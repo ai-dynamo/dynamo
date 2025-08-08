@@ -185,6 +185,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Speculative Decoding
 - **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4_plus_eagle.md)**
+- **[Async Speculative Decoding](./async_spec_dec.md)**
 
 ### Kubernetes Deployment
 

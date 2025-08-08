@@ -15,6 +15,7 @@ from tensorrt_llm.llmapi import (
     KvCacheConfig,
     SchedulerConfig,
 )
+from tensorrt_llm.llmapi.llm_args import ExternalAPIConfig, UserProvidedDecodingConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
@@ -30,10 +31,13 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from dynamo.trtllm.utils.api_drafter import DynamoAPIDrafter
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
+    is_drafter,
     is_first_worker,
+    is_verifier,
     parse_endpoint,
 )
 
@@ -165,6 +169,32 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
             sys.exit(1)
 
+    if is_verifier(config):
+        # Set speculative_config to use DynamoAPIDrafter in the verifier worker.
+        try:
+            drafter_config = arg_map["drafter_config"]
+            drafter_endpoint = drafter_config["drafter_endpoint"]
+            if "max_draft_len" in drafter_config:
+                max_draft_len = drafter_config["max_draft_len"]
+            else:
+                max_draft_len = 10
+        except KeyError:
+            raise ValueError(
+                "Verifier worker requires drafter_config to be specified in the engine config with drafter_endpoint."
+            )
+        del arg_map["drafter_config"]
+
+        drafter_config = ExternalAPIConfig(
+            endpoint=drafter_endpoint,
+            max_draft_len=max_draft_len,
+        )
+        drafter = DynamoAPIDrafter(spec_config=drafter_config, runtime=runtime)
+        spec_config = UserProvidedDecodingConfig(
+            drafter=drafter,
+            max_draft_len=max_draft_len,
+        )
+        arg_map["speculative_config"] = spec_config
+
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
 
@@ -195,8 +225,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
-        if is_first_worker(config):
+        if is_first_worker(config) and not is_drafter(config):
             # Register the model with the endpoint if only the worker is first in the disaggregation chain.
+            # Drafter workers should not register.
             await register_llm(
                 modelType,
                 endpoint,
