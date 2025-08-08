@@ -81,20 +81,20 @@ pub struct RuntimeConfig {
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub max_blocking_threads: usize,
 
-    /// System server host for health and metrics endpoints
+    /// System status server host for health and metrics endpoints
     /// Set this at runtime with environment variable DYN_SYSTEM_HOST
     #[builder(default = "DEFAULT_SYSTEM_HOST.to_string()")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_host: String,
 
-    /// System server port for health and metrics endpoints
+    /// System status server port for health and metrics endpoints
     /// If set to 0, the system will assign a random available port
     /// Set this at runtime with environment variable DYN_SYSTEM_PORT
     #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_port: u16,
 
-    /// Health and metrics System server enabled
+    /// Health and metrics System status server enabled
     /// Set this at runtime with environment variable DYN_SYSTEM_ENABLED
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
