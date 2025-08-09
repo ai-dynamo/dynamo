@@ -152,6 +152,12 @@ class KvConnectorLeader:
             scheduler_output.scheduled_cached_reqs.new_block_ids,
             scheduler_output.scheduled_cached_reqs.num_computed_tokens,
         ):
+            print("--------------------------------")
+            print(f"scheduler_output: {scheduler_output}")
+            print(
+                f"Adding cached request: {req_id}, {resumed_from_preemption}, {new_token_ids}, {new_block_ids}, {num_computed_tokens}"
+            )
+            print("--------------------------------")
             output.add_cached_request(
                 request_id=req_id,
                 resumed_from_preemption=resumed_from_preemption,

@@ -52,6 +52,9 @@ pub enum SlotState {
     /// The slot was not scheduled in the previous iteration.
     Initialized,
 
+    /// The slot was previously scheduled, but not in the last iteration.
+    NotScheduled,
+
     /// The slot is prepared to load kv blocks from external storage; however, the onboarding operation
     /// has not been triggered yet. The usize is the number of tokens that are ready for onboarding.
     OnboardStaged(usize),
@@ -99,6 +102,10 @@ pub trait Slot: std::fmt::Debug {
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
 
     fn mark_as_finished(&mut self, iteration: u64) -> Result<(), SlotError>;
+
+    fn mark_as_not_scheduled(&mut self, iteration: u64) -> Result<(), SlotError>;
+
+    fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError>;
 
     /// The number of device blocks that have been allocated to the slot.
     fn num_device_blocks_allocated(&self) -> usize;
@@ -351,6 +358,30 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn reset_after_preemption(&mut self) {
+        // Clean up any pending staging operations first
+        if self.staging_from_host.is_some() {
+            tracing::warn!(
+                request_id = self.request_id,
+                "======>>>>>>>>> Dropping staging_from_host during preemption reset"
+            );
+            self.staging_from_host = None;  // Force clear
+        }
+
+        if self.staging_from_disk.is_some() {
+            tracing::warn!(
+                request_id = self.request_id,
+                "======>>>>>>>>> Dropping staging_from_disk during preemption reset"
+            );
+            self.staging_from_disk = None;  // Force clear
+        }
+
+        if self.pending_operations.is_some() {
+            tracing::warn!(
+                request_id = self.request_id,
+                "======>>>>>>>>> Dropping pending_operations during preemption reset"
+            );
+            self.pending_operations = None;  // Force clear
+        }
         assert!(self.staging_from_disk.is_none());
         assert!(self.staging_from_host.is_none());
         assert!(self.pending_operations.is_none());
@@ -366,6 +397,7 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn reset(&mut self) {
+
         self.reset_after_preemption();
         self.state = SlotState::Initialized;
     }
@@ -517,6 +549,24 @@ impl Slot for VllmConnectorSlot {
         Ok(())
     }
 
+    fn mark_as_not_scheduled(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        self.state = SlotState::NotScheduled;
+        tracing::warn!(
+            request_id = %self.request_id,
+            "request set to not scheduled intentionally"
+        );
+        Ok(())
+    }
+
+    fn mark_as_prefilling(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        self.state = SlotState::Prefilling;
+        tracing::warn!(
+            request_id = %self.request_id,
+            "request set to prefilling intentionally"
+        );
+        Ok(())
+    }
+
     fn sequence(&self) -> &TokenBlockSequence {
         &self.sequence
     }
@@ -540,12 +590,13 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted) {
-            return Err(SlotError::InvalidOperation(format!(
-                "slot must be in the NotScheduled state to acquire local matches; got {:?}",
-                self.state()
-            )));
-        }
+        //if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted | SlotState::NotScheduled) {
+        //    return Err(SlotError::InvalidOperation(format!(
+        //        "slot must be in the NotScheduled state to acquire local matches; got {:?}; request_id: {:?}",
+        //        self.state(),
+        //        self.request_id
+        //    )));
+        //}
 
         if matches!(self.state(), SlotState::Preempted) {
             tracing::info!("slot is in the Preempted state; we get another chance to match");
@@ -564,6 +615,19 @@ impl Slot for VllmConnectorSlot {
 
         // we start matching non-device blocks after the device blocks
         let search_offset = num_computed_blocks;
+
+        tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> search_offset: {}", search_offset);
+        tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> sequence_hashes: {:?}", sequence_hashes);
+        tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> length: {}", sequence_hashes.len());
+
+        // NOTE: oandreeva. This happens when a request wasn't scheduled in the last iteration.
+        // vLLM is rescheduling it and is trying to match again the computed at this point request agains Block Pools.
+        // Since we don't offload decoding blocks, search_offset will be greater than sequence_hashes.len() (which is the number of blocks in the sequence).
+        // Should return early.
+        if search_offset >= sequence_hashes.len() {
+            tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> search_offset >= sequence_hashes.len()");
+            return Ok(());
+        }
 
         tracing::debug!(
             "matching against {} block hashes",
@@ -735,8 +799,8 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
     fn advance_computed_position(&mut self, num_tokens: usize) -> Result<(), SlotError> {
         if self.current_position + num_tokens > self.sequence().total_tokens() {
             return Err(SlotError::InvalidOperation(format!(
-                "cannot advance computed position from {} by {num_tokens} tokens, total tokens is {}",
-                self.current_position, self.sequence().total_tokens()
+                "cannot advance computed position from {} by {num_tokens} tokens, total tokens is {}, request_id: {}",
+                self.current_position, self.sequence().total_tokens(), self.request_id
             )));
         }
 

@@ -127,22 +127,36 @@ impl Leader for KvConnectorLeader {
         request_num_tokens: usize,
         num_computed_tokens: usize,
     ) -> anyhow::Result<(usize, bool)> {
+
+        if request_num_tokens > num_computed_tokens {
+            tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> request_num_tokens > num_computed_tokens: {request_num_tokens} > {num_computed_tokens}");
+            return Ok((0, false));
+        }
+
+        let slot_state = self.slot_manager.get_slot(&request_id).unwrap().lock().unwrap().state();
         tracing::debug!(
-            "request_num_tokens: {request_num_tokens}; num_computed_tokens: {num_computed_tokens}"
+            "request_num_tokens: {request_num_tokens}; num_computed_tokens: {num_computed_tokens}, request_id: {request_id}, request_state: {:?}",
+            slot_state
         );
+
+        // if decoding request was skipped, exit early
+        if slot_state == SlotState::Decoding {
+            return Ok((0, false));
+        }
 
         // the number of device matched tokens should be less than or equal to the number of tokens in the request
         debug_assert!(num_computed_tokens % self.block_size == 0);
 
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
+
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-        if slot.state() == SlotState::Prefilling {
-            tracing::warn!("slot is in the Prefilled state; this seems like we need to reset the slot and start over");
-            slot.reset();
-        }
+        //if slot.state() == SlotState::Prefilling || slot.state() == SlotState::NotScheduled || slot.state() == SlotState::Decoding {
+        //    tracing::warn!("===>>>>>>>>>>>>>>>>>>>>>>>>>>>>>ß slot is in the Prefilled/NotScheduled state; this seems like we need to reset the slot and start over");
+        //    slot.reset();
+        //}
 
         // early exit if we cannot match full block
         if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
@@ -151,6 +165,7 @@ impl Leader for KvConnectorLeader {
 
         // find matches for any remaining tokens
         // this will advance the computed position and hold any newly matched blocks in the slot
+
         slot.acquire_local_matches(num_computed_tokens)?;
 
         // return the number of external tokens that are ready for onboarding
@@ -363,6 +378,26 @@ impl Leader for KvConnectorLeader {
             }
         }
 
+        // At the end of build_connector_metadata(), this should be added:
+        if !inflight_requests.is_empty() {
+            // These are requests from previous passes that are no longer being processed
+            // They should be cleaned up from self.inflight_requests
+            let skipped_request_ids: Vec<String> = inflight_requests.iter().cloned().collect();
+
+            for skipped_request_id in &skipped_request_ids {
+
+                tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> SKIPPED request from inflight_requests: {}", skipped_request_id);
+                if self.slot_manager.has_slot(skipped_request_id) {
+                    tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Slot for skipped request still exists: {}", skipped_request_id);
+                }
+                else {
+                    tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Slot for skipped request does not exist: {}", skipped_request_id);
+                    self.inflight_requests.remove(skipped_request_id);
+                }
+            }
+
+        }
+
         tracing::debug!("metadata: {md:#?}");
         serde_json::to_vec(&md)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connector metadata: {}", e))
@@ -374,6 +409,12 @@ impl Leader for KvConnectorLeader {
         block_ids: Vec<BlockId>,
     ) -> anyhow::Result<bool> {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
+
+        if !self.slot_manager.has_slot(&request_id) {
+            tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Slot does not exist: {}", request_id);
+            return Ok(false);
+        }
+
         // grab the slot
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
 
@@ -389,10 +430,15 @@ impl Leader for KvConnectorLeader {
         // then we can remove the slot and trigger the worker to clean up as well.
 
         // remove it from the manager as we will never use it again
-        self.slot_manager.remove_slot(&request_id)?;
+        if self.slot_manager.has_slot(&request_id) {
+            self.slot_manager.remove_slot(&request_id)?;
+        }
+        else {
+            tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Slot does not exist: {}", request_id);
+        }
 
         // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
-        // otherwise, we return false, which means there are still outstanding operations on gpu blocks which
+        // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
         // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
         // of the connector api which will be used to inform vllm that the request is finished.
         if let SlotState::Finished = slot.state() {

@@ -182,11 +182,14 @@ impl WorkerSchedulerClient {
     }
 
     pub fn remove_slot(&mut self, request_id: &String) {
-        let slot = self.slots.remove(request_id).expect("slot does not exist");
-        assert!(slot.is_complete());
-        self.scheduler_tx
-            .send(SchedulerMessage::RequestFinished(request_id.clone()))
-            .expect("failed to send request finished message; disconnected");
+        if let Some(slot) = self.slots.remove(request_id) {
+            assert!(slot.is_complete());
+            self.scheduler_tx
+                .send(SchedulerMessage::RequestFinished(request_id.clone()))
+                .expect("failed to send request finished message; disconnected");
+        } else {
+            tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Attempted to remove non-existent slot: {}", request_id);
+        }
     }
 
     /// Enqueues a request to the scheduler.
@@ -221,8 +224,14 @@ impl WorkerSchedulerClient {
     }
 
     pub fn is_complete(&self, request_id: &str) -> bool {
-        let slot = self.slots.get(request_id).expect("slot does not exist");
-        slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64
+        if self.slots.contains_key(request_id) {
+            let slot = self.slots.get(request_id).expect("slot does not exist");
+            slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64
+        }
+        else {
+            tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Slot does not exist: {}", request_id);
+            true
+        }
     }
 }
 
