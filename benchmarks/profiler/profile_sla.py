@@ -35,7 +35,7 @@ from utils.profile_cache import (
     load_existing_decode_results,
     load_existing_prefill_results,
 )
-from utils.profile_deocde import profile_decode
+from benchmarks.profiler.utils.profile_decode import profile_decode
 from utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
