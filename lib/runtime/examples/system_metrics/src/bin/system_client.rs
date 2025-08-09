@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use futures::StreamExt;
-use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
+use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_MODEL_NAME, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
     logging, pipeline::PushRouter, protocols::annotated::Annotated, utils::Duration,
