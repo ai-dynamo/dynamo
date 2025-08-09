@@ -357,13 +357,11 @@ func firstKey(m map[string]interface{}) string {
 }
 
 func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequirements, error) {
-
 	if resources == nil {
-		return nil, nil
+		return &corev1.ResourceRequirements{}, nil
 	}
 
 	currentResources := &corev1.ResourceRequirements{}
-
 	if resources.Limits != nil {
 		if resources.Limits.CPU != "" {
 			q, err := resource.ParseQuantity(resources.Limits.CPU)
