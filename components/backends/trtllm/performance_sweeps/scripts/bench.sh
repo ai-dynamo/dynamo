@@ -67,6 +67,23 @@ do_get_logs(){
     grep -a "'num_generation_tokens': 0" ${worker_log_path} > ${output_folder}/ctx_only.txt || true
 }
 
+# The configuration is dumped to a JSON file which hold details of the OAI service
+# being benchmarked.
+deployment_config=$(cat << EOF
+{
+  "kind": "${kind}",
+  "model": "${model}",
+  "total_gpus": "${total_gpus}"
+}
+EOF
+)
+
+mkdir -p "${artifacts_dir}"
+if [ -f "${artifacts_dir}/deployment_config.json" ]; then
+  echo "Deployment configuration already exists. Overwriting..."
+  rm -f "${artifacts_dir}/deployment_config.json"
+fi
+echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
 
 # Loop up to 50 times
 for ((i=1; i<=50; i++)); do
@@ -161,24 +178,6 @@ for concurrency in ${concurrency_list}; do
     do_get_logs ${log_path}/output_workers.log ${log_path}/concurrency_${concurrency}
     echo -n "" > ${log_path}/output_workers.log
 done
-
-# The configuration is dumped to a JSON file which hold details of the OAI service
-# being benchmarked.
-deployment_config=$(cat << EOF
-{
-  "kind": "${kind}",
-  "model": "${model}",
-  "total_gpus": "${total_gpus}"
-}
-EOF
-)
-
-mkdir -p "${artifacts_dir}"
-if [ -f "${artifacts_dir}/deployment_config.json" ]; then
-  echo "Deployment configuration already exists. Overwriting..."
-  rm -f "${artifacts_dir}/deployment_config.json"
-fi
-echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
 
 
 job_id=${SLURM_JOB_ID}

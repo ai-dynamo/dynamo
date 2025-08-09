@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --partition=batch
 #SBATCH --account=gtc_inference
-#SBATCH --time=03:00:00
+#SBATCH --time=04:00:00
 #SBATCH --job-name="gtc_inference-job-1:disaggr-test"
 
 MULTI_ROUND="${MULTI_ROUND:-8}"
