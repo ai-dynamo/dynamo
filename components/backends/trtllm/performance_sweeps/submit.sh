@@ -163,13 +163,13 @@ run_32_gpus_mtp() {
 main() {
     local mtp_mode=$1
     local mode=$2
-    
+
     # Validate MTP mode
     if [[ "$mtp_mode" != "mtp0" && "$mtp_mode" != "mtp" ]]; then
         echo "Error: Invalid MTP mode '$mtp_mode'. Must be 'mtp0' or 'mtp'"
         usage
     fi
-    
+
     case $mode in
         "all")
             echo "Running all GPU configurations for $mtp_mode mode..."
@@ -222,7 +222,7 @@ main() {
                 echo "Error: TEP mode requires 11 additional parameters (including mtp_mode)"
                 usage
             fi
-            
+
             local ctx_num=$3
             local gen_num=$4
             local gen_tp_size=$5
@@ -232,9 +232,9 @@ main() {
             local gen_mtp_size=$9
             local gen_eplb_num_slots=${10}
             local gen_concurrency_list=${11}
-            
+
             echo "Running TEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
-            
+
             # TEP mode: Use false to disable attention dp
             run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens false $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
@@ -243,7 +243,7 @@ main() {
                 echo "Error: DEP mode requires 11 additional parameters (including mtp_mode)"
                 usage
             fi
-            
+
             local ctx_num=$3
             local gen_num=$4
             local gen_tp_size=$5
@@ -253,9 +253,9 @@ main() {
             local gen_mtp_size=$9
             local gen_eplb_num_slots=${10}
             local gen_concurrency_list=${11}
-            
+
             echo "Running DEP mode ($mtp_mode) with ctx_num=$ctx_num, gen_num=$gen_num, gen_tp_size=$gen_tp_size, gen_batch_size=$gen_batch_size, gen_max_num_tokens=$gen_max_num_tokens, gen_gpu_memory_fraction=$gen_gpu_memory_fraction, gen_mtp_size=$gen_mtp_size, gen_eplb_num_slots=$gen_eplb_num_slots, gen_concurrency_list=\"$gen_concurrency_list\""
-            
+
             run_single $ctx_num $gen_num $gen_tp_size $gen_batch_size $gen_max_num_tokens true $gen_gpu_memory_fraction $gen_mtp_size $gen_eplb_num_slots "$gen_concurrency_list"
             ;;
         *)
@@ -271,4 +271,4 @@ if [ $# -eq 0 ]; then
 fi
 
 # Run main function
-main "$@" 
+main "$@"

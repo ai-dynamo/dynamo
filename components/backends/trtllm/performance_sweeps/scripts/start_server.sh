@@ -16,7 +16,7 @@ if [ -f "$config_file" ]; then
     if grep -q "hostname:" "$config_file"; then
         # Extract the current hostname value from the config
         current_hostname=$(grep "hostname:" "$config_file" | sed 's/.*hostname:[ ]*//' | awk '{print $1}')
-        
+
         if [ "$current_hostname" != "$short_hostname" ]; then
             echo "Replacing hostname '$current_hostname' with '$short_hostname' in $config_file"
             # Use sed to replace the hostname value

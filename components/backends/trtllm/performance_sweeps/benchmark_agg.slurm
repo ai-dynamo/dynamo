@@ -92,7 +92,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --mpi=pmix --overlap -N 1 -n 1 \
         --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
 	-w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} 1 "${concurrency_list}" ${STREAMING} ${full_logdir} ${tp_size} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1 
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} 1 "${concurrency_list}" ${STREAMING} ${full_logdir} ${tp_size} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
 # try to kill the server and workers
 srun -l --container-name=${CONTAINER_NAME} \

@@ -157,7 +157,7 @@ DECODE_COUNT=$(grep 'decode_count:' "${full_logdir}/instance_config.yaml" | awk 
 echo "Decode Count: $DECODE_COUNT"
 
 num_gen_nodes=$((gen_nodes/num_gen_servers))
-decode_start_idx=$PREFILL_COUNT 
+decode_start_idx=$PREFILL_COUNT
 for ((i=1; i<=DECODE_COUNT; i++)); do
   echo "Running Decode Worker: ${i}"
   decode_node_list=()
@@ -185,7 +185,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts},${artifacts_dir}:${artifacts_dir} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	-w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1 
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
 # try to kill the server and workers
 srun -l --container-name=${CONTAINER_NAME} \
