@@ -15,6 +15,7 @@
 
 use dynamo_runtime::{
     logging,
+    metrics::MetricsRegistry,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
@@ -66,13 +67,18 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
 
     // // make the ingress discoverable via a component service
     // // we must first create a service, then we can attach one more more endpoints
+    // Test the new add_labels functionality!
     runtime
+        .add_labels(&[("environment", "development"), ("version", "1.0")])
         .namespace(DEFAULT_NAMESPACE)?
+        .add_labels(&[("namespace_type", "hello_world")])
         .component("backend")?
+        .add_labels(&[("component_type", "backend_service")])
         .service_builder()
         .create()
         .await?
         .endpoint("generate")
+        .add_labels(&[("endpoint_type", "string_splitter")])
         .endpoint_builder()
         .handler(ingress)
         .start()

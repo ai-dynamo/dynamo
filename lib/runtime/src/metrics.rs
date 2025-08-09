@@ -386,6 +386,47 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
     // Get the name of this registry (without any prefix)
     fn basename(&self) -> String;
 
+    // Get the model name for this registry
+    fn model(&self) -> Option<String> {
+        None
+    }
+
+    /// Get any stored labels for this registry
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        Vec::new()
+    }
+
+    /// Get mutable access to the labels storage - implementors must provide this
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)>;
+
+    /// Add labels to this registry and return a new instance with the labels
+    /// This allows for method chaining like: runtime.namespace(...).add_labels(...).component(...)?
+    fn add_labels(mut self, labels: &[(&str, &str)]) -> Self
+    where
+        Self: Sized,
+    {
+        // Default implementation - no duplication needed!
+        let labels_storage = self.labels_mut();
+        for (key, value) in labels {
+            labels_storage.push((key.to_string(), value.to_string()));
+        }
+        self
+    }
+
+    /// Combine stored labels with provided labels, giving priority to provided labels
+    fn combine_labels(&self, labels: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut combined: Vec<(String, String)> = self
+            .stored_labels()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        for (key, value) in labels {
+            combined.push((key.to_string(), value.to_string()));
+        }
+
+        combined
+    }
     /// Retrieve the complete hierarchy and basename for this registry. Currently, the prefix for drt is an empty string,
     /// so we must account for the leading underscore. The existing code remains unchanged to accommodate any future
     /// scenarios where drt's prefix might be assigned a value.
@@ -424,7 +465,12 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Counter> {
-        create_metric(self, name, description, labels, None, None)
+        let combined_labels = self.combine_labels(labels);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        create_metric(self, name, description, &combined_labels_refs, None, None)
     }
 
     /// Create a CounterVec metric with label names (for dynamic labels)
@@ -435,11 +481,16 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::CounterVec> {
+        let combined_labels = self.combine_labels(const_label_values);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         create_metric(
             self,
             name,
             description,
-            const_label_values,
+            &combined_labels_refs,
             None,
             Some(const_labels),
         )
@@ -452,7 +503,12 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::Gauge> {
-        create_metric(self, name, description, labels, None, None)
+        let combined_labels = self.combine_labels(labels);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        create_metric(self, name, description, &combined_labels_refs, None, None)
     }
 
     /// Create a Histogram metric with custom buckets
@@ -463,7 +519,19 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         labels: &[(&str, &str)],
         buckets: Option<Vec<f64>>,
     ) -> anyhow::Result<prometheus::Histogram> {
-        create_metric(self, name, description, labels, buckets, None)
+        let combined_labels = self.combine_labels(labels);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        create_metric(
+            self,
+            name,
+            description,
+            &combined_labels_refs,
+            buckets,
+            None,
+        )
     }
 
     /// Create an IntCounter metric
@@ -473,7 +541,12 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntCounter> {
-        create_metric(self, name, description, labels, None, None)
+        let combined_labels = self.combine_labels(labels);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        create_metric(self, name, description, &combined_labels_refs, None, None)
     }
 
     /// Create an IntCounterVec metric with label names (for dynamic labels)
@@ -484,11 +557,16 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntCounterVec> {
+        let combined_labels = self.combine_labels(const_label_values);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         create_metric(
             self,
             name,
             description,
-            const_label_values,
+            &combined_labels_refs,
             None,
             Some(const_labels),
         )
@@ -501,7 +579,12 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntGauge> {
-        create_metric(self, name, description, labels, None, None)
+        let combined_labels = self.combine_labels(labels);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        create_metric(self, name, description, &combined_labels_refs, None, None)
     }
 
     /// Create an IntGaugeVec metric with label names (for dynamic labels)
@@ -512,11 +595,16 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntGaugeVec> {
+        let combined_labels = self.combine_labels(const_label_values);
+        let combined_labels_refs: Vec<(&str, &str)> = combined_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         create_metric(
             self,
             name,
             description,
-            const_label_values,
+            &combined_labels_refs,
             None,
             Some(const_labels),
         )
