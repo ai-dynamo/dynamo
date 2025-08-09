@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
 use tokio::sync::{mpsc::Receiver, Notify};
@@ -36,11 +37,18 @@ use crate::{
 
 use super::{ModelEntry, ModelManager, MODEL_ROOT_PATH};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ModelUpdate {
+    Added(ModelType),
+    Removed(ModelType),
+}
+
 pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_mode: RouterMode,
     notify_on_model: Notify,
+    model_update_tx: Option<Sender<ModelUpdate>>,
     kv_router_config: Option<KvRouterConfig>,
 }
 
@@ -56,8 +64,13 @@ impl ModelWatcher {
             drt: runtime,
             router_mode,
             notify_on_model: Notify::new(),
+            model_update_tx: None,
             kv_router_config,
         }
+    }
+
+    pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
+        self.model_update_tx = Some(tx);
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -109,6 +122,11 @@ impl ModelWatcher {
                     match self.handle_put(&model_entry).await {
                         Ok(()) => {
                             tracing::info!(model_name = model_entry.name, "added model");
+                            if let Some(tx) = &self.model_update_tx {
+                                tx.send(ModelUpdate::Added(model_entry.model_type))
+                                    .await
+                                    .ok();
+                            }
                             self.notify_on_model.notify_waiters();
                         }
                         Err(err) => {
@@ -153,7 +171,11 @@ impl ModelWatcher {
         if !active_instances.is_empty() {
             return Ok(None);
         }
-
+        if let Some(tx) = &self.model_update_tx {
+            tx.send(ModelUpdate::Removed(model_entry.model_type))
+                .await
+                .ok();
+        }
         // Ignore the errors because model could be either type
         let _ = self.manager.remove_chat_completions_model(&model_name);
         let _ = self.manager.remove_completions_model(&model_name);
