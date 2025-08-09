@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import argparse
 import logging
+import os
+
+from utils.profile_prefill import profile_prefill
 
 from benchmarks.profiler.utils.profile_decode import profile_decode
-from utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
