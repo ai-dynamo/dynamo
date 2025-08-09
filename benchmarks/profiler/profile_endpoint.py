@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import argparse
 import logging
 
@@ -73,6 +74,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    os.makedirs(args.work_dir, exist_ok=True)
     if args.mode == "prefill":
         profile_prefill(
             args.work_dir,
