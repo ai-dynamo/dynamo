@@ -40,14 +40,17 @@ pub async fn create_lease(
             // When we use the etcd client within the primary runtime, it's possible
             // thet the gRPC/networking drivers will be starved.
             // To avoid this, we create a new client here, with the drivers within this same runtime.
-            let client = match etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options).await {
-                Ok(client) => client,
-                Err(e) => {
-                    tracing::error!("failed to connect to etcd: {:?}", e);
-                    token.cancel();
-                    return;
-                }
-            };
+            let client =
+                match etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options)
+                    .await
+                {
+                    Ok(client) => client,
+                    Err(e) => {
+                        tracing::error!("failed to connect to etcd: {:?}", e);
+                        token.cancel();
+                        return;
+                    }
+                };
 
             let mut lease_client = client.lease_client();
 
@@ -61,7 +64,7 @@ pub async fn create_lease(
             };
 
             let id = lease.id();
-            
+
             // safe, since we know rx won't be dropped.
             tx.send(id).unwrap();
 
