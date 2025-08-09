@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 import logging
 
-from utils.plot import plot_decode_3d_surface
+import numpy as np
 from utils.genai_perf import benchmark_decode
+from utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -18,15 +18,23 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def profile_decode(work_dir, model_name, url, num_gpus, max_kv_tokens, max_context_length, interpolation_granularity):
+def profile_decode(
+    work_dir,
+    model_name,
+    url,
+    num_gpus,
+    max_kv_tokens,
+    max_context_length,
+    interpolation_granularity,
+):
     """interpolate ITL - Active_KV_Cache - Decode_Context_Length"""
     x_kv_usage = []
     y_context_length = []
     z_itl = []
     z_thpt_per_gpu = []
-    
+
     osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
-    
+
     for isl in range(
         100,
         max_context_length - osl,
@@ -41,9 +49,7 @@ def profile_decode(work_dir, model_name, url, num_gpus, max_kv_tokens, max_conte
             )
         )
         for num_request in sweep_num_request:
-            genai_perf_artifact_dir = (
-                f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
-            )
+            genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
             gap_result = benchmark_decode(
                 isl,
                 osl,

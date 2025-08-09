@@ -28,18 +28,15 @@ from utils.dynamo_deployment import (
     cleanup_remaining_deployments,
 )
 from utils.genai_perf import benchmark_decode, benchmark_prefill
-from utils.plot import (
-    plot_decode_performance,
-    plot_prefill_performance,
-)
+from utils.plot import plot_decode_performance, plot_prefill_performance
 from utils.profile_cache import (
     check_decode_results_exist,
     check_prefill_results_exist,
     load_existing_decode_results,
     load_existing_prefill_results,
 )
-from utils.profile_prefill import profile_prefill
 from utils.profile_deocde import profile_decode
+from utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -419,8 +416,12 @@ async def run_profile(args):
         base_url = client.get_service_url()
 
         profile_prefill(
-            work_dir, model_name, base_url, best_prefill_tp, 
-            args.max_context_length, args.prefill_interpolation_granularity,
+            work_dir,
+            model_name,
+            base_url,
+            best_prefill_tp,
+            args.max_context_length,
+            args.prefill_interpolation_granularity,
         )
 
         print("Cleaning up deployment...")
@@ -468,8 +469,13 @@ async def run_profile(args):
         base_url = client.get_service_url()
 
         profile_decode(
-            work_dir, model_name, base_url, best_decode_tp, max_kv_tokens,
-            args.max_context_length, args.decode_interpolation_granularity
+            work_dir,
+            model_name,
+            base_url,
+            best_decode_tp,
+            max_kv_tokens,
+            args.max_context_length,
+            args.decode_interpolation_granularity,
         )
 
         print("Cleaning up deployment...")
