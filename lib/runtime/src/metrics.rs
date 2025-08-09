@@ -221,7 +221,10 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     if USE_AUTO_LABELS {
         // Validate that user-provided labels don't conflict with auto-generated labels
         for (key, _) in labels {
-            if *key == "dynamo_namespace" || *key == "dynamo_component" || *key == "dynamo_endpoint"
+            if *key == "dynamo_namespace"
+                || *key == "dynamo_component"
+                || *key == "dynamo_endpoint"
+                || *key == "model"
             {
                 return Err(anyhow::anyhow!(
                     "Label '{}' is automatically added by auto_label feature and cannot be manually set",
@@ -246,6 +249,14 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
                 let valid_component = lint_prometheus_name(component)?;
                 if !valid_component.is_empty() {
                     updated_labels.push(("dynamo_component".to_string(), valid_component));
+                }
+            }
+        }
+        if let Some(model) = registry.model() {
+            if !model.is_empty() {
+                let valid_model = lint_prometheus_name(&model)?;
+                if !valid_model.is_empty() {
+                    updated_labels.push(("model".to_string(), valid_model));
                 }
             }
         }
@@ -385,6 +396,11 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvider {
     // Get the name of this registry (without any prefix)
     fn basename(&self) -> String;
+
+    // Get the model name for this registry
+    fn model(&self) -> Option<String> {
+        None
+    }
 
     /// Retrieve the complete hierarchy and basename for this registry. Currently, the prefix for drt is an empty string,
     /// so we must account for the leading underscore. The existing code remains unchanged to accommodate any future

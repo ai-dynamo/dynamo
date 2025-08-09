@@ -70,7 +70,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
 
     runtime
         .namespace(DEFAULT_NAMESPACE)?
-        .component("backend")?
+        .component("backend", Some("service_metrics_model".to_string()))?
         .service_builder()
         .create()
         .await?

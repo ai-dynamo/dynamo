@@ -68,7 +68,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     // // we must first create a service, then we can attach one more more endpoints
     runtime
         .namespace(DEFAULT_NAMESPACE)?
-        .component("backend")?
+        .component("backend", Some("hello_world_model".to_string()))?
         .service_builder()
         .create()
         .await?

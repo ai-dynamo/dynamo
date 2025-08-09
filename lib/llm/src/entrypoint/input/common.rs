@@ -109,7 +109,7 @@ pub async fn prepare_engine(
             let endpoint_id = local_model.endpoint_id();
             let component = distributed_runtime
                 .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)?;
+                .component(&endpoint_id.component, Some(card.slug().to_string()))?;
             let client = component.endpoint(&endpoint_id.name).client().await?;
 
             let kv_chooser = if router_mode == RouterMode::KV {

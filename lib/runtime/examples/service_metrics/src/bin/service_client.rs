@@ -31,7 +31,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
-    let component = namespace.component("backend")?;
+    let component = namespace.component("backend", Some("service_metrics_model".to_string()))?;
 
     let client = component.endpoint("generate").client().await?;
 

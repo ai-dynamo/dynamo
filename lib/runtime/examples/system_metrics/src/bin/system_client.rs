@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use futures::StreamExt;
-use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
+use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_MODEL_NAME, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
     logging, pipeline::PushRouter, protocols::annotated::Annotated, utils::Duration,
@@ -31,7 +31,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
-    let component = namespace.component(DEFAULT_COMPONENT)?;
+    let component = namespace.component(DEFAULT_COMPONENT, Some(DEFAULT_MODEL_NAME.to_string()))?;
 
     let client = component.endpoint(DEFAULT_ENDPOINT).client().await?;
 
