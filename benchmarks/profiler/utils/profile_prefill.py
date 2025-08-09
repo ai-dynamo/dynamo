@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 import logging
 
-from utils.plot import plot_prefill_interpolation
+import numpy as np
 from utils.genai_perf import benchmark_prefill
+from utils.plot import plot_prefill_interpolation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -18,7 +18,9 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def profile_prefill(work_dir, model_name, url, num_gpus, max_context_length, interpolation_granularity):
+def profile_prefill(
+    work_dir, model_name, url, num_gpus, max_context_length, interpolation_granularity
+):
     prefill_isl = []
     prefill_ttft = []
     prefill_thpt_per_gpu = []

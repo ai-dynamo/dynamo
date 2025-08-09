@@ -160,7 +160,9 @@ def plot_prefill_interpolation(
     plt.close()
 
 
-def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, z_thpt_per_gpu, work_dir):
+def plot_decode_3d_surface(
+    x_kv_usage, y_context_length, z_itl, z_thpt_per_gpu, work_dir
+):
     """
     Plot 3D surface for decode interpolation with KV usage, context length, and ITL.
 
@@ -175,7 +177,9 @@ def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, z_thpt_per_gpu, 
     yi = np.linspace(min(y_context_length), max(y_context_length), 100)
     X, Y = np.meshgrid(xi, yi)
     Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
-    Z_thpt = griddata((x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="cubic")
+    Z_thpt = griddata(
+        (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="cubic"
+    )
 
     # Plot ITL surface
     fig = plt.figure(figsize=(12, 10))

@@ -4,8 +4,8 @@
 import argparse
 import logging
 
-from utils.profile_prefill import profile_prefill
 from utils.profile_deocde import profile_decode
+from utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -72,11 +72,26 @@ if __name__ == "__main__":
         help="interpolation granularity for the results",
     )
     args = parser.parse_args()
-    
+
     if args.mode == "prefill":
-        profile_prefill(args.work_dir, args.model_name, args.url, args.num_gpus, args.max_context_length, args.interpolation_granularity)
+        profile_prefill(
+            args.work_dir,
+            args.model_name,
+            args.url,
+            args.num_gpus,
+            args.max_context_length,
+            args.interpolation_granularity,
+        )
     elif args.mode == "decode":
         assert args.max_kv_tokens > 0, "max_kv_tokens must be provided for decode"
-        profile_decode(args.work_dir, args.model_name, args.url, args.num_gpus, args.max_kv_tokens, args.max_context_length, args.interpolation_granularity)
+        profile_decode(
+            args.work_dir,
+            args.model_name,
+            args.url,
+            args.num_gpus,
+            args.max_kv_tokens,
+            args.max_context_length,
+            args.interpolation_granularity,
+        )
     else:
         raise ValueError(f"Invalid mode: {args.mode}")
