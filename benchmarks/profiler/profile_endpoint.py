@@ -4,7 +4,7 @@
 import argparse
 import logging
 
-from utils.profile_deocde import profile_decode
+from benchmarks.profiler.utils.profile_decode import profile_decode
 from utils.profile_prefill import profile_prefill
 
 logger = logging.getLogger(__name__)
