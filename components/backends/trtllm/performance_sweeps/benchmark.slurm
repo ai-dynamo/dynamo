@@ -140,7 +140,7 @@ echo "Prefill Count: $PREFILL_COUNT"
 prefill_pids=()
 for ((i=1; i<=PREFILL_COUNT; i++)); do
   echo "Running Prefill Worker: ${i}"
-  node_idx=$(i-1)
+  node_idx=$((i-1))
   echo "Running Prefill Nodes: ${nodes[node_idx]}"
   srun -l --container-name=${CONTAINER_NAME} \
       --container-mounts=${container_mounts} \
