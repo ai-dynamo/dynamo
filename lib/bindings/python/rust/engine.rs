@@ -21,6 +21,8 @@ use pythonize::{depythonize, pythonize};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
+use crate::async_stream;
+
 pub use dynamo_runtime::{
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
@@ -179,7 +181,7 @@ where
                 let py_request = pythonize(py, &request)?;
                 let gen = generator.call1(py, (py_request,))?;
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
+                async_stream::into_stream(locals, gen.into_bound(py))
             })
         })
         .await??;
@@ -240,7 +242,7 @@ where
                 };
 
                 if tx.send(response).await.is_err() {
-                    tracing::trace!(
+                    tracing::debug!(
                         request_id,
                         "error forwarding annotated response to channel; channel is closed"
                     );
