@@ -20,7 +20,7 @@ use derive_builder::Builder;
 use derive_getters::Dissolve;
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
@@ -32,9 +32,12 @@ pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{interval, Duration};
 
 mod lease;
+mod metrics;
 mod path;
 
+use crate::component::{Endpoint, INSTANCE_ROOT_PATH};
 use lease::*;
+use metrics::*;
 pub use path::*;
 
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
@@ -45,6 +48,7 @@ pub struct Client {
     client: etcd_client::Client,
     primary_lease: i64,
     runtime: Runtime,
+    metrics: Option<EtcdMetrics>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +133,65 @@ impl Client {
             client,
             primary_lease: lease_id,
             runtime,
+            metrics: None,
         })
+    }
+
+    /// Initializes the metrics for the etcd client.
+    ///
+    /// TODO(tzulingk): The current implementation retrieves all etcd keys starting with /instances
+    /// and records the total number of keys and the cumulative size of their values across the entire etcd.
+    /// This approach is incorrect. The desired behavior is to track, for this specific DistributedRuntime,
+    /// 1) the number of etcd calls made, and 2) the total bytes transferred.
+    pub async fn init_metrics(&mut self, drt: &crate::DistributedRuntime) -> Result<()> {
+        let metrics = EtcdMetrics::from_distributed_runtime(drt)?;
+
+        // Scan etcd for existing instances to backfill metrics
+        let existing_instances = self.kv_get_prefix(INSTANCE_ROOT_PATH).await?;
+
+        // Debug output. List all existing instances. It looks like this:
+        // Key: 'instances/dynamo/backend/generate:694d985d0f41c9a4', Value: '{
+        //   "component": "backend",
+        //   "endpoint": "generate",
+        //   "namespace": "dynamo",
+        //   "instance_id": 7587888472644503972,
+        //   "transport": {
+        //     "nats_tcp": "dynamo_backend.generate-694d985d0f41c9a4"
+        //   }
+        println!(
+            "=== init_metrics: existing instances for prefix '{}' ===",
+            INSTANCE_ROOT_PATH
+        );
+        for (i, kv) in existing_instances.iter().enumerate() {
+            println!(
+                "[{}] Key: '{}', Value: '{}'",
+                i,
+                kv.key_str().unwrap_or("invalid_key"),
+                kv.value_str().unwrap_or("invalid_value")
+            );
+        }
+        println!(
+            "=== Found {} existing instances ===",
+            existing_instances.len()
+        );
+
+        let total_initial_count = existing_instances.len() as i64;
+        let total_initial_bytes = existing_instances
+            .iter()
+            .map(|kv| kv.value().len() as i64)
+            .sum::<i64>();
+
+        metrics.etcd_block_total.add(total_initial_count);
+        metrics.etcd_block_bytes_total.add(total_initial_bytes);
+
+        tracing::info!(
+            "Initialized etcd metrics: initial_count={}, initial_bytes={}",
+            total_initial_count,
+            total_initial_bytes
+        );
+
+        self.metrics = Some(metrics);
+        Ok(())
     }
 
     /// Get a reference to the underlying [`etcd_client::Client`] instance.
@@ -176,6 +238,7 @@ impl Client {
         value: Vec<u8>,
         lease_id: Option<i64>,
     ) -> Result<()> {
+        let value_len = value.len() as i64;
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
 
@@ -190,6 +253,10 @@ impl Client {
         let result = self.client.kv_client().txn(txn).await?;
 
         if result.succeeded() {
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.etcd_block_total.inc();
+                metrics.etcd_block_bytes_total.add(value_len);
+            }
             Ok(())
         } else {
             for resp in result.op_responses() {
@@ -230,6 +297,10 @@ impl Client {
 
         // We have to enumerate the response paths to determine if the transaction succeeded
         if result.succeeded() {
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.etcd_block_total.inc();
+                metrics.etcd_block_bytes_total.add(value.len() as i64);
+            }
             Ok(())
         } else {
             match result.op_responses().first() {
@@ -251,14 +322,25 @@ impl Client {
         value: impl AsRef<[u8]>,
         lease_id: Option<i64>,
     ) -> Result<()> {
+        let value_len = value.as_ref().len() as i64;
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
-        let _ = self
+        let result = self
             .client
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(put_options))
-            .await?;
-        Ok(())
+            .await;
+
+        match result {
+            Ok(_) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.etcd_block_total.inc();
+                    metrics.etcd_block_bytes_total.add(value_len);
+                }
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn kv_put_with_options(
@@ -267,14 +349,26 @@ impl Client {
         value: impl AsRef<[u8]>,
         options: Option<PutOptions>,
     ) -> Result<PutResponse> {
+        let value_len = value.as_ref().len() as i64;
         let options = options
             .unwrap_or_default()
             .with_lease(self.primary_lease().id());
-        self.client
+        let result = self
+            .client
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(options))
-            .await
-            .map_err(|err| err.into())
+            .await;
+
+        match result {
+            Ok(resp) => {
+                if let Some(metrics) = self.metrics.as_ref() {
+                    metrics.etcd_block_total.inc();
+                    metrics.etcd_block_bytes_total.add(value_len);
+                }
+                Ok(resp)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn kv_get(
@@ -291,14 +385,42 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<DeleteOptions>,
     ) -> Result<i64> {
-        self.client
+        // To correctly decrement metrics, we need to know the size of what was deleted.
+        // The `with_prev_kv` option makes the delete operation return the deleted key-value pairs.
+        let options = options.unwrap_or_default().with_prev_key();
+        let key_bytes = key.into();
+        let result = self
+            .client
             .kv_client()
-            .delete(key, options)
-            .await
-            .map(|del_response| del_response.deleted())
-            .map_err(|err| err.into())
+            .delete(key_bytes, Some(options))
+            .await;
+        match result {
+            Ok(del_response) => {
+                let deleted_count = del_response.deleted();
+                if let Some(metrics) = self.metrics.as_ref() {
+                    if deleted_count > 0 {
+                        let prev_kvs = del_response.prev_kvs();
+                        let total_bytes_deleted =
+                            prev_kvs.iter().map(|kv| kv.value().len()).sum::<usize>();
+                        metrics.etcd_block_total.sub(prev_kvs.len() as i64);
+                        metrics
+                            .etcd_block_bytes_total
+                            .sub(total_bytes_deleted as i64);
+                    }
+                }
+                Ok(deleted_count)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
+    /// Retrieves all key-value pairs from etcd that have keys starting with the given prefix.
+    ///
+    /// Uses etcd's native prefix-based querying for efficient bulk retrieval.
+    /// Common use cases: listing component instances, bucket entries, hierarchical data.
+    ///
+    /// # Returns:
+    /// - `Result<Vec<KeyValue>>`: All matching key-value pairs
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
         let mut get_response = self
             .client
@@ -756,6 +878,222 @@ mod tests {
                 Some(etcd_client::DeleteOptions::new().with_prefix()),
             )
             .await?;
+
+        Ok(())
+    }
+}
+
+// Run with:
+// cargo test --locked --features=integration test_etcd_system_stats_server
+#[cfg(feature = "integration")]
+#[cfg(test)]
+mod etcd_system_stats_server_test {
+    use super::*;
+    use crate::component::INSTANCE_ROOT_PATH;
+    use crate::pipeline::{
+        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
+        ResponseStream, SingleIn,
+    };
+    use crate::protocols::annotated::Annotated;
+    use crate::stream;
+    use crate::{distributed::DistributedConfig, DistributedRuntime, Runtime};
+    use reqwest;
+    use std::env;
+    use std::sync::Arc;
+    use tokio::time::{sleep, Duration};
+    use uuid::Uuid;
+
+    const TEST_NAMESPACE: &str = "testnamespace";
+    const TEST_COMPONENT: &str = "testcomponent";
+    const TEST_ENDPOINT: &str = "testendpoint";
+
+    struct TestRequestHandler {}
+
+    impl TestRequestHandler {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {})
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for TestRequestHandler {
+        async fn generate(
+            &self,
+            input: SingleIn<String>,
+        ) -> crate::Result<ManyOut<Annotated<String>>> {
+            let (data, ctx) = input.into_parts();
+
+            let chars = data
+                .chars()
+                .map(|c| Annotated::from_data(c.to_string()))
+                .collect::<Vec<_>>();
+
+            let stream = stream::iter(chars);
+
+            Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
+        }
+    }
+
+    async fn backend(drt: DistributedRuntime) -> crate::Result<()> {
+        // Create a namespace, component, service, and endpoint like the backend examples
+        let ingress = Ingress::for_engine(TestRequestHandler::new())?;
+
+        let endpoint = drt
+            .namespace(TEST_NAMESPACE)?
+            .component(TEST_COMPONENT)?
+            .service_builder()
+            .create()
+            .await?
+            .endpoint(TEST_ENDPOINT);
+
+        // Start the endpoint with the ingress handler
+        endpoint.endpoint_builder().handler(ingress).start().await?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_etcd_system_stats_server() {
+        // Test direct etcd client operations. Generate bogus instances on etcd.
+        let rt = Runtime::from_settings().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            // Create first drt for etcd operations
+            let drt1 =
+                DistributedRuntime::new(rt_clone.clone(), DistributedConfig::from_settings(false))
+                    .await
+                    .unwrap();
+            let etcd_client = drt1.etcd_client().expect("etcd client should be available");
+
+            // Test kv_create - create 10 deterministic keys
+            let mut created_keys = Vec::new();
+            for i in 0..10 {
+                let key = format!(
+                    "{}/dynamo/deleteme_test/generate:{:02}",
+                    INSTANCE_ROOT_PATH, i
+                );
+                let value = format!("deterministic_value_{:02}", i);
+                let value_bytes = value.as_bytes().to_vec();
+
+                println!("Testing kv_create with key: '{}', value: '{}'", key, value);
+                etcd_client
+                    .kv_create(key.clone(), value_bytes, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("etcd error: {}", e))
+                    .unwrap();
+                println!("Successfully created key via kv_create: {}", key);
+                created_keys.push(key);
+            }
+
+            // Set environment variables for dynamic port allocation BEFORE creating the runtime
+            std::env::set_var("DYN_SYSTEM_ENABLED", "true");
+            std::env::set_var("DYN_SYSTEM_PORT", "0");
+
+            // Create second drt for system stats server test
+            let drt2 = DistributedRuntime::new(rt_clone, DistributedConfig::from_settings(false))
+                .await
+                .unwrap();
+            test_system_stats_server(drt2).await.unwrap();
+
+            // Clean up created keys
+            for key in created_keys {
+                etcd_client
+                    .kv_delete(key.as_bytes(), None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("etcd error: {}", e))
+                    .unwrap();
+                println!("Deleted key: {}", key);
+            }
+        });
+    }
+
+    async fn test_system_stats_server(drt: DistributedRuntime) -> Result<()> {
+        // Get the system stats server info to find the actual port
+        let metrics_server_info = drt.metrics_server_info();
+        let metrics_port = match metrics_server_info {
+            Some(info) => {
+                println!("System stats server running on: {}", info.address());
+                info.port()
+            }
+            None => {
+                panic!("System stats server not started - check DYN_SYSTEM_ENABLED environment variable");
+            }
+        };
+
+        // Start the backend in a separate task (like system_metrics example)
+        let drt_clone = drt.clone();
+        let backend_handle = tokio::spawn(async move { backend(drt_clone).await });
+
+        // Give the backend some time to start up
+        sleep(Duration::from_millis(500)).await;
+
+        // Now fetch the system stats server endpoint using the dynamic port
+        let metrics_url = format!("http://localhost:{}/metrics", metrics_port);
+        println!("Fetching metrics from: {}", metrics_url);
+
+        // Make HTTP request to get metrics using reqwest
+        let client = reqwest::Client::new();
+        let response = client.get(&metrics_url).send().await;
+
+        match response {
+            Ok(response) => {
+                if response.status().is_success() {
+                    let metrics_content = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Failed to read response body".to_string());
+
+                    // println!("=== METRICS CONTENT ===");
+                    // println!("{}", metrics_content);
+                    // println!("=== END METRICS CONTENT ===");
+
+                    // Verify that metrics endpoint is working
+                    assert!(
+                        !metrics_content.is_empty(),
+                        "Metrics content should not be empty"
+                    );
+
+                    // Filter to only show lines containing '_etcd_' in the metric name (not labels)
+                    let etcd_metrics: Vec<&str> = metrics_content
+                        .lines()
+                        .filter(|line| {
+                            // Only include lines that contain '_etcd_' in the metric name
+                            // (not in labels like dynamo_namespace="test_etcd_namespace")
+                            line.contains("_etcd_")
+                                && (line.starts_with("# HELP")
+                                    || line.starts_with("# TYPE")
+                                    || line.starts_with("dynamo_component_etcd_"))
+                        })
+                        .collect();
+
+                    println!("=== ETCD METRICS ONLY ===");
+                    for line in &etcd_metrics {
+                        println!("{}", line);
+                    }
+                    println!("=== END ETCD METRICS ===");
+
+                    // Check for some common metrics that should be present
+                    let has_metrics = metrics_content.contains("dynamo_")
+                        || metrics_content.contains("process_")
+                        || metrics_content.contains("go_");
+
+                    assert!(has_metrics, "Metrics content should contain some metrics");
+
+                    println!("Successfully retrieved metrics from system stats server endpoint!");
+                } else {
+                    println!("HTTP request failed with status: {}", response.status());
+                    panic!("Failed to get metrics: HTTP {}", response.status());
+                }
+            }
+            Err(e) => {
+                println!("Failed to connect to system stats server endpoint: {}", e);
+                panic!("Failed to connect to system stats server endpoint: {}", e);
+            }
+        }
+
+        // Cancel the backend task
+        backend_handle.abort();
 
         Ok(())
     }
