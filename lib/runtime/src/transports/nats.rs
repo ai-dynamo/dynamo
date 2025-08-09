@@ -43,9 +43,9 @@ use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::metrics::prometheus_names::nats as nats_metrics;
 pub use crate::slug::Slug;
 use tracing as log;
-use crate::metrics::prometheus_names::nats as nats_metrics;
 
 pub const URL_PREFIX: &str = "nats://";
 
@@ -72,20 +72,22 @@ impl Client {
     }
 
     /// Add Prometheus metrics for this NATS client
-    pub fn add_metrics(&self, drt: &crate::DistributedRuntime) -> Result<NatsClientMetrics> {
-        let nats_metrics = NatsClientMetrics::new(drt)?;
-        //nats_metrics.copy_from_nats_client_stats(&self.client);
+    pub fn register_metrics(
+        &self,
+        drt: &crate::DistributedRuntime,
+    ) -> Result<DRTSystemStatusNatsMetrics> {
+        let sys_nats_metrics = DRTSystemStatusNatsMetrics::new(drt)?;
 
         // Create a callback that updates the metrics when called
-        let nats_metrics_clone = nats_metrics.clone();
+        let nats_metrics_clone = sys_nats_metrics.clone();
         let client_clone = self.client.clone();
-        drt.add_metrics_callback("", move |_runtime| {
+        drt.add_metrics_callback(&drt.prefix(), move |_runtime| {
             // Use the cloned client directly
             nats_metrics_clone.copy_from_nats_client_stats(&client_clone);
             Ok("".to_string())
         });
 
-        Ok(nats_metrics)
+        Ok(sys_nats_metrics)
     }
 
     /// host:port of NATS
@@ -510,8 +512,9 @@ impl NatsQueue {
 }
 
 /// Prometheus metrics that mirror the NATS client statistics (in primitive types)
+/// to be used for the System Status Server.
 #[derive(Debug, Clone)]
-pub struct NatsClientMetrics {
+pub struct DRTSystemStatusNatsMetrics {
     /// Number of bytes received (excluding protocol overhead)
     pub in_bytes: IntGauge,
     /// Number of bytes sent (excluding protocol overhead)
@@ -526,7 +529,7 @@ pub struct NatsClientMetrics {
     pub connection_state: IntGauge,
 }
 
-impl NatsClientMetrics {
+impl DRTSystemStatusNatsMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime) -> Result<Self> {
         let in_bytes = drt.create_intgauge(

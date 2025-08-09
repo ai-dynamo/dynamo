@@ -900,10 +900,22 @@ mod test_prefixes {
 #[cfg(test)]
 mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
+    use super::prometheus_names::nats as nats_metrics;
     use super::*;
-            use super::prometheus_names::nats as nats_metrics;
     use prometheus::Counter;
     use std::sync::Arc;
+
+    /// Filters out all NATS metrics from Prometheus output for test comparisons.
+    fn filter_out_nats_metrics(input: &str) -> String {
+        input
+            .lines()
+            .filter(|line| {
+                !line.starts_with(&format!("dynamo_component_{}", nats_metrics::PREFIX))
+                    && !line.trim().is_empty()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn test_prometheusfactory_using_metrics_registry_trait() {
@@ -925,15 +937,17 @@ mod test_simple_metricsregistry_trait {
         let epsilon = 0.01;
         assert!((counter.get() - 123.456789).abs() < epsilon);
 
-        let endpoint_output = endpoint.prometheus_metrics_fmt().unwrap();
+        let endpoint_output_raw = endpoint.prometheus_metrics_fmt().unwrap();
         println!("Endpoint output:");
-        println!("{}", endpoint_output);
+        println!("{}", endpoint_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let endpoint_output = filter_out_nats_metrics(&endpoint_output_raw);
 
         let expected_endpoint_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
-"#
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789"#
         );
 
         assert_eq!(
@@ -953,9 +967,12 @@ dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="
         assert_eq!(gauge.get(), 50000.0);
 
         // Test Prometheus format output for Component (gauge + histogram)
-        let component_output = component.prometheus_metrics_fmt().unwrap();
+        let component_output_raw = component.prometheus_metrics_fmt().unwrap();
         println!("Component output:");
-        println!("{}", component_output);
+        println!("{}", component_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let component_output = filter_out_nats_metrics(&component_output_raw);
 
         let expected_component_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
@@ -963,8 +980,7 @@ dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="
 dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
 # HELP dynamo_component_testgauge A test gauge
 # TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
-"#
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000"#
         );
 
         assert_eq!(
@@ -983,9 +999,12 @@ dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="t
         assert_eq!(intcounter.get(), 12345);
 
         // Test Prometheus format output for Namespace (int_counter + gauge + histogram)
-        let namespace_output = namespace.prometheus_metrics_fmt().unwrap();
+        let namespace_output_raw = namespace.prometheus_metrics_fmt().unwrap();
         println!("Namespace output:");
-        println!("{}", namespace_output);
+        println!("{}", namespace_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let namespace_output = filter_out_nats_metrics(&namespace_output_raw);
 
         let expected_namespace_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
@@ -996,8 +1015,7 @@ dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="
 dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
 # HELP dynamo_component_testintcounter A test int counter
 # TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
-"#
+dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345"#
         );
 
         assert_eq!(
@@ -1063,16 +1081,7 @@ dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
         println!("DRT output:");
         println!("{}", drt_output);
 
-        // Helper function to filter out NATS client metrics
-        fn filter_out_nats_metrics(metrics: &str) -> String {
-            metrics
-                .lines()
-                .filter(|line| !line.contains(nats_metrics::PREFIX) && !line.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-
-        // Filter out NATS client metrics for comparison
+        // Filter out all NATS metrics for comparison
         let filtered_drt_output = filter_out_nats_metrics(&drt_output);
 
         let expected_drt_output = format!(
@@ -1144,7 +1153,7 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
         // Check for specific NATS client metric names (without values)
         let nats_metric_names: Vec<&str> = nats_metrics
             .iter()
-            .filter(|line| line.starts_with(&format!("dynamo_component_{}_", nats_metrics::PREFIX)))
+            .filter(|line| line.starts_with(&format!("dynamo_component_{}", nats_metrics::PREFIX)))
             .map(|line| line.split('{').next().unwrap_or(line))
             .collect();
 

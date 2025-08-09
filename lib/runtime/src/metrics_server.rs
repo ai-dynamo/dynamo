@@ -253,6 +253,7 @@ async fn metrics_handler(state: Arc<MetricsServerState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
+    // Empty prefix means this is the top-level metrics at the DistributedRuntime level
     state.drt().execute_metrics_callbacks("");
 
     // Get all metrics from DistributedRuntime (top-level)
@@ -345,7 +346,7 @@ mod tests {
         // Filter out NATS client metrics for comparison
         let filtered_response: String = response
             .lines()
-            .filter(|line| !line.contains("nats_client"))
+            .filter(|line| !line.contains(crate::metrics::prometheus_names::nats::PREFIX))
             .collect::<Vec<_>>()
             .join("\n");
 
