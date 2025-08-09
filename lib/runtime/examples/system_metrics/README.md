@@ -77,7 +77,7 @@ These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and
 
 ## Example Metrics Output
 
-When the system is running, you'll see metrics from the /metrics HTTP path like this:
+When the system is running, you'll see metrics from http://<ip>:<port>/metrics like this:
 
 ```prometheus
 # HELP dynamo_component_concurrent_requests Number of requests currently being processed by component endpoint
@@ -176,13 +176,13 @@ if enable_custom_metrics {
 
 ## Running the Example
 
-**Important**: You must set the `DYN_SYSTEM_PORT` environment variable to specify which port the HTTP system status server will run on.
+**Important**: You must set the `DYN_SYSTEM_PORT` environment variable to specify which port the system status server will listen on.
 
 ```bash
 # Run the system metrics example
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 cargo run --bin system_server
 ```
-The server will start an HTTP system status server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
+The server will start an system status server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
 
 
 To Run an actual LLM frontend + server (aggregated example), launch both of them. By default, the frontend listens to port 8080.
