@@ -114,16 +114,13 @@ def plot_prefill_interpolation(
     """
     # Fit quadratic functions
     ttft_coeffs = np.polyfit(prefill_isl_np, prefill_ttft_np, 2)
-    thpt_coeffs = np.polyfit(prefill_isl_np, prefill_thpt_per_gpu_np, 2)
 
     # Create interpolation functions
     ttft_poly = np.poly1d(ttft_coeffs)
-    thpt_poly = np.poly1d(thpt_coeffs)
 
     # Generate points for smooth curves
     x_interp = np.linspace(min(prefill_isl_np), max(prefill_isl_np), 100)
     ttft_interp = ttft_poly(x_interp)
-    thpt_interp = thpt_poly(x_interp)
 
     # Plot TTFT vs ISL
     plt.figure(figsize=(10, 6))
@@ -148,14 +145,7 @@ def plot_prefill_interpolation(
 
     # Plot Throughput vs ISL
     plt.figure(figsize=(10, 6))
-    plt.scatter(prefill_isl_np, prefill_thpt_per_gpu_np, s=100, label="Measured data")
-    plt.plot(
-        x_interp,
-        thpt_interp,
-        "g-",
-        label=f"Quadratic fit: {thpt_coeffs[0]:.2e}x² + {thpt_coeffs[1]:.2e}x + {thpt_coeffs[2]:.2e}",
-    )
-
+    plt.scatter(prefill_isl_np, prefill_thpt_per_gpu_np, s=100, label="Throughput/GPU")
     plt.title("Prefill Throughput vs Input Sequence Length")
     plt.xlabel("Input Sequence Length (tokens)")
     plt.ylabel("Prefill throughput per GPU (tokens/s/GPU)")
@@ -170,7 +160,9 @@ def plot_prefill_interpolation(
     plt.close()
 
 
-def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, tp_size, work_dir):
+def plot_decode_3d_surface(
+    x_kv_usage, y_context_length, z_itl, z_thpt_per_gpu, work_dir
+):
     """
     Plot 3D surface for decode interpolation with KV usage, context length, and ITL.
 
@@ -178,14 +170,18 @@ def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, tp_size, work_di
         x_kv_usage: list of KV usage percentages
         y_context_length: list of context lengths
         z_itl: list of ITL values
-        tp_size: TP size for the plot filename
+        z_thpt_per_gpu: list of throughput per GPU values
         work_dir: directory to save the plot
     """
     xi = np.linspace(min(x_kv_usage), max(x_kv_usage), 100)
     yi = np.linspace(min(y_context_length), max(y_context_length), 100)
     X, Y = np.meshgrid(xi, yi)
-    Z = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
+    Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
+    Z_thpt = griddata(
+        (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="cubic"
+    )
 
+    # Plot ITL surface
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")  # type: ignore
 
@@ -193,7 +189,7 @@ def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, tp_size, work_di
     surf = ax.plot_surface(  # type: ignore
         X,
         Y,
-        Z,
+        Z_itl,
         cmap=cm.coolwarm,  # type: ignore
         linewidth=0.2,
         antialiased=True,
@@ -202,20 +198,57 @@ def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, tp_size, work_di
 
     # Add a color bar with custom settings
     cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
-    cbar.set_label("Z Value", fontsize=12)
+    cbar.set_label("ITL (ms)", fontsize=12)
     cbar.ax.tick_params(labelsize=10)
 
     # Add labels with custom font sizes
     ax.set_xlabel("Active KV Percentage", fontsize=12)
     ax.set_ylabel("Decode Context Length", fontsize=12)
     ax.set_zlabel("ITL", fontsize=12)  # type: ignore
+    ax.set_title("Decode ITL Interpolation", fontsize=14)
 
     # Set viewing angle
     ax.view_init(elev=30, azim=45)  # type: ignore
     ax.grid(True)
     ax.tick_params(axis="both", which="major", labelsize=10)
 
-    plot_path = f"{work_dir}/decode_tp{tp_size}.png"
+    plot_path = f"{work_dir}/decode_itl_interpolation.png"
     logger.info(f"Saving ITL surface plot to {plot_path}")
     plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Plot Throughput surface
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection="3d")  # type: ignore
+
+    # Create the throughput surface plot with customizations
+    surf = ax.plot_surface(  # type: ignore
+        X,
+        Y,
+        Z_thpt,
+        cmap=cm.viridis,  # type: ignore
+        linewidth=0.2,
+        antialiased=True,
+        alpha=0.8,
+    )
+
+    # Add a color bar with custom settings
+    cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
+    cbar.set_label("Throughput per GPU (tokens/s/GPU)", fontsize=12)
+    cbar.ax.tick_params(labelsize=10)
+
+    # Add labels with custom font sizes
+    ax.set_xlabel("Active KV Percentage", fontsize=12)
+    ax.set_ylabel("Decode Context Length", fontsize=12)
+    ax.set_zlabel("Throughput per GPU", fontsize=12)  # type: ignore
+    ax.set_title("Decode Throughput Interpolation", fontsize=14)
+
+    # Set viewing angle
+    ax.view_init(elev=30, azim=45)  # type: ignore
+    ax.grid(True)
+    ax.tick_params(axis="both", which="major", labelsize=10)
+
+    thpt_plot_path = f"{work_dir}/decode_throughput_interpolation.png"
+    logger.info(f"Saving throughput surface plot to {thpt_plot_path}")
+    plt.savefig(thpt_plot_path, dpi=300, bbox_inches="tight")
     plt.close()
