@@ -17,26 +17,68 @@ use super::*;
 
 /// Create a [`Lease`] with a given time-to-live (TTL) attached to the [`CancellationToken`].
 pub async fn create_lease(
-    mut lease_client: LeaseClient,
+    config: ClientOptions,
     ttl: i64,
     token: CancellationToken,
 ) -> Result<Lease> {
-    let lease = lease_client.grant(ttl, None).await?;
-
-    let id = lease.id();
-    let ttl = lease.ttl();
     let child = token.child_token();
     let clone = token.clone();
 
-    tokio::spawn(async move {
-        match keep_alive(lease_client, id, ttl, child).await {
-            Ok(_) => tracing::trace!("keep alive task exited successfully"),
-            Err(e) => {
-                tracing::info!("keep alive task failed: {:?}", e);
-                token.cancel();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Max).unwrap();
+
+        runtime.block_on(async move {
+            // We MUST create our etcd client within this dedicated, high priority runtime.
+            // Under extreme concurrency, we have 10s of thousands of tokio tasks.
+            // When we use the etcd client within the primary runtime, it's possible
+            // thet the gRPC/networking drivers will be starved.
+            // To avoid this, we create a new client here, with the drivers within this same runtime.
+            let client =
+                match etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options)
+                    .await
+                {
+                    Ok(client) => client,
+                    Err(e) => {
+                        tracing::error!("failed to connect to etcd: {:?}", e);
+                        token.cancel();
+                        return;
+                    }
+                };
+
+            let mut lease_client = client.lease_client();
+
+            let lease = match lease_client.grant(ttl, None).await {
+                Ok(lease) => lease,
+                Err(e) => {
+                    tracing::error!("failed to grant lease: {:?}", e);
+                    token.cancel();
+                    return;
+                }
+            };
+
+            let id = lease.id();
+
+            // safe, since we know rx won't be dropped.
+            tx.send(id).unwrap();
+
+            match keep_alive(lease_client, id, ttl, child).await {
+                Ok(_) => tracing::trace!("keep alive task exited successfully"),
+                Err(e) => {
+                    tracing::info!("keep alive task failed: {:?}", e);
+                    token.cancel();
+                }
             }
-        }
+        });
     });
+
+    let id = rx.await?;
 
     Ok(Lease {
         id,
@@ -103,7 +145,7 @@ pub async fn keep_alive(
             }
 
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(ttl as u64 / 2)) => {
-                tracing::trace!(lease_id, "sending keep alive");
+                                    tracing::trace!(lease_id, "sending keep alive");
 
                 // if we get a error issuing the heartbeat, set the ttl to 0
                 // this will allow us to poll the response stream once and the cancellation token once, then

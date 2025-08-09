@@ -45,6 +45,7 @@ pub struct Client {
     client: etcd_client::Client,
     primary_lease: i64,
     runtime: Runtime,
+    config: ClientOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -110,13 +111,14 @@ impl Client {
     /// Create a new etcd client and tie the primary [`CancellationToken`] to the primary etcd lease.
     async fn create(config: ClientOptions, runtime: Runtime) -> Result<Self> {
         let token = runtime.primary_token();
-        let client =
-            etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options).await?;
+        let client = etcd_client::Client::connect(
+            config.etcd_url.clone(),
+            config.etcd_connect_options.clone(),
+        )
+        .await?;
 
         let lease_id = if config.attach_lease {
-            let lease_client = client.lease_client();
-
-            let lease = create_lease(lease_client, 10, token)
+            let lease = create_lease(config.clone(), 10, token)
                 .await
                 .context("creating primary lease")?;
 
@@ -129,6 +131,7 @@ impl Client {
             client,
             primary_lease: lease_id,
             runtime,
+            config,
         })
     }
 
@@ -154,11 +157,8 @@ impl Client {
     /// This [`Lease`] will be tied to the [`Runtime`], specifically a child [`CancellationToken`].
     pub async fn create_lease(&self, ttl: i64) -> Result<Lease> {
         let token = self.runtime.child_token();
-        let lease_client = self.client.lease_client();
-        self.runtime
-            .secondary()
-            .spawn(create_lease(lease_client, ttl, token))
-            .await?
+
+        create_lease(self.config.clone(), ttl, token).await
     }
 
     // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
