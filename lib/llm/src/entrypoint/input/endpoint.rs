@@ -35,7 +35,9 @@ pub async fn run(
         EngineConfig::StaticFull { model, .. } | EngineConfig::StaticCore { model, .. } => {
             Some(model.card().slug().to_string())
         }
-        EngineConfig::StaticRemote(model) | EngineConfig::Dynamic(model) => Some(model.card().slug().to_string()),
+        EngineConfig::StaticRemote(model) | EngineConfig::Dynamic(model) => {
+            Some(model.card().slug().to_string())
+        }
     };
 
     let component = distributed_runtime

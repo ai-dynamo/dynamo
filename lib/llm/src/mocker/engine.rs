@@ -457,7 +457,8 @@ impl AnnotatedMockEngine {
                     continue;
                 };
 
-                let Ok(component) = namespace.component(&endpoint.component, model_name.clone()) else {
+                let Ok(component) = namespace.component(&endpoint.component, model_name.clone())
+                else {
                     tracing::debug!("Component not available yet, retrying...");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -517,8 +518,12 @@ pub async fn make_mocker_engine(
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
-    let annotated_engine =
-        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint, model_name);
+    let annotated_engine = AnnotatedMockEngine::new(
+        MockVllmEngine::new(args),
+        distributed_runtime,
+        endpoint,
+        model_name,
+    );
 
     Ok(Arc::new(annotated_engine))
 }

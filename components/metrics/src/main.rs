@@ -138,7 +138,8 @@ async fn app(runtime: Runtime) -> Result<()> {
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 
-    let target_component = namespace.component(&config.component_name, config.model_name.clone())?;
+    let target_component =
+        namespace.component(&config.component_name, config.model_name.clone())?;
     let target_endpoint = target_component.endpoint(&config.endpoint_name);
 
     let service_path = target_endpoint.path();
