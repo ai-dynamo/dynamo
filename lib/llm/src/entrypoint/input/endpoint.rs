@@ -33,9 +33,9 @@ pub async fn run(
 
     let model_name = match &engine_config {
         EngineConfig::StaticFull { model, .. } | EngineConfig::StaticCore { model, .. } => {
-            Some(model.card().service_name.clone())
+            Some(model.card().slug().to_string())
         }
-        EngineConfig::Dynamic(model) => Some(model.card().service_name.clone()),
+        EngineConfig::StaticRemote(model) | EngineConfig::Dynamic(model) => Some(model.card().slug().to_string()),
     };
 
     let component = distributed_runtime

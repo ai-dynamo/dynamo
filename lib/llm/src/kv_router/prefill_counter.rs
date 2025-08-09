@@ -366,8 +366,9 @@ mod integration_tests {
 
                 // Create namespace and components with same names
                 let namespace = distributed.namespace("test_prefill_multiworker")?;
+                // Counters component is not associated with any model, hence model name is None.
                 let component = namespace
-                    .component("counters")?
+                    .component("counters", None)?
                     .service_builder()
                     .create()
                     .await?;
@@ -430,8 +431,9 @@ mod integration_tests {
 
                 // Create namespace and components with same names
                 let namespace = distributed.namespace("test_prefill_multiworker")?;
+                // Counters component is not associated with any model, hence model name is None.
                 let component = namespace
-                    .component("counters")?
+                    .component("counters", None)?
                     .service_builder()
                     .create()
                     .await?;
