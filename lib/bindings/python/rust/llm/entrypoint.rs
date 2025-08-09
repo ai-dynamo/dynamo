@@ -211,7 +211,7 @@ async fn select_engine(
             let engine = dynamo_llm::mocker::engine::make_mocker_engine(
                 distributed_runtime.inner,
                 endpoint,
-                Some(local_model.card().service_name.clone()),
+                Some(local_model.card().slug().to_string()),
                 mocker_args,
             )
             .await?;
