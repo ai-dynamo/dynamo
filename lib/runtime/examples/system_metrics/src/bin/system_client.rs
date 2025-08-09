@@ -31,7 +31,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
-    let component = namespace.component(DEFAULT_COMPONENT)?;
+    let component = namespace.component(DEFAULT_COMPONENT, Some(DEFAULT_MODEL_NAME.to_string()))?;
 
     let client = component.endpoint(DEFAULT_ENDPOINT).client().await?;
 

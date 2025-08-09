@@ -16,6 +16,7 @@ use std::sync::Arc;
 pub const DEFAULT_NAMESPACE: &str = "dyn_example_namespace";
 pub const DEFAULT_COMPONENT: &str = "dyn_example_component";
 pub const DEFAULT_ENDPOINT: &str = "dyn_example_endpoint";
+pub const DEFAULT_MODEL_NAME: &str = "dyn_example_model";
 
 /// Stats structure returned by the endpoint's stats handler
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -89,7 +90,7 @@ pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Re
 
     let endpoint = drt
         .namespace(DEFAULT_NAMESPACE)?
-        .component(DEFAULT_COMPONENT)?
+        .component(DEFAULT_COMPONENT, Some(DEFAULT_MODEL_NAME.to_string()))?
         .service_builder()
         .create()
         .await?

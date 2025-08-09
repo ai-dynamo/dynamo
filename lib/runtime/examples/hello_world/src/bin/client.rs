@@ -30,7 +30,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let client = distributed
         .namespace(DEFAULT_NAMESPACE)?
-        .component("backend")?
+        .component("backend", Some("hello_world_model".to_string()))?
         .endpoint("generate")
         .client()
         .await?;
