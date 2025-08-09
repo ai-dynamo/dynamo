@@ -35,6 +35,7 @@ testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
+cuda          = ["dep:cudarc"]
 integration = []
 
 [[bench]]
