@@ -175,6 +175,7 @@ mod tests {
     // Helper to create a mock preprocessed request
     fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
         PreprocessedRequest {
+            model: "mock".to_string(),
             token_ids: vec![1, 2, 3],
             batch_token_ids: None,
             stop_conditions: StopConditions {
