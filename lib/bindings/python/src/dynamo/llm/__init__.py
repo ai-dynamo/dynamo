@@ -40,5 +40,4 @@ from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for_seq_py
 from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
-from dynamo._core import register_runtime_config as register_runtime_config
 from dynamo._core import run_input

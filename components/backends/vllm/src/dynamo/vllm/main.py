@@ -216,18 +216,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         runtime_config = ModelRuntimeConfig()
 
-        # NOTE: These values need to be queried directly from the engine,
-        # since this will compute it if no value was set by the user
-        runtime_config.total_kv_blocks = (
-            engine_client.engine.cache_config.num_gpu_blocks
-        )
-        runtime_config.max_num_seqs = (
-            engine_client.vllm_config.scheduler_config.max_num_seqs
-        )
-
-        gpu_mem_integer = int(
-            engine_client.engine.cache_config.gpu_memory_utilization * 100
-        )
+        # make a `collective_rpc` call to get runtime configuration values
+        runtime_values = await get_engine_cache_info(engine_client)
+        runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+        runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
+        gpu_mem_integer = runtime_values["gpu_memory_utilization"]
         runtime_config.gpu_memory_utilization = gpu_mem_integer
 
         await register_llm(
@@ -253,6 +246,28 @@ async def init(runtime: DistributedRuntime, config: Config):
     finally:
         # Cleanup background tasks
         handler.cleanup()
+
+
+async def get_engine_cache_info(engine: AsyncLLM):
+    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+    cache_values = await engine.collective_rpc(
+        lambda worker: {
+            "num_gpu_blocks": worker.cache_config.num_gpu_blocks,
+            "gpu_memory_utilization": worker.cache_config.gpu_memory_utilization,
+        }
+    )
+
+    scheduler_values = await engine.collective_rpc(
+        lambda worker: {
+            "max_num_seqs": worker.scheduler_config.max_num_seqs,
+        }
+    )
+
+    return {
+        "num_gpu_blocks": cache_values["num_gpu_blocks"],
+        "max_num_seqs": scheduler_values["max_num_seqs"],
+        "gpu_memory_utilization": cache_values["gpu_memory_utilization"],
+    }
 
 
 def main():

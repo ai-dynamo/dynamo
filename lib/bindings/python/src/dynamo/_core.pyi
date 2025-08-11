@@ -843,10 +843,6 @@ async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: st
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
-async def register_runtime_config(endpoint: Endpoint, runtime_config: ModelRuntimeConfig) -> None:
-    """Register runtime configuration with the model card"""
-    ...
-
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...
