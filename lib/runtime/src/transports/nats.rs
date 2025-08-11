@@ -74,7 +74,7 @@ impl Client {
     }
 
     /// Add Prometheus metrics for this NATS client
-    pub fn register_metrics(
+    pub fn register_metrics_callback(
         &self,
         drt: &crate::DistributedRuntime,
     ) -> Result<DRTSystemStatusNatsMetrics> {

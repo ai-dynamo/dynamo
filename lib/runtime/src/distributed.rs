@@ -108,7 +108,7 @@ impl DistributedRuntime {
         // Register NATS client metrics after creation
         if let Err(e) = distributed_runtime
             .nats_client()
-            .register_metrics(&distributed_runtime)
+            .register_metrics_callback(&distributed_runtime)
         {
             tracing::warn!("Failed to register NATS client metrics: {}", e);
         }

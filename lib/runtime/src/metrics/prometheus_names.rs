@@ -23,7 +23,7 @@ pub mod nats {
     /// Prefix for all NATS client metrics
     pub const PREFIX: &str = "nats_";
 
-    /// DistributedRuntime metrics
+    /// ===== DistributedRuntime metrics =====
     /// Total number of bytes received by NATS client
     pub const IN_BYTES: &str = "nats_in_bytes";
 
@@ -42,7 +42,7 @@ pub mod nats {
     /// Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
     pub const CONNECTION_STATE: &str = "nats_connection_state";
 
-    // Component metrics (ordered to match NatsStatsMetrics fields)
+    /// ===== Component metrics (ordered to match NatsStatsMetrics fields) =====
     /// Average processing time in milliseconds (maps to: average_processing_time in nanoseconds)
     pub const AVG_PROCESSING_MS: &str = "nats_avg_processing_time_ms";
 

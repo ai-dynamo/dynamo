@@ -265,7 +265,8 @@ impl Component {
         Ok(out)
     }
 
-    /// Scrape user defined stats (embedded in data field of ServiceInfo)
+    /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
+    /// embedded in data field of ServiceInfo.
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
         let service_name = self.service_name();
         let service_client = self.drt().service_client();
@@ -275,7 +276,7 @@ impl Component {
     }
 
     /// Register Prometheus metrics for this component's service stats
-    pub fn register_metrics(&self) -> Result<crate::service::ComponentSystemStatusNatsMetrics> {
+    pub fn register_metrics_callback(&self) -> Result<crate::service::ComponentSystemStatusNatsMetrics> {
         let component_metrics =
             crate::service::ComponentSystemStatusNatsMetrics::from_component(self)?;
 
@@ -285,6 +286,7 @@ impl Component {
         let prefix = self.prefix();
         let service_name = self.service_name();
         let prefix_for_closure = prefix.clone();
+        // self is component, and prefix is the prefix for the component
         self.drt().add_metrics_callback(&prefix, move |_runtime| {
             println!(
                 "[DEBUG]CALLING  metrics callback for component: {}, prefix:{}",
@@ -572,7 +574,7 @@ impl Namespace {
             .namespace(self.clone())
             .is_static(self.is_static)
             .build()?;
-        component.register_metrics()?; // register a callback to scrape stats and update metrics
+        component.register_metrics_callback()?; // register a callback to scrape stats and update metrics
         Ok(component)
     }
 
