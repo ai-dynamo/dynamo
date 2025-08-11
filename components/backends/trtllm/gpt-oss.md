@@ -203,7 +203,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --disaggregation-mode decode \
   --disaggregation-strategy prefill_first \
   --max-num-tokens 16384 \
-  --max-batch-size 128 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
   --expert-parallel-size 4

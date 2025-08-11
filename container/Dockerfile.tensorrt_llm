@@ -486,7 +486,7 @@ RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_P
     if [ "$ARCH" = "amd64" ]; then \
         pip install "triton==3.3.1"; \
     fi; \
-    uv pip install ai-dynamo nixl --find-links /workspace/wheelhouse
+    uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl /workspace/wheelhouse/ai_dynamo*any.whl /workspace/wheelhouse/nixl*.whl
 
 # Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image

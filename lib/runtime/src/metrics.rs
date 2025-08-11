@@ -194,7 +194,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     labels: &[(&str, &str)],
     buckets: Option<Vec<f64>>,
     const_labels: Option<&[&str]>,
-) -> anyhow::Result<Arc<T>> {
+) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
     let mut seen_keys = std::collections::HashSet::new();
 
@@ -268,7 +268,9 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     );
 
     // Handle different metric types
-    let metric = if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
+    let prometheus_metric = if std::any::TypeId::of::<T>()
+        == std::any::TypeId::of::<prometheus::Histogram>()
+    {
         // Special handling for Histogram with custom buckets
         // buckets parameter is valid for Histogram, const_labels is not used
         if const_labels.is_some() {
@@ -369,14 +371,14 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         current_prefix.push_str(name);
 
         // Register metric at this hierarchical level
-        let collector: Box<dyn prometheus::core::Collector> = Box::new(metric.clone());
+        let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
         let _ = prometheus_registry
             .entry(current_prefix.clone())
             .or_default()
             .register(collector);
     }
 
-    Ok(Arc::new(metric))
+    Ok(prometheus_metric)
 }
 
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
@@ -423,7 +425,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::Counter>> {
+    ) -> anyhow::Result<prometheus::Counter> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -434,7 +436,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+    ) -> anyhow::Result<prometheus::CounterVec> {
         create_metric(
             self,
             name,
@@ -451,7 +453,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::Gauge>> {
+    ) -> anyhow::Result<prometheus::Gauge> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -462,7 +464,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
         buckets: Option<Vec<f64>>,
-    ) -> anyhow::Result<Arc<prometheus::Histogram>> {
+    ) -> anyhow::Result<prometheus::Histogram> {
         create_metric(self, name, description, labels, buckets, None)
     }
 
@@ -472,7 +474,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
+    ) -> anyhow::Result<prometheus::IntCounter> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -483,7 +485,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounterVec>> {
+    ) -> anyhow::Result<prometheus::IntCounterVec> {
         create_metric(
             self,
             name,
@@ -500,7 +502,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntGauge>> {
+    ) -> anyhow::Result<prometheus::IntGauge> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -511,7 +513,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntGaugeVec>> {
+    ) -> anyhow::Result<prometheus::IntGaugeVec> {
         create_metric(
             self,
             name,
@@ -1040,12 +1042,12 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
         );
 
         assert_eq!(
-            drt_output, expected_drt_output,
+            filtered_drt_output, expected_drt_output,
             "\n=== DRT COMPARISON FAILED ===\n\
              Expected:\n{}\n\
              Actual:\n{}\n\
              ==============================",
-            expected_drt_output, drt_output
+            expected_drt_output, filtered_drt_output
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
