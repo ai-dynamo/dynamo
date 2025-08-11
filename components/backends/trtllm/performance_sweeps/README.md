@@ -63,6 +63,9 @@ export SLURM_PARTITION=""
 # Set account manually if this command doesn't work on your cluster
 export SLURM_ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
 
+# Set a job name for your benchmarking runs (optional, will be auto-generated if not set)
+export SLURM_JOB_NAME=""
+
 # NOTE: IMAGE must be set manually for now
 # To build an iamge, see the steps here:
 # https://github.com/ai-dynamo/dynamo/tree/main/components/backends/trtllm#build-docker
