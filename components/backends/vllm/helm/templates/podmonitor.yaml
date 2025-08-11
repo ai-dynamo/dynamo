@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- with $.Values.dynamo }}
+{{-   $namespace := required "The dynamo.name property is required" .name }}
+{{-   with .frontend }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    nvidia.com/dynamo-component: Frontend
+    nvidia.com/dynamo-namespace: {{ $namespace | lower }}
+    nvidia.com/selector: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}-frontend
+    release: prometheus
+  name: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}-frontend
+spec:
+  podMetricsEndpoints:
+  - interval: 6s
+    path: /metrics
+    port: http
+  namespaceSelector:
+    matchNames:
+    - {{ $.Release.Namespace }}
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component: Frontend
+      nvidia.com/dynamo-namespace: {{ $namespace | lower }}
+      nvidia.com/selector: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}-frontend
+{{-   else }}
+{{-     fail "The dynamo.frontend property is required." }}
+{{-   end }}
+{{-   with .components }}
+{{-     range . }}
+---
+{{-       $componentName := required "Each component in dynamo.components must have a .name property" .name }}
+{{-       $metricPath := "/metrics" }}
+{{-       with .probes }}
+{{-         with .metrics }}
+{{-           with .path }}
+{{-             $metricPath = . }}
+{{-           end }}
+{{-         end }}
+{{-       end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    nvidia.com/dynamo-component: {{ $componentName }}
+    nvidia.com/dynamo-namespace: {{ $namespace | lower }}
+    nvidia.com/selector: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}-{{ $componentName | lower }}
+    release: prometheus
+  name: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}-{{ $componentName | lower }}
+spec:
+  podMetricsEndpoints:
+  - interval: 6s
+    path: {{ $metricPath }}
+    port: http
+  namespaceSelector:
+    matchNames:
+    - {{ $.Release.Namespace }}
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component: {{ $componentName }}
+      nvidia.com/dynamo-namespace: {{ $namespace | lower }}
+      nvidia.com/selector: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}-{{ $componentName | lower }}
+{{-     end }}
+{{-   else }}
+{{-     fail "The dynamo.components property is required and must contain at least one component." }}
+{{-   end }}
+{{- else }}
+{{-   fail "The dynamo property is required." }}
+{{- end }}
