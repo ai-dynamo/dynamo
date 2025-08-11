@@ -65,7 +65,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ### Install `ai-dynamo[sglang]`
 
 #### Install latest release
-We strong suggest using uv to install the latest release of ai-dynamo[sglang]. You can install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`
+We suggest using uv to install the latest release of ai-dynamo[sglang]. You can install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ```bash
 # create a virtual env
@@ -79,7 +79,7 @@ uv pip install "ai-dynamo[sglang]"
 <details>
 <summary>Instructions</summary>
 
-This requires have rust installed. We also recommend having a proper installation of the cuda toolkit as sglang requires `nvcc` to be available.
+This requires having rust installed. We also recommend having a proper installation of the cuda toolkit as sglang requires `nvcc` to be available.
 
 ```bash
 # create a virtual env
