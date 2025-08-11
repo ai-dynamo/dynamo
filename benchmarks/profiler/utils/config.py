@@ -45,10 +45,11 @@ def break_arguments(args: list[str]) -> list[str]:
 
 def remove_valued_arguments(args: list[str], key: str) -> list[str]:
     """Remove a valued argument (e.g., --key value) from the arguments list if exists."""
-    while key in args:
+    if key in args:
         idx = args.index(key)
         if idx + 1 < len(args):
             del args[idx : idx + 2]
+
     return args
 
 
