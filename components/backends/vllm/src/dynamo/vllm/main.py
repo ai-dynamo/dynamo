@@ -217,11 +217,18 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config = ModelRuntimeConfig()
 
         # make a `collective_rpc` call to get runtime configuration values
+        logging.info(
+            "Getting engine runtime configuration metadata from vLLM engine..."
+        )
         runtime_values = await get_engine_cache_info(engine_client)
         runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
         runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
         gpu_mem_integer = runtime_values["gpu_memory_utilization"]
         runtime_config.gpu_memory_utilization = gpu_mem_integer
+
+        logging.info(
+            f"Registering model {config.model} with runtime config: {runtime_config}"
+        )
 
         await register_llm(
             ModelType.Backend,
@@ -250,24 +257,32 @@ async def init(runtime: DistributedRuntime, config: Config):
 
 async def get_engine_cache_info(engine: AsyncLLM):
     """Retrieve cache configuration information from [`AsyncLLM`] engine."""
-    cache_values = await engine.collective_rpc(
-        lambda worker: {
-            "num_gpu_blocks": worker.cache_config.num_gpu_blocks,
-            "gpu_memory_utilization": worker.cache_config.gpu_memory_utilization,
-        }
-    )
 
-    scheduler_values = await engine.collective_rpc(
-        lambda worker: {
-            "max_num_seqs": worker.scheduler_config.max_num_seqs,
-        }
-    )
+    try:
+        cache_values = await engine.collective_rpc(
+            lambda worker: {
+                "num_gpu_blocks": worker.cache_config.num_gpu_blocks,
+                "gpu_memory_utilization": worker.cache_config.gpu_memory_utilization,
+            }
+        )
 
-    return {
-        "num_gpu_blocks": cache_values["num_gpu_blocks"],
-        "max_num_seqs": scheduler_values["max_num_seqs"],
-        "gpu_memory_utilization": cache_values["gpu_memory_utilization"],
-    }
+        scheduler_values = await engine.collective_rpc(
+            lambda worker: {
+                "max_num_seqs": worker.scheduler_config.max_num_seqs,
+            }
+        )
+        logging.info(f"Collective RPC cache values: {cache_values}")
+        logging.info(f"Collective RPC scheduler values: {scheduler_values}")
+        return {
+            "num_gpu_blocks": cache_values["num_gpu_blocks"],
+            "max_num_seqs": scheduler_values["max_num_seqs"],
+            "gpu_memory_utilization": cache_values["gpu_memory_utilization"],
+        }
+    except Exception as e:
+        logging.error(
+            f"Failed to get collective RPC configuration values from vLLM engine: {e}"
+        )
+        raise
 
 
 def main():

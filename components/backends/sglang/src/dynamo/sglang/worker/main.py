@@ -435,6 +435,8 @@ async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig
                     f"Failed to publish runtime config after {MAX_RETRIES} attempts"
                 )
 
+    return None
+
 
 def main():
     uvloop.install()
