@@ -42,6 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
+          docker login nvcr.io -u '$oauthtoken' -p ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework none
       - name: Start services with docker-compose
         working-directory: ./deploy
