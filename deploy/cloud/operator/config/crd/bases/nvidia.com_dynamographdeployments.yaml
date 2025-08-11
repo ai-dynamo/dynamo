@@ -10108,6 +10108,13 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      numberOfNodes:
+                        default: 1
+                        description: |-
+                          Indicates the number of nodes to deploy for multinode components.
+                          Total number of GPUs is NumberOfNodes * GPU limit.
+                        format: int32
+                        type: integer
                       pvc:
                         description: PVC config describing volumes to be mounted by the component.
                         properties:
@@ -10298,12 +10305,11 @@ spec:
                                   type: string
                                 type: object
                               gpu:
-                                description: GPU is the number of GPUs to request per node.
+                                description: |-
+                                  Indicates the number of GPUs to request.
+                                  total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
                                 type: string
                               memory:
-                                type: string
-                              nodes:
-                                description: Nodes is the number of nodes to request. Total number of GPUs will be GPU * Nodes.
                                 type: string
                             type: object
                           requests:
@@ -10315,12 +10321,11 @@ spec:
                                   type: string
                                 type: object
                               gpu:
-                                description: GPU is the number of GPUs to request per node.
+                                description: |-
+                                  Indicates the number of GPUs to request.
+                                  total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
                                 type: string
                               memory:
-                                type: string
-                              nodes:
-                                description: Nodes is the number of nodes to request. Total number of GPUs will be GPU * Nodes.
                                 type: string
                             type: object
                         type: object
