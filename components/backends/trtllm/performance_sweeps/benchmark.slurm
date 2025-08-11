@@ -1,11 +1,16 @@
 #!/bin/bash
-#SBATCH --nodes=2
-#SBATCH --ntasks=8
-#SBATCH --ntasks-per-node=4
-#SBATCH --partition=batch
-#SBATCH --account=gtc_inference
+#SBATCH --partition=${SLURM_PARTITION}
+#SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --time=04:00:00
-#SBATCH --job-name="gtc_inference-job-1:disaggr-test"
+#SBATCH --job-name="${SLURM_JOB_NAME}:disaggregated"
+
+if [ -z "$SLURM_PARTITION" ] || [ -z "$SLURM_ACCOUNT" ] || [ -z "$SLURM_JOB_NAME" ]; then
+    echo "Error: Required environment variables not set:"
+    echo "  SLURM_PARTITION: $SLURM_PARTITION"
+    echo "  SLURM_ACCOUNT: $SLURM_ACCOUNT"
+    echo "  SLURM_JOB_NAME: $SLURM_JOB_NAME"
+    exit 1
+fi
 
 MULTI_ROUND="${MULTI_ROUND:-8}"
 
