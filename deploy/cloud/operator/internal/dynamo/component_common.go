@@ -20,7 +20,7 @@ type ComponentDefaults interface {
 // ComponentDefaultsFactory creates appropriate defaults based on component type
 func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 	switch componentType {
-	case commonconsts.ComponentTypeMain:
+	case commonconsts.ComponentTypeFrontend:
 		return NewFrontendDefaults()
 	case commonconsts.ComponentTypeWorker:
 		return NewWorkerDefaults()

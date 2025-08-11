@@ -192,7 +192,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			// finally set the service account name
 			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
-		if deployment.IsMainComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+		if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
 			deployment.Spec.Ingress = defaultIngressSpec
 		}
 		// merge the envs from the parent deployment with the envs from the service
@@ -220,7 +220,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
 // It updates the port for the given service (if it is the main component)
 func updateDynDeploymentConfig(dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment, newPort int) error {
-	if dynamoDeploymentComponent.IsMainComponent() {
+	if dynamoDeploymentComponent.IsFrontendComponent() {
 		dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
 		if dynamoDeploymentConfig != nil {
 			var config map[string]any

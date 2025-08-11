@@ -27,7 +27,7 @@ spec:
         timeoutSeconds: 30
         failureThreshold: 10
       dynamoNamespace: sglang-agg
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:

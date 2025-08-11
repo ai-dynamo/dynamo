@@ -9,7 +9,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: trtllm-v1-disagg-router
-      componentType: main
+      componentType: frontend
       livenessProbe:
         exec:
           command:

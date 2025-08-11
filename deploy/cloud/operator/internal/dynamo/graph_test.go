@@ -1308,7 +1308,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector:      "test-dynamo-graph-deployment-frontend",
 									commonconsts.KubeLabelMetricsEnabled:      commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeMain,
+									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeFrontend,
 									"nvidia.com/label1":                       "label1",
 									"nvidia.com/label2":                       "label2",
 								},

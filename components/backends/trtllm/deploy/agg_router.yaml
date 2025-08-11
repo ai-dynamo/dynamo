@@ -28,7 +28,7 @@ spec:
         timeoutSeconds: 3
         failureThreshold: 5
       dynamoNamespace: trtllm-agg-router
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:

@@ -16,7 +16,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
-      componentType: main
+      componentType: frontend
       replicas: 1
       livenessProbe:
         httpGet:
@@ -101,7 +101,7 @@ spec:
             - --profile-results-dir=/workspace/profiling_results
     Prometheus:
       dynamoNamespace: vllm-disagg-planner
-      componentType: main
+      componentType: default
       replicas: 1
       envs:
         - name: PYTHONPATH

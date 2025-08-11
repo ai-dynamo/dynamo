@@ -27,7 +27,7 @@ spec:
         timeoutSeconds: 5
         failureThreshold: 3
       dynamoNamespace: vllm-agg
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:

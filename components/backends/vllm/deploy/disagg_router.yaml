@@ -9,7 +9,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: vllm-v1-disagg-router
-      componentType: main
+      componentType: frontend
       replicas: 1
       livenessProbe:
         httpGet:
