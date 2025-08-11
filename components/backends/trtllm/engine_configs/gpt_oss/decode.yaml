@@ -17,7 +17,6 @@ disable_overlap_scheduler: false
 moe_config:
     backend: CUTLASS
 cuda_graph_config:
-    max_batch_size: 128
     enable_padding: true
 cache_transceiver_config:
   backend: ucx
