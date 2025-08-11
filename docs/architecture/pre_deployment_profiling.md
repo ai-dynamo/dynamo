@@ -233,6 +233,9 @@ python3 benchmarks/profiler/download_pvc_results.py --namespace $NAMESPACE --out
 
 # Download to specific directory
 python3 benchmarks/profiler/download_pvc_results.py --namespace $NAMESPACE --output-dir /path/to/my/results
+
+# Download without any of the auto-created config.yaml files used in profiling
+python3 benchmarks/profiler/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --no-config
 ```
 
 The script will:

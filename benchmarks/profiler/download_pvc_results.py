@@ -7,7 +7,7 @@ This script downloads all relevant profiling results from the profiling PVC to a
 It creates the necessary access pod, downloads the files, and cleans up automatically.
 
 Usage:
-    python3 download_pvc_results.py --namespace <namespace> --output-dir <local_directory>
+    python3 download_pvc_results.py --namespace <namespace> --output-dir <local_directory> [--no-config]
 
 Examples:
     # Download to ./results directory
@@ -15,6 +15,9 @@ Examples:
 
     # Download to specific directory
     python3 download_pvc_results.py --namespace <namespace> --output-dir /home/user/profiling_data
+
+    # Download without configuration files
+    python3 download_pvc_results.py --namespace <namespace> --output-dir ./results --no-config
 """
 
 import argparse
@@ -57,7 +60,7 @@ def deploy_access_pod(namespace: str) -> str:
 
     # Check if pod already exists and is running
     try:
-        result = run_command(
+        result = subprocess.run(
             [
                 "kubectl",
                 "get",
@@ -69,12 +72,14 @@ def deploy_access_pod(namespace: str) -> str:
                 "jsonpath={.status.phase}",
             ],
             capture_output=True,
+            text=True,
+            check=False,
         )
 
-        if result.stdout.strip() == "Running":
+        if result.returncode == 0 and result.stdout.strip() == "Running":
             print(f"✓ Access pod '{pod_name}' already running")
             return pod_name
-    except subprocess.CalledProcessError:
+    except Exception:
         # Pod doesn't exist or isn't running
         pass
 
@@ -99,7 +104,7 @@ def deploy_access_pod(namespace: str) -> str:
     # Wait for pod to be ready (up to 60 seconds)
     for i in range(60):
         try:
-            result = run_command(
+            result = subprocess.run(
                 [
                     "kubectl",
                     "get",
@@ -111,13 +116,15 @@ def deploy_access_pod(namespace: str) -> str:
                     "jsonpath={.status.phase}",
                 ],
                 capture_output=True,
+                text=True,
+                check=False,
             )
 
-            if result.stdout.strip() == "Running":
+            if result.returncode == 0 and result.stdout.strip() == "Running":
                 print("✓ Access pod is ready")
                 return pod_name
 
-        except subprocess.CalledProcessError:
+        except Exception:
             pass
 
         time.sleep(1)
@@ -128,40 +135,50 @@ def deploy_access_pod(namespace: str) -> str:
     sys.exit(1)
 
 
-def list_pvc_contents(namespace: str, pod_name: str) -> List[str]:
+def list_pvc_contents(
+    namespace: str, pod_name: str, skip_config: bool = False
+) -> List[str]:
     """List contents of the PVC to identify relevant files."""
     print("Scanning PVC contents...")
 
-    try:
-        result = run_command(
+    # Build find command with optional config file exclusion
+    find_cmd = [
+        "kubectl",
+        "exec",
+        pod_name,
+        "-n",
+        namespace,
+        "--",
+        "find",
+        "/profiling_results",
+        "-type",
+        "f",
+        "-name",
+        "*.png",
+        "-o",
+        "-name",
+        "*.npz",
+    ]
+
+    # Add config file patterns if not skipping them
+    if not skip_config:
+        find_cmd.extend(
             [
-                "kubectl",
-                "exec",
-                pod_name,
-                "-n",
-                namespace,
-                "--",
-                "find",
-                "/profiling_results",
-                "-type",
-                "f",
-                "-name",
-                "*.png",
-                "-o",
-                "-name",
-                "*.npz",
                 "-o",
                 "-name",
                 "*.yaml",
                 "-o",
                 "-name",
                 "*.yml",
-            ],
-            capture_output=True,
+            ]
         )
 
+    try:
+        result = run_command(find_cmd, capture_output=True)
+
         files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
-        print(f"Found {len(files)} relevant files to download")
+        config_note = " (excluding config files)" if skip_config else ""
+        print(f"Found {len(files)} relevant files to download{config_note}")
         return files
 
     except subprocess.CalledProcessError:
@@ -213,20 +230,27 @@ def download_files(
     print(f"✓ Download completed: {downloaded} successful, {failed} failed")
 
 
-def download_summary_files(namespace: str, pod_name: str, output_dir: Path) -> None:
+def download_summary_files(
+    namespace: str, pod_name: str, output_dir: Path, skip_config: bool = False
+) -> None:
     """Download key summary files that might not match the pattern."""
     summary_files = [
         "/profiling_results/prefill_performance.png",
         "/profiling_results/decode_performance.png",
-        "/profiling_results/disagg.yaml",  # In case it was injected
     ]
+
+    # Add config files if not skipping them
+    if not skip_config:
+        summary_files.append(
+            "/profiling_results/disagg.yaml"
+        )  # In case it was injected
 
     print("Downloading summary files...")
 
     for file_path in summary_files:
         try:
-            # Check if file exists first
-            run_command(
+            # Check if file exists first using subprocess.run directly
+            result = subprocess.run(
                 [
                     "kubectl",
                     "exec",
@@ -239,7 +263,13 @@ def download_summary_files(namespace: str, pod_name: str, output_dir: Path) -> N
                     file_path,
                 ],
                 capture_output=True,
+                text=True,
+                check=False,
             )
+
+            if result.returncode != 0:
+                # File doesn't exist, skip silently
+                continue
 
             # File exists, download it
             rel_path = file_path.replace("/profiling_results/", "")
@@ -258,8 +288,9 @@ def download_summary_files(namespace: str, pod_name: str, output_dir: Path) -> N
 
             print(f"  ✓ {rel_path}")
 
-        except subprocess.CalledProcessError:
+        except Exception as e:
             # File doesn't exist or failed to download, skip silently
+            print(f"  ⚠️  Skipped {file_path.split('/')[-1]}: {e}")
             pass
 
 
@@ -342,6 +373,12 @@ def main():
         help="Local directory to download results to",
     )
 
+    parser.add_argument(
+        "--no-config",
+        action="store_true",
+        help="Skip downloading configuration files (*.yaml, *.yml)",
+    )
+
     args = parser.parse_args()
 
     print("📥 PVC Results Download")
@@ -354,11 +391,11 @@ def main():
     pod_name = deploy_access_pod(args.namespace)
 
     # List and download files
-    files = list_pvc_contents(args.namespace, pod_name)
+    files = list_pvc_contents(args.namespace, pod_name, args.no_config)
     download_files(args.namespace, pod_name, files, args.output_dir)
 
     # Download additional summary files
-    download_summary_files(args.namespace, pod_name, args.output_dir)
+    download_summary_files(args.namespace, pod_name, args.output_dir, args.no_config)
 
     # Generate README
     generate_readme(args.output_dir, len(files))
