@@ -84,7 +84,7 @@ use std::net::SocketAddr;
 use std::time::Duration as StdDuration;
 
 use dynamo_llm::kv_router::protocols::{ForwardPassMetrics, LoadMetrics};
-use dynamo_llm::kv_router::scheduler::Endpoint;
+use dynamo_llm::kv_router::scoring::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
 use dynamo_runtime::{

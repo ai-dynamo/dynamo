@@ -115,8 +115,8 @@ impl SystemHealth {
         self.system_health = status;
     }
 
-    pub fn set_endpoint_health_status(&mut self, endpoint: String, status: HealthStatus) {
-        self.endpoint_health.insert(endpoint, status);
+    pub fn set_endpoint_health_status(&mut self, endpoint: &str, status: HealthStatus) {
+        self.endpoint_health.insert(endpoint.to_string(), status);
     }
 
     /// Returns the overall health status and endpoint health statuses

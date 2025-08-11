@@ -16,9 +16,10 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
-use crate::model_card::{self, ModelDeploymentCard, ModelRuntimeConfig};
+use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
+use crate::runtime_config::ModelRuntimeConfig;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
@@ -261,12 +262,15 @@ impl LocalModel {
         &self.full_path
     }
 
+    /// Human friendly model name. This is the correct name.
     pub fn display_name(&self) -> &str {
         &self.card.display_name
     }
 
+    /// The name under which we make this model available over HTTP.
+    /// A slugified version of the model's name, for use in NATS, etcd, etc.
     pub fn service_name(&self) -> &str {
-        &self.card.service_name
+        self.card.slug().as_ref()
     }
 
     pub fn request_template(&self) -> Option<RequestTemplate> {
