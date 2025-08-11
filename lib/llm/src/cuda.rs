@@ -16,8 +16,9 @@
 //! that we may tap the lower level CUDA context, streams, events, etcs from external sources and leverage
 //! them within Dynamo.
 
-use cudarc::driver::sys::{
-    cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cudaError_enum, CUcontext, CUstream,
+use cudarc::driver::{
+    sys::{cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cudaError_enum, CUcontext, CUstream},
+    CudaContext, CudaStream,
 };
 use std::pin::Pin;
 use std::{marker::PhantomData, sync::Arc};
@@ -132,11 +133,11 @@ impl Drop for DynamoCudaContextGuard {
 
 /// A CUDA context provider that wraps an external CUDA context.
 pub struct ExternalCudaContext {
+    // SAFETY: CUcontext is thread-safe to pass between threads and can be used concurrently.
     context: CUcontext,
 }
 
-// SAFETY: CUcontext is thread-safe to pass between threads but not to use concurrently.
-// The Arc ensures we only have one owner, and CUDA contexts can be safely passed between threads.
+// SAFETY: See notes on CUcontext above.
 unsafe impl Send for ExternalCudaContext {}
 unsafe impl Sync for ExternalCudaContext {}
 
@@ -182,8 +183,6 @@ impl DynamoCudaStreamProvider for ExternalCudaStream {
 // which prevents the guard from crossing async boundaries
 
 // Implementations of this trait for the [`cudarc`] crate.
-
-use cudarc::driver::{CudaContext, CudaStream};
 
 impl DynamoCudaContextProvider for CudaContext {
     unsafe fn cu_context(&self) -> cudarc::driver::sys::CUcontext {
