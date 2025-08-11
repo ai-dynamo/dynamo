@@ -35,7 +35,7 @@ spec:
           - --namespace
           - ${NAMESPACE}
           - --backend
-          - sglang
+          - vllm
           - --min-num-gpus-per-engine
           - "1"
           - --max-num-gpus-per-engine

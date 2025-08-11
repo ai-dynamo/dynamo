@@ -4,6 +4,16 @@
 
 To ensure Dynamo deployments comply with the SLA, we provide a pre-deployment script to profile the model performance with different parallelization mappings and recommend the parallelization mapping for prefill and decode workers and planner configurations. To use this script, the user needs to provide the target ISL, OSL, TTFT SLA, and ITL SLA.
 
+Support matrix:
+| Backends | Model Types | Supported |
+| --- | --- | --- |
+| vLLM | Dense | ✅ |
+| vLLM | MoE | 🚧 |
+| SGLang | Dense | ✅ |
+| SGLang | MoE | 🚧 |
+| TensorRT-LLM | Dense | 🚧 |
+| TensorRT-LLM | MoE | 🚧 |
+
 > [!NOTE]
 > The script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
 
@@ -76,13 +86,13 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
   -n $NAMESPACE
 ```
 
-**Step 1: Build your own vLLM image for profiling**
+**Step 1: Build your own dynamo image for profiling**
 
 ```bash
 # in the project's root folder
-./container/build.sh --framework VLLM
+./container/build.sh --framework <VLLM/sglang>
 # Tag and push to your container registry
-export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2 # or your own dynamoimage
+export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest # or your own dynamoimage
 # NOTE: DGD_CONFIG_FILE is pointing to the location of the config file inside DOCKER_IMAGE
 # Modify this yaml to profile different models
 export DGD_CONFIG_FILE=/workspace/components/backends/vllm/deploy/disagg.yaml # or your own disagg config file
@@ -90,9 +100,9 @@ export DGD_CONFIG_FILE=/workspace/components/backends/vllm/deploy/disagg.yaml # 
 
 Replace the `image` within `profile_sla_job.yaml` with the tag of the image you pushed.
 
-**Step 2: Set SLA target**
+**Step 2: Set SLA target and backend type**
 
-Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL.
+Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
 
 ```yaml
 spec:
@@ -109,6 +119,8 @@ spec:
             - "200" # target TTFT is 200ms
             - --itl
             - "20" # target ITL is 20ms
+            - --backend
+            - <vllm/sglang>
 ```
 
 **Step 3: Run profiling (required)**
