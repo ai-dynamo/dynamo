@@ -12,12 +12,12 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
-    ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
+from dynamo.llm import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -259,20 +259,18 @@ async def get_engine_cache_info(engine: AsyncLLM):
     """Retrieve cache configuration information from [`AsyncLLM`] engine."""
 
     try:
-        cache_values = await engine.collective_rpc(
-            lambda worker: {
-                "num_gpu_blocks": worker.cache_config.num_gpu_blocks,
-                "gpu_memory_utilization": worker.cache_config.gpu_memory_utilization,
-            }
-        )
-
-        scheduler_values = await engine.collective_rpc(
-            lambda worker: {
-                "max_num_seqs": worker.scheduler_config.max_num_seqs,
-            }
-        )
-        logging.info(f"Collective RPC cache values: {cache_values}")
-        logging.info(f"Collective RPC scheduler values: {scheduler_values}")
+        # Get values directly from vllm_config instead of collective_rpc
+        cache_values = {
+            "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
+            "gpu_memory_utilization": engine.vllm_config.cache_config.gpu_memory_utilization,
+        }
+        
+        scheduler_values = {
+            "max_num_seqs": engine.vllm_config.scheduler_config.max_num_seqs,
+        }
+        
+        logging.info(f"Cache config values: {cache_values}")
+        logging.info(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
@@ -280,7 +278,7 @@ async def get_engine_cache_info(engine: AsyncLLM):
         }
     except Exception as e:
         logging.error(
-            f"Failed to get collective RPC configuration values from vLLM engine: {e}"
+            f"Failed to get configuration values from vLLM config: {e}"
         )
         raise
 
