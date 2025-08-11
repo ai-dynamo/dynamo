@@ -15,7 +15,9 @@ use crate::{
         Annotated,
     },
 };
+
 use dynamo_runtime::engine::AsyncEngineStream;
+use dynamo_runtime::metrics::MetricsRegistry;
 use dynamo_runtime::pipeline::{
     network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
@@ -42,7 +44,14 @@ pub async fn run(
 
     let component = distributed_runtime
         .namespace(&endpoint_id.namespace)?
-        .component(&endpoint_id.component, model_name)?;
+        .component(&endpoint_id.component)
+        .and_then(|c| {
+            if let Some(ref name) = model_name {
+                c.add_labels(&[("model", name.as_str())])
+            } else {
+                Ok(c)
+            }
+        })?;
     let endpoint = component
         .service_builder()
         .create()

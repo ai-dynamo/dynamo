@@ -40,6 +40,18 @@ impl MetricsRegistry for DistributedRuntime {
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![] // drt is the root, so no parent hierarchy
     }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        // Convert Vec<(String, String)> to Vec<(&str, &str)>
+        self.labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
+    }
 }
 
 impl DistributedRuntime {
@@ -111,6 +123,7 @@ impl DistributedRuntime {
                 prometheus::Registry,
             >::new())),
             system_health,
+            labels: Vec::new(),
         };
 
         // Start metrics server if enabled

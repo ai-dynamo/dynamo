@@ -147,9 +147,7 @@ fn dynamo_create_kv_publisher(
         .ok_or(anyhow::Error::msg("Could not get Distributed Runtime"))
     {
         Ok(drt) => {
-            // The model publisher isn't tied to a specific model. Thus, the model name
-            // is set to None.
-            let backend = drt.namespace(namespace)?.component(component, None)?;
+            let backend = drt.namespace(namespace)?.component(component)?;
             KvEventPublisher::new(backend, worker_id, kv_block_size, None)
         }
         Err(e) => Err(e),

@@ -137,13 +137,8 @@ async fn engine_for(
             let args = flags.mocker_config();
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine = dynamo_llm::mocker::engine::make_mocker_engine(
-                drt,
-                endpoint,
-                Some(local_model.card().slug().to_string()),
-                args,
-            )
-            .await?;
+            let engine =
+                dynamo_llm::mocker::engine::make_mocker_engine(drt, endpoint, args).await?;
 
             Ok(EngineConfig::StaticCore {
                 engine,

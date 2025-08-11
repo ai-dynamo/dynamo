@@ -800,7 +800,7 @@ mod tests {
                 // Create namespace and component with same names as thread 2
                 let namespace = distributed.namespace("test_multiworker_sequences")?;
                 let component = namespace
-                    .component("sequences", None)?
+                    .component("sequences")?
                     .service_builder()
                     .create()
                     .await?;
@@ -914,7 +914,7 @@ mod tests {
                 // Create namespace and component with same names as thread 1
                 let namespace = distributed.namespace("test_multiworker_sequences")?;
                 let component = namespace
-                    .component("sequences", None)?
+                    .component("sequences")?
                     .service_builder()
                     .create()
                     .await?;

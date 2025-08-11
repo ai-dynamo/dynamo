@@ -60,11 +60,9 @@ async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse();
     let runtime = DistributedRuntime::from_settings(runtime).await?;
 
-    // The metrics aggregator operates independently of any model,
-    // hence the model name is set to None.
     let component = runtime
         .namespace(&args.namespace)?
-        .component(&args.component, None)?;
+        .component(&args.component)?;
 
     let selector = Box::new(CustomWorkerSelector::default());
 

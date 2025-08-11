@@ -15,6 +15,7 @@
 
 use dynamo_runtime::{
     logging,
+    metrics::MetricsRegistry,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
@@ -68,7 +69,8 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     // // we must first create a service, then we can attach one more more endpoints
     runtime
         .namespace(DEFAULT_NAMESPACE)?
-        .component("backend", Some("hello_world_model".to_string()))?
+        .component("backend")?
+        .add_labels(&[("model", "hello_world_model")])?
         .service_builder()
         .create()
         .await?

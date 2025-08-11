@@ -66,7 +66,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let endpoint_id = local_model.endpoint_id();
             let component = distributed_runtime
                 .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component, Some(card.slug().to_string()))?;
+                .component(&endpoint_id.component)?;
             let client = component.endpoint(&endpoint_id.name).client().await?;
 
             let kv_chooser = if router_mode == RouterMode::KV {

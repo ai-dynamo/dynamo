@@ -48,7 +48,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
-pub const MOCKER_MODEL: &str = "mocker_model";
 
 /// Generate a random token ID from 1k to 5k
 fn generate_random_token() -> TokenIdType {
@@ -442,7 +441,6 @@ impl AnnotatedMockEngine {
         inner: MockVllmEngine,
         distributed_runtime: DistributedRuntime,
         endpoint: dynamo_runtime::protocols::Endpoint,
-        model_name: Option<String>,
     ) -> Self {
         let inner = Arc::new(inner);
         let inner_clone = inner.clone();
@@ -457,8 +455,7 @@ impl AnnotatedMockEngine {
                     continue;
                 };
 
-                let Ok(component) = namespace.component(&endpoint.component, model_name.clone())
-                else {
+                let Ok(component) = namespace.component(&endpoint.component) else {
                     tracing::debug!("Component not available yet, retrying...");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -513,17 +510,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint: dynamo_runtime::protocols::Endpoint,
-    model_name: Option<String>,
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
-    let annotated_engine = AnnotatedMockEngine::new(
-        MockVllmEngine::new(args),
-        distributed_runtime,
-        endpoint,
-        model_name,
-    );
+    let annotated_engine =
+        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint);
 
     Ok(Arc::new(annotated_engine))
 }
@@ -559,7 +551,7 @@ mod integration_tests {
         // Create component for MockVllmEngine (needed for publishers)
         let test_component = distributed
             .namespace("test")?
-            .component(MOCKER_COMPONENT, Some(MOCKER_MODEL.to_string()))?
+            .component(MOCKER_COMPONENT)?
             .service_builder()
             .create()
             .await?;
@@ -630,7 +622,7 @@ mod integration_tests {
         // Create client
         let client = distributed
             .namespace("test")?
-            .component(MOCKER_COMPONENT, Some(MOCKER_MODEL.to_string()))?
+            .component(MOCKER_COMPONENT)?
             .endpoint("generate")
             .client()
             .await?;
