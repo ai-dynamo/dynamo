@@ -842,6 +842,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 								},
 								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+									PodSpec: &corev1.PodSpec{
+										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+									},
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 										Command: []string{
@@ -901,7 +904,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 							},
 							Spec: corev1.PodSpec{
-								SchedulerName: "volcano",
+								SchedulerName:                 "volcano",
+								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
@@ -917,9 +921,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort,
-											},
-											{
-												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
 											},
 										},
 										TTY:   true,
@@ -953,7 +954,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 							},
 							Spec: corev1.PodSpec{
-								SchedulerName: "volcano",
+								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								SchedulerName:                 "volcano",
 								Containers: []corev1.Container{
 									{
 										Name:         "main",
@@ -962,9 +964,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Args:         []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env:          []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}, {Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
 										VolumeMounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
-										Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort}, {
-											Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
-										}},
+										Ports: []corev1.ContainerPort{
+											{
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort,
+											},
+										},
 										TTY:   true,
 										Stdin: true,
 										Resources: corev1.ResourceRequirements{

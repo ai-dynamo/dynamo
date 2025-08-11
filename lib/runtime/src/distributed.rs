@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -76,7 +77,7 @@ impl DistributedRuntime {
             })
             .await??;
 
-        // Start HTTP server for health and metrics if enabled in configuration
+        // Start system metrics server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
         // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
@@ -87,9 +88,13 @@ impl DistributedRuntime {
         };
         let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+        let health_endpoint_path = config.system_health_path.clone();
+        let live_endpoint_path = config.system_live_path.clone();
+        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
+            health_endpoint_path,
+            live_endpoint_path,
         )));
 
         let distributed_runtime = Self {
@@ -97,6 +102,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            metrics_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -107,13 +113,13 @@ impl DistributedRuntime {
             system_health,
         };
 
-        // Start HTTP server if enabled
+        // Start metrics server if enabled
         if let Some(cancel_token) = cancel_token {
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start HTTP server (it spawns its own task internally)
-            match crate::http_server::spawn_http_server(
+            // Start metrics server (it spawns its own task internally)
+            match crate::metrics_server::spawn_metrics_server(
                 &host,
                 port,
                 cancel_token,
@@ -121,15 +127,25 @@ impl DistributedRuntime {
             )
             .await
             {
-                Ok((addr, _)) => {
-                    tracing::info!("HTTP server started successfully on {}", addr);
+                Ok((addr, handle)) => {
+                    tracing::info!("Metrics server started successfully on {}", addr);
+
+                    // Store metrics server information
+                    let metrics_server_info =
+                        crate::metrics_server::MetricsServerInfo::new(addr, Some(handle));
+
+                    // Initialize the metrics_server field
+                    distributed_runtime
+                        .metrics_server
+                        .set(Arc::new(metrics_server_info))
+                        .expect("Metrics server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("HTTP server startup failed: {}", e);
+                    tracing::error!("Metrics server startup failed: {}", e);
                 }
             }
         } else {
-            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
+            tracing::debug!("Health and metrics server is disabled via DYN_SYSTEM_ENABLED");
         }
 
         Ok(distributed_runtime)
@@ -208,6 +224,11 @@ impl DistributedRuntime {
 
     pub fn nats_client(&self) -> nats::Client {
         self.nats_client.clone()
+    }
+
+    /// Get metrics server information if available
+    pub fn metrics_server_info(&self) -> Option<Arc<crate::metrics_server::MetricsServerInfo>> {
+        self.metrics_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers

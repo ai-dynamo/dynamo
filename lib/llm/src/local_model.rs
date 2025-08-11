@@ -47,6 +47,8 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_port: u16,
     migration_limit: u32,
+    is_mocker: bool,
+    user_data: Option<serde_json::Value>,
 }
 
 impl Default for LocalModelBuilder {
@@ -62,6 +64,8 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            is_mocker: Default::default(),
+            user_data: Default::default(),
         }
     }
 }
@@ -119,6 +123,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
+        self.is_mocker = is_mocker;
+        self
+    }
+
+    pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
+        self.user_data = user_data;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -148,6 +162,7 @@ impl LocalModelBuilder {
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
             card.migration_limit = self.migration_limit;
+            card.user_data = self.user_data.take();
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
@@ -169,7 +184,7 @@ impl LocalModelBuilder {
         let relative_path = model_path.trim_start_matches(HF_SCHEME);
         let full_path = if is_hf_repo {
             // HF download if necessary
-            super::hub::from_hf(relative_path).await?
+            super::hub::from_hf(relative_path, self.is_mocker).await?
         } else {
             fs::canonicalize(relative_path)?
         };
@@ -204,6 +219,7 @@ impl LocalModelBuilder {
         }
 
         card.migration_limit = self.migration_limit;
+        card.user_data = self.user_data.take();
 
         Ok(LocalModel {
             card,
@@ -235,12 +251,15 @@ impl LocalModel {
         &self.full_path
     }
 
+    /// Human friendly model name. This is the correct name.
     pub fn display_name(&self) -> &str {
         &self.card.display_name
     }
 
+    /// The name under which we make this model available over HTTP.
+    /// A slugified version of the model's name, for use in NATS, etcd, etc.
     pub fn service_name(&self) -> &str {
-        &self.card.service_name
+        self.card.slug().as_ref()
     }
 
     pub fn request_template(&self) -> Option<RequestTemplate> {

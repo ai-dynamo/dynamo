@@ -8,11 +8,10 @@ This document outlines the testing framework for the Dynamo runtime system, incl
 
 ```bash
 tests/
-├── serve/              # E2E tests using dynamo serve
-│   ├── conftest.py     # test fixtures as needed for specific test area
-├── run/                # E2E tests using dynamo run
+├── serve/              # E2E tests
 │   ├── conftest.py     # test fixtures as needed for specific test area
 ├── conftest.py         # Shared fixtures and configuration
+├── utils               # Common utils accross tests
 └── README.md           # This file
 ```
 

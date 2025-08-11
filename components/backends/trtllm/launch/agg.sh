@@ -6,6 +6,9 @@
 export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
 export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"engine_configs/agg.yaml"}
+export MODALITY=${MODALITY:-"text"}
+# If you want to use multimodal, set MODALITY to "multimodal"
+#export MODALITY=${MODALITY:-"multimodal"}
 
 # Setup cleanup trap
 cleanup() {
@@ -27,4 +30,5 @@ DYNAMO_PID=$!
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
+  --modality "$MODALITY" \
   --extra-engine-args "$AGG_ENGINE_ARGS"

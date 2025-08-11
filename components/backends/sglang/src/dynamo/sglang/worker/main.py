@@ -27,13 +27,18 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang.utils.protocol import DisaggPreprocessedRequest
-from dynamo.sglang.utils.sgl_utils import parse_sglang_args_inc
+from dynamo.sglang.common import (
+    BaseWorkerHandler,
+    DisaggPreprocessedRequest,
+    graceful_shutdown,
+    parse_sglang_args_inc,
+    setup_native_endpoints,
+)
 
 configure_dynamo_logging()
 
 
-class RequestHandler:
+class RequestHandler(BaseWorkerHandler):
     def __init__(
         self,
         engine: sgl.Engine,
@@ -41,9 +46,7 @@ class RequestHandler:
         component,
         decode_client: Optional[Any] = None,
     ):
-        self.engine = engine
-        self.server_args = server_args
-        self.component = component
+        super().__init__(engine, server_args, component, decode_client)
         self.metrics_publisher = WorkerMetricsPublisher()
 
         self.zmq_context = zmq.asyncio.Context()  # type: ignore
@@ -291,12 +294,6 @@ class RequestHandler:
         }
 
 
-async def graceful_shutdown(runtime):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
-
-
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     # Set up signal handler for graceful shutdown
@@ -311,11 +308,23 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    server_args = parse_sglang_args_inc(sys.argv[1:])
-    await init(runtime, server_args)
+    # TODO: Better handle non-sglang args
+    sys_argv = sys.argv[1:]
+    migration_limit = 0
+    try:
+        idx = sys_argv.index("--migration-limit")
+        migration_limit = int(sys_argv[idx + 1])
+        del sys_argv[idx : idx + 2]  # Remove the args from sys_argv
+    except Exception:
+        pass
+
+    server_args = parse_sglang_args_inc(sys_argv)
+    await init(runtime, server_args, migration_limit)
 
 
-async def init(runtime: DistributedRuntime, server_args: ServerArgs):
+async def init(
+    runtime: DistributedRuntime, server_args: ServerArgs, migration_limit: int
+):
     """Initialize worker (either prefill or aggregated)"""
 
     engine = sgl.Engine(server_args=server_args)
@@ -330,6 +339,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
         server_args.model_path,
         server_args.served_model_name,
         kv_cache_block_size=server_args.page_size,
+        migration_limit=migration_limit,
     )
 
     if server_args.disaggregation_mode != "null":
@@ -355,8 +365,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     tasks = [endpoint.serve_endpoint(handler.generate)]
 
-    flush_endpoint = component.endpoint("flush_cache")
-    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+    tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
 

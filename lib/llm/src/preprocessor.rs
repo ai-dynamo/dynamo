@@ -22,7 +22,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
+use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::tokenizers::Encoding;
 

@@ -144,7 +144,7 @@ type Resource interface {
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
-	if r.Config.EnableGrove {
+	if r.Config.Grove.Enabled {
 		// check if explicit opt out of grove
 		if dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove] == consts.KubeLabelValueFalse {
 			logger.Info("Grove is explicitly disabled for this deployment, skipping grove resources reconciliation")
@@ -308,7 +308,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
-	if r.Config.EnableGrove {
+	if r.Config.Grove.Enabled {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodGangSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the pod gang set
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },

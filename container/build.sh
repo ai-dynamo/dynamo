@@ -88,13 +88,16 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="69e9f6d48944b2ae0124ff57aa59340aa4dfae15"
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
+TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc0"
+# TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
+# Need to update the Dockerfile.tensorrt_llm to use the ai-dynamo[trtllm] package.
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc4"
 TENSORRTLLM_PIP_WHEEL=""
 
 
@@ -105,13 +108,13 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # can be updated to later versions.
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NONE_BASE_IMAGE="ubuntu"
-NONE_BASE_IMAGE_TAG="24.04"
+NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+NIXL_REF=0.4.1
 NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
 
 NO_CACHE=""
@@ -180,6 +183,14 @@ get_options() {
         --tensorrtllm-index-url)
             if [ "$2" ]; then
                 TENSORRTLLM_INDEX_URL=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --tensorrtllm-git-url)
+            if [ "$2" ]; then
+                TRTLLM_GIT_URL=$2
                 shift
             else
                 missing_requirement "$1"
@@ -358,6 +369,7 @@ show_help() {
     echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
+    echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
@@ -387,8 +399,6 @@ ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
-    # TEMP: Pin to nixl 0.3.1 for arm build, since 0.4.0 fails
-    NIXL_REF=3503658e71143b56f9d5b1b440d84a94b9c41af8
 fi
 
 # Update DOCKERFILE if framework is VLLM
@@ -397,7 +407,7 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
 elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
 elif [[ $FRAMEWORK == "NONE" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.none
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 fi
@@ -489,7 +499,11 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF}; then
+            GIT_URL_ARG=""
+            if [ -n "${TRTLLM_GIT_URL}" ]; then
+                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+            fi
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi

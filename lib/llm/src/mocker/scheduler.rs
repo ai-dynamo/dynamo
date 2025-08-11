@@ -47,6 +47,7 @@ use crate::mocker::protocols::{block_response_to_kv_event, MoveBlock, OutputSign
 use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
 use crate::mocker::sequence::ActiveSequence;
 use crate::tokens::blocks::UniqueBlock;
+use crate::tokens::BlockHash;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -123,8 +124,9 @@ impl SchedulerState {
     /// Returns `Some((prefill_compute, creation_signal, is_full_prefill))` where:
     /// - `prefill_compute`: The compute time in milliseconds for this prefill operation
     /// - `creation_signal`: Optional MoveBlock signal for KV cache block creation
+    /// - `block_hashes`: Block hashes of the sequence beign prefilled
     /// - `is_full_prefill`: true if the entire sequence was prefilled, false if chunked
-    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, bool)> {
+    fn try_prefill(&mut self) -> Option<(f64, Option<MoveBlock>, Vec<BlockHash>, bool)> {
         let uuid = self.prefill.pop_front()?;
 
         // Remove and extract prefill_compute from prefill_costs
@@ -179,6 +181,7 @@ impl SchedulerState {
         Some((
             prefill_compute,
             sequence.take_creation_signal(),
+            sequence.block_hashes(),
             is_full_prefill,
         ))
     }
@@ -401,8 +404,12 @@ impl Scheduler {
                 let mut total_time = Duration::from_secs_f64(decoding_time / 1000.0);
 
                 // Process prefilling
-                while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
-                    state_guard.try_prefill()
+                while let Some((
+                    prefill_compute,
+                    maybe_creation_signal,
+                    block_hashes,
+                    is_full_prefill,
+                )) = state_guard.try_prefill()
                 {
                     // NOTE: Prefill cost/time is always incremented for new blocks, even if they
                     // could be cached by other requests in the same batch. This matches vLLM behavior.
@@ -421,7 +428,8 @@ impl Scheduler {
                             (&kv_events_tx, &mut block_resp_rx)
                         {
                             while let Ok(event) = rx.try_recv() {
-                                let _ = relay_tx.send(block_response_to_kv_event(event));
+                                let _ =
+                                    relay_tx.send(block_response_to_kv_event(event, &block_hashes));
                             }
                         }
                     };
@@ -460,7 +468,8 @@ impl Scheduler {
                         (&kv_events_tx, &mut block_resp_rx)
                     {
                         while let Ok(event) = rx.try_recv() {
-                            let _ = relay_tx.send(block_response_to_kv_event(event));
+                            let _ = relay_tx
+                                .send(block_response_to_kv_event(event, &sequence.block_hashes()));
                         }
                     }
 

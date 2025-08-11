@@ -1208,6 +1208,25 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
 
+	// Convert user-provided metrics annotation into controller-managed label
+	// By default (no annotation), metrics are enabled
+	metricsAnnotationValue := ""
+	if opt.dynamoComponentDeployment.Spec.Annotations != nil {
+		metricsAnnotationValue = opt.dynamoComponentDeployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics]
+	}
+	switch metricsAnnotationValue {
+	case commonconsts.KubeLabelValueFalse:
+		// Explicitly disabled, don't add the label
+	default:
+		// Any other value (including empty) enables metrics
+		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
+	// Add component type label if specified
+	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
+	}
+
 	podAnnotations := make(map[string]string)
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.isStealingTrafficDebugModeEnabled)
@@ -1345,48 +1364,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				Name:          commonconsts.DynamoContainerPortName,
 				ContainerPort: int32(containerPort), // nolint: gosec
 			},
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.DynamoHealthPortName,
-				ContainerPort: int32(commonconsts.DynamoHealthPort),
-			},
 		},
 		SecurityContext: mainContainerSecurityContext,
 	}
 
-	// Set default probes if none are provided
-	if livenessProbe == nil {
-		container.LivenessProbe = &corev1.Probe{
-			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
-			InitialDelaySeconds: 60, // 1 minute
-			PeriodSeconds:       60, // Check every 1 minute
-			TimeoutSeconds:      5,  // 5 second timeout
-			FailureThreshold:    10, // Allow 10 failures before declaring unhealthy
-			SuccessThreshold:    1,  // Need 1 success to be considered healthy
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-				},
-			},
-		}
-	}
-
-	if readinessProbe == nil {
-		container.ReadinessProbe = &corev1.Probe{
-			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
-			InitialDelaySeconds: 60, // 1 minute
-			PeriodSeconds:       60, // Check every 1 minute
-			TimeoutSeconds:      5,  // 5 second timeout
-			FailureThreshold:    10, // Allow 10 failures before declaring not ready
-			SuccessThreshold:    1,  // Need 1 success to be considered ready
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/readyz",
-					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-				},
-			},
-		}
+	// Add system port for worker components
+	if opt.dynamoComponentDeployment.Spec.ComponentType == commonconsts.ComponentTypeWorker {
+		container.Ports = append(container.Ports, corev1.ContainerPort{
+			Protocol:      corev1.ProtocolTCP,
+			Name:          commonconsts.DynamoSystemPortName,
+			ContainerPort: int32(commonconsts.DynamoSystemPort),
+		})
 	}
 
 	if opt.dynamoComponentDeployment.Spec.EnvFromSecret != nil {
@@ -1477,11 +1465,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
-	podSpec := corev1.PodSpec{
-		Containers: containers,
-		Volumes:    volumes,
-	}
-
 	imagePullSecrets := []corev1.LocalObjectReference{}
 
 	if r.DockerSecretRetriever == nil {
@@ -1500,9 +1483,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	if len(imagePullSecrets) > 0 {
-		podSpec.ImagePullSecrets = imagePullSecrets
+	podSpec := &corev1.PodSpec{}
+	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil && opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec != nil {
+		podSpec = opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec.DeepCopy()
 	}
+	podSpec.Containers = append(podSpec.Containers, containers...)
+	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1514,18 +1501,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		for k, v := range extraPodMetadata.Labels {
 			podLabels[k] = v
 		}
-	}
-
-	extraPodSpec := opt.dynamoComponentDeployment.Spec.ExtraPodSpec
-
-	if extraPodSpec != nil {
-		podSpec.SchedulerName = extraPodSpec.SchedulerName
-		podSpec.NodeSelector = extraPodSpec.NodeSelector
-		podSpec.Affinity = extraPodSpec.Affinity
-		podSpec.Tolerations = extraPodSpec.Tolerations
-		podSpec.TopologySpreadConstraints = extraPodSpec.TopologySpreadConstraints
-		podSpec.Containers = append(podSpec.Containers, extraPodSpec.Containers...)
-		podSpec.ServiceAccountName = extraPodSpec.ServiceAccountName
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -1565,7 +1540,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
-		Spec: podSpec,
+		Spec: *podSpec,
 	}
 
 	return

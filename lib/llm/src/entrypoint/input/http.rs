@@ -6,34 +6,36 @@ use std::sync::Arc;
 use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
-    entrypoint::{input::common, EngineConfig},
+    entrypoint::{self, input::common, EngineConfig},
     http::service::service_v2,
     kv_router::KvRouterConfig,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        },
-        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::{
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::transports::etcd;
+use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
-    let http_service = service_v2::HttpService::builder()
+    let mut http_service_builder = service_v2::HttpService::builder()
         .port(engine_config.local_model().http_port())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
-        .with_request_template(engine_config.local_model().request_template())
-        .build()?;
-    match engine_config {
+        .with_request_template(engine_config.local_model().request_template());
+
+    let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            match distributed_runtime.etcd_client() {
-                Some(etcd_client) => {
+            let etcd_client = distributed_runtime.etcd_client();
+            // This allows the /health endpoint to query etcd for active instances
+            http_service_builder = http_service_builder.with_etcd_client(etcd_client.clone());
+            let http_service = http_service_builder.build()?;
+            match etcd_client {
+                Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
                     run_watcher(
@@ -50,17 +52,68 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                     // Static endpoints don't need discovery
                 }
             }
+            http_service
         }
-        EngineConfig::StaticFull { engine, model } => {
+        EngineConfig::StaticRemote(local_model) => {
+            let card = local_model.card();
+            let router_mode = local_model.router_config().router_mode;
+
+            let dst_config = DistributedConfig::from_settings(true); // true means static
+            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
+            let http_service = http_service_builder.build()?;
+            let manager = http_service.model_manager();
+
+            let endpoint_id = local_model.endpoint_id();
+            let component = distributed_runtime
+                .namespace(&endpoint_id.namespace)?
+                .component(&endpoint_id.component)?;
+            let client = component.endpoint(&endpoint_id.name).client().await?;
+
+            let kv_chooser = if router_mode == RouterMode::KV {
+                Some(
+                    manager
+                        .kv_chooser_for(
+                            local_model.display_name(),
+                            &component,
+                            card.kv_cache_block_size,
+                            Some(local_model.router_config().kv_router_config),
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+
+            let chat_engine = entrypoint::build_routed_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(card, &client, router_mode, kv_chooser.clone())
+            .await?;
+            manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
+
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(card, &client, router_mode, kv_chooser)
+            .await?;
+            manager.add_completions_model(local_model.display_name(), completions_engine)?;
+
+            http_service
+        }
+        EngineConfig::StaticFull { engine, model, .. } => {
+            let http_service = http_service_builder.build()?;
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             manager.add_completions_model(model.service_name(), engine.clone())?;
             manager.add_chat_completions_model(model.service_name(), engine)?;
+            http_service
         }
         EngineConfig::StaticCore {
             engine: inner_engine,
             model,
+            ..
         } => {
+            let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
 
             let chat_pipeline = common::build_pipeline::<
@@ -76,8 +129,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             >(model.card(), inner_engine)
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
+            http_service
         }
-    }
+    };
     tracing::debug!(
         "Supported routes: {:?}",
         http_service
