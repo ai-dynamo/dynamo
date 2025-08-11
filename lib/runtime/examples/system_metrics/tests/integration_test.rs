@@ -42,15 +42,15 @@ async fn test_backend_with_metrics() -> Result<()> {
     let runtime = Runtime::from_current()?;
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-    // Get the HTTP server info to find the actual port
-    let http_server_info = distributed.http_server_info();
-    let metrics_port = match http_server_info {
+    // Get the Metrics server info to find the actual port
+    let metrics_server_info = distributed.metrics_server_info();
+    let metrics_port = match metrics_server_info {
         Some(info) => {
-            println!("HTTP server running on: {}", info.address());
+            println!("Metrics server running on: {}", info.address());
             info.port()
         }
         None => {
-            panic!("HTTP server not started - check DYN_SYSTEM_ENABLED environment variable");
+            panic!("Metrics server not started - check DYN_SYSTEM_ENABLED environment variable");
         }
     };
 

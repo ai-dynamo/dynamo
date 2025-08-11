@@ -12,13 +12,17 @@ use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::transports::etcd;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
+    etcd_client: Option<etcd::Client>,
 }
 
 impl State {
@@ -26,6 +30,15 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
+            etcd_client: None,
+        }
+    }
+
+    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+        Self {
+            manager,
+            metrics: Arc::new(Metrics::default()),
+            etcd_client,
         }
     }
 
@@ -40,6 +53,10 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub fn etcd_client(&self) -> Option<&etcd::Client> {
+        self.etcd_client.as_ref()
     }
 
     // TODO
@@ -84,6 +101,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    #[builder(default = "None")]
+    etcd_client: Option<etcd::Client>,
 }
 
 impl HttpService {
@@ -155,7 +175,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager));
+        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -212,6 +232,9 @@ impl HttpServiceConfigBuilder {
             all_docs.extend(route_docs);
         }
 
+        // Add span for tracing
+        router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+
         Ok(HttpService {
             state,
             router,
@@ -223,6 +246,11 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
+        self
+    }
+
+    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
+        self.etcd_client = Some(etcd_client);
         self
     }
 }

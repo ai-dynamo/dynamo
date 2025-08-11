@@ -34,3 +34,6 @@ kv_cache_config:
 # https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
 disable_overlap_scheduler: true
 print_iter_log: true
+
+cache_transceiver_config:
+  backend: default

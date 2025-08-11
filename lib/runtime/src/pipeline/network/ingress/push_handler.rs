@@ -14,29 +14,32 @@
 // limitations under the License.
 
 use super::*;
+use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::info_span;
+use tracing::Instrument;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
 pub struct WorkHandlerMetrics {
-    pub request_counter: Arc<IntCounter>,
-    pub request_duration: Arc<Histogram>,
-    pub concurrent_requests: Arc<IntGauge>,
-    pub request_bytes: Arc<IntCounter>,
-    pub response_bytes: Arc<IntCounter>,
-    pub error_counter: Arc<IntCounterVec>,
+    pub request_counter: IntCounter,
+    pub request_duration: Histogram,
+    pub concurrent_requests: IntGauge,
+    pub request_bytes: IntCounter,
+    pub response_bytes: IntCounter,
+    pub error_counter: IntCounterVec,
 }
 
 impl WorkHandlerMetrics {
     pub fn new(
-        request_counter: Arc<IntCounter>,
-        request_duration: Arc<Histogram>,
-        concurrent_requests: Arc<IntGauge>,
-        request_bytes: Arc<IntCounter>,
-        response_bytes: Arc<IntCounter>,
-        error_counter: Arc<IntCounterVec>,
+        request_counter: IntCounter,
+        request_duration: Histogram,
+        concurrent_requests: IntGauge,
+        request_bytes: IntCounter,
+        response_bytes: IntCounter,
+        error_counter: IntCounterVec,
     ) -> Self {
         Self {
             request_counter,
@@ -105,7 +108,7 @@ impl WorkHandlerMetrics {
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + std::fmt::Debug,
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
 {
     fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
         // Call the Ingress-specific add_metrics implementation
@@ -220,6 +223,14 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
+            if let Some(err) = resp.err() {
+                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
+                if format!("{:?}", err) == STREAM_ERR_MSG {
+                    tracing::warn!(STREAM_ERR_MSG);
+                    send_complete_final = false;
+                    break;
+                }
+            }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,

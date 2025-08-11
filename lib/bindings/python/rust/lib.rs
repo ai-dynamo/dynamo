@@ -131,7 +131,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0))]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, user_data=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -143,6 +143,7 @@ fn register_llm<'p>(
     kv_cache_block_size: Option<u32>,
     router_mode: Option<RouterMode>,
     migration_limit: u32,
+    user_data: Option<&Bound<'p, PyDict>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -156,6 +157,13 @@ fn register_llm<'p>(
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
+    let user_data_json = user_data
+        .map(|dict| pythonize::depythonize(dict))
+        .transpose()
+        .map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to convert user_data: {}", err))
+        })?;
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
@@ -164,7 +172,8 @@ fn register_llm<'p>(
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
-            .migration_limit(Some(migration_limit));
+            .migration_limit(Some(migration_limit))
+            .user_data(user_data_json);
         // Download from HF, load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
@@ -475,11 +484,12 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator))]
+    #[pyo3(signature = (generator, graceful_shutdown = true))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
+        graceful_shutdown: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -487,8 +497,13 @@ impl Endpoint {
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
         let builder = self.inner.endpoint_builder().handler(ingress);
+        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            builder.start().await.map_err(to_pyerr)?;
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
             Ok(())
         })
     }

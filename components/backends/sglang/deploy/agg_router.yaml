@@ -12,16 +12,16 @@ spec:
         httpGet:
           path: /health
           port: 8000
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
+        initialDelaySeconds: 20
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 3
       readinessProbe:
         exec:
           command:
             - /bin/sh
             - -c
-            - "exit 0"
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 30
@@ -31,11 +31,11 @@ spec:
       replicas: 1
       resources:
         requests:
-          cpu: "5"
+          cpu: "10"
           memory: "10Gi"
         limits:
-          cpu: "5"
-          memory: "10Gi"
+          cpu: "32"
+          memory: "40Gi"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
@@ -46,24 +46,20 @@ spec:
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
         timeoutSeconds: 30
-        failureThreshold: 10
+        failureThreshold: 1
       readinessProbe:
         exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 60
-        periodSeconds: 60
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
         timeoutSeconds: 30
-        failureThreshold: 10
+        failureThreshold: 60
       dynamoNamespace: sglang-agg-router
       componentType: worker
       replicas: 1
@@ -73,11 +69,24 @@ spec:
           memory: "20Gi"
           gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "32"
+          memory: "80Gi"
           gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
       extraPodSpec:
         mainContainer:
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           args:
