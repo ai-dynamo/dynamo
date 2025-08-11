@@ -224,7 +224,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
         runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
         gpu_mem_integer = runtime_values["gpu_memory_utilization"]
-        runtime_config.gpu_memory_utilization = gpu_mem_integer
+        runtime_config.gpu_memory_utilization = (gpu_mem_integer * 100)
 
         logging.info(
             f"Registering model {config.model} with runtime config: {runtime_config}"
