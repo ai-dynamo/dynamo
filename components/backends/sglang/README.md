@@ -84,7 +84,7 @@ This requires having rust installed. We also recommend having a proper installat
 ```bash
 # create a virtual env
 uv venv --python 3.12 --seed
-# build dynamo runtime bindings 
+# build dynamo runtime bindings
 uv pip install maturin
 cd $DYNAMO_HOME/lib/bindings/python
 maturin develop --uv
@@ -109,7 +109,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 
 </details>
 
-#### Building docker container from source 
+#### Building docker container from source
 
 <details>
 <summary>Instructions</summary>
