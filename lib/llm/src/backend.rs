@@ -225,12 +225,14 @@ impl
         //let mdcsum = self.mdcsum.clone();
         let stream = processed_stream.map(move |output| {
             output.map_data(|data| {
+                log::info!("data: {:?}", data);
                 Ok(BackendOutput {
                     token_ids: data.token_ids,
                     tokens: data.tokens.unwrap_or_default(),
                     text: data.text,
                     cum_log_probs: data.cum_log_probs,
                     log_probs: data.log_probs,
+                    top_logprobs: data.top_logprobs,
                     finish_reason: data.finish_reason,
                     //mdcsum: mdcsum.clone(),
                     index: data.index,
