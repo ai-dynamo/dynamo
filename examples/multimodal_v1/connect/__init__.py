@@ -19,8 +19,6 @@ import torch
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from dynamo.runtime import DistributedRuntime
-# [gluo FIXME] this library is still depending on dynamo.sdk in some cases..
-from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)
 
@@ -425,8 +423,6 @@ class Connector:
         namespace = "dynamo" if namespace is None else namespace
         if not isinstance(namespace, str):
             raise TypeError("Argument `namespace` must be `str` or `None`.")
-        if dynamo_context is not None and "runtime" in dynamo_context:
-            runtime = dynamo_context["runtime"] if runtime is None else runtime
         if not isinstance(runtime, DistributedRuntime) or runtime is None:
             raise TypeError("Argument `runtime` must be `dynamo.runtime.DistributedRuntime` or `None`.")
         worker_id = worker_id if worker_id is not None else str(uuid.uuid4())
