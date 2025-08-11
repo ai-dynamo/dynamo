@@ -152,6 +152,47 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.common)
     }
+
+    /// Guided Decoding Options
+    /// Get guided_json value with nvext taking precedence over common
+    fn get_guided_json(&self) -> Option<&serde_json::Value> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_json.as_ref())
+            .or(self.common.guided_json.as_ref())
+    }
+
+    /// Get guided_regex value with nvext taking precedence over common
+    fn get_guided_regex(&self) -> Option<String> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_regex.clone())
+            .or(self.common.guided_regex.clone())
+    }
+
+    /// Get guided_grammar value with nvext taking precedence over common
+    fn get_guided_grammar(&self) -> Option<String> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_grammar.clone())
+            .or(self.common.guided_grammar.clone())
+    }
+
+    /// Get guided_choice value with nvext taking precedence over common
+    fn get_guided_choice(&self) -> Option<Vec<String>> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_choice.clone())
+            .or(self.common.guided_choice.clone())
+    }
+
+    /// Get guided_decoding_backend value with nvext taking precedence over common
+    fn get_guided_decoding_backend(&self) -> Option<String> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_decoding_backend.clone())
+            .or(self.common.guided_decoding_backend.clone())
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,

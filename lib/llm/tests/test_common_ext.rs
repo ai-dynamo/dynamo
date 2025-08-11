@@ -23,11 +23,83 @@ fn test_chat_completions_ignore_eos_from_common() {
 
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(100));
+    assert_eq!(request.effective_ignore_eos(), Some(true));
+    assert_eq!(request.effective_min_tokens(), Some(100));
+}
 
-    // Verify through stop conditions extraction
-    let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(true));
-    assert_eq!(stop_conditions.min_tokens, Some(100));
+#[test]
+fn test_chat_completions_guided_decoding_from_common() {
+    // Test that guided_json can be specified at root level
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_json": {"key": "value"}
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(request.common.guided_json, Some(json!({"key": "value"})));
+    assert_eq!(request.get_guided_json(), Some(&json!({"key": "value"})));
+
+    // Test guided_regex can be specified at root level
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_regex": "*"
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(request.common.guided_regex, Some("*".to_string()));
+    assert_eq!(request.get_guided_regex(), Some("*".to_string()));
+
+    // Test guided_grammar can be specified at root level
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_grammar": "::=[1-9]"
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(request.common.guided_grammar, Some("::=[1-9]".to_string()));
+    assert_eq!(request.get_guided_grammar(), Some("::=[1-9]".to_string()));
+
+    // Test guided_choice can be specified at root level
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_choice": ["choice1", "choice2"]
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(
+        request.common.guided_choice,
+        Some(vec!["choice1".to_string(), "choice2".to_string()])
+    );
+    assert_eq!(
+        request.get_guided_choice(),
+        Some(vec!["choice1".to_string(), "choice2".to_string()])
+    );
+
+    // Test guided_decoding_backend can be specified at root level
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "guided_decoding_backend": "backend"
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(
+        request.common.guided_decoding_backend,
+        Some("backend".to_string())
+    );
+    assert_eq!(
+        request.get_guided_decoding_backend(),
+        Some("backend".to_string())
+    );
 }
 
 #[test]
@@ -37,19 +109,30 @@ fn test_chat_completions_common_overrides_nvext() {
         "model": "test-model",
         "messages": [{"role": "user", "content": "Hello"}],
         "ignore_eos": false,
+        "guided_regex": ".*",
         "min_tokens": 50,
         "nvext": {
-            "ignore_eos": true
+            "ignore_eos": true,
+            "guided_regex": "./*"
         }
     }"#;
 
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, Some(false));
+    assert_eq!(request.common.guided_regex, Some(".*".to_string()));
     assert_eq!(
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
+    assert_eq!(
+        request
+            .nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_regex.clone()),
+        Some("./*".to_string())
+    );
+    assert_eq!(request.get_guided_regex(), Some("./*".to_string())); // nvext value takes precedence
     // Verify precedence through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
@@ -57,24 +140,34 @@ fn test_chat_completions_common_overrides_nvext() {
 }
 
 #[test]
-fn test_chat_completions_nvext_fallback() {
-    // Test that nvext is used when common doesn't specify ignore_eos
+fn test_chat_completions_backward_compatibility() {
+    // Test backward compatibility - ignore_eos and guided_json only in nvext
     let json_str = r#"{
         "model": "test-model",
         "messages": [{"role": "user", "content": "Hello"}],
         "nvext": {
-            "ignore_eos": true
+            "ignore_eos": true,
+            "guided_json": {"key": "value"}
         }
     }"#;
 
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, None);
+    assert_eq!(request.common.guided_json, None);
     assert_eq!(
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
-    // Verify through stop conditions extraction - nvext is used as fallback
+    assert_eq!(
+        request
+            .nvext
+            .as_ref()
+            .and_then(|nv| nv.guided_json.as_ref()),
+        Some(&json!({"key": "value"}))
+    );
+    assert_eq!(request.get_guided_json(), Some(&json!({"key": "value"})));
+    // Verify through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(true));
     assert_eq!(stop_conditions.min_tokens, None);
@@ -146,6 +239,7 @@ fn test_serialization_preserves_structure() {
         common: CommonExt {
             ignore_eos: Some(true),
             min_tokens: Some(100),
+            ..Default::default()
         },
         nvext: Some(NvExt {
             ignore_eos: Some(false),
