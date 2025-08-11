@@ -36,7 +36,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Login to NGC
         run: |
-          docker login nvcr.io -u '$oauthtoken' -p ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
       - name: Define Image Tag
         id: define_image_tag
         run: |
