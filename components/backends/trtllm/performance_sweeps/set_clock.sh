@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 set -x
 
 # nvidia-smi -lgc 1965" ### This way doesn't work on GB200-NVL. bug 5069775

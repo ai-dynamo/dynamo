@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #SBATCH --partition=${SLURM_PARTITION}
 #SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --time=04:00:00
