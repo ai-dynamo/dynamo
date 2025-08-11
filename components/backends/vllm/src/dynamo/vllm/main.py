@@ -12,12 +12,12 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
-from dynamo.llm import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -264,11 +264,11 @@ async def get_engine_cache_info(engine: AsyncLLM):
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
             "gpu_memory_utilization": engine.vllm_config.cache_config.gpu_memory_utilization,
         }
-        
+
         scheduler_values = {
             "max_num_seqs": engine.vllm_config.scheduler_config.max_num_seqs,
         }
-        
+
         logging.info(f"Cache config values: {cache_values}")
         logging.info(f"Scheduler config values: {scheduler_values}")
         return {
@@ -277,9 +277,7 @@ async def get_engine_cache_info(engine: AsyncLLM):
             "gpu_memory_utilization": cache_values["gpu_memory_utilization"],
         }
     except Exception as e:
-        logging.error(
-            f"Failed to get configuration values from vLLM config: {e}"
-        )
+        logging.error(f"Failed to get configuration values from vLLM config: {e}")
         raise
 
 
