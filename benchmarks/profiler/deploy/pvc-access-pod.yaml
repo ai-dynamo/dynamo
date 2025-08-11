@@ -9,11 +9,21 @@ metadata:
     app: pvc-access
 spec:
   activeDeadlineSeconds: 300  # Auto-delete after 5 minutes
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
   containers:
   - name: ubuntu
     image: ubuntu:22.04
     command: ["/bin/bash"]
-    args: ["-c", "apt-get update && apt-get install -y curl jq && sleep infinity"]
+    args: ["-c", "sleep 290"]  # Sleep for slightly less than deadline - tools can be installed via kubectl exec if needed
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+      capabilities:
+        drop:
+        - ALL
     volumeMounts:
     - name: profiling-storage
       mountPath: /profiling_results
