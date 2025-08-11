@@ -20,7 +20,7 @@ ARG TORCH_BACKEND="cu128"
 # Pinned to commit before https://github.com/deepseek-ai/DeepGEMM/pull/112 for DeepGEMM which seems to break on H100:
 # "RuntimeError: Failed: CUDA runtime error csrc/jit/kernel_runtime.hpp:108 '98'"
 ARG DEEPGEMM_REF="03d0be3"
-ARG FLASHINF_REF="v0.2.8rc1"
+ARG FLASHINF_REF="v0.2.8.rc1"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
