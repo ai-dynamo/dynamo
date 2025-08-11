@@ -41,12 +41,10 @@ def profile_decode(
         (max_context_length - osl) // interpolation_granularity,
     ):
         max_concurrency = max_kv_tokens // (isl + osl)
-        sweep_num_request = list(
-            range(
-                1,
-                max_concurrency,
-                max_concurrency // interpolation_granularity,
-            )
+        sweep_num_request = range(
+            1,
+            max_concurrency,
+            max_concurrency // interpolation_granularity,
         )
         for num_request in sweep_num_request:
             genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
