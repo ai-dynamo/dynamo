@@ -12,12 +12,12 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
 )
-from dynamo.llm.model_card import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 

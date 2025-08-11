@@ -19,6 +19,7 @@ from dynamo._core import Endpoint
 from dynamo.llm import (
     ForwardPassMetrics,
     KvStats,
+    ModelRuntimeConfig,
     ModelType,
     WorkerMetricsPublisher,
     WorkerStats,
@@ -26,7 +27,6 @@ from dynamo.llm import (
     ZmqKvEventPublisherConfig,
     register_llm,
 )
-from dynamo.llm.model_card import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.common import (
