@@ -633,6 +633,7 @@ mod integration_tests {
 
         // Create test requests for both DP workers
         let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
+            model: "mock".to_string(),
             token_ids: tokens,
             batch_token_ids: None,
             stop_conditions: StopConditions {

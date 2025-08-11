@@ -1282,6 +1282,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Name: "frontend",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-frontend",
+									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName: "frontend",
@@ -1365,11 +1366,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:          commonconsts.DynamoContainerPortName,
 														ContainerPort: int32(commonconsts.DynamoServicePort),
 													},
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoHealthPortName,
-														ContainerPort: int32(commonconsts.DynamoHealthPort),
-													},
 												},
 											},
 										},
@@ -1380,6 +1376,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Name: "planner",
 								Labels: map[string]string{
 									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-planner",
+									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName: "planner",
@@ -1478,11 +1475,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Protocol:      corev1.ProtocolTCP,
 														Name:          commonconsts.DynamoContainerPortName,
 														ContainerPort: int32(commonconsts.DynamoServicePort),
-													},
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoHealthPortName,
-														ContainerPort: int32(commonconsts.DynamoHealthPort),
 													},
 												},
 											},

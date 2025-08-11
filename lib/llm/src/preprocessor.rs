@@ -153,6 +153,7 @@ impl OpenAIPreprocessor {
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
+        builder.model(request.model());
 
         // match request type before any conversion/processing
         match request.prompt_input_type() {
