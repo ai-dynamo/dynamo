@@ -20,7 +20,7 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
+VLLM_REF="458e74eb907f96069e6d8a4f3c9f457001fef2ea"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
