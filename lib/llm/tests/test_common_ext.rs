@@ -7,7 +7,6 @@ use dynamo_llm::protocols::openai::{
     completions::NvCreateCompletionRequest,
     nvext::NvExt,
 };
-use serde_json::json;
 
 #[test]
 fn test_chat_completions_ignore_eos_from_common() {
