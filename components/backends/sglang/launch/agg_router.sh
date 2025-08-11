@@ -25,4 +25,5 @@ python3 -m dynamo.sglang.worker \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init
+  --skip-tokenizer-init \
+  --kv-events-config '{"publisher": "zmq", "topic": "kv-events"}' 
