@@ -30,8 +30,8 @@
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
 use crate::{metrics::MetricsRegistry, Result};
 
-use async_nats::{client, jetstream, Subscriber};
 use async_nats::connection::State;
+use async_nats::{client, jetstream, Subscriber};
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
@@ -75,22 +75,17 @@ impl Client {
     }
 
     /// Add Prometheus metrics for this NATS client
-    pub fn register_metrics_callback(
-        &self,
-        drt: &crate::DistributedRuntime,
-    ) -> Result<DRTSystemStatusNatsMetrics> {
-        let sys_nats_metrics = DRTSystemStatusNatsMetrics::new(drt)?;
+    pub fn register_metrics_callback(&self, drt: &crate::DistributedRuntime) -> Result<()> {
+        let sys_nats_metrics = DRTNatsPrometheusMetrics::new(drt, self.client.clone())?;
 
         // Create a callback that updates the metrics when called
         let nats_metrics_clone = sys_nats_metrics.clone();
-        let client_clone = self.client.clone();
         drt.add_metrics_callback(&drt.hierarchy(), move |_runtime| {
-            // Use the cloned client directly
-            nats_metrics_clone.copy_from_nats_client_stats(&client_clone);
+            nats_metrics_clone.set_from_client_stats();
             Ok("".to_string())
         });
 
-        Ok(sys_nats_metrics)
+        Ok(())
     }
 
     /// host:port of NATS
@@ -529,7 +524,8 @@ impl NatsQueue {
 /// Prometheus metrics that mirror the NATS client statistics (in primitive types)
 /// to be used for the System Status Server.
 #[derive(Debug, Clone)]
-pub struct DRTSystemStatusNatsMetrics {
+pub struct DRTNatsPrometheusMetrics {
+    nats_client: client::Client,
     /// Number of bytes received (excluding protocol overhead)
     pub in_bytes: IntGauge,
     /// Number of bytes sent (excluding protocol overhead)
@@ -544,9 +540,9 @@ pub struct DRTSystemStatusNatsMetrics {
     pub connection_state: IntGauge,
 }
 
-impl DRTSystemStatusNatsMetrics {
+impl DRTNatsPrometheusMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
-    pub fn new(drt: &crate::DistributedRuntime) -> Result<Self> {
+    pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
         let in_bytes = drt.create_intgauge(
             nats_metrics::IN_TOTAL_BYTES,
             "Total number of bytes received by NATS client",
@@ -579,6 +575,7 @@ impl DRTSystemStatusNatsMetrics {
         )?;
 
         Ok(Self {
+            nats_client,
             in_bytes,
             out_bytes,
             in_messages,
@@ -588,9 +585,9 @@ impl DRTSystemStatusNatsMetrics {
         })
     }
 
-    /// Copy statistics from a NATS client to these Prometheus metrics
-    pub fn copy_from_nats_client_stats(&self, client: &client::Client) {
-        let stats = client.statistics();
+    /// Copy statistics from the stored NATS client to these Prometheus metrics
+    pub fn set_from_client_stats(&self) {
+        let stats = self.nats_client.statistics();
 
         // Get current values from the client statistics
         let in_bytes = stats.in_bytes.load(Ordering::Relaxed);
@@ -600,11 +597,10 @@ impl DRTSystemStatusNatsMetrics {
         let connects = stats.connects.load(Ordering::Relaxed);
 
         // Get connection state
-        let connection_state = match client.connection_state() {
-            State::Connected              => 1,
+        let connection_state = match self.nats_client.connection_state() {
+            State::Connected => 1,
             // treat Disconnected and Pending as "down"
-            State::Disconnected
-            | State::Pending              => 0,
+            State::Disconnected | State::Pending => 0,
         };
 
         // Update Prometheus metrics

@@ -401,7 +401,9 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
 /// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
 /// generating output in Prometheus text format.
-pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvider {
+use crate::traits::DistributedRuntimeProvider;
+
+pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
     // Get the name of this registry (without any hierarchy prefix)
     fn basename(&self) -> String;
 
@@ -836,15 +838,9 @@ mod test_metricsregistry_units {
         let drt = super::test_helpers::create_test_drt();
 
         // Add some runtime callbacks
-        entry.add_callback(|_| {
-            Ok("callback1".to_string())
-        });
-        entry.add_callback(|_| {
-            Ok("callback2".to_string())
-        });
-        entry.add_callback(|_| {
-            Ok("callback3".to_string())
-        });
+        entry.add_callback(|_| Ok("callback1".to_string()));
+        entry.add_callback(|_| Ok("callback2".to_string()));
+        entry.add_callback(|_| Ok("callback3".to_string()));
 
         // Execute runtime callbacks
         let results = entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);

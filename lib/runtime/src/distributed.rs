@@ -249,8 +249,6 @@ impl DistributedRuntime {
         self.instance_sources.clone()
     }
 
-
-
     /// Add a Prometheus metric to a specific hierarchy's registry
     pub fn add_prometheus_metric(
         &self,

@@ -48,6 +48,7 @@ use super::{
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
 use crate::protocols::Endpoint as EndpointId;
+use crate::service::ComponentNatsPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -276,22 +277,18 @@ impl Component {
     }
 
     /// Register Prometheus metrics for this component's service stats
-    pub fn register_metrics_callback(
-        &self,
-    ) -> Result<crate::service::ComponentSystemStatusNatsMetrics> {
-        let component_metrics =
-            crate::service::ComponentSystemStatusNatsMetrics::from_component(self)?;
+    pub fn register_metrics_callback(&self) -> Result<()> {
+        let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
 
         // Create a callback that scrapes stats and updates metrics when called
-        let metrics_clone = component_metrics.clone();
+        // Cloning is required here so that:
+        // - The registered callback can implement Fn (not FnOnce); we avoid moving captured values.
+        // - The spawned task gets owned 'static values; we cannot borrow &self or move the originals.
         let component_clone = self.clone();
         let hierarchy = self.hierarchy();
         assert_eq!(hierarchy, self.service_name()); // it happens that in component, hierarchy and service name are the same
         self.drt()
             .add_metrics_callback(&hierarchy, move |_runtime| {
-                let metrics_ref = metrics_clone.clone();
-                let comp_ref = component_clone.clone();
-
                 // Use tokio::runtime::Handle to run async code in the callback
                 let handle = match tokio::runtime::Handle::try_current() {
                     Ok(h) => h,
@@ -300,22 +297,24 @@ impl Component {
                             "No Tokio runtime handle available; resetting metrics to zeros: {}",
                             err
                         );
-                        metrics_ref.reset_to_zeros();
+                        component_metrics.clone().reset_to_zeros();
                         return Ok(String::new());
                     }
                 };
 
+                let m = component_metrics.clone();
+                let c = component_clone.clone();
                 handle.spawn(async move {
                     let timeout = std::time::Duration::from_millis(500);
-                    match comp_ref.scrape_stats(timeout).await {
-                        Ok(service_set) => metrics_ref.update_from_service_set(&service_set),
+                    match c.scrape_stats(timeout).await {
+                        Ok(service_set) => m.update_from_service_set(&service_set),
                         Err(err) => {
                             tracing::warn!(
                                 "Failed to scrape stats for component '{}': {}",
-                                comp_ref.service_name(),
+                                c.service_name(),
                                 err
                             );
-                            metrics_ref.reset_to_zeros();
+                            m.reset_to_zeros();
                         }
                     }
                 });
@@ -323,7 +322,7 @@ impl Component {
                 Ok(String::new())
             });
 
-        Ok(component_metrics)
+        Ok(())
     }
 
     /// TODO

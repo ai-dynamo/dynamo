@@ -346,9 +346,11 @@ mod tests {
         println!("Full metrics response:\n{}", response);
 
         // Filter out NATS client metrics for comparison
+        use crate::metrics::prometheus_names::nats as nats_metrics;
+
         let filtered_response: String = response
             .lines()
-            .filter(|line| !line.contains(crate::metrics::prometheus_names::nats::PREFIX))
+            .filter(|line| !line.contains(nats_metrics::PREFIX))
             .collect::<Vec<_>>()
             .join("\n");
 

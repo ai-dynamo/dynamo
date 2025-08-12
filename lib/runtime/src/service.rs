@@ -308,7 +308,7 @@ mod tests {
 
 /// Prometheus metrics for component service statistics (ordered to match NatsStatsMetrics)
 #[derive(Debug, Clone)]
-pub struct ComponentSystemStatusNatsMetrics {
+pub struct ComponentNatsPrometheusMetrics {
     /// Average processing time in milliseconds (maps to: average_processing_time)
     pub avg_processing_ms: prometheus::Gauge,
     /// Total errors across all endpoints (maps to: num_errors)
@@ -323,9 +323,9 @@ pub struct ComponentSystemStatusNatsMetrics {
     pub active_endpoints: prometheus::IntGauge,
 }
 
-impl ComponentSystemStatusNatsMetrics {
+impl ComponentNatsPrometheusMetrics {
     /// Create new ComponentServiceMetrics using Component's DistributedRuntime's Prometheus constructors
-    pub fn from_component(component: &Component) -> Result<Self> {
+    pub fn new(component: &Component) -> Result<Self> {
         let avg_processing_ms = component.create_gauge(
             prometheus_names::nats::AVG_PROCESSING_MS,
             "Average processing time across all component endpoints in milliseconds",
