@@ -104,14 +104,14 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 
 ```bash
 # Queues the SLURM jobs for disaggregated configurations for DeepSeek R1 without MTP
-./submit.sh mtp0 all
+./submit.sh mtp=off all
 ```
 
 ### Disaggregated (Includes WideEP) - MTP on
 
 ```bash
 # Queues the SLURM jobs for disaggregated configurations for DeepSeek R1 with MTP
-./submit.sh mtp all
+./submit.sh mtp=on all
 ```
 
 ## Post-Processing Results

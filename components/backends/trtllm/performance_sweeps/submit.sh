@@ -46,8 +46,8 @@ usage() {
     echo "Usage: $0 <mtp_mode> <mode> [ctx_num] [gen_num] [gen_tp_size] [gen_batch_size] [gen_max_num_tokens] [gen_gpu_memory_fraction] [gen_eplb_num_slots] [gen_mtp_size] [gen_concurrency_list]"
     echo ""
     echo "MTP Modes:"
-    echo "  mtp0 - Run without Model Tensor Parallelism (gen_mtp_size=0)"
-    echo "  mtp  - Run with Model Tensor Parallelism (gen_mtp_size=1,2,3)"
+    echo "  mtp=off - Run without Model Tensor Parallelism (gen_mtp_size=0)"
+    echo "  mtp=on  - Run with Model Tensor Parallelism (gen_mtp_size=1,2,3)"
     echo ""
     echo "Execution Modes:"
     echo "  all - Run all predefined GPU configurations (4, 8, 16, 32 GPUs)"
@@ -62,15 +62,15 @@ usage() {
     echo "  gen_batch_size: Generation batch size"
     echo "  gen_max_num_tokens: Generation max number of tokens"
     echo "  gen_gpu_memory_fraction: GPU memory fraction (0.7-0.95)"
-    echo "  gen_mtp_size: Model tensor parallel size (0 for mtp0, 1-3 for mtp)"
+    echo "  gen_mtp_size: Model tensor parallel size (0 for mtp=off, 1-3 for mtp=on)"
     echo "  gen_eplb_num_slots: Expert load balancing slots (0, 256, 288)"
     echo "  gen_concurrency_list: Concurrency values (space-separated, quoted)"
     echo ""
     echo "Examples:"
-    echo "  $0 mtp0 all                                    # Run all MTP0 predefined combinations"
-    echo "  $0 mtp all                                     # Run all MTP predefined combinations"
-    echo "  $0 mtp0 tep 1 3 4 128 128 0.9 0 0 \"1 2 4 8\" # Run MTP0 TEP with specific config"
-    echo "  $0 mtp dep 2 3 8 256 256 0.8 0 256 \"256 512 1024\" # Run MTP DEP with specific config"
+    echo "  $0 mtp=off all                                    # Run all MTP0 predefined combinations"
+    echo "  $0 mtp=on all                                     # Run all MTP predefined combinations"
+    echo "  $0 mtp=off tep 1 3 4 128 128 0.9 0 0 \"1 2 4 8\" # Run MTP0 TEP with specific config"
+    echo "  $0 mtp=on dep 2 3 8 256 256 0.8 0 256 \"256 512 1024\" # Run MTP DEP with specific config"
     exit 1
 }
 
@@ -189,15 +189,15 @@ main() {
     local mode=$2
 
     # Validate MTP mode
-    if [[ "$mtp_mode" != "mtp0" && "$mtp_mode" != "mtp" ]]; then
-        echo "Error: Invalid MTP mode '$mtp_mode'. Must be 'mtp0' or 'mtp'"
+    if [[ "$mtp_mode" != "mtp=off" && "$mtp_mode" != "mtp=on" ]]; then
+        echo "Error: Invalid MTP mode '$mtp_mode'. Must be 'mtp=off' or 'mtp=on'"
         usage
     fi
 
     case $mode in
         "all")
             echo "Running all GPU configurations for $mtp_mode mode..."
-            if [[ "$mtp_mode" == "mtp0" ]]; then
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
                 run_4_gpus_mtp0
                 run_8_gpus_mtp0
                 run_16_gpus_mtp0
@@ -211,7 +211,7 @@ main() {
             ;;
         "4GPU")
             echo "Running 4 GPUs combinations for $mtp_mode mode..."
-            if [[ "$mtp_mode" == "mtp0" ]]; then
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
                 run_4_gpus_mtp0
             else
                 run_4_gpus_mtp
@@ -219,7 +219,7 @@ main() {
             ;;
         "8GPU")
             echo "Running 8 GPUs combinations for $mtp_mode mode..."
-            if [[ "$mtp_mode" == "mtp0" ]]; then
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
                 run_8_gpus_mtp0
             else
                 run_8_gpus_mtp
@@ -227,7 +227,7 @@ main() {
             ;;
         "16GPU")
             echo "Running 16 GPUs combinations for $mtp_mode mode..."
-            if [[ "$mtp_mode" == "mtp0" ]]; then
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
                 run_16_gpus_mtp0
             else
                 run_16_gpus_mtp
@@ -235,7 +235,7 @@ main() {
             ;;
         "32GPU")
             echo "Running 32 GPUs combinations for $mtp_mode mode..."
-            if [[ "$mtp_mode" == "mtp0" ]]; then
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
                 run_32_gpus_mtp0
             else
                 run_32_gpus_mtp
