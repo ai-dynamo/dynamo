@@ -250,23 +250,6 @@ def gen_config_file(
         "stream_interval": 20,
     }
 
-    # Process nodes and generate URLs
-
-    # Generate URLs for context and generation servers
-    # ctx_urls, task_nodes_offset = generate_urls(
-    #    "ctx", num_ctx_servers, ctx_tp_size, 1, max_tasks_per_node,
-    #    nodes, task_nodes, node_ports)
-    # if num_ctx_servers > 0:
-    #    config['context_servers']['urls'] = ctx_urls
-
-    # gen_urls, _ = generate_urls(
-    #    "gen", num_gen_servers, gen_tp_size, 1, max_tasks_per_node,
-    #    nodes, task_nodes, node_ports, task_nodes_offset)
-    # config['generation_servers']['urls'] = gen_urls
-
-    # set the hostname to the first node
-    # config['hostname'] = nodes[0]
-
     if gen_tp_size == 8 and not gen_enable_attention_dp:
         decode_config["allreduce_strategy"] = "MNNVL"
 
