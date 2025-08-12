@@ -19,12 +19,7 @@ on:
   push:
     branches:
     - main
-  pull_request_target:
-    types:
-      - opened
-      - edited
-      - synchronize
-      - reopened
+    - "pull-request/[0-9]+"
 
 jobs:
   build-test:
@@ -40,10 +35,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to NGC
-        env:
-          NGC_CI_ACCESS_TOKEN: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
         run: |
-          echo "${{ env.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
       - name: Define Image Tag
         id: define_image_tag
         run: |
@@ -58,25 +51,27 @@ jobs:
         run: |
           docker compose up -d nats-server etcd-server
       - name: Run Rust checks (block-manager + integration tests)
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           docker run -v ${{ github.workspace }}:/workspace -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager && cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
-        if: always()
+        if: ${{ always() && github.event_name != 'pull_request' }}
         working-directory: ./deploy
         run: |
           docker compose down
       - name: Run pytest
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           PYTEST_MARKS: "pre_merge or mypy"
         run: |
           docker run -v ${{ github.workspace }}:/workspace -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
       - name: Copy test report from test Container
-        if: always()
+        if: ${{ always() && github.event_name != 'pull_request' }}
         run: |
           docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
       - name: Archive test report
         uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && github.event_name != 'pull_request' }}
         with:
           name: dynamo-python-test-results
           if-no-files-found: error
