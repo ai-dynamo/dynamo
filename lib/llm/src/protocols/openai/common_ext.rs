@@ -70,7 +70,7 @@ pub trait CommonExtProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::openai::nvext::NvExt;
+
     use serde_json;
 
     #[test]

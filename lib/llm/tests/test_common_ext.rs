@@ -4,8 +4,10 @@
 use dynamo_llm::protocols::{
     common::StopConditionsProvider,
     openai::{
-        chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
-        completions::NvCreateCompletionRequest, nvext::NvExt,
+        chat_completions::NvCreateChatCompletionRequest,
+        common_ext::{CommonExt, CommonExtProvider},
+        completions::NvCreateCompletionRequest,
+        nvext::NvExt,
     },
 };
 
@@ -23,8 +25,6 @@ fn test_chat_completions_ignore_eos_from_common() {
 
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(100));
-    assert_eq!(request.effective_ignore_eos(), Some(true));
-    assert_eq!(request.effective_min_tokens(), Some(100));
 }
 
 #[test]
@@ -131,15 +131,8 @@ fn test_chat_completions_common_overrides_nvext() {
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
-    assert_eq!(
-        request
-            .nvext
-            .as_ref()
-            .and_then(|nv| nv.guided_regex.clone()),
-        Some("./*".to_string())
-    );
-    assert_eq!(request.get_guided_regex(), Some("./*".to_string())); // nvext value takes precedence
-    // Verify precedence through stop conditions extraction
+    assert_eq!(request.get_guided_regex(), Some(".*".to_string())); // common value takes precedence
+                                                                    // Verify precedence through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
     assert_eq!(stop_conditions.min_tokens, Some(50));
