@@ -153,7 +153,7 @@ fi
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-bash install_python_libraries.sh # These libraries aren't pinned.
+TORCH_CUDA_ARCH_LIST="9.0;10.0" bash install_python_libraries.sh # These libraries aren't pinned.
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM
