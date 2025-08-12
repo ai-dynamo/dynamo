@@ -19,10 +19,12 @@ use crate::entrypoint::RouterConfig;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
-use crate::runtime_config::ModelRuntimeConfig;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
+pub mod runtime_config;
+
+use runtime_config::ModelRuntimeConfig;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";

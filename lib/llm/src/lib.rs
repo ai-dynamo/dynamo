@@ -31,7 +31,6 @@ pub mod preprocessor;
 pub mod protocols;
 pub mod recorder;
 pub mod request_template;
-pub mod runtime_config;
 pub mod tokenizers;
 pub mod tokens;
 pub mod types;
