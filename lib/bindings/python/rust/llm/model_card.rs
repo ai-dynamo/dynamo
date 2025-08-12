@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 
 #[pyclass]
 #[derive(Clone)]
