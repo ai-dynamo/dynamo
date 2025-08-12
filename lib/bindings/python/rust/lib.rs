@@ -555,7 +555,7 @@ impl Endpoint {
 #[pymethods]
 impl Namespace {
     #[pyo3(signature = (name))]
-    fn component(&self, name: String,) -> PyResult<Component> {
+    fn component(&self, name: String) -> PyResult<Component> {
         let inner = self.inner.component(name).map_err(to_pyerr)?;
         Ok(Component {
             inner,
