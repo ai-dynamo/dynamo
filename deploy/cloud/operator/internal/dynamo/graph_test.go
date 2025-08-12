@@ -2228,7 +2228,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 						Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 							"Frontend": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									Replicas: &[]int32{1}[0],
+									Replicas:      &[]int32{1}[0],
+									ComponentType: commonconsts.ComponentTypeFrontend,
 									Resources: &common.Resources{
 										Requests: &common.ResourceItem{
 											CPU:    "1",
@@ -2485,11 +2486,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												Ports: []corev1.ContainerPort{
 													{
 														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoContainerPortName,
-														ContainerPort: int32(commonconsts.DynamoServicePort),
-													},
-													{
-														Protocol:      corev1.ProtocolTCP,
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
@@ -2502,10 +2498,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "WORKER_ENV_1",
 														Value: "1",
-													},
-													{
-														Name:  "DYNAMO_PORT",
-														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
 														Name:  "NATS_SERVER",
@@ -2584,11 +2576,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												Ports: []corev1.ContainerPort{
 													{
 														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoContainerPortName,
-														ContainerPort: int32(commonconsts.DynamoServicePort),
-													},
-													{
-														Protocol:      corev1.ProtocolTCP,
 														Name:          commonconsts.DynamoSystemPortName,
 														ContainerPort: int32(commonconsts.DynamoSystemPort),
 													},
@@ -2601,10 +2588,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "WORKER_ENV_1",
 														Value: "1",
-													},
-													{
-														Name:  "DYNAMO_PORT",
-														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
 														Name:  "NATS_SERVER",
@@ -2640,8 +2623,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							{
 								Name: "frontend",
 								Labels: map[string]string{
-									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
-									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-frontend",
+									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeFrontend,
+									commonconsts.KubeLabelMetricsEnabled:      commonconsts.KubeLabelValueTrue,
+									commonconsts.KubeLabelDynamoSelector:      "test-dynamo-graph-deployment-frontend",
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2832,10 +2816,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Value: "2",
 													},
 													{
-														Name:  "DYNAMO_PORT",
-														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-													},
-													{
 														Name:  "NATS_SERVER",
 														Value: "nats-address",
 													},
@@ -2863,13 +2843,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: "/dev/shm",
-													},
-												},
-												Ports: []corev1.ContainerPort{
-													{
-														Protocol:      corev1.ProtocolTCP,
-														Name:          commonconsts.DynamoContainerPortName,
-														ContainerPort: int32(commonconsts.DynamoServicePort),
 													},
 												},
 											},

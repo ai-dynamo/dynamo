@@ -699,8 +699,8 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
-	container, err := componentDefaults.GetBaseContainer(backendFramework)
+	componentDefaults := ComponentDefaultsFactory(component.ComponentType, numberOfNodes)
+	container, err := componentDefaults.GetBaseContainer(backendFramework, numberOfNodes)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
 	}
@@ -717,8 +717,7 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	// Merge probes
-	// TODO: Mohammed figure out if there is a bug in the merging logic
+	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {
 		container.LivenessProbe = component.LivenessProbe.DeepCopy()
 	}
@@ -731,7 +730,7 @@ func GenerateBasePodSpec(
 		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
 	}
 	// Requests
-	if len(overrideResources.Requests) > 0 {
+	if overrideResources != nil && len(overrideResources.Requests) > 0 {
 		if container.Resources.Requests == nil {
 			container.Resources.Requests = corev1.ResourceList{}
 		}
@@ -739,7 +738,7 @@ func GenerateBasePodSpec(
 	}
 
 	// Limits
-	if len(overrideResources.Limits) > 0 {
+	if overrideResources != nil && len(overrideResources.Limits) > 0 {
 		if container.Resources.Limits == nil {
 			container.Resources.Limits = corev1.ResourceList{}
 		}

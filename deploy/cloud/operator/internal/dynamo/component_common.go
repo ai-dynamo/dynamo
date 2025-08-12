@@ -14,11 +14,12 @@ import (
 type ComponentDefaults interface {
 	// GetBaseContainer returns the base container configuration for this component type
 	// The backendFramework parameter may be empty for components that don't need backend-specific config
-	GetBaseContainer(backendFramework BackendFramework) (corev1.Container, error)
+	// The numberOfNodes parameter indicates the total number of nodes in the deployment
+	GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error)
 }
 
-// ComponentDefaultsFactory creates appropriate defaults based on component type
-func ComponentDefaultsFactory(componentType string) ComponentDefaults {
+// ComponentDefaultsFactory creates appropriate defaults based on component type and number of nodes
+func ComponentDefaultsFactory(componentType string, numberOfNodes int32) ComponentDefaults {
 	switch componentType {
 	case commonconsts.ComponentTypeFrontend:
 		return NewFrontendDefaults()
@@ -32,7 +33,7 @@ func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 // BaseComponentDefaults provides common defaults shared by all components
 type BaseComponentDefaults struct{}
 
-func (b *BaseComponentDefaults) GetBaseContainer(backendFramework BackendFramework) (corev1.Container, error) {
+func (b *BaseComponentDefaults) GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error) {
 	return b.getCommonContainer(), nil
 }
 

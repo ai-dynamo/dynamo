@@ -23,7 +23,7 @@ func NewWorkerDefaults() *WorkerDefaults {
 	return &WorkerDefaults{&BaseComponentDefaults{}}
 }
 
-func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework) (corev1.Container, error) {
+func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error) {
 	if backendFramework == "" {
 		return corev1.Container{}, fmt.Errorf("worker components require a backend framework")
 	}
@@ -40,30 +40,6 @@ func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework) (co
 	}
 
 	// Add worker base defaults
-	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
-		},
-		PeriodSeconds:    5,
-		TimeoutSeconds:   30,
-		FailureThreshold: 1,
-	}
-
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
-		},
-		PeriodSeconds:    10,
-		TimeoutSeconds:   30,
-		FailureThreshold: 60,
-	}
-
 	container.Resources = corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10"),
@@ -76,19 +52,46 @@ func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework) (co
 		},
 	}
 
-	container.Env = []corev1.EnvVar{
-		{
-			Name:  "DYN_SYSTEM_ENABLED",
-			Value: "true",
-		},
-		{
-			Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-			Value: "[\"generate\"]",
-		},
-		{
-			Name:  "DYN_SYSTEM_PORT",
-			Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
-		},
+	// Only add probes and env vars for single node deployments
+	if numberOfNodes == 1 {
+		container.LivenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live",
+					Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+				},
+			},
+			PeriodSeconds:    5,
+			TimeoutSeconds:   30,
+			FailureThreshold: 1,
+		}
+
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/health",
+					Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+				},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   30,
+			FailureThreshold: 60,
+		}
+
+		container.Env = []corev1.EnvVar{
+			{
+				Name:  "DYN_SYSTEM_ENABLED",
+				Value: "true",
+			},
+			{
+				Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+				Value: "[\"generate\"]",
+			},
+			{
+				Name:  "DYN_SYSTEM_PORT",
+				Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
+			},
+		}
 	}
 
 	return container, nil
