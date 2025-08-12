@@ -149,6 +149,6 @@ Refer to [Beyond the Buzz: A Pragmatic Take on Inference Disaggregation](https:/
 
 ## Known Issues
 
-- Some of the jobs may timeout if genai-perf takes longer time to run through all concurrencies.
-- Some of the workers may hit OOM issue during inference.
-- The configs hitting above errors would lead to missing points on the plot.
+- Some jobs may time out if genai-perf requires more time to complete all concurrency levels.
+- Workers may encounter out-of-memory (OOM) errors during inference, especially with larger configurations.
+- Configurations affected by these issues will result in missing data points on the performance plot.
