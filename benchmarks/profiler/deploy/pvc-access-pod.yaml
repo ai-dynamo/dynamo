@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-access-pod
+  labels:
+    app: pvc-access
+spec:
+  activeDeadlineSeconds: 300  # Auto-delete after 5 minutes
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  containers:
+  - name: ubuntu
+    image: ubuntu:22.04
+    command: ["/bin/bash"]
+    args: ["-c", "sleep 290"]  # Sleep for slightly less than deadline - tools can be installed via kubectl exec if needed
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+      capabilities:
+        drop:
+        - ALL
+    volumeMounts:
+    - name: profiling-storage
+      mountPath: /profiling_results
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+  volumes:
+  - name: profiling-storage
+    persistentVolumeClaim:
+      claimName: profiling-pvc
+  restartPolicy: Never
