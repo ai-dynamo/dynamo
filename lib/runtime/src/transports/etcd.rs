@@ -170,20 +170,15 @@ impl Client {
             .await?
     }
 
-    pub async fn kv_create(
-        &self,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> Result<()> {
+    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<i64>) -> Result<()> {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction
         let txn = Txn::new()
-            .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Ensure the lock does not exist
+            .when(vec![Compare::version(key, CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value, Some(put_options)), // Create the object
+                TxnOp::put(key, value, Some(put_options)), // Create the object
             ]);
 
         // Execute the transaction

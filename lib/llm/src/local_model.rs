@@ -235,7 +235,7 @@ impl LocalModelBuilder {
 #[derive(Debug, Clone)]
 pub struct LocalModel {
     full_path: PathBuf,
-    pub card: ModelDeploymentCard, // TEMP pub
+    card: ModelDeploymentCard,
     endpoint_id: EndpointId,
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
@@ -326,7 +326,7 @@ impl LocalModel {
         };
         etcd_client
             .kv_create(
-                network_name.to_string(),
+                &network_name,
                 serde_json::to_vec_pretty(&model_registration)?,
                 None, // use primary lease
             )

@@ -23,3 +23,16 @@ impl std::fmt::Display for ModelNetworkName {
         write!(f, "{}", self.0)
     }
 }
+
+impl AsRef<str> for ModelNetworkName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ModelNetworkName {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
