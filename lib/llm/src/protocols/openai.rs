@@ -120,7 +120,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             Ok(options) => options,
             Err(e) => {
                 // Handle the validation error (log, return error, etc.)
-                tracing::error!("Invalid guided decoding options: {}", e);
+                tracing::error!("Invalid guided decoding options: {:?}", e);
                 return Err(e);
             }
         };
