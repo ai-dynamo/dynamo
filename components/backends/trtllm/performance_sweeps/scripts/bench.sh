@@ -96,48 +96,38 @@ if [ -f "${artifacts_dir}/deployment_config.json" ]; then
 fi
 echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
 
-# TODO: This is a temporary fix to check if the server is up.
-# We should use a more robust health check mechanism.
-
-# Loop up to 50 times
+# Wait for server to become healthy (up to 50 attempts)
+failed=true
 for ((i=1; i<=50; i++)); do
-    # Run curl and capture response and HTTP code
-    response=$(curl -s -w "\n%{http_code}" "${hostname}:${port}/v1/chat/completions" \
-      -H "Content-Type: application/json" \
-      -d "{
-        \"model\": \"${model}\",
-        \"messages\": [
-           {
-            \"role\": \"user\",
-            \"content\": \"Tell me a story as if we were playing dungeons and dragons.\"
-           }
-        ],
-        \"stream\": true,
-        \"max_tokens\": 30
-      }")
-
-    # Extract HTTP code
+    response=$(curl -s -w "\n%{http_code}" "${hostname}:${port}/health")
     http_code=$(echo "$response" | tail -n1)
+    body=$(echo "$response" | sed '$d')
 
-    if [ "$http_code" = "200" ]; then
-        echo "Success on attempt $i"
-        # Optional: Print the response body (excluding HTTP code)
-        echo "$response" | sed '$d'
-        break
-    else
-        echo "Attempt $i failed (HTTP $http_code)."
-
-        # Wait: 100 seconds after first failure, 10 seconds after subsequent
-        if [ "$i" -eq 1 ]; then
-            sleep 300
+    if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\["dyn://dynamo.tensorrt_llm.generate"\]'; then
+        if [[ "$kind" == *disagg* ]]; then
+            etcd_keys=$(curl -s -L http://localhost:2379/v3/kv/range -X POST -d '{"key": "Lw", "range_end": "AA"}' | jq -r '.kvs[] | .key |= @base64d | select(.key | contains("tensorrt_llm_next")) | .key')
+            if [[ -n "$etcd_keys" ]]; then
+                echo "Health check succeeded on attempt $i"
+                echo "$body"
+                failed=false
+                break
+            else
+                echo "Attempt $i: tensorrt_llm_next key not found in etcd."
+            fi
         else
-            sleep 10
+            echo "Health check succeeded on attempt $i"
+            echo "$body"
+            failed=false
+            break
         fi
+    else
+        echo "Attempt $i failed: /health not ready (HTTP $http_code)."
     fi
+    sleep $((i == 1 ? 100 : 10))
 done
 
-if [ "$http_code" != "200" ]; then
-    echo "Server did not respond correctly after 50 attempts."
+if [[ "$failed" == "true" ]]; then
+    echo "Server did not respond with healthy status after 50 attempts."
     exit 1
 fi
 
