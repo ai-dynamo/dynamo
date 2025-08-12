@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG SGLANG_IMAGE_TAG="v0.4.10-cu126"
+ARG SGLANG_IMAGE="lmsysorg/sglang:v0.4.10-cu126"
 
-FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
+FROM ${SGLANG_IMAGE}
 
 ARG MODE="hopper"
 ARG ARCH="amd64"

@@ -101,7 +101,10 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         "--network-interface", default="eth3", help="Network interface to use"
     )
     parser.add_argument(
-        "--gpu-type", choices=["h100", "gb200"], default="h100", help="GPU type to use"
+        "--gpu-type",
+        choices=["h100", "gb200-fp8", "gb200-fp4"],
+        default="h100",
+        help="GPU type to use",
     )
     parser.add_argument(
         "--use-sglang-commands",
