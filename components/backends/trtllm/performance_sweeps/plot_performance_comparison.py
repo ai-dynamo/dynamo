@@ -309,16 +309,28 @@ def plot_performance_comparison(
 
     # Add some statistics as text
     if user_throughput_threshold is not None:
+        # Format the statistics with proper conditional handling
+        x1_max_str = f"{max(x1):.1f}" if len(x1) > 0 else "N/A"
+        y1_max_str = f"{max(y1):.1f}" if len(y1) > 0 else "N/A"
+        x2_max_str = f"{max(x2):.1f}" if len(x2) > 0 else "N/A"
+        y2_max_str = f"{max(y2):.1f}" if len(y2) > 0 else "N/A"
+        
         stats_text = f"""
 Statistics (Max Difference Point: User Throughput ≥ {user_throughput_threshold}):
-{kind1}: {len(data1)} points, max per-user: {max(x1):.1f if len(x1) > 0 else "N/A"}, max per-gpu: {max(y1):.1f if len(y1) > 0 else "N/A"}
-{kind2}: {len(data2)} points, max per-user: {max(x2):.1f if len(x2) > 0 else "N/A"}, max per-gpu: {max(y2):.1f if len(y2) > 0 else "N/A"}
+{kind1}: {len(data1)} points, max per-user: {x1_max_str}, max per-gpu: {y1_max_str}
+{kind2}: {len(data2)} points, max per-user: {x2_max_str}, max per-gpu: {y2_max_str}
         """
     else:
+        # Format the statistics with proper conditional handling
+        x1_max_str = f"{max(x1):.1f}" if len(x1) > 0 else "N/A"
+        y1_max_str = f"{max(y1):.1f}" if len(y1) > 0 else "N/A"
+        x2_max_str = f"{max(x2):.1f}" if len(x2) > 0 else "N/A"
+        y2_max_str = f"{max(y2):.1f}" if len(y2) > 0 else "N/A"
+        
         stats_text = f"""
 Statistics:
-{kind1}: {len(data1)} points, max per-user: {max(x1):.1f if len(x1) > 0 else "N/A"}, max per-gpu: {max(y1):.1f if len(y1) > 0 else "N/A"}
-{kind2}: {len(data2)} points, max per-user: {max(x2):.1f if len(x2) > 0 else "N/A"}, max per-gpu: {max(y2):.1f if len(y2) > 0 else "N/A"}
+{kind1}: {len(data1)} points, max per-user: {x1_max_str}, max per-gpu: {y1_max_str}
+{kind2}: {len(data2)} points, max per-user: {x2_max_str}, max per-gpu: {y2_max_str}
         """
     plt.text(
         0.02,
