@@ -4,7 +4,7 @@
 import argparse
 import os
 import re
-from typing import Dict, List, Any, Union
+from typing import Any, Dict, List
 
 import yaml
 
@@ -32,7 +32,9 @@ def process_node_and_task() -> tuple[int, List[str], List[str]]:
         node_prefix = slurm_job_nodelist.split("[")[0]  # Extract everything before '['
         node_range_match = re.search(r"\[(.*?)\]", slurm_job_nodelist)
         if node_range_match is None:
-            raise ValueError(f"Invalid nodelist format: expected range in brackets but found '{slurm_job_nodelist}'")
+            raise ValueError(
+                f"Invalid nodelist format: expected range in brackets but found '{slurm_job_nodelist}'"
+            )
         node_range = node_range_match.group(1)
         nodes = []
         for part in node_range.split(","):

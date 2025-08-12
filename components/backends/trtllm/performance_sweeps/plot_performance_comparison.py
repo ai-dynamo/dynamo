@@ -11,7 +11,7 @@ Points from different files are colored differently, and Pareto lines are added 
 
 import argparse
 import json
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 
@@ -106,7 +106,7 @@ def find_max_difference_point(
         pareto_y1_filtered: List[float]
         pareto_x2_filtered: List[float]
         pareto_y2_filtered: List[float]
-        
+
         # Unzip the filtered points into separate x and y lists
         pareto_x1_filtered = [point[0] for point in pareto_points1]
         pareto_y1_filtered = [point[1] for point in pareto_points1]
@@ -155,7 +155,6 @@ def find_max_difference_point(
 
     # Create the label
     if max_diff_gpu1 is not None and max_diff_gpu2 is not None:
-        better_gpu = "GPU1" if max_diff_gpu1 > max_diff_gpu2 else "GPU2"
         label = f"{max_diff_ratio:.1f}x better\nUser: {max_diff_user:.1f}\nGPU1: {max_diff_gpu1:.1f}\nGPU2: {max_diff_gpu2:.1f}"
     else:
         label = "No valid GPU data"
@@ -314,7 +313,7 @@ def plot_performance_comparison(
         y1_max_str = f"{max(y1):.1f}" if len(y1) > 0 else "N/A"
         x2_max_str = f"{max(x2):.1f}" if len(x2) > 0 else "N/A"
         y2_max_str = f"{max(y2):.1f}" if len(y2) > 0 else "N/A"
-        
+
         stats_text = f"""
 Statistics (Max Difference Point: User Throughput ≥ {user_throughput_threshold}):
 {kind1}: {len(data1)} points, max per-user: {x1_max_str}, max per-gpu: {y1_max_str}
@@ -326,7 +325,7 @@ Statistics (Max Difference Point: User Throughput ≥ {user_throughput_threshold
         y1_max_str = f"{max(y1):.1f}" if len(y1) > 0 else "N/A"
         x2_max_str = f"{max(x2):.1f}" if len(x2) > 0 else "N/A"
         y2_max_str = f"{max(y2):.1f}" if len(y2) > 0 else "N/A"
-        
+
         stats_text = f"""
 Statistics:
 {kind1}: {len(data1)} points, max per-user: {x1_max_str}, max per-gpu: {y1_max_str}

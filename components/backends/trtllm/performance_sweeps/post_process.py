@@ -19,7 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def parse_directory_config(dir_name: str) -> Dict[str, str]:
@@ -228,16 +228,22 @@ def process_directory(dir_path: str) -> Optional[List[Dict[str, Any]]]:
             total_gpus = 1  # safe default
             try:
                 if "total_gpus" not in deployment_config:
-                    print(f"Warning: 'total_gpus' key missing in deployment config, using default value 1")
+                    print(
+                        "Warning: 'total_gpus' key missing in deployment config, using default value 1"
+                    )
                 else:
                     total_gpus = int(deployment_config["total_gpus"])
                     if total_gpus <= 0:
-                        print(f"Warning: Invalid total_gpus value '{deployment_config['total_gpus']}', using default value 1")
+                        print(
+                            f"Warning: Invalid total_gpus value '{deployment_config['total_gpus']}', using default value 1"
+                        )
                         total_gpus = 1
             except (ValueError, TypeError) as e:
-                print(f"Warning: Could not convert total_gpus '{deployment_config.get('total_gpus', 'missing')}' to int: {e}, using default value 1")
+                print(
+                    f"Warning: Could not convert total_gpus '{deployment_config.get('total_gpus', 'missing')}' to int: {e}, using default value 1"
+                )
                 total_gpus = 1
-            
+
             result = {
                 "concurrency": concurrency,
                 "output_token_throughput": output_throughput,
