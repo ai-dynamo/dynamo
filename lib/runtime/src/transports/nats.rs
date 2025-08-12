@@ -31,6 +31,7 @@
 use crate::{metrics::MetricsRegistry, Result};
 
 use async_nats::{client, jetstream, Subscriber};
+use async_nats::connection::State;
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
@@ -599,11 +600,11 @@ impl DRTSystemStatusNatsMetrics {
         let connects = stats.connects.load(Ordering::Relaxed);
 
         // Get connection state
-        let connection_state = match format!("{:?}", client.connection_state()).as_str() {
-            "Connected" => 1,
-            "Connecting" => 2,
-            "Disconnected" => 0,
-            _ => 0, // Default to disconnected for unknown states
+        let connection_state = match client.connection_state() {
+            State::Connected              => 1,
+            // treat Disconnected and Pending as "down"
+            State::Disconnected
+            | State::Pending              => 0,
         };
 
         // Update Prometheus metrics

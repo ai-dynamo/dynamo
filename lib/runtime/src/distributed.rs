@@ -299,7 +299,7 @@ impl DistributedRuntime {
         registries
             .entry(hierarchy.to_string())
             .or_default()
-            .add_callback(self as &dyn crate::metrics::MetricsRegistry, callback);
+            .add_callback(callback);
     }
 
     /// Execute all callbacks for a given hierarchy key and return their results

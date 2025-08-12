@@ -549,7 +549,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         // Log any callback errors but continue
         for result in callback_results {
             if let Err(e) = result {
-                eprintln!("Error executing metrics callback: {}", e);
+                tracing::error!("Error executing metrics callback: {}", e);
             }
         }
 
@@ -836,13 +836,13 @@ mod test_metricsregistry_units {
         let drt = super::test_helpers::create_test_drt();
 
         // Add some runtime callbacks
-        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+        entry.add_callback(|_| {
             Ok("callback1".to_string())
         });
-        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+        entry.add_callback(|_| {
             Ok("callback2".to_string())
         });
-        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+        entry.add_callback(|_| {
             Ok("callback3".to_string())
         });
 

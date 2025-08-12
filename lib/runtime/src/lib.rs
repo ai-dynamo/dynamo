@@ -169,7 +169,7 @@ impl MetricsRegistryEntry {
     }
 
     /// Add a callback function that receives a reference to any MetricsRegistry
-    pub fn add_callback<F>(&mut self, _runtime: &dyn crate::metrics::MetricsRegistry, callback: F)
+    pub fn add_callback<F>(&mut self, callback: F)
     where
         F: Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String>
             + Send
