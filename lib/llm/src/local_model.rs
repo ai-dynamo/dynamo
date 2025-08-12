@@ -342,6 +342,7 @@ impl LocalModel {
             name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
+            runtime_config: Some(self.runtime_config.clone()),
         };
         etcd_client
             .kv_create(

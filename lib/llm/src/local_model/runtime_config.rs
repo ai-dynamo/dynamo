@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 
