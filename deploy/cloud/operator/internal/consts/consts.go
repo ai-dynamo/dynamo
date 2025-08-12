@@ -15,6 +15,8 @@ const (
 	DynamoSystemPort     = 9090
 	DynamoSystemPortName = "system"
 
+	MpiRunSshPort = 2222
+
 	EnvDynamoServicePort = "DYNAMO_PORT"
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
@@ -47,4 +49,18 @@ const (
 	// Metrics related constants
 	KubeAnnotationEnableMetrics = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
 	KubeLabelMetricsEnabled     = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection
+	KubeValueNameSharedMemory   = "shared-memory"
+
+	// Grove multinode role suffixes
+	GroveRoleSuffixLeader = "ldr"
+	GroveRoleSuffixWorker = "wkr"
+
+	MpiRunSshSecretName = "mpi-run-ssh-secret"
+)
+
+type MultinodeDeploymentType string
+
+const (
+	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
+	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
 )

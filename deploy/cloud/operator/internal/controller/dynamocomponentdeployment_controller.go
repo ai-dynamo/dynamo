@@ -22,11 +22,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/imdario/mergo"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -34,9 +34,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -48,7 +48,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -64,7 +63,6 @@ import (
 const (
 	DefaultClusterName                                   = "default"
 	DefaultServiceAccountName                            = "default"
-	KubeValueNameSharedMemory                            = "shared-memory"
 	KubeAnnotationDeploymentStrategy                     = "nvidia.com/deployment-strategy"
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
@@ -78,6 +76,7 @@ const (
 	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
 	DeploymentTypeStandard       = "standard"
 	DeploymentTypeLeaderWorker   = "leader-worker"
+	DeploymentTypeMultinodeGrove = "multinode-grove"
 	ComponentTypePlanner         = "Planner"
 )
 
@@ -510,11 +509,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
 
-	if labels != nil {
-		leaderPodTemplateSpec.ObjectMeta.Labels = labels
-	} else {
-		leaderPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
-	}
+	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
 	leaderPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
@@ -556,11 +551,7 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
 
-	if labels != nil {
-		workerPodTemplateSpec.ObjectMeta.Labels = labels
-	} else {
-		workerPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
-	}
+	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
 	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
@@ -988,8 +979,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		},
 	}
 
-	vsEnabled := opt.dynamoComponentDeployment.Spec.Ingress != nil && opt.dynamoComponentDeployment.Spec.Ingress.Enabled && opt.dynamoComponentDeployment.Spec.Ingress.UseVirtualService && opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway != nil
-	if !vsEnabled {
+	if !opt.dynamoComponentDeployment.Spec.Ingress.IsVirtualServiceEnabled() {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}
@@ -1231,8 +1221,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.isStealingTrafficDebugModeEnabled)
 
-	containerPort := commonconsts.DynamoServicePort
-
 	resourceAnnotations := opt.dynamoComponentDeployment.Spec.Annotations
 
 	if resourceAnnotations == nil {
@@ -1241,191 +1229,21 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	defaultEnvs := []corev1.EnvVar{
-		{
-			Name:  commonconsts.EnvDynamoServicePort,
-			Value: fmt.Sprintf("%d", containerPort),
-		},
-	}
-
-	if r.Config.NatsAddress != "" {
-		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
-			Name:  "NATS_SERVER",
-			Value: r.Config.NatsAddress,
-		})
-	}
-
-	if r.Config.EtcdAddress != "" {
-		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
-			Name:  "ETCD_ENDPOINTS",
-			Value: r.Config.EtcdAddress,
-		})
-	}
-
-	envs := dynamo.MergeEnvs(opt.dynamoComponentDeployment.Spec.Envs, defaultEnvs)
-
-	var livenessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
-		livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe
-	}
-
-	var readinessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.ReadinessProbe != nil {
-		readinessProbe = opt.dynamoComponentDeployment.Spec.ReadinessProbe
-	}
-
-	volumes := make([]corev1.Volume, 0)
-	volumeMounts := make([]corev1.VolumeMount, 0)
-
-	dynamoResources := opt.dynamoComponentDeployment.Spec.Resources
-
-	resources, err := getResourcesConfig(dynamoResources)
+	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, dynamo.RoleMain, consts.MultinodeDeploymentTypeLWS)
 	if err != nil {
-		err = errors.Wrap(err, "failed to get resources config")
+		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
 
-	sharedMemorySizeLimit := resource.MustParse("64Mi")
-	memoryLimit := resources.Limits[corev1.ResourceMemory]
-	if !memoryLimit.IsZero() {
-		sharedMemorySizeLimit.SetMilli(memoryLimit.MilliValue() / 2)
+	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
+	if len(basePodSpec.Containers) == 0 {
+		return nil, errors.New("no containers found in base pod spec")
 	}
 
-	volumes = append(volumes, corev1.Volume{
-		Name: KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &sharedMemorySizeLimit,
-			},
-		},
-	})
-	volumeMounts = append(volumeMounts, corev1.VolumeMount{
-		Name:      KubeValueNameSharedMemory,
-		MountPath: "/dev/shm",
-	})
-	if opt.dynamoComponentDeployment.Spec.PVC != nil {
-		volumes = append(volumes, corev1.Volume{
-			Name: getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-				},
-			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-			MountPath: *opt.dynamoComponentDeployment.Spec.PVC.MountPoint,
-		})
-	}
-
-	imageName := opt.dynamoComponentDeployment.GetImage()
-	if imageName == "" {
-		return nil, errors.Errorf("image is not set for component %s", opt.dynamoComponentDeployment.Name)
-	}
-
-	var securityContext *corev1.SecurityContext
-	var mainContainerSecurityContext *corev1.SecurityContext
-
-	enableRestrictedSecurityContext := os.Getenv("ENABLE_RESTRICTED_SECURITY_CONTEXT") == "true"
-	if enableRestrictedSecurityContext {
-		securityContext = &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			RunAsNonRoot:             ptr.To(true),
-			RunAsUser:                ptr.To(int64(1000)),
-			RunAsGroup:               ptr.To(int64(1000)),
-			SeccompProfile: &corev1.SeccompProfile{
-				Type: corev1.SeccompProfileTypeRuntimeDefault,
-			},
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-			},
-		}
-		mainContainerSecurityContext = securityContext.DeepCopy()
-		mainContainerSecurityContext.RunAsUser = ptr.To(int64(1034))
-	}
+	// Get the main container from the base spec
+	container := basePodSpec.Containers[0]
 
 	containers := make([]corev1.Container, 0, 2)
-
-	// TODO: Temporarily disabling probes
-	container := corev1.Container{
-		Name:           "main",
-		Image:          imageName,
-		LivenessProbe:  livenessProbe,
-		ReadinessProbe: readinessProbe,
-		Resources:      resources,
-		Env:            envs,
-		TTY:            true,
-		Stdin:          true,
-		VolumeMounts:   volumeMounts,
-		Ports: []corev1.ContainerPort{
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.DynamoContainerPortName,
-				ContainerPort: int32(containerPort), // nolint: gosec
-			},
-		},
-		SecurityContext: mainContainerSecurityContext,
-	}
-
-	// Add system port for worker components
-	if opt.dynamoComponentDeployment.Spec.ComponentType == commonconsts.ComponentTypeWorker {
-		container.Ports = append(container.Ports, corev1.ContainerPort{
-			Protocol:      corev1.ProtocolTCP,
-			Name:          commonconsts.DynamoSystemPortName,
-			ContainerPort: int32(commonconsts.DynamoSystemPort),
-		})
-	}
-
-	if opt.dynamoComponentDeployment.Spec.EnvFromSecret != nil {
-		container.EnvFrom = []corev1.EnvFromSource{
-			{
-				SecretRef: &corev1.SecretEnvSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: *opt.dynamoComponentDeployment.Spec.EnvFromSecret,
-					},
-				},
-			},
-		}
-	}
-
-	if resourceAnnotations["nvidia.com/enable-container-privileged"] == commonconsts.KubeLabelValueTrue {
-		if container.SecurityContext == nil {
-			container.SecurityContext = &corev1.SecurityContext{}
-		}
-		container.SecurityContext.Privileged = &[]bool{true}[0]
-	}
-
-	if resourceAnnotations["nvidia.com/enable-container-ptrace"] == commonconsts.KubeLabelValueTrue {
-		if container.SecurityContext == nil {
-			container.SecurityContext = &corev1.SecurityContext{}
-		}
-		container.SecurityContext.Capabilities = &corev1.Capabilities{
-			Add: []corev1.Capability{"SYS_PTRACE"},
-		}
-	}
-
-	if resourceAnnotations["nvidia.com/run-container-as-root"] == commonconsts.KubeLabelValueTrue {
-		if container.SecurityContext == nil {
-			container.SecurityContext = &corev1.SecurityContext{}
-		}
-		container.SecurityContext.RunAsUser = &[]int64{0}[0]
-	}
-
-	// Merge extraPodSpecMainContainer into container, only overriding empty fields
-	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
-		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
-		if extraPodSpecMainContainer != nil {
-			// Merge non empty fields from extraPodSpecMainContainer into container, only overriding empty fields
-			err := mergo.Merge(&container, extraPodSpecMainContainer.DeepCopy())
-			if err != nil {
-				err = errors.Wrapf(err, "failed to merge extraPodSpecMainContainer into container")
-				return nil, err
-			}
-			// finally merge the envs from extraPodSpecMainContainer into container
-			container.Env = dynamo.MergeEnvs(container.Env, extraPodSpecMainContainer.Env)
-		}
-	}
 
 	containers = append(containers, container)
 
@@ -1465,42 +1283,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
-	imagePullSecrets := []corev1.LocalObjectReference{}
-
-	if r.DockerSecretRetriever == nil {
-		err = errors.New("DockerSecretRetriever is not initialized")
-		return
-	}
-	secretsName, err := r.DockerSecretRetriever.GetSecrets(opt.dynamoComponentDeployment.Namespace, imageName)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to get secrets for component %s and image %s", opt.dynamoComponentDeployment.Name, imageName)
-		return
-	}
-
-	for _, secretName := range secretsName {
-		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
-			Name: secretName,
-		})
-	}
-
-	podSpec := &corev1.PodSpec{}
-	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil && opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec != nil {
-		podSpec = opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec.DeepCopy()
-	}
-	podSpec.Containers = append(podSpec.Containers, containers...)
-	podSpec.Volumes = append(podSpec.Volumes, volumes...)
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+	podSpec := &basePodSpec
+	podSpec.Containers = containers
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
 	if extraPodMetadata != nil {
-		for k, v := range extraPodMetadata.Annotations {
-			podAnnotations[k] = v
-		}
-
-		for k, v := range extraPodMetadata.Labels {
-			podLabels[k] = v
-		}
+		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
+		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -1519,18 +1309,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
-	if resourceAnnotations["nvidia.com/enable-host-ipc"] == commonconsts.KubeLabelValueTrue {
-		podSpec.HostIPC = true
-	}
-
-	if resourceAnnotations["nvidia.com/enable-host-network"] == commonconsts.KubeLabelValueTrue {
-		podSpec.HostNetwork = true
-	}
-
-	if resourceAnnotations["nvidia.com/enable-host-pid"] == commonconsts.KubeLabelValueTrue {
-		podSpec.HostPID = true
-	}
-
 	if opt.isStealingTrafficDebugModeEnabled || isDebugModeEnabled {
 		podSpec.ShareProcessNamespace = &[]bool{true}[0]
 	}
@@ -1544,31 +1322,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	return
-}
-
-func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequirements, error) {
-	defaultResources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("300m"),
-			corev1.ResourceMemory: resource.MustParse("500Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("500m"),
-			corev1.ResourceMemory: resource.MustParse("1Gi"),
-		},
-	}
-	if resources == nil {
-		return defaultResources, nil
-	}
-	resourcesConfig, err := controller_common.GetResourcesConfig(resources)
-	if err != nil {
-		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to get resources config")
-	}
-	err = mergo.Merge(resourcesConfig, defaultResources.DeepCopy())
-	if err != nil {
-		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to merge resources config")
-	}
-	return *resourcesConfig, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {

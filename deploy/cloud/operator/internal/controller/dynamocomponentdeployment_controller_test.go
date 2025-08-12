@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
@@ -821,8 +822,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Namespace: "default",
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponent: "test-lws-component",
-							DynamoTag:       "test-tag",
+							DynamoComponent:  "test-lws-component",
+							DynamoTag:        "test-tag",
+							BackendFramework: string(dynamo.BackendFrameworkVLLM),
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								Envs: []corev1.EnvVar{
 									{
@@ -837,8 +839,20 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"nvidia.com/lws-size":        "2",
 								},
 								Resources: &common.Resources{
+									Requests: &common.ResourceItem{
+										CPU:    "300m",
+										Memory: "500Mi",
+									},
 									Limits: &common.ResourceItem{
 										GPU: "1",
+									},
+								},
+								ExtraPodMetadata: &common.ExtraPodMetadata{
+									Annotations: map[string]string{
+										"nvidia.com/annotation1": "annotation1",
+									},
+									Labels: map[string]string{
+										"nvidia.com/label1": "label1",
 									},
 								},
 								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
@@ -896,49 +910,59 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						LeaderTemplate: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"instance-id": "0",
-									"role":        "leader",
+									"instance-id":                        "0",
+									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
+									"role":                               "leader",
+									"nvidia.com/label1":                  "label1",
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
+									"nvidia.com/annotation1":       "annotation1",
 								},
 							},
 							Spec: corev1.PodSpec{
 								SchedulerName:                 "volcano",
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								Volumes: []corev1.Volume{
+									{
+										Name: "shared-memory",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{
+												Medium:    corev1.StorageMediumMemory,
+												SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI), // 512Mi default (calculated from memory limit)
+											},
+										},
+									},
+								},
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
-										Env:     []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}, {Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
-										VolumeMounts: []corev1.VolumeMount{
-											{
-												Name: "shared-memory", MountPath: "/dev/shm",
-											},
-										},
+										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}, {Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort,
 											},
 										},
-										TTY:   true,
-										Stdin: true,
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "shared-memory",
+												MountPath: "/dev/shm",
+											},
+										},
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("300m"),
 												corev1.ResourceMemory: resource.MustParse("500Mi"),
 											},
 											Limits: corev1.ResourceList{
-												corev1.ResourceCPU:    resource.MustParse("500m"),
-												corev1.ResourceMemory: resource.MustParse("1Gi"),
-												"nvidia.com/gpu":      resource.MustParse("1"),
+												"nvidia.com/gpu": resource.MustParse("1"),
 											},
 										},
 									},
 								},
-								Volumes:            []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: limit}}}},
 								ImagePullSecrets:   nil,               // Assuming default config gives empty secret name
 								ServiceAccountName: "default-test-sa", // Updated to reflect mocked SA
 							},
@@ -946,38 +970,53 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						WorkerTemplate: corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"instance-id": "0",
-									"role":        "worker",
+									"instance-id":                        "0",
+									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
+									"role":                               "worker",
+									"nvidia.com/label1":                  "label1",
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
+									"nvidia.com/annotation1":       "annotation1",
 								},
 							},
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SchedulerName:                 "volcano",
-								Containers: []corev1.Container{
+								Volumes: []corev1.Volume{
 									{
-										Name:         "main",
-										Image:        "test-image:latest",
-										Command:      []string{"sh", "-c"},
-										Args:         []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
-										Env:          []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}, {Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
-										VolumeMounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
-										Ports: []corev1.ContainerPort{
-											{
-												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort,
+										Name: "shared-memory",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{
+												Medium:    corev1.StorageMediumMemory,
+												SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI), // 512Mi default (calculated from memory limit)
 											},
-										},
-										TTY:   true,
-										Stdin: true,
-										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("300m"), corev1.ResourceMemory: resource.MustParse("500Mi")},
-											Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi"), "nvidia.com/gpu": resource.MustParse("1")},
 										},
 									},
 								},
-								Volumes:            []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: limit}}}},
+								Containers: []corev1.Container{
+									{
+										Name:    "main",
+										Image:   "test-image:latest",
+										Command: []string{"sh", "-c"},
+										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
+										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}, {Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
+										Ports:   []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort}},
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "shared-memory",
+												MountPath: "/dev/shm",
+											},
+										},
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("300m"),
+												corev1.ResourceMemory: resource.MustParse("500Mi"),
+											},
+										},
+									},
+								},
 								ImagePullSecrets:   nil,
 								ServiceAccountName: "default-test-sa", // Updated to reflect mocked SA
 							},
