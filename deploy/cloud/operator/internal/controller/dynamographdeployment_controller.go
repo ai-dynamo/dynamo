@@ -222,26 +222,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return true
 			}))
 			// generate the main component virtual service
-			mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
-			if err != nil {
-				logger.Error(err, "failed to generate the main component virtual service")
-				return "", "", "", fmt.Errorf("failed to generate the main component virtual service: %w", err)
-			}
-			_, syncedMainComponentVirtualService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-				vsEnabled := ingressSpec.Enabled && ingressSpec.UseVirtualService && ingressSpec.VirtualServiceGateway != nil
-				if !vsEnabled {
-					logger.Info("VirtualService is not enabled")
-					return mainComponentVirtualService, true, nil
+			if r.Config.IngressConfig.UseVirtualService() {
+				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+				if err != nil {
+					logger.Error(err, "failed to generate the main component virtual service")
+					return "", "", "", fmt.Errorf("failed to generate the main component virtual service: %w", err)
 				}
-				return mainComponentVirtualService, false, nil
-			})
-			if err != nil {
-				logger.Error(err, "failed to sync the main component virtual service")
-				return "", "", "", fmt.Errorf("failed to sync the main component virtual service: %w", err)
+				_, syncedMainComponentVirtualService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+					if !ingressSpec.IsVirtualServiceEnabled() {
+						logger.Info("VirtualService is not enabled")
+						return mainComponentVirtualService, true, nil
+					}
+					return mainComponentVirtualService, false, nil
+				})
+				if err != nil {
+					logger.Error(err, "failed to sync the main component virtual service")
+					return "", "", "", fmt.Errorf("failed to sync the main component virtual service: %w", err)
+				}
+				resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService, func() bool {
+					return true
+				}))
 			}
-			resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService, func() bool {
-				return true
-			}))
 		}
 	}
 	return r.checkResourcesReadiness(resources)

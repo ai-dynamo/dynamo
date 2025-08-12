@@ -116,6 +116,13 @@ class DynamoDeploymentClient:
         self.deployment_spec["metadata"]["name"] = self.deployment_name
         self.deployment_spec["metadata"]["namespace"] = self.namespace
 
+        # Disable grove as it will cause the deployment to not report ready
+        if "annotations" not in self.deployment_spec["metadata"]:
+            self.deployment_spec["metadata"]["annotations"] = {}
+        self.deployment_spec["metadata"]["annotations"][
+            "nvidia.com/enable-grove"
+        ] = "false"
+
         try:
             await self.custom_api.create_namespaced_custom_object(
                 group="nvidia.com",

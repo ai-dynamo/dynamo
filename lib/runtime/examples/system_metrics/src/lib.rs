@@ -82,7 +82,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
     }
 }
 
-/// Backend function that sets up the system server with metrics and ingress handler
+/// Backend function that sets up the system status server with metrics and ingress handler
 /// This function can be reused by integration tests to ensure they use the exact same setup
 pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Result<()> {
     let endpoint_name = endpoint_name.unwrap_or(DEFAULT_ENDPOINT);
