@@ -20,6 +20,11 @@ on:
     branches:
     - main
   pull_request_target:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
 
 jobs:
   build-test:
