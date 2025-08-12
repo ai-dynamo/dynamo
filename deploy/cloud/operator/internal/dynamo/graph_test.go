@@ -1840,13 +1840,21 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Value: "1",
 													},
 													{
+														Name:  "DYN_SYSTEM_ENABLED",
+														Value: "true",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: "9090",
+													},
+													{
+														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+														Value: `["generate"]`,
+													},
+													{
 														Name:  "WORKER_ENV_1",
 														Value: "1",
 													},
-													// {
-													// 	Name:  "DYNAMO_PORT",
-													// 	Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-													// },
 													{
 														Name:  "NATS_SERVER",
 														Value: "nats-address",
@@ -1929,6 +1937,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
+													},
+													{
+														Name:  "DYN_SYSTEM_ENABLED",
+														Value: "true",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: "9090",
+													},
+													{
+														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+														Value: `["generate"]`,
 													},
 													{
 														Name:  "WORKER_ENV_1",
@@ -2496,6 +2516,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Value: "1",
 													},
 													{
+														Name:  "DYN_SYSTEM_ENABLED",
+														Value: "true",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: "9090",
+													},
+													{
+														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+														Value: `["generate"]`,
+													},
+													{
 														Name:  "WORKER_ENV_1",
 														Value: "1",
 													},
@@ -2584,6 +2616,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
+													},
+													{
+														Name:  "DYN_SYSTEM_ENABLED",
+														Value: "true",
+													},
+													{
+														Name:  "DYN_SYSTEM_PORT",
+														Value: "9090",
+													},
+													{
+														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+														Value: `["generate"]`,
 													},
 													{
 														Name:  "WORKER_ENV_1",
