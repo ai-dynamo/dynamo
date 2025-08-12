@@ -1512,10 +1512,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "PLANNER_ENV_1",
 														Value: "2",
 													},
-													// {
-													// 	Name:  "DYNAMO_PORT",
-													// 	Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-													// },
 													{
 														Name:  "NATS_SERVER",
 														Value: "nats-address",
@@ -1546,13 +1542,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														MountPath: "/dev/shm",
 													},
 												},
-												// Ports: []corev1.ContainerPort{
-												// 	{
-												// 		Protocol:      corev1.ProtocolTCP,
-												// 		Name:          commonconsts.DynamoContainerPortName,
-												// 		ContainerPort: int32(commonconsts.DynamoServicePort),
-												// 	},
-												// },
 											},
 										},
 									},
@@ -1823,11 +1812,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
-													// {
-													// 	Protocol:      corev1.ProtocolTCP,
-													// 	Name:          commonconsts.DynamoContainerPortName,
-													// 	ContainerPort: int32(commonconsts.DynamoServicePort),
-													// },
 													{
 														Protocol:      corev1.ProtocolTCP,
 														Name:          commonconsts.DynamoSystemPortName,
