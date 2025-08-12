@@ -81,7 +81,7 @@ export IMAGE="<dynamo_trtllm_image>"
 #
 # On Hopper systems, FP4 isn't supported so you'll need to use the default weights:
 # https://huggingface.co/deepseek-ai/DeepSeek-R1
-export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
+export MODEL_PATH="<path_to_model_weights>"
 
 # The name the model will be served/queried under, matching what's
 # returned by the /v1/models endpoint.
@@ -125,13 +125,13 @@ To run the post-processing script, use:
 ### Aggregated
 
 ```bash
-python3 post_process.py dynamo_agg-bm-${ISL}-${OSL} --output-file agg_result.json
+python3 post_process.py dynamo_agg-bm-8150-1024 --output-file agg_result.json
 ```
 
 ### Disaggregated
 
 ```bash
-python3 post_process.py dynamo_disagg-bm-${ISL}-${OSL} --output-file disagg_result.json
+python3 post_process.py dynamo_disagg-bm-8150-1024 --output-file disagg_result.json
 ```
 
 ## Ploting Performance
@@ -139,8 +139,10 @@ python3 post_process.py dynamo_disagg-bm-${ISL}-${OSL} --output-file disagg_resu
 You can now use the `plot_performance_comparison.py` like below to observe the performance.
 
 ```bash
-python3 plot_performance_comparison.py agg_result.json disagg_result.json -o performance_plot.png
+python3 plot_performance_comparison.py dynamo_agg-bm-8150-1024/agg_result.json dynamo_disagg-bm-8150-1024/disagg_result.js
+on -o performance_plot.png
 ```
 
 This script will produce a scatter plot of all the configuration points with each concurrency on a Output Throughput per GPU vs Output Throughput per User. It will also include the roofline pareto line for both aggregated and disaggregated setups.
 
+Refer to [Beyond the Buzz: A Pragmatic Take on Inference Disaggregation](https://arxiv.org/html/2506.05508v1) to learn how to interpret these plots.
