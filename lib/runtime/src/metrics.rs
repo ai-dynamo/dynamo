@@ -212,6 +212,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 ) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
     validate_no_duplicate_label_keys(labels)?;
+    // Validate that user-provided labels don't conflict with stored labels
     for (key, _) in registry.stored_labels() {
         if labels.iter().any(|(k, _)| *k == key) {
             return Err(anyhow::anyhow!(

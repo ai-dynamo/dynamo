@@ -489,11 +489,7 @@ impl Component {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let inner = self
-            .inner
-            .clone()
-            .add_labels(&pairs)
-            .map_err(to_pyerr)?;
+        let inner = self.inner.clone().add_labels(&pairs).map_err(to_pyerr)?;
         Ok(Component {
             inner,
             event_loop: self.event_loop.clone(),
@@ -554,7 +550,6 @@ impl Endpoint {
 
 #[pymethods]
 impl Namespace {
-    #[pyo3(signature = (name))]
     fn component(&self, name: String) -> PyResult<Component> {
         let inner = self.inner.component(name).map_err(to_pyerr)?;
         Ok(Component {

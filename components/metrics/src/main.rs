@@ -126,8 +126,6 @@ async fn app(runtime: Runtime) -> Result<()> {
     let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = drt.namespace(args.namespace)?;
-    // The metrics aggregator operates independently of any model,
-    // hence the model name is set to None.
     let component = namespace.component("count")?;
 
     // Create unique instance of Count
