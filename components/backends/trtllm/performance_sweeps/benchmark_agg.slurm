@@ -1,29 +1,6 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-# Get partition, account, and job name from command line arguments
-SLURM_PARTITION=$1
-SLURM_ACCOUNT=$2
-SLURM_JOB_NAME=$3
-
-# Shift arguments so the rest of the script gets the correct parameters
-shift 3
-
-#SBATCH --partition=${SLURM_PARTITION}
-#SBATCH --account=${SLURM_ACCOUNT}
-#SBATCH --time=04:00:00
-#SBATCH --job-name="${SLURM_JOB_NAME}:aggregated"
-
-if [ -z "$SLURM_PARTITION" ] || [ -z "$SLURM_ACCOUNT" ] || [ -z "$SLURM_JOB_NAME" ]; then
-    echo "Error: Required parameters not provided:"
-    echo "  SLURM_PARTITION: $SLURM_PARTITION"
-    echo "  SLURM_ACCOUNT: $SLURM_ACCOUNT"
-    echo "  SLURM_JOB_NAME: $SLURM_JOB_NAME"
-    echo "Usage: $0 <partition> <account> <job_name> [other_args...]"
-    exit 1
-fi
-
 MULTI_ROUND="${MULTI_ROUND:-8}"
 
 MOUNT_DIR="${MOUNT_DIR:-${PWD}}"
