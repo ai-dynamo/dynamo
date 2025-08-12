@@ -296,6 +296,8 @@ impl Worker for KvConnectorWorker {
         let mut is_finished_offloading = HashSet::new();
         let mut is_finished_onboarding = HashSet::new();
 
+
+
         // before we process the maybes, add any newly annotated finished requests
         // to the maybe finished set
         for request_id in finished_requests {
@@ -317,11 +319,15 @@ impl Worker for KvConnectorWorker {
 
         // visit each request slot in the maybe finished set
         for request_id in self.maybe_finished_offloading.iter() {
-            if self.connector.is_complete(request_id) {
-                tracing::debug!(request_id, "request slot is finished");
-                is_finished_offloading.insert(request_id.clone());
+            if self.connector.has_slot(request_id) {
+                if self.connector.is_complete(request_id) {
+                    tracing::debug!(request_id, "request slot is finished");
+                    is_finished_offloading.insert(request_id.clone());
+                } else {
+                    tracing::debug!(request_id, "request slot is not finished");
+                }
             } else {
-                tracing::debug!(request_id, "request slot is not finished");
+                tracing::debug!(request_id, "request slot is not found - likely aborted");
             }
         }
 
@@ -331,23 +337,35 @@ impl Worker for KvConnectorWorker {
             self.maybe_finished_offloading.remove(request_id);
 
             // currently chomping the error as the engine is closed and we are shutting down
-            self.connector.remove_slot(request_id);
+            if self.connector.has_slot(request_id) {
+                self.connector.remove_slot(request_id);
+            } else {
+                tracing::debug!(request_id, "is_finished_offloading: request slot is not found - likely aborted, removing from is finished offloading set");
+            }
         }
 
         // visit each request slot in the maybe finished set to see if it is finished
         for request_id in self.maybe_finished_onboarding.iter() {
-            if self.connector.is_complete(request_id) {
-                tracing::debug!(request_id, "request slot is finished");
-                is_finished_onboarding.insert(request_id.clone());
+            if self.connector.has_slot(request_id) {
+                if self.connector.is_complete(request_id) {
+                    tracing::debug!(request_id, "request slot is finished");
+                    is_finished_onboarding.insert(request_id.clone());
+                } else {
+                    tracing::debug!(request_id, "request slot is not finished");
+                }
             } else {
-                tracing::debug!(request_id, "request slot is not finished");
+                tracing::debug!(request_id, "request slot is not found - likely aborted");
             }
         }
 
         // remove the finished requests from the maybe finished set
         for request_id in &is_finished_onboarding {
             self.maybe_finished_onboarding.remove(request_id);
-            self.connector.remove_slot(request_id);
+            if self.connector.has_slot(request_id) {
+                self.connector.remove_slot(request_id);
+            } else {
+                tracing::debug!(request_id, "is_finished_onboarding: request slot is not found - likely aborted, removing from is finished onboarding set");
+            }
         }
 
         (is_finished_offloading, is_finished_onboarding)

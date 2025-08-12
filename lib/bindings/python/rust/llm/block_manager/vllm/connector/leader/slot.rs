@@ -143,9 +143,6 @@ pub trait Slot: std::fmt::Debug {
     /// Reset the slot.
     fn reset(&mut self);
 
-    /// Get a reference to the slot as a dynamic Any.
-    fn as_any(&self) -> &dyn Any;
-
     /// Get a mutable reference to the slot as a dynamic Any.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -790,10 +787,6 @@ impl Slot for VllmConnectorSlot {
         self.advance_computed_position(num_external_tokens)?;
 
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

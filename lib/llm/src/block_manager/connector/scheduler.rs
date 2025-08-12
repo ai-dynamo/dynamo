@@ -221,8 +221,15 @@ impl WorkerSchedulerClient {
     }
 
     pub fn is_complete(&self, request_id: &str) -> bool {
-        let slot = self.slots.get(request_id).expect("slot does not exist");
-        slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64
+        match self.slots.get(request_id) {
+            Some(slot) => {
+                slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64
+            }
+            None => {
+                tracing::debug!(request_id, "slot not found - likely aborted");
+                true
+            }
+        }
     }
 }
 

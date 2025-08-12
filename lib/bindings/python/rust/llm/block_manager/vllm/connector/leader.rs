@@ -408,6 +408,13 @@ impl Leader for KvConnectorLeader {
         block_ids: Vec<BlockId>,
     ) -> anyhow::Result<bool> {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
+
+        if !self.slot_manager.has_slot(&request_id) {
+            tracing::warn!("request_finished called for request_id: {request_id} but slot is not found");
+            self.inflight_requests.remove(&request_id);
+            return Ok(false);
+        }
+
         // grab the slot
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
 
@@ -429,7 +436,7 @@ impl Leader for KvConnectorLeader {
         self.slot_manager.remove_slot(&request_id)?;
 
         // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
-        // otherwise, we return false, which means there are still outstanding operations on gpu blocks which
+        // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
         // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
         // of the connector api which will be used to inform vllm that the request is finished.
         if let SlotState::Finished = slot.state() {
