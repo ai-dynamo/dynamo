@@ -1237,6 +1237,7 @@ mod tests {
                 messages: vec![],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1263,6 +1264,7 @@ mod tests {
                 )],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);

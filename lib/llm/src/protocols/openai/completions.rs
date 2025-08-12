@@ -22,6 +22,7 @@ use crate::engines::ValidateRequest;
 
 use super::{
     common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::{NvExt, NvExtProvider},
     validate, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
@@ -36,6 +37,9 @@ pub use delta::DeltaGenerator;
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateCompletionRequest,
+
+    #[serde(flatten)]
+    pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -131,13 +135,56 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     }
 }
 
+impl CommonExtProvider for NvCreateCompletionRequest {
+    fn common_ext(&self) -> Option<&CommonExt> {
+        Some(&self.common)
+    }
+
+    /// Guided Decoding Options
+    fn get_guided_json(&self) -> Option<&serde_json::Value> {
+        self.common
+            .guided_json
+            .as_ref()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+    }
+
+    fn get_guided_regex(&self) -> Option<String> {
+        self.common
+            .guided_regex
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_regex.clone()))
+    }
+
+    fn get_guided_grammar(&self) -> Option<String> {
+        self.common
+            .guided_grammar
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_grammar.clone()))
+    }
+
+    fn get_guided_choice(&self) -> Option<Vec<String>> {
+        self.common
+            .guided_choice
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_choice.clone()))
+    }
+
+    fn get_guided_decoding_backend(&self) -> Option<String> {
+        self.common.guided_decoding_backend.clone().or_else(|| {
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_decoding_backend.clone())
+        })
+    }
+}
+
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_tokens
     }
 
     fn get_min_tokens(&self) -> Option<u32> {
-        None
+        self.common.min_tokens
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
@@ -146,6 +193,10 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
 
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    fn get_common_ignore_eos(&self) -> Option<bool> {
+        self.common.ignore_eos
     }
 }
 

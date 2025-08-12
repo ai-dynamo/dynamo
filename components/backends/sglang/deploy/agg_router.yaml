@@ -43,6 +43,9 @@ spec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3"
             - "-m"

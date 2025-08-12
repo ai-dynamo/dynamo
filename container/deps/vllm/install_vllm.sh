@@ -24,7 +24,7 @@ VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="1876566"
+DEEPGEMM_REF="03d0be3"
 FLASHINF_REF="v0.2.8rc1"
 TORCH_BACKEND="cu128"
 
@@ -174,7 +174,7 @@ else
     git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
     cd flashinfer
     git checkout $FLASHINF_REF
-    python -m pip install -v .
+    uv pip install -v --no-build-isolation .
 fi
 
 echo "vllm installation completed successfully"
