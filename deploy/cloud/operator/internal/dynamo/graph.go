@@ -717,12 +717,34 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// Merge probes
+	// TODO: Mohammed figure out if there is a bug in the merging logic
+	if component.LivenessProbe != nil {
+		container.LivenessProbe = component.LivenessProbe.DeepCopy()
+	}
+	if component.ReadinessProbe != nil {
+		container.ReadinessProbe = component.ReadinessProbe.DeepCopy()
+	}
+
 	overrideResources, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
 	}
-	maps.Copy(container.Resources.Requests, overrideResources.Requests)
-	maps.Copy(container.Resources.Limits, overrideResources.Limits)
+	// Requests
+	if len(overrideResources.Requests) > 0 {
+		if container.Resources.Requests == nil {
+			container.Resources.Requests = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Requests, overrideResources.Requests)
+	}
+
+	// Limits
+	if len(overrideResources.Limits) > 0 {
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Limits, overrideResources.Limits)
+	}
 
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {

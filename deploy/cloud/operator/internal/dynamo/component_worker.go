@@ -68,7 +68,6 @@ func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework) (co
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10"),
 			corev1.ResourceMemory: resource.MustParse("20Gi"),
-			"nvidia.com/gpu":      resource.MustParse("1"),
 		},
 		Limits: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10"),
