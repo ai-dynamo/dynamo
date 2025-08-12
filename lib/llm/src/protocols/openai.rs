@@ -20,6 +20,7 @@ use super::{
     common::{self, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
 };
+use crate::protocols::openai::common_ext::CommonExtProvider;
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -78,7 +79,7 @@ trait OpenAIStopConditionsProvider {
     }
 }
 
-impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
+impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
     fn extract_sampling_options(&self) -> Result<common::SamplingOptions> {
         // let result = self.validate();
         // if let Err(e) = result {
@@ -103,29 +104,26 @@ impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
             }
         }
 
-        let mut guided_decoding = None;
-        if let Some(nvext) = self.nvext() {
-            let guided_decoding_backend = nvext.guided_decoding_backend.clone();
-            let guided_json = nvext.guided_json.clone();
-            let guided_regex = nvext.guided_regex.clone();
-            let guided_grammar = nvext.guided_grammar.clone();
-            let guided_choice = nvext.guided_choice.clone();
+        let guided_decoding_backend = self.get_guided_decoding_backend();
+        let guided_json = self.get_guided_json();
+        let guided_regex = self.get_guided_regex();
+        let guided_grammar = self.get_guided_grammar();
+        let guided_choice = self.get_guided_choice();
 
-            match common::GuidedDecodingOptions::from_optional(
-                guided_json,
-                guided_regex,
-                guided_choice,
-                guided_grammar,
-                guided_decoding_backend,
-            ) {
-                Ok(options) => guided_decoding = options,
-                Err(e) => {
-                    // Handle the validation error (log, return error, etc.)
-                    tracing::error!("Invalid guided decoding options: {}", e);
-                    return Err(e);
-                }
+        let guided_decoding = match common::GuidedDecodingOptions::from_optional(
+            guided_json.cloned(),
+            guided_regex,
+            guided_choice,
+            guided_grammar,
+            guided_decoding_backend,
+        ) {
+            Ok(options) => options,
+            Err(e) => {
+                // Handle the validation error (log, return error, etc.)
+                tracing::error!("Invalid guided decoding options: {:?}", e);
+                return Err(e);
             }
-        }
+        };
 
         Ok(common::SamplingOptions {
             n: None,

@@ -139,6 +139,43 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.common)
     }
+
+    /// Guided Decoding Options
+    fn get_guided_json(&self) -> Option<&serde_json::Value> {
+        self.common
+            .guided_json
+            .as_ref()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+    }
+
+    fn get_guided_regex(&self) -> Option<String> {
+        self.common
+            .guided_regex
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_regex.clone()))
+    }
+
+    fn get_guided_grammar(&self) -> Option<String> {
+        self.common
+            .guided_grammar
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_grammar.clone()))
+    }
+
+    fn get_guided_choice(&self) -> Option<Vec<String>> {
+        self.common
+            .guided_choice
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_choice.clone()))
+    }
+
+    fn get_guided_decoding_backend(&self) -> Option<String> {
+        self.common.guided_decoding_backend.clone().or_else(|| {
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_decoding_backend.clone())
+        })
+    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
