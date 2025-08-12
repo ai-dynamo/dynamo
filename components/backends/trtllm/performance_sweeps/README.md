@@ -116,7 +116,7 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 
 ## Post-Processing Results
 
-The above jobs use genAI-perf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-{ISL}-{OSL}/<config-setup>/genai_perf_artifacts` and `dynamo_agg-bm-{ISL}-{OSL}/<config-setup>/genai_perf_artifacts` for disaggregated and aggregated respectively.
+The above jobs use genAI-perf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-8150-1024/<config-setup>/genai_perf_artifacts` and `dynamo_agg-bm-8150-1024/<config-setup>/genai_perf_artifacts` for disaggregated and aggregated respectively.
 
 After your benchmarking jobs have completed, you can use the `post_process.py` script to aggregate and summarize the results from the generated genai_perf_artifacts.
 
@@ -146,3 +146,9 @@ on -o performance_plot.png
 This script will produce a scatter plot of all the configuration points with each concurrency on a Output Throughput per GPU vs Output Throughput per User. It will also include the roofline pareto line for both aggregated and disaggregated setups.
 
 Refer to [Beyond the Buzz: A Pragmatic Take on Inference Disaggregation](https://arxiv.org/html/2506.05508v1) to learn how to interpret these plots.
+
+## Known Issues
+
+- Some of the jobs may timeout if genai-perf takes longer time to run through all concurrencies.
+- Some of the workers may hit OOM issue during inference.
+- The configs hitting above errors would lead to missing points on the plot.
