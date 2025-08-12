@@ -151,7 +151,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
