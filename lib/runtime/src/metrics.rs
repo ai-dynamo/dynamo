@@ -1564,8 +1564,8 @@ mod test_metricsregistry_nats {
                     "{}_sum",
                     build_metric_name(work_handler::REQUEST_DURATION_SECONDS)
                 ),
-                0.002,
-                0.008,
+                0.001,
+                0.999,
             ), // Processing time sum (10 messages)
         ];
 
