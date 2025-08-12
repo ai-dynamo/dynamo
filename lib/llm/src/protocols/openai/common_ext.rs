@@ -10,7 +10,7 @@ use validator::Validate;
 #[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
 pub struct CommonExt {
     /// If true, the model will ignore the end of string token and generate to max_tokens.
-    /// This field can also be specified in nvext, where the nvext value takes precedence.
+    /// This field can also be specified in nvext, but the root-level value takes precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub ignore_eos: Option<bool>,
@@ -37,7 +37,6 @@ pub trait CommonExtProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::openai::nvext::NvExt;
 
     #[test]
     fn test_common_ext_builder_with_values() {
@@ -66,11 +65,31 @@ mod tests {
 
     #[test]
     fn test_validation_min_tokens() {
-        // Test that negative min_tokens fails validation
+        // Test that min_tokens with 0 is valid
         let common_ext = CommonExt {
             ignore_eos: None,
             min_tokens: Some(0), // Should be valid (min = 0)
         };
+        assert!(common_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_common_ext_neither_specified() {
+        // Test that neither ignore_eos nor min_tokens specified works
+        let common_ext = CommonExt::builder().build().unwrap();
+
+        assert_eq!(common_ext.ignore_eos, None);
+        assert_eq!(common_ext.min_tokens, None);
+        assert!(common_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_common_ext_default() {
+        // Test that Default trait implementation works correctly
+        let common_ext = CommonExt::default();
+
+        assert_eq!(common_ext.ignore_eos, None);
+        assert_eq!(common_ext.min_tokens, None);
         assert!(common_ext.validate().is_ok());
     }
 }

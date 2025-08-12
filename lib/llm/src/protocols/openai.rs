@@ -70,12 +70,11 @@ trait OpenAIStopConditionsProvider {
     }
 
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// NvExt takes precedence over CommonExt for backward compatibility.
+    /// CommonExt (root-level) takes precedence over NvExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        // Check nvext first (takes precedence), then fall back to common
-        self.nvext()
-            .and_then(|nv| nv.ignore_eos)
-            .or_else(|| self.get_common_ignore_eos())
+        // Check common first (takes precedence), then fall back to nvext
+        self.get_common_ignore_eos()
+            .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
     }
 }
 

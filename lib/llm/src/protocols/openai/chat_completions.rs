@@ -39,7 +39,7 @@ pub use delta::DeltaGenerator;
 /// - `inner`: The base OpenAI chat completion request, embedded using `serde(flatten)`.
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
-///   Note: If ignore_eos is specified in both common and nvext, the nvext value takes precedence.
+///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]

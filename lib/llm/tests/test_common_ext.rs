@@ -31,8 +31,8 @@ fn test_chat_completions_ignore_eos_from_common() {
 }
 
 #[test]
-fn test_chat_completions_nvext_overrides_common() {
-    // Test that nvext ignore_eos overrides root-level ignore_eos
+fn test_chat_completions_common_overrides_nvext() {
+    // Test that root-level ignore_eos overrides nvext ignore_eos
     let json_str = r#"{
         "model": "test-model",
         "messages": [{"role": "user", "content": "Hello"}],
@@ -52,13 +52,13 @@ fn test_chat_completions_nvext_overrides_common() {
     );
     // Verify precedence through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(true)); // nvext value takes precedence
+    assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
     assert_eq!(stop_conditions.min_tokens, Some(50));
 }
 
 #[test]
-fn test_chat_completions_backward_compatibility() {
-    // Test backward compatibility - ignore_eos only in nvext
+fn test_chat_completions_nvext_fallback() {
+    // Test that nvext is used when common doesn't specify ignore_eos
     let json_str = r#"{
         "model": "test-model",
         "messages": [{"role": "user", "content": "Hello"}],
@@ -74,7 +74,7 @@ fn test_chat_completions_backward_compatibility() {
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
-    // Verify through stop conditions extraction
+    // Verify through stop conditions extraction - nvext is used as fallback
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(true));
     assert_eq!(stop_conditions.min_tokens, None);
@@ -102,8 +102,8 @@ fn test_completions_ignore_eos_from_common() {
 }
 
 #[test]
-fn test_completions_nvext_overrides_common() {
-    // Test that nvext ignore_eos overrides root-level ignore_eos for completions
+fn test_completions_common_overrides_nvext() {
+    // Test that root-level ignore_eos overrides nvext ignore_eos for completions
     let json_str = r#"{
         "model": "test-model",
         "prompt": "Hello world",
@@ -123,7 +123,7 @@ fn test_completions_nvext_overrides_common() {
     );
     // Verify precedence through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(true)); // nvext value takes precedence
+    assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
     assert_eq!(stop_conditions.min_tokens, Some(75));
 }
 
@@ -163,7 +163,7 @@ fn test_serialization_preserves_structure() {
 
     // Verify precedence through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
-    assert_eq!(stop_conditions.ignore_eos, Some(false)); // nvext overrides common
+    assert_eq!(stop_conditions.ignore_eos, Some(true)); // common overrides nvext
     assert_eq!(stop_conditions.min_tokens, Some(100));
 }
 
