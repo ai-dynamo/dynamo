@@ -38,8 +38,14 @@ fn test_chat_completions_guided_decoding_from_common() {
 
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
-    assert_eq!(request.common.guided_json, Some(json!({"key": "value"})));
-    assert_eq!(request.get_guided_json(), Some(&json!({"key": "value"})));
+    assert_eq!(
+        request.common.guided_json,
+        Some(serde_json::json!({"key": "value"}))
+    );
+    assert_eq!(
+        request.get_guided_json(),
+        Some(&serde_json::json!({"key": "value"}))
+    );
 
     // Test guided_regex can be specified at root level
     let json_str = r#"{
@@ -164,9 +170,12 @@ fn test_chat_completions_backward_compatibility() {
             .nvext
             .as_ref()
             .and_then(|nv| nv.guided_json.as_ref()),
-        Some(&json!({"key": "value"}))
+        Some(&serde_json::json!({"key": "value"}))
     );
-    assert_eq!(request.get_guided_json(), Some(&json!({"key": "value"})));
+    assert_eq!(
+        request.get_guided_json(),
+        Some(&serde_json::json!({"key": "value"}))
+    );
     // Verify through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(true));
