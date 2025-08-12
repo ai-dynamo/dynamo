@@ -63,9 +63,19 @@ trait OpenAIStopConditionsProvider {
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
 
+    /// Get ignore_eos from CommonExt if the type supports it.
+    /// Default returns None for types without CommonExt support.
+    fn get_common_ignore_eos(&self) -> Option<bool> {
+        None
+    }
+
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
+    /// NvExt takes precedence over CommonExt for backward compatibility.
     fn get_ignore_eos(&self) -> Option<bool> {
-        self.nvext().and_then(|nv| nv.ignore_eos)
+        // Check nvext first (takes precedence), then fall back to common
+        self.nvext()
+            .and_then(|nv| nv.ignore_eos)
+            .or_else(|| self.get_common_ignore_eos())
     }
 }
 

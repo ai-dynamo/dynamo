@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::openai::{
-    chat_completions::NvCreateChatCompletionRequest,
-    common_ext::{CommonExt, CommonExtProvider},
-    completions::NvCreateCompletionRequest,
-    nvext::NvExt,
+use dynamo_llm::protocols::{
+    common::StopConditionsProvider,
+    openai::{
+        chat_completions::NvCreateChatCompletionRequest,
+        common_ext::CommonExt,
+        completions::NvCreateCompletionRequest,
+        nvext::NvExt,
+    },
 };
 
 #[test]
@@ -22,8 +25,11 @@ fn test_chat_completions_ignore_eos_from_common() {
 
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(100));
-    assert_eq!(request.effective_ignore_eos(), Some(true));
-    assert_eq!(request.effective_min_tokens(), Some(100));
+
+    // Verify through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.ignore_eos, Some(true));
+    assert_eq!(stop_conditions.min_tokens, Some(100));
 }
 
 #[test]
@@ -46,8 +52,10 @@ fn test_chat_completions_nvext_overrides_common() {
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
-    assert_eq!(request.effective_ignore_eos(), Some(true)); // nvext value takes precedence
-    assert_eq!(request.effective_min_tokens(), Some(50));
+    // Verify precedence through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.ignore_eos, Some(true)); // nvext value takes precedence
+    assert_eq!(stop_conditions.min_tokens, Some(50));
 }
 
 #[test]
@@ -68,8 +76,10 @@ fn test_chat_completions_backward_compatibility() {
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
-    assert_eq!(request.effective_ignore_eos(), Some(true));
-    assert_eq!(request.effective_min_tokens(), None);
+    // Verify through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.ignore_eos, Some(true));
+    assert_eq!(stop_conditions.min_tokens, None);
 }
 
 #[test]
@@ -86,8 +96,11 @@ fn test_completions_ignore_eos_from_common() {
 
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(200));
-    assert_eq!(request.effective_ignore_eos(), Some(true));
-    assert_eq!(request.effective_min_tokens(), Some(200));
+
+    // Verify through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.ignore_eos, Some(true));
+    assert_eq!(stop_conditions.min_tokens, Some(200));
 }
 
 #[test]
@@ -110,8 +123,10 @@ fn test_completions_nvext_overrides_common() {
         request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
         Some(true)
     );
-    assert_eq!(request.effective_ignore_eos(), Some(true)); // nvext value takes precedence
-    assert_eq!(request.effective_min_tokens(), Some(75));
+    // Verify precedence through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.ignore_eos, Some(true)); // nvext value takes precedence
+    assert_eq!(stop_conditions.min_tokens, Some(75));
 }
 
 #[test]
@@ -148,9 +163,10 @@ fn test_serialization_preserves_structure() {
     assert_eq!(json["min_tokens"], 100); // From common (flattened)
     assert_eq!(json["nvext"]["ignore_eos"], false); // From nvext
 
-    // Verify effective values use correct precedence
-    assert_eq!(request.effective_ignore_eos(), Some(false)); // nvext overrides common
-    assert_eq!(request.effective_min_tokens(), Some(100));
+    // Verify precedence through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.ignore_eos, Some(false)); // nvext overrides common
+    assert_eq!(stop_conditions.min_tokens, Some(100));
 }
 
 #[test]
@@ -165,5 +181,8 @@ fn test_min_tokens_only_at_root_level() {
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.min_tokens, Some(150));
-    assert_eq!(request.effective_min_tokens(), Some(150));
+
+    // Verify through stop conditions extraction
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.min_tokens, Some(150));
 }

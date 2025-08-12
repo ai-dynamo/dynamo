@@ -139,17 +139,6 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.common)
     }
-
-    fn effective_ignore_eos(&self) -> Option<bool> {
-        self.nvext
-            .as_ref()
-            .and_then(|nv| nv.ignore_eos)
-            .or(self.common.ignore_eos)
-    }
-
-    fn effective_min_tokens(&self) -> Option<u32> {
-        self.common.min_tokens
-    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
@@ -158,7 +147,7 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_min_tokens(&self) -> Option<u32> {
-        self.effective_min_tokens()
+        self.common.min_tokens
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
@@ -169,8 +158,8 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
         self.nvext.as_ref()
     }
 
-    fn get_ignore_eos(&self) -> Option<bool> {
-        self.effective_ignore_eos()
+    fn get_common_ignore_eos(&self) -> Option<bool> {
+        self.common.ignore_eos
     }
 }
 
