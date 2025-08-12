@@ -220,15 +220,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.info(
             "Getting engine runtime configuration metadata from vLLM engine..."
         )
-        runtime_values = await get_engine_cache_info(engine_client)
+        runtime_values = get_engine_cache_info(engine_client)
         runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
         runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
         gpu_mem_integer = runtime_values["gpu_memory_utilization"]
         runtime_config.gpu_memory_utilization = int(gpu_mem_integer * 100)
-
-        logging.info(
-            f"Registering model {config.model} with runtime config: {runtime_config}"
-        )
 
         await register_llm(
             ModelType.Backend,
@@ -255,7 +251,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def get_engine_cache_info(engine: AsyncLLM):
+def get_engine_cache_info(engine: AsyncLLM):
     """Retrieve cache configuration information from [`AsyncLLM`] engine."""
 
     try:
