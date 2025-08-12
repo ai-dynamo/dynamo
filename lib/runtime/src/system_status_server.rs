@@ -255,8 +255,16 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
-    // Empty hierarchy means this is the top-level metrics at the DistributedRuntime level
-    state.drt().execute_metrics_callbacks("");
+    // Execute all the callbacks starting at the DistributedRuntime level
+    assert!(state.drt().basename() == "");
+    let callback_results = state
+        .drt()
+        .execute_metrics_callbacks(&state.drt().hierarchy());
+    for result in callback_results {
+        if let Err(e) = result {
+            tracing::error!("Error executing metrics callback: {}", e);
+        }
+    }
 
     // Get all metrics from DistributedRuntime (top-level)
     match state.drt().prometheus_metrics_fmt() {

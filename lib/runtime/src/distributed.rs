@@ -14,6 +14,7 @@
 // limitations under the License.
 
 pub use crate::component::Component;
+use crate::transports::nats::DRTNatsPrometheusMetrics;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
@@ -88,6 +89,8 @@ impl DistributedRuntime {
             live_endpoint_path,
         )));
 
+        let nats_client_for_metrics = nats_client.clone();
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -105,13 +108,19 @@ impl DistributedRuntime {
             labels: Vec::new(),
         };
 
-        // Register NATS client metrics after creation
-        if let Err(e) = distributed_runtime
-            .nats_client()
-            .register_metrics_callback(&distributed_runtime)
-        {
-            tracing::warn!("Failed to register NATS client metrics: {}", e);
-        }
+        let sys_nats_metrics = DRTNatsPrometheusMetrics::new(
+            &distributed_runtime,
+            nats_client_for_metrics.client().clone(),
+        )?;
+        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
+        drt_hierarchies.push(distributed_runtime.hierarchy());
+        distributed_runtime.register_metrics_callback(drt_hierarchies, {
+            let sys_nats_metrics_clone = sys_nats_metrics.clone();
+            move || {
+                sys_nats_metrics_clone.set_from_client_stats();
+                Ok(())
+            }
+        });
 
         // Start system status server if enabled
         if let Some(cancel_token) = cancel_token {
@@ -285,26 +294,29 @@ impl DistributedRuntime {
         }
     }
 
-    /// Add a callback function to a metrics registry for the given hierarchy key
-    pub fn add_metrics_callback<F>(&self, hierarchy: &str, callback: F)
+    /// Add a callback function to metrics registries for the given hierarchies
+    pub fn register_metrics_callback<F>(&self, hierarchies: Vec<String>, callback: F)
     where
-        F: Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String>
-            + Send
-            + Sync
-            + 'static,
+        F: Fn() -> anyhow::Result<()> + Send + Sync + 'static,
     {
+        use std::sync::Arc as StdArc;
+        let callback_arc: StdArc<F> = StdArc::new(callback);
+
         let mut registries = self.hierarchy_to_metricsregistry.lock().unwrap();
-        registries
-            .entry(hierarchy.to_string())
-            .or_default()
-            .add_callback(callback);
+        for hierarchy in hierarchies {
+            let callback_clone = callback_arc.clone();
+            registries
+                .entry(hierarchy)
+                .or_default()
+                .add_callback(move || (callback_clone)());
+        }
     }
 
     /// Execute all callbacks for a given hierarchy key and return their results
-    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<String>> {
+    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
         let registries = self.hierarchy_to_metricsregistry.lock().unwrap();
         if let Some(entry) = registries.get(hierarchy) {
-            entry.execute_callbacks(self as &dyn crate::metrics::MetricsRegistry)
+            entry.execute_callbacks()
         } else {
             Vec::new()
         }

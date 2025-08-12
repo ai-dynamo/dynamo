@@ -148,10 +148,9 @@ impl SystemHealth {
 }
 
 /// Type alias for runtime callback functions to reduce complexity
-type RuntimeCallback =
-    Box<dyn Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String> + Send + Sync>;
+type RuntimeCallback = Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
 
-/// Structure to hold Prometheus registries and associated callbacks for a given prefix
+/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
 pub struct MetricsRegistryEntry {
     /// The Prometheus registry for this prefix
     pub prometheus_registry: prometheus::Registry,
@@ -171,22 +170,16 @@ impl MetricsRegistryEntry {
     /// Add a callback function that receives a reference to any MetricsRegistry
     pub fn add_callback<F>(&mut self, callback: F)
     where
-        F: Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String>
-            + Send
-            + Sync
-            + 'static,
+        F: Fn() -> anyhow::Result<()> + Send + Sync + 'static,
     {
         self.runtime_callbacks.push(Box::new(callback));
     }
 
     /// Execute all runtime callbacks and return their results
-    pub fn execute_callbacks(
-        &self,
-        runtime: &dyn crate::metrics::MetricsRegistry,
-    ) -> Vec<anyhow::Result<String>> {
+    pub fn execute_callbacks(&self) -> Vec<anyhow::Result<()>> {
         self.runtime_callbacks
             .iter()
-            .map(|callback| callback(runtime))
+            .map(|callback| callback())
             .collect()
     }
 

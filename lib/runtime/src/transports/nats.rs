@@ -74,20 +74,6 @@ impl Client {
         &self.js_ctx
     }
 
-    /// Add Prometheus metrics for this NATS client
-    pub fn register_metrics_callback(&self, drt: &crate::DistributedRuntime) -> Result<()> {
-        let sys_nats_metrics = DRTNatsPrometheusMetrics::new(drt, self.client.clone())?;
-
-        // Create a callback that updates the metrics when called
-        let nats_metrics_clone = sys_nats_metrics.clone();
-        drt.add_metrics_callback(&drt.hierarchy(), move |_runtime| {
-            nats_metrics_clone.set_from_client_stats();
-            Ok("".to_string())
-        });
-
-        Ok(())
-    }
-
     /// host:port of NATS
     pub fn addr(&self) -> String {
         let info = self.client.server_info();

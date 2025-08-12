@@ -276,51 +276,54 @@ impl Component {
             .await
     }
 
-    /// Register Prometheus metrics for this component's service stats
-    pub fn register_metrics_callback(&self) -> Result<()> {
+    /// Add Prometheus metrics for this component's service stats.
+    /// Registers a lightweight `Fn()` callback that scrapes stats asynchronously
+    /// and updates gauges.
+    pub fn add_metrics_callback(&self) -> Result<()> {
         let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
 
-        // Create a callback that scrapes stats and updates metrics when called
-        // Cloning is required here so that:
-        // - The registered callback can implement Fn (not FnOnce); we avoid moving captured values.
-        // - The spawned task gets owned 'static values; we cannot borrow &self or move the originals.
+        // Callback clones per-invocation so it remains `Fn()` and can move owned values
+        // into the spawned task (requires `'static`).
         let component_clone = self.clone();
-        let hierarchy = self.hierarchy();
-        assert_eq!(hierarchy, self.service_name()); // it happens that in component, hierarchy and service name are the same
-        self.drt()
-            .add_metrics_callback(&hierarchy, move |_runtime| {
-                // Use tokio::runtime::Handle to run async code in the callback
-                let handle = match tokio::runtime::Handle::try_current() {
-                    Ok(h) => h,
+        let mut hierarchies = self.parent_hierarchy();
+        hierarchies.push(self.hierarchy());
+        assert_eq!(
+            hierarchies.last().cloned().unwrap_or_default(),
+            self.service_name()
+        ); // it happens that in component, hierarchy and service name are the same
+        self.drt().register_metrics_callback(hierarchies, move || {
+            // Use the current Tokio runtime to run the async scrape
+            let handle = match tokio::runtime::Handle::try_current() {
+                Ok(h) => h,
+                Err(err) => {
+                    tracing::warn!(
+                        "No Tokio runtime handle available; resetting metrics to zeros: {}",
+                        err
+                    );
+                    component_metrics.clone().reset_to_zeros();
+                    return Ok(());
+                }
+            };
+
+            let m = component_metrics.clone();
+            let c = component_clone.clone();
+            handle.spawn(async move {
+                let timeout = std::time::Duration::from_millis(500);
+                match c.scrape_stats(timeout).await {
+                    Ok(service_set) => m.update_from_service_set(&service_set),
                     Err(err) => {
                         tracing::warn!(
-                            "No Tokio runtime handle available; resetting metrics to zeros: {}",
+                            "Failed to scrape stats for component '{}': {}",
+                            c.service_name(),
                             err
                         );
-                        component_metrics.clone().reset_to_zeros();
-                        return Ok(String::new());
+                        m.reset_to_zeros();
                     }
-                };
-
-                let m = component_metrics.clone();
-                let c = component_clone.clone();
-                handle.spawn(async move {
-                    let timeout = std::time::Duration::from_millis(500);
-                    match c.scrape_stats(timeout).await {
-                        Ok(service_set) => m.update_from_service_set(&service_set),
-                        Err(err) => {
-                            tracing::warn!(
-                                "Failed to scrape stats for component '{}': {}",
-                                c.service_name(),
-                                err
-                            );
-                            m.reset_to_zeros();
-                        }
-                    }
-                });
-
-                Ok(String::new())
+                }
             });
+
+            Ok(())
+        });
 
         Ok(())
     }
@@ -580,7 +583,7 @@ impl Namespace {
             .namespace(self.clone())
             .is_static(self.is_static)
             .build()?;
-        component.register_metrics_callback()?; // register a callback to scrape stats and update metrics
+        component.add_metrics_callback()?; // register a callback to scrape stats and update metrics
         Ok(component)
     }
 

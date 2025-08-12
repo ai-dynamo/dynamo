@@ -555,6 +555,7 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
             }
         }
 
+        // Get the Prometheus registry for this hierarchy
         let prometheus_registry = {
             let mut registry_entry = self.drt().hierarchy_to_metricsregistry.lock().unwrap();
             registry_entry
@@ -838,28 +839,24 @@ mod test_metricsregistry_units {
         let drt = super::test_helpers::create_test_drt();
 
         // Add some runtime callbacks
-        entry.add_callback(|_| Ok("callback1".to_string()));
-        entry.add_callback(|_| Ok("callback2".to_string()));
-        entry.add_callback(|_| Ok("callback3".to_string()));
+        entry.add_callback(|| Ok(()));
+        entry.add_callback(|| Ok(()));
+        entry.add_callback(|| Ok(()));
 
         // Execute runtime callbacks
-        let results = entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        let results = entry.execute_callbacks();
 
         // Verify results
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].as_ref().unwrap(), "callback1");
-        assert_eq!(results[1].as_ref().unwrap(), "callback2");
-        assert_eq!(results[2].as_ref().unwrap(), "callback3");
+        assert!(results.iter().all(|r| r.is_ok()));
 
         // Test cloning (callbacks should be empty after clone)
         let cloned_entry = entry.clone();
-        let cloned_results =
-            cloned_entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        let cloned_results = cloned_entry.execute_callbacks();
         assert_eq!(cloned_results.len(), 0);
 
         // Original should still have callbacks
-        let original_results =
-            entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        let original_results = entry.execute_callbacks();
         assert_eq!(original_results.len(), 3);
     }
 }
@@ -872,203 +869,76 @@ mod test_metricsregistry_prefixes {
 
     #[test]
     fn test_hierarchical_prefixes_and_parent_hierarchies() {
-        println!("=== Testing Names, Prefixes, and Parent Hierarchies ===");
-
-        // Create a distributed runtime for testing
         let drt = super::test_helpers::create_test_drt();
 
-        // Use a simple constant namespace name
-        let namespace_name = "ns901";
+        const DRT_NAME: &str = "";
+        const NAMESPACE_NAME: &str = "ns901";
+        const COMPONENT_NAME: &str = "comp901";
+        const ENDPOINT_NAME: &str = "ep901";
+        let namespace = drt.namespace(NAMESPACE_NAME).unwrap();
+        let component = namespace.component(COMPONENT_NAME).unwrap();
+        let endpoint = component.endpoint(ENDPOINT_NAME);
 
-        // Create namespace
-        let namespace = drt.namespace(namespace_name).unwrap();
+        // DRT
+        assert_eq!(drt.basename(), DRT_NAME);
+        assert_eq!(drt.parent_hierarchy(), Vec::<String>::new());
+        assert_eq!(drt.hierarchy(), DRT_NAME);
 
-        // Create component
-        let component = namespace.component("comp901").unwrap();
+        // Namespace
+        assert_eq!(namespace.basename(), NAMESPACE_NAME);
+        assert_eq!(namespace.parent_hierarchy(), vec!["".to_string()]);
+        assert_eq!(namespace.hierarchy(), NAMESPACE_NAME);
 
-        // Create endpoint
-        let endpoint = component.endpoint("ep901");
-
-        // Test DistributedRuntime hierarchy
-        println!("\n=== DistributedRuntime ===");
-        println!("basename: '{}'", drt.basename());
-        println!("parent_hierarchy: {:?}", drt.parent_hierarchy());
-        println!("prefix: '{}'", drt.hierarchy());
-
-        assert_eq!(drt.basename(), "", "DRT basename should be empty");
-        assert_eq!(
-            drt.parent_hierarchy(),
-            Vec::<String>::new(),
-            "DRT parent hierarchy should be empty"
-        );
-        assert_eq!(drt.hierarchy(), "", "DRT prefix should be empty");
-
-        // Test Namespace hierarchy
-        println!("\n=== Namespace ===");
-        println!("basename: '{}'", namespace.basename());
-        println!("parent_hierarchy: {:?}", namespace.parent_hierarchy());
-        println!("prefix: '{}'", namespace.hierarchy());
-
-        assert_eq!(
-            namespace.basename(),
-            namespace_name,
-            "Namespace basename should match the generated name"
-        );
-        assert_eq!(
-            namespace.parent_hierarchy(),
-            vec![""],
-            "Namespace parent hierarchy should contain DRT level"
-        );
-        assert_eq!(
-            namespace.hierarchy(),
-            namespace_name,
-            "Namespace prefix should match the generated name, because drt's prefix is empty"
-        );
-
-        // Test Component hierarchy
-        println!("\n=== Component ===");
-        println!("basename: '{}'", component.basename());
-        println!("parent_hierarchy: {:?}", component.parent_hierarchy());
-        println!("prefix: '{}'", component.hierarchy());
-
-        assert_eq!(
-            component.basename(),
-            "comp901",
-            "Component basename should be 'comp901'"
-        );
+        // Component
+        assert_eq!(component.basename(), COMPONENT_NAME);
         assert_eq!(
             component.parent_hierarchy(),
-            vec!["", &namespace_name],
-            "Component parent hierarchy should contain the DRT level and namespace name"
+            vec!["".to_string(), NAMESPACE_NAME.to_string()]
         );
         assert_eq!(
             component.hierarchy(),
-            format!("{}_comp901", namespace_name),
-            "Component prefix should be 'ns901_comp901'"
+            format!("{}_{}", NAMESPACE_NAME, COMPONENT_NAME)
         );
 
-        // Test Endpoint hierarchy
-        println!("\n=== Endpoint ===");
-        println!("basename: '{}'", endpoint.basename());
-        println!("parent_hierarchy: {:?}", endpoint.parent_hierarchy());
-        println!("prefix: '{}'", endpoint.hierarchy());
-
-        assert_eq!(
-            endpoint.basename(),
-            "ep901",
-            "Endpoint basename should be 'ep901'"
-        );
+        // Endpoint
+        assert_eq!(endpoint.basename(), ENDPOINT_NAME);
         assert_eq!(
             endpoint.parent_hierarchy(),
-            vec!["", &namespace_name, "comp901"],
-            "Endpoint parent hierarchy should contain the DRT level, namespace, and component names"
+            vec![
+                "".to_string(),
+                NAMESPACE_NAME.to_string(),
+                COMPONENT_NAME.to_string(),
+            ]
         );
         assert_eq!(
             endpoint.hierarchy(),
-            format!("{}_comp901_ep901", namespace_name),
-            "Endpoint prefix should be 'ns901_comp901_ep901'"
+            format!("{}_{}_{}", NAMESPACE_NAME, COMPONENT_NAME, ENDPOINT_NAME)
         );
 
-        // Test hierarchy relationships
-        println!("\n=== Hierarchy Relationships ===");
-        assert!(
-            namespace.parent_hierarchy().contains(&drt.basename()),
-            "Namespace should have DRT prefix in parent hierarchy"
-        );
-        assert!(
-            component.parent_hierarchy().contains(&namespace.basename()),
-            "Component should have Namespace prefix in parent hierarchy"
-        );
-        assert!(
-            endpoint.parent_hierarchy().contains(&component.basename()),
-            "Endpoint should have Component prefix in parent hierarchy"
-        );
-        println!("✓ All parent-child relationships verified");
+        // Relationships
+        assert!(namespace.parent_hierarchy().contains(&drt.basename()));
+        assert!(component.parent_hierarchy().contains(&namespace.basename()));
+        assert!(endpoint.parent_hierarchy().contains(&component.basename()));
 
-        // Test hierarchy depth
-        println!("\n=== Hierarchy Depth ===");
-        assert_eq!(
-            drt.parent_hierarchy().len(),
-            0,
-            "DRT should have 0 parent hierarchy levels"
-        );
-        assert_eq!(
-            namespace.parent_hierarchy().len(),
-            1,
-            "Namespace should have 1 parent hierarchy level"
-        );
-        assert_eq!(
-            component.parent_hierarchy().len(),
-            2,
-            "Component should have 2 parent hierarchy levels"
-        );
-        assert_eq!(
-            endpoint.parent_hierarchy().len(),
-            3,
-            "Endpoint should have 3 parent hierarchy levels"
-        );
-        println!("✓ All hierarchy depths verified");
+        // Depth
+        assert_eq!(drt.parent_hierarchy().len(), 0);
+        assert_eq!(namespace.parent_hierarchy().len(), 1);
+        assert_eq!(component.parent_hierarchy().len(), 2);
+        assert_eq!(endpoint.parent_hierarchy().len(), 3);
 
-        // Summary
-        println!("\n=== Summary ===");
-        println!("DRT prefix: '{}'", drt.hierarchy());
-        println!("Namespace prefix: '{}'", namespace.hierarchy());
-        println!("Component prefix: '{}'", component.hierarchy());
-        println!("Endpoint prefix: '{}'", endpoint.hierarchy());
-        println!("All hierarchy assertions passed!");
-
-        // Test invalid namespace behavior
-        println!("\n=== Testing Invalid Namespace Behavior ===");
-
-        // Create a namespace with invalid name (contains hyphen)
+        // Invalid namespace behavior (sanitization should still error after becoming "123")
         let invalid_namespace = drt.namespace("@@123").unwrap();
-
-        // Debug: Let's see what the hierarchy looks like
-        println!(
-            "Invalid namespace basename: '{}'",
-            invalid_namespace.basename()
-        );
-        println!(
-            "Invalid namespace parent_hierarchy: {:?}",
-            invalid_namespace.parent_hierarchy()
-        );
-        println!(
-            "Invalid namespace prefix: '{}'",
-            invalid_namespace.hierarchy()
-        );
-
-        // Try to create a metric - this should succeed because the namespace name will be sanitized
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
-        println!("Result with invalid namespace '@@123':");
-        println!("{:?}", result);
-
-        // The result should be an error because '@@123' gets sanitized to '123' which is invalid
-        assert!(
-            result.is_err(),
-            "Creating metric with namespace '@@123' should fail because it gets sanitized to '123' which is invalid"
-        );
-
-        // Verify the error message indicates the sanitized name is still invalid
+        assert!(result.is_err());
         if let Err(e) = &result {
-            let error_msg = e.to_string();
-            assert!(
-                error_msg.contains("123"),
-                "Error message should mention the sanitized name '123', got: {}",
-                error_msg
-            );
+            assert!(e.to_string().contains("123"));
         }
 
-        // For comparison, show a valid namespace works
+        // Valid namespace works
         let valid_namespace = drt.namespace("ns567").unwrap();
-        let valid_result = valid_namespace.create_counter("test_counter", "A test counter", &[]);
-        println!("Result with valid namespace 'test_namespace':");
-        println!("{:?}", valid_result);
-        assert!(
-            valid_result.is_ok(),
-            "Creating metric with valid namespace should succeed"
-        );
-
-        println!("✓ Invalid namespace behavior verified!");
+        assert!(valid_namespace
+            .create_counter("test_counter", "A test counter", &[])
+            .is_ok());
     }
 
     #[test]
@@ -1568,19 +1438,19 @@ mod test_metricsregistry_nats {
 
         let initial_expected_metric_values = [
             // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (build_metric_name(nats::CONNECTION_STATE), 1.0, 1.0), //   Should be connected
-            (build_metric_name(nats::CONNECTS), 1.0, 1.0),         //   Should have 1 connection
-            (build_metric_name(nats::IN_TOTAL_BYTES), 300.0, 500.0), //   ~75% to ~125% of 417
-            (build_metric_name(nats::IN_MESSAGES), 0.0, 0.0),      //   No messages yet
-            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 500.0, 700.0), //   ~75% to ~125% of 612 (includes endpoint creation overhead)
-            (build_metric_name(nats::OUT_MESSAGES), 0.0, 0.0),           //   No messages yet
+            (build_metric_name(nats::CONNECTION_STATE), 1.0, 1.0), // Should be connected
+            (build_metric_name(nats::CONNECTS), 1.0, 1.0),         // Should have 1 connection
+            (build_metric_name(nats::IN_TOTAL_BYTES), 300.0, 500.0), // ~75% to ~125% of 417
+            (build_metric_name(nats::IN_MESSAGES), 0.0, 0.0),      // No messages yet
+            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 500.0, 700.0), // ~75% to ~125% of 612 (includes endpoint creation overhead)
+            (build_metric_name(nats::OUT_MESSAGES), 0.0, 0.0),           // No messages yet
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 0.0), //   No processing yet
-            (build_metric_name(nats::TOTAL_ERRORS), 0.0, 0.0),      //   No errors yet
-            (build_metric_name(nats::TOTAL_REQUESTS), 0.0, 0.0),    //   No requests yet
-            (build_metric_name(nats::TOTAL_PROCESSING_MS), 0.0, 0.0), //   No processing yet
-            (build_metric_name(nats::ACTIVE_SERVICES), 0.0, 0.0),   //   No services yet
-            (build_metric_name(nats::ACTIVE_ENDPOINTS), 0.0, 0.0),  //   No endpoints yet
+            (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 0.0), // No processing yet
+            (build_metric_name(nats::TOTAL_ERRORS), 0.0, 0.0),      // No errors yet
+            (build_metric_name(nats::TOTAL_REQUESTS), 0.0, 0.0),    // No requests yet
+            (build_metric_name(nats::TOTAL_PROCESSING_MS), 0.0, 0.0), // No processing yet
+            (build_metric_name(nats::ACTIVE_SERVICES), 0.0, 0.0),   // No services yet
+            (build_metric_name(nats::ACTIVE_ENDPOINTS), 0.0, 0.0),  // No endpoints yet
         ];
 
         for (metric_name, min_value, max_value) in &initial_expected_metric_values {
@@ -1650,37 +1520,37 @@ mod test_metricsregistry_nats {
 
         let post_expected_metric_values = [
             // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (build_metric_name(nats::CONNECTION_STATE), 1.0, 1.0), //   Should remain connected
-            (build_metric_name(nats::CONNECTS), 1.0, 1.0),         //   Should remain 1 connection
-            (build_metric_name(nats::IN_TOTAL_BYTES), 22000.0, 28000.0), //   ~75% to ~125% of 24977 (10 messages × 2000 bytes + overhead)
-            (build_metric_name(nats::IN_MESSAGES), 10.0, 10.0), //   Exact count (10 messages)
-            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 1500.0, 2000.0), //   ~75% to ~125% of 1752 (10 messages + overhead)
-            (build_metric_name(nats::OUT_MESSAGES), 10.0, 10.0), //   Exact count (10 messages)
+            (build_metric_name(nats::CONNECTION_STATE), 1.0, 1.0), // Should remain connected
+            (build_metric_name(nats::CONNECTS), 1.0, 1.0),         // Should remain 1 connection
+            (build_metric_name(nats::IN_TOTAL_BYTES), 22000.0, 28000.0), // ~75% to ~125% of 24977 (10 messages × 2000 bytes + overhead)
+            (build_metric_name(nats::IN_MESSAGES), 10.0, 12.0), // Allow small drift (callback may run twice)
+            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 1500.0, 2000.0), // ~75% to ~125% of 1752 (10 messages + overhead)
+            (build_metric_name(nats::OUT_MESSAGES), 10.0, 12.0), // Allow small drift (callback may run twice)
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 1.0), //   Should be low processing time
-            (build_metric_name(nats::TOTAL_ERRORS), 0.0, 0.0),      //   Should have no errors
-            (build_metric_name(nats::TOTAL_REQUESTS), 0.0, 0.0), //   NATS metrics don't track work handler requests
-            (build_metric_name(nats::TOTAL_PROCESSING_MS), 0.0, 5.0), //   Should be low total processing time
-            (build_metric_name(nats::ACTIVE_SERVICES), 0.0, 0.0), //   NATS metrics don't track work handler services
-            (build_metric_name(nats::ACTIVE_ENDPOINTS), 0.0, 0.0), //   NATS metrics don't track work handler endpoints
+            (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 1.0), // Should be low processing time
+            (build_metric_name(nats::TOTAL_ERRORS), 0.0, 0.0),      // Should have no errors
+            (build_metric_name(nats::TOTAL_REQUESTS), 0.0, 0.0), // NATS metrics don't track work handler requests
+            (build_metric_name(nats::TOTAL_PROCESSING_MS), 0.0, 5.0), // Should be low total processing time
+            (build_metric_name(nats::ACTIVE_SERVICES), 0.0, 0.0), // NATS metrics don't track work handler services
+            (build_metric_name(nats::ACTIVE_ENDPOINTS), 0.0, 0.0), // NATS metrics don't track work handler endpoints
             // Work handler metrics with ranges
-            (build_metric_name(work_handler::REQUESTS_TOTAL), 10.0, 10.0), //   Exact count (10 messages)
+            (build_metric_name(work_handler::REQUESTS_TOTAL), 10.0, 10.0), // Exact count (10 messages)
             (
                 build_metric_name(work_handler::REQUEST_BYTES_TOTAL),
                 21000.0,
                 26000.0,
-            ), //   ~75% to ~125% of 23520 (10 × 2000 bytes + overhead)
+            ), // ~75% to ~125% of 23520 (10 × 2000 bytes + overhead)
             (
                 build_metric_name(work_handler::RESPONSE_BYTES_TOTAL),
                 18000.0,
                 23000.0,
-            ), //   ~75% to ~125% of 20660 (10 × 2000 bytes + overhead, but response size varies)
+            ), // ~75% to ~125% of 20660 (10 × 2000 bytes + overhead, but response size varies)
             // Additional component metrics
             (
                 build_metric_name(work_handler::CONCURRENT_REQUESTS),
                 0.0,
                 1.0,
-            ), //   Should be 0 or very low
+            ), // Should be 0 or very low
             (
                 format!(
                     "{}_count",
@@ -1688,7 +1558,7 @@ mod test_metricsregistry_nats {
                 ),
                 10.0,
                 10.0,
-            ), //   Exact count (10 messages)
+            ), // Exact count (10 messages)
             (
                 format!(
                     "{}_sum",
@@ -1696,7 +1566,7 @@ mod test_metricsregistry_nats {
                 ),
                 0.002,
                 0.008,
-            ), //   Processing time sum (10 messages)
+            ), // Processing time sum (10 messages)
         ];
 
         println!("\n=== Checking Post-Activity All Metrics (NATS + Work Handler) ===");
