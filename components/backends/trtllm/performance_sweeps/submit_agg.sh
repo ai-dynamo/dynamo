@@ -26,7 +26,7 @@ NTASKS_PER_NODE="${NTASKS_PER_NODE:-4}"
 kind='dynamo_agg'
 
 common_args="${kind} ${ISL} ${OSL} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE}"
-slurm_args="--partition=${SLURM_PARTITION} --account=${SLURM_ACCOUNT} --job-name=${SLURM_JOB_NAME}"
+slurm_args="--time=04:00:00 --partition=${SLURM_PARTITION} --account=${SLURM_ACCOUNT} --job-name=${SLURM_JOB_NAME}"
 
 # tep4
 max_batch=1024

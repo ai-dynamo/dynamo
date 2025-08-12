@@ -36,11 +36,11 @@ Please note that:
 ### Core Scripts
 
 1. `submit.sh` - Main entry point for submitting benchmark jobs for disaggregated configurations. This includes WideEP optimization for DEP>=16.
-2. `submit_agg.sh` - Main entry point for submitting benchmark jobs for aggregated configurations. 
-3. `post_process.py` - Scan the genai-perf results to produce a json with entries to each config point. 
+2. `submit_agg.sh` - Main entry point for submitting benchmark jobs for aggregated configurations.
+3. `post_process.py` - Scan the genai-perf results to produce a json with entries to each config point.
 4. `plot_performance_comparison.py` - Takes the json result file for disaggregated and/or aggregated configuration sweeps and plots a pareto line for better visualization.
 
-For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide. 
+For more finer grained details on how to launch TRTLLM backend workers with DeepSeek R1 on GB200 slurm, please refer [multinode-examples.md](../multinode/multinode-examples.md). This guide shares similar assumption to the multinode examples guide.
 
 ## Usage
 
@@ -63,7 +63,7 @@ export SLURM_PARTITION=""
 # Set account manually if this command doesn't work on your cluster
 export SLURM_ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
 
-# Set a job name for your benchmarking runs (optional, will be auto-generated if not set)
+# Set a job name for your benchmarking runs
 export SLURM_JOB_NAME=""
 
 # NOTE: IMAGE must be set manually for now
@@ -116,13 +116,13 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 
 ## Post-Processing Results
 
-The above jobs use genAI-perf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-{ISL}-{OSL}/<config-setup>/genai_perf_artifacts` and `dynamo_agg-bm-{ISL}-{OSL}/<config-setup>/genai_perf_artifacts` for disaggregated and aggregated respectively. 
+The above jobs use genAI-perf tool to benchmark each configuration point across different concurrency values. These get stored in `dynamo_disagg-bm-{ISL}-{OSL}/<config-setup>/genai_perf_artifacts` and `dynamo_agg-bm-{ISL}-{OSL}/<config-setup>/genai_perf_artifacts` for disaggregated and aggregated respectively.
 
 After your benchmarking jobs have completed, you can use the `post_process.py` script to aggregate and summarize the results from the generated genai_perf_artifacts.
 
 To run the post-processing script, use:
 
-### Aggregated 
+### Aggregated
 
 ```bash
 python3 post_process.py dynamo_agg-bm-${ISL}-${OSL} --output-file agg_result.json
