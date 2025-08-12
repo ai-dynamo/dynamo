@@ -7,9 +7,6 @@ set -e
 set -u
 trap 'echo "Error occurred at line $LINENO"; exit 1' ERR
 
-
-
-
 model=$1
 multi_round=$2
 num_gen_servers=$3
@@ -22,6 +19,26 @@ model_path=$9
 isl=${10}
 osl=${11}
 kind=${12}
+
+if [ "$#" -ne 12 ]; then
+    echo "Error: Expected 12 arguments, got $#"
+    echo "Usage: $0 <model> <multi_round> <num_gen_servers> <concurrency_list> <streaming> <log_path> <total_gpus> <artifacts_dir> <model_path> <isl> <osl> <kind>"
+    exit 1
+fi
+
+echo "Arguments:"
+echo "  model: $model"
+echo "  multi_round: $multi_round"
+echo "  num_gen_servers: $num_gen_servers"
+echo "  concurrency_list: $concurrency_list"
+echo "  streaming: $streaming"
+echo "  log_path: $log_path"
+echo "  total_gpus: $total_gpus"
+echo "  artifacts_dir: $artifacts_dir"
+echo "  model_path: $model_path"
+echo "  isl: $isl"
+echo "  osl: $osl"
+echo "  kind: $kind"
 
 
 
@@ -159,11 +176,11 @@ for concurrency in ${concurrency_list}; do
     	--extra-inputs max_tokens:${osl} \
     	--extra-inputs min_tokens:${osl} \
     	--extra-inputs ignore_eos:true \
-	--extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+	    --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
     	--concurrency ${concurrency} \
     	--request-count $(($concurrency*10)) \
     	--warmup-request-count $(($concurrency*2)) \
-	--num-dataset-entries ${num_prompts} \
+	    --num-dataset-entries ${num_prompts} \
     	--random-seed 100 \
     	--artifact-dir ${artifacts_dir} \
     	-- \
