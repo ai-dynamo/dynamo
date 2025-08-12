@@ -53,7 +53,7 @@ else
 fi
 
 # run ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend &
 
 
 # run processor

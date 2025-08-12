@@ -8,7 +8,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
 
 # run ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend &
 
 # run processor
 python3 components/processor.py --model $MODEL_NAME --prompt-template "<|image|>\n<prompt>" &
