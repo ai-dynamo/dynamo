@@ -4,7 +4,7 @@
 import argparse
 import os
 import re
-from typing import Dict, List
+from typing import Dict, List, Any, Union
 
 import yaml
 
@@ -30,7 +30,10 @@ def process_node_and_task() -> tuple[int, List[str], List[str]]:
     if "[" in slurm_job_nodelist:
         # Handle nodelist with range format (e.g., "ptyche[0065-0066]" or "nvl72029-T[15,18]")
         node_prefix = slurm_job_nodelist.split("[")[0]  # Extract everything before '['
-        node_range = re.search(r"\[(.*?)\]", slurm_job_nodelist).group(1)
+        node_range_match = re.search(r"\[(.*?)\]", slurm_job_nodelist)
+        if node_range_match is None:
+            raise ValueError(f"Invalid nodelist format: expected range in brackets but found '{slurm_job_nodelist}'")
+        node_range = node_range_match.group(1)
         nodes = []
         for part in node_range.split(","):
             if "-" in part:
@@ -94,7 +97,7 @@ def generate_urls(
     Returns:
         tuple: (urls, updated_task_nodes_offset)
     """
-    urls = []
+    urls: List[str] = []
 
     for instance in range(num_instances):
         tasks_needed = tensor_parallel_size * pipeline_parallel_size
@@ -196,7 +199,7 @@ def gen_config_file(
     if not gen_enable_attention_dp:
         gen_moe_backend = "TRTLLM"
 
-    prefill_config = {
+    prefill_config: Dict[str, Any] = {
         "max_batch_size": ctx_batch_size,
         "max_num_tokens": ctx_max_num_tokens,
         "max_seq_len": ctx_max_seq_len,
@@ -217,7 +220,7 @@ def gen_config_file(
         },
     }
 
-    decode_config = {
+    decode_config: Dict[str, Any] = {
         "tensor_parallel_size": gen_tp_size,
         "moe_expert_parallel_size": gen_tp_size,
         "enable_attention_dp": gen_enable_attention_dp,
@@ -284,14 +287,14 @@ def gen_config_file(
             "decoding_type": "MTP",
             "num_nextn_predict_layers": mtp_size,
         }
-        decode_config["generation_servers"]["speculative_config"] = {
+        decode_config["speculative_config"] = {
             "decoding_type": "MTP",
             "num_nextn_predict_layers": mtp_size,
         }
 
     counts = {"prefill_count": num_ctx_servers, "decode_count": num_gen_servers}
 
-    with open(instance_config, "w") as f:
+    with open(instance_config_path, "w") as f:
         yaml.dump(counts, f, default_flow_style=False, sort_keys=False)
 
     # Write config to file

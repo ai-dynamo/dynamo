@@ -139,8 +139,7 @@ python3 post_process.py dynamo_disagg-bm-8150-1024 --output-file disagg_result.j
 You can now use the `plot_performance_comparison.py` like below to observe the performance.
 
 ```bash
-python3 plot_performance_comparison.py dynamo_agg-bm-8150-1024/agg_result.json dynamo_disagg-bm-8150-1024/disagg_result.js
-on -o performance_plot.png
+python3 plot_performance_comparison.py dynamo_agg-bm-8150-1024/agg_result.json dynamo_disagg-bm-8150-1024/disagg_result.json -o performance_plot.png
 ```
 
 This script will produce a scatter plot of all the configuration points with each concurrency on a Output Throughput per GPU vs Output Throughput per User. It will also include the roofline pareto line for both aggregated and disaggregated setups.

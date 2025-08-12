@@ -7,12 +7,7 @@ set -e
 set -u
 trap 'echo "Error occurred at line $LINENO"; exit 1' ERR
 
-# Add argument checking
-if [ "$#" -lt 6 ]; then
-    echo "Error: Missing required arguments"
-    echo "Usage: $0 model_name multi_round concurrency_list streaming log_path total_gpus artifacts_dir model_path isl osl"
-    exit 1
-fi
+
 
 
 model=$1
@@ -28,10 +23,7 @@ isl=${10}
 osl=${11}
 kind=${12}
 
-if [ $# -lt 12 ]; then
-  echo "Usage: $0 $model $multi_round $num_gen_servers $concurrency_list $streaming $log_path $total_gpus $artifacts_dir $model_path $isl $osl $kind"
-  exit 1
-fi
+
 
 # check process id is not 0
 if [[ ${SLURM_PROCID} != "0" ]]; then
@@ -86,6 +78,9 @@ if [ -f "${artifacts_dir}/deployment_config.json" ]; then
   rm -f "${artifacts_dir}/deployment_config.json"
 fi
 echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
+
+# TODO: This is a temporary fix to check if the server is up.
+# We should use a more robust health check mechanism.
 
 # Loop up to 50 times
 for ((i=1; i<=50; i++)); do
@@ -185,17 +180,4 @@ done
 job_id=${SLURM_JOB_ID}
 if [ -n "${job_id}" ]; then
     echo "${SLURM_JOB_NODELIST}" > ${log_path}/job_${job_id}.txt
-fi
-
-echo "Benchmark done, gracefully shutting down server and workers..."
-kill -9 $(ps aux | grep '[s]tart_server.sh' | awk '{print $2}') >/dev/null 2>&1 || true
-kill -9 $(ps aux | grep '[s]tart_worker.sh' | awk '{print $2}') >/dev/null 2>&1 || true
-kill -9 $(ps aux | grep '[t]rtllm-serve' | awk '{print $2}') >/dev/null 2>&1 || true
-sleep 20  # Give processes some time to clean up
-
-# Check if there are any remaining processes
-if pgrep -f "trtllm-serve"; then
-    echo "Warning: Some processes may still be running"
-else
-    echo "All processes successfully terminated"
 fi

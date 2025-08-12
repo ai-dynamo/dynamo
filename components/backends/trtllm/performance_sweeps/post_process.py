@@ -19,7 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 
 def parse_directory_config(dir_name: str) -> Dict[str, str]:
@@ -63,7 +63,7 @@ def parse_directory_config(dir_name: str) -> Dict[str, str]:
     if tep_match:
         config["tep_mode"] = tep_match.group(1)
 
-    # Parse tep (tensor expert parallel) mode
+    # Parse dep mode
     dep_match = re.search(r"dep(\d+)", dir_name)
     if dep_match:
         config["dep_mode"] = dep_match.group(1)
@@ -81,14 +81,14 @@ def find_ctx_gen_directories(base_path: str) -> List[str]:
     Returns:
         List of directory paths matching the pattern
     """
-    directories = []
-    base_path = Path(base_path)
+    directories: List[str] = []
+    base_path_obj = Path(base_path)
 
-    if not base_path.exists():
-        print(f"Error: Base path {base_path} does not exist")
+    if not base_path_obj.exists():
+        print(f"Error: Base path {base_path_obj} does not exist")
         return directories
 
-    for item in base_path.iterdir():
+    for item in base_path_obj.iterdir():
         if item.is_dir() and re.match(r"ctx\d+_gen\d+_.*", item.name):
             directories.append(str(item))
 
@@ -173,7 +173,7 @@ def extract_concurrency_from_path(dir_path: str) -> Optional[int]:
     return None
 
 
-def process_directory(dir_path: str) -> Optional[Dict]:
+def process_directory(dir_path: str) -> Optional[List[Dict[str, Any]]]:
     """
     Process a single directory and extract all required data
 
@@ -183,8 +183,8 @@ def process_directory(dir_path: str) -> Optional[Dict]:
     Returns:
         Dictionary containing extracted data, or None if processing failed
     """
-    dir_path = Path(dir_path)
-    artifacts_path = dir_path / "genai_perf_artifacts"
+    dir_path_obj = Path(dir_path)
+    artifacts_path = dir_path_obj / "genai_perf_artifacts"
 
     if not artifacts_path.exists():
         print(f"Warning: No genai_perf_artifacts directory found in {dir_path}")
@@ -199,7 +199,7 @@ def process_directory(dir_path: str) -> Optional[Dict]:
     deployment_config = parse_deployment_config(str(config_path))
 
     # Parse directory configuration
-    dir_config = parse_directory_config(dir_path.name)
+    dir_config = parse_directory_config(dir_path_obj.name)
 
     # Find CSV files in subdirectories
     csv_files = []
@@ -220,16 +220,29 @@ def process_directory(dir_path: str) -> Optional[Dict]:
             csv_file
         )
         # Extract concurrency from the CSV file path
-        csv_path = Path(csv_file)
-        concurrency = extract_concurrency_from_path(csv_path.parent.name)
+        csv_path_obj = Path(csv_file)
+        concurrency = extract_concurrency_from_path(csv_path_obj.parent.name)
 
         if output_throughput is not None and concurrency is not None:
+            # Safely validate and convert total_gpus
+            total_gpus = 1  # safe default
+            try:
+                if "total_gpus" not in deployment_config:
+                    print(f"Warning: 'total_gpus' key missing in deployment config, using default value 1")
+                else:
+                    total_gpus = int(deployment_config["total_gpus"])
+                    if total_gpus <= 0:
+                        print(f"Warning: Invalid total_gpus value '{deployment_config['total_gpus']}', using default value 1")
+                        total_gpus = 1
+            except (ValueError, TypeError) as e:
+                print(f"Warning: Could not convert total_gpus '{deployment_config.get('total_gpus', 'missing')}' to int: {e}, using default value 1")
+                total_gpus = 1
+            
             result = {
                 "concurrency": concurrency,
                 "output_token_throughput": output_throughput,
                 "output_token_throughput_per_user": output_throughput_per_user,
-                "output_token_throughput_per_gpu": output_throughput
-                / int(deployment_config["total_gpus"]),
+                "output_token_throughput_per_gpu": output_throughput / total_gpus,
                 "model": deployment_config["model"],
                 "kind": deployment_config["kind"],
                 "total_gpus": deployment_config["total_gpus"],
@@ -278,7 +291,7 @@ def main():
         print(f"  - {os.path.basename(dir_path)}")
 
     # Collect all results from all directories
-    all_results = []
+    all_results: List[Dict[str, Any]] = []
     skipped_directories = []
 
     # Process each directory

@@ -11,7 +11,7 @@ Points from different files are colored differently, and Pareto lines are added 
 
 import argparse
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import matplotlib.pyplot as plt
 
@@ -75,8 +75,8 @@ def find_max_difference_point(
     pareto_y1: List[float],
     pareto_x2: List[float],
     pareto_y2: List[float],
-    user_throughput_threshold: float = None,
-) -> Tuple[float, float, float, str]:
+    user_throughput_threshold: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
     """
     Find the point with maximum relative difference between the two rooflines.
     If threshold is specified, only considers points above the threshold.
@@ -102,14 +102,22 @@ def find_max_difference_point(
         if not pareto_points1 or not pareto_points2:
             return None, None, None, ""
 
-        pareto_x1_filtered, pareto_y1_filtered = zip(*pareto_points1)
-        pareto_x2_filtered, pareto_y2_filtered = zip(*pareto_points2)
+        pareto_x1_filtered: List[float]
+        pareto_y1_filtered: List[float]
+        pareto_x2_filtered: List[float]
+        pareto_y2_filtered: List[float]
+        
+        # Unzip the filtered points into separate x and y lists
+        pareto_x1_filtered = [point[0] for point in pareto_points1]
+        pareto_y1_filtered = [point[1] for point in pareto_points1]
+        pareto_x2_filtered = [point[0] for point in pareto_points2]
+        pareto_y2_filtered = [point[1] for point in pareto_points2]
     else:
         pareto_x1_filtered, pareto_y1_filtered = pareto_x1, pareto_y1
         pareto_x2_filtered, pareto_y2_filtered = pareto_x2, pareto_y2
 
     # Find the point with maximum relative difference between rooflines
-    max_diff_ratio = 0
+    max_diff_ratio: float = 0.0
     max_diff_user = None
     max_diff_gpu1 = None
     max_diff_gpu2 = None
@@ -146,10 +154,11 @@ def find_max_difference_point(
         return None, None, None, ""
 
     # Create the label
-    if max_diff_gpu1 > max_diff_gpu2:
+    if max_diff_gpu1 is not None and max_diff_gpu2 is not None:
+        better_gpu = "GPU1" if max_diff_gpu1 > max_diff_gpu2 else "GPU2"
         label = f"{max_diff_ratio:.1f}x better\nUser: {max_diff_user:.1f}\nGPU1: {max_diff_gpu1:.1f}\nGPU2: {max_diff_gpu2:.1f}"
     else:
-        label = f"{max_diff_ratio:.1f}x better\nUser: {max_diff_user:.1f}\nGPU1: {max_diff_gpu1:.1f}\nGPU2: {max_diff_gpu2:.1f}"
+        label = "No valid GPU data"
 
     return max_diff_user, max_diff_gpu1, max_diff_gpu2, label
 
@@ -157,8 +166,8 @@ def find_max_difference_point(
 def plot_performance_comparison(
     file1_path: str,
     file2_path: str,
-    output_path: str = None,
-    user_throughput_threshold: float = None,
+    output_path: Optional[str] = None,
+    user_throughput_threshold: Optional[float] = None,
 ):
     """Create the performance comparison plot."""
 
@@ -302,14 +311,14 @@ def plot_performance_comparison(
     if user_throughput_threshold is not None:
         stats_text = f"""
 Statistics (Max Difference Point: User Throughput ≥ {user_throughput_threshold}):
-{kind1}: {len(data1)} points, max per-user: {max(x1):.1f}, max per-gpu: {max(y1):.1f}
-{kind2}: {len(data2)} points, max per-user: {max(x2):.1f}, max per-gpu: {max(y2):.1f}
+{kind1}: {len(data1)} points, max per-user: {max(x1):.1f if len(x1) > 0 else "N/A"}, max per-gpu: {max(y1):.1f if len(y1) > 0 else "N/A"}
+{kind2}: {len(data2)} points, max per-user: {max(x2):.1f if len(x2) > 0 else "N/A"}, max per-gpu: {max(y2):.1f if len(y2) > 0 else "N/A"}
         """
     else:
         stats_text = f"""
 Statistics:
-{kind1}: {len(data1)} points, max per-user: {max(x1):.1f}, max per-gpu: {max(y1):.1f}
-{kind2}: {len(data2)} points, max per-user: {max(x2):.1f}, max per-gpu: {max(y2):.1f}
+{kind1}: {len(data1)} points, max per-user: {max(x1):.1f if len(x1) > 0 else "N/A"}, max per-gpu: {max(y1):.1f if len(y1) > 0 else "N/A"}
+{kind2}: {len(data2)} points, max per-user: {max(x2):.1f if len(x2) > 0 else "N/A"}, max per-gpu: {max(y2):.1f if len(y2) > 0 else "N/A"}
         """
     plt.text(
         0.02,

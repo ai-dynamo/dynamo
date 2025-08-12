@@ -63,6 +63,28 @@ export HEAD_NODE_IP="$(hostname -i)"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 
+# Create a temporary file to store PIDs
+PID_FILE=$(mktemp)
+trap 'cleanup_and_exit' EXIT
+
+cleanup_and_exit() {
+    if [ -f "$PID_FILE" ]; then
+        echo "Cleaning up spawned processes..."
+        while read -r pid; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "Sending TERM to process $pid"
+                kill -TERM "$pid" 2>/dev/null
+                sleep 2
+                if kill -0 "$pid" 2>/dev/null; then
+                    echo "Process $pid still running, sending KILL"
+                    kill -KILL "$pid" 2>/dev/null
+                fi
+            fi
+        done < "$PID_FILE"
+        rm -f "$PID_FILE"
+    fi
+}
+
 # start the server
 srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
@@ -72,6 +94,8 @@ srun -l --container-name=${CONTAINER_NAME} \
 	--container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
         -w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/start_frontend.sh  &> ${full_logdir}/output_server.log &
+SERVER_PID=$!
+echo "$SERVER_PID" >> "$PID_FILE"
 
 # wait for the server to start
 sleep 10
@@ -82,6 +106,8 @@ srun -l --container-name=${CONTAINER_NAME} \
         --mpi=pmix --overlap \
         --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
         bash -x ${WORK_DIR}/scripts/start_agg_worker.sh ${model_path} ${max_batch_size} ${max_num_tokens} ${tp_size} ${ep_size} ${enable_attention_dp} ${GPU_FRAC} ${max_seq_len} ${mtp_size} ${served_model_name} &> ${full_logdir}/output_workers.log &
+WORKERS_PID=$!
+echo "$WORKERS_PID" >> "$PID_FILE"
 
 # start the loadgen
 srun -l --container-name=${CONTAINER_NAME} \
@@ -91,9 +117,7 @@ srun -l --container-name=${CONTAINER_NAME} \
 	-w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} 1 "${concurrency_list}" ${STREAMING} ${full_logdir} ${tp_size} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
-# try to kill the server and workers
-srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
-        --mpi=pmix --overlap \
-        kill -9 $(ps aux | grep '[p]ython3' | awk '{print $2}') >/dev/null 2>&1 || true
+# Wait for all background processes to complete
 wait
+
+# Cleanup will be handled by the EXIT trap

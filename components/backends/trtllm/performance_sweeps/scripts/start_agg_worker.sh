@@ -13,6 +13,67 @@ max_seq_len=$8
 mtp=$9
 model_name=${10}
 
+# Validate all required parameters
+if [ -z "${model_path}" ] || [ -z "${max_batch}" ] || [ -z "${max_num_tokens}" ] || [ -z "${tp_size}" ] || [ -z "${ep_size}" ] || [ -z "${enable_attention_dp}" ] || [ -z "${gpu_fraction}" ] || [ -z "${max_seq_len}" ] || [ -z "${mtp}" ] || [ -z "${model_name}" ]; then
+    echo "Error: Missing required arguments"
+    echo "Usage: $0 model_path max_batch max_num_tokens tp_size ep_size enable_attention_dp gpu_fraction max_seq_len mtp model_name"
+    echo ""
+    echo "Parameters:"
+    echo "  model_path: Path to the model"
+    echo "  max_batch: Maximum batch size (integer)"
+    echo "  max_num_tokens: Maximum number of tokens (integer)"
+    echo "  tp_size: Tensor parallel size (integer)"
+    echo "  ep_size: Expert parallel size (integer)"
+    echo "  enable_attention_dp: Enable attention data parallel (true/false)"
+    echo "  gpu_fraction: GPU memory fraction (float 0.0-1.0)"
+    echo "  max_seq_len: Maximum sequence length (integer)"
+    echo "  mtp: MTP size (integer)"
+    echo "  model_name: Name of the model to serve"
+    exit 1
+fi
+
+# Validate numeric parameters
+if ! [[ "${max_batch}" =~ ^[0-9]+$ ]]; then
+    echo "Error: max_batch must be a positive integer, got: ${max_batch}"
+    exit 1
+fi
+
+if ! [[ "${max_num_tokens}" =~ ^[0-9]+$ ]]; then
+    echo "Error: max_num_tokens must be a positive integer, got: ${max_num_tokens}"
+    exit 1
+fi
+
+if ! [[ "${tp_size}" =~ ^[0-9]+$ ]]; then
+    echo "Error: tp_size must be a positive integer, got: ${tp_size}"
+    exit 1
+fi
+
+if ! [[ "${ep_size}" =~ ^[0-9]+$ ]]; then
+    echo "Error: ep_size must be a positive integer, got: ${ep_size}"
+    exit 1
+fi
+
+if ! [[ "${gpu_fraction}" =~ ^[0-9]*\.?[0-9]+$ ]] || (( $(echo "${gpu_fraction} <= 0" | bc -l) )) || (( $(echo "${gpu_fraction} > 1" | bc -l) )); then
+    echo "Error: gpu_fraction must be a float between 0.0 and 1.0, got: ${gpu_fraction}"
+    exit 1
+fi
+
+if ! [[ "${max_seq_len}" =~ ^[0-9]+$ ]]; then
+    echo "Error: max_seq_len must be a positive integer, got: ${max_seq_len}"
+    exit 1
+fi
+
+if ! [[ "${mtp}" =~ ^[0-9]+$ ]]; then
+    echo "Error: mtp must be a positive integer, got: ${mtp}"
+    exit 1
+fi
+
+# Validate enable_attention_dp is true or false
+if [ "${enable_attention_dp}" != "true" ] && [ "${enable_attention_dp}" != "false" ]; then
+    echo "Error: enable_attention_dp must be 'true' or 'false', got: ${enable_attention_dp}"
+    exit 1
+fi
+
 # echo all parameters
 echo "model_path: ${model_path}"
 echo "max_batch: ${max_batch}"

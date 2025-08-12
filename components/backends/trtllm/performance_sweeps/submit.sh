@@ -11,7 +11,8 @@ if [[ -z ${MODEL_PATH} ]]; then
 fi
 
 if [[ -z ${SERVED_MODEL_NAME} ]]; then
-    echo "WARNING: SERVED_MODEL_NAME was not set. It will be derived from MODEL_PATH."
+    echo "ERROR: SERVED_MODEL_NAME was not set."
+    exit 1
 fi
 
 IMAGE="${IMAGE:-""}"
@@ -22,7 +23,23 @@ NTASKS_PER_NODE="${NTASKS_PER_NODE:-4}"
 ISL="${ISL:-8150}"
 OSL="${OSL:-1024}"
 
-slurm_args="--time=04:00:00 --partition=${SLURM_PARTITION} --account=${SLURM_ACCOUNT} --job-name=${SLURM_JOB_NAME}"
+# Build slurm_args step-by-step with validation and defaults
+slurm_args="--time=04:00:00"
+
+# Add partition if set
+if [[ -n "${SLURM_PARTITION:-}" ]]; then
+    slurm_args="${slurm_args} --partition=${SLURM_PARTITION}"
+fi
+
+# Add account if set
+if [[ -n "${SLURM_ACCOUNT:-}" ]]; then
+    slurm_args="${slurm_args} --account=${SLURM_ACCOUNT}"
+fi
+
+# Add job name with sensible default
+if [[ -n "${SLURM_JOB_NAME:-}" ]]; then
+    slurm_args="${slurm_args} --job-name=${SLURM_JOB_NAME}"
+fi
 
 # Usage Instructions
 usage() {

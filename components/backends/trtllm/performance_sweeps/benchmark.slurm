@@ -1,29 +1,6 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-# Get partition, account, and job name from command line arguments
-SLURM_PARTITION=$1
-SLURM_ACCOUNT=$2
-SLURM_JOB_NAME=$3
-
-# Shift arguments so the rest of the script gets the correct parameters
-shift 3
-
-#SBATCH --partition=${SLURM_PARTITION}
-#SBATCH --account=${SLURM_ACCOUNT}
-#SBATCH --time=04:00:00
-#SBATCH --job-name="${SLURM_JOB_NAME}:disaggregated"
-
-if [ -z "$SLURM_PARTITION" ] || [ -z "$SLURM_ACCOUNT" ] || [ -z "$SLURM_JOB_NAME" ]; then
-    echo "Error: Required parameters not provided:"
-    echo "  SLURM_PARTITION: $SLURM_PARTITION"
-    echo "  SLURM_ACCOUNT: $SLURM_ACCOUNT"
-    echo "  SLURM_JOB_NAME: $SLURM_JOB_NAME"
-    echo "Usage: $0 <partition> <account> <job_name> [other_args...]"
-    exit 1
-fi
-
 MULTI_ROUND="${MULTI_ROUND:-8}"
 
 # set MOUNT_DIR
@@ -137,6 +114,28 @@ export HEAD_NODE_IP="$(hostname -i)"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 
+# Create a temporary file to store PIDs
+PID_FILE=$(mktemp)
+trap 'cleanup_and_exit' EXIT
+
+cleanup_and_exit() {
+    if [ -f "$PID_FILE" ]; then
+        echo "Cleaning up spawned processes..."
+        while read -r pid; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                echo "Sending TERM to process $pid"
+                kill -TERM "$pid" 2>/dev/null
+                sleep 2
+                if kill -0 "$pid" 2>/dev/null; then
+                    echo "Process $pid still running, sending KILL"
+                    kill -KILL "$pid" 2>/dev/null
+                fi
+            fi
+        done < "$PID_FILE"
+        rm -f "$PID_FILE"
+    fi
+}
+
 # start the server
 srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
@@ -146,11 +145,17 @@ srun -l --container-name=${CONTAINER_NAME} \
 	--container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
         -w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/start_frontend.sh &> ${full_logdir}/output_server.log &
+SERVER_PID=$!
+echo "$SERVER_PID" >> "$PID_FILE"
 
 # wait for the server to start
 sleep 10
 
 PREFILL_COUNT=$(grep 'prefill_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
+if [ -z "$PREFILL_COUNT" ]; then
+    echo "Error: Failed to extract prefill_count from instance_config.yaml"
+    exit 1
+fi
 echo "Prefill Count: $PREFILL_COUNT"
 
 # start the prefill workers
@@ -168,9 +173,14 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
       --nodes 1 \
       bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_workers.log &
   prefill_pids+=($!)
+  echo "$!" >> "$PID_FILE"
 done
 
 DECODE_COUNT=$(grep 'decode_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
+if [ -z "$DECODE_COUNT" ]; then
+    echo "Error: Failed to extract decode_count from instance_config.yaml"
+    exit 1
+fi
 echo "Decode Count: $DECODE_COUNT"
 
 num_gen_nodes=$((gen_nodes/num_gen_servers))
@@ -193,6 +203,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --oversubscribe \
       --overlap \
       bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_workers.log &
+  echo "$!" >> "$PID_FILE"
 done
 
 total_gpus=$((ctx_gpus + gen_gpus))
@@ -204,9 +215,7 @@ srun -l --container-name=${CONTAINER_NAME} \
 	-w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
-# try to kill the server and workers
-srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
-        --mpi=pmix --overlap \
-        kill -9 $(ps aux | grep '[p]ython3' | awk '{print $2}') >/dev/null 2>&1 || true
+# Wait for all background processes to complete
 wait
+
+# Cleanup will be handled by the EXIT trap
