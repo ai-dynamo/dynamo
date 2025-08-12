@@ -1,4 +1,17 @@
-
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 pub struct ParserResult {
     /// The parsed reasoning as a string.
@@ -31,26 +44,6 @@ impl BaseReasoningParser {
     }
 
     pub fn detect_and_parse(&mut self, text: &str) -> ParserResult {
-        // in_reasoning = self._in_reasoning or self.think_start_token in text
-
-        // if not in_reasoning:
-        //     return StreamingParseResult(normal_text=text)
-
-        // # The text is considered to be in a reasoning block.
-        // processed_text = text.replace(self.think_start_token, "").strip()
-
-        // if self.think_end_token not in processed_text:
-        //     # Assume reasoning was truncated before `</think>` token
-        //     return StreamingParseResult(reasoning_text=processed_text)
-
-        // # Extract reasoning content
-        // splits = processed_text.split(self.think_end_token, maxsplit=1)
-        // reasoning_text = splits[0]
-        // normal_text = splits[1].strip()
-
-        // return StreamingParseResult(
-        //     normal_text=normal_text, reasoning_text=reasoning_text
-        // )
 
         let in_reasoning = self.force_reasoning || text.contains(&self.think_start_token);
 
@@ -62,7 +55,7 @@ impl BaseReasoningParser {
         }
 
         // The text is considered to be in a reasoning block.
-        
+
         let processed_text = text.replace(&self.think_start_token, "").trim().to_string();
 
         if !processed_text.contains(&self.think_end_token) {
@@ -106,7 +99,7 @@ impl BaseReasoningParser {
         if !self.stripped_think_start && current_text.contains(&self.think_start_token) {
             self._buffer = current_text.replace(&self.think_start_token, "");
             self.stripped_think_start = true;
-            self.force_reasoning = true; 
+            self.force_reasoning = true;
         }
         // Handle end of reasoning block
         if self.force_reasoning && current_text.contains(&self.think_end_token) {
