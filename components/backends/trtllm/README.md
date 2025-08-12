@@ -43,7 +43,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Client](#client)
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
-- [Performance Sweep](#p)
+- [Performance Sweep](#performance-sweep)
 
 ## Feature Support Matrix
 
