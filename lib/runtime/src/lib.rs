@@ -176,6 +176,9 @@ pub struct DistributedRuntime {
     // Health Status
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
+    // Additional labels for metrics
+    labels: Vec<(String, String)>,
+
     // This map associates metric prefixes with their corresponding Prometheus registries.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
 }

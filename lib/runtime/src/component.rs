@@ -133,6 +133,10 @@ pub struct Component {
     // A static component's endpoints cannot be discovered via etcd, they are
     // fixed at startup time.
     is_static: bool,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 }
 
 impl Hash for Component {
@@ -183,6 +187,18 @@ impl MetricsRegistry for Component {
         ]
         .concat()
     }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        // Convert Vec<(String, String)> to Vec<(&str, &str)>
+        self.labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
+    }
 }
 
 impl Component {
@@ -220,6 +236,7 @@ impl Component {
             component: self.clone(),
             name: endpoint.into(),
             is_static: self.is_static,
+            labels: Vec::new(),
         }
     }
 
@@ -285,6 +302,9 @@ pub struct Endpoint {
     name: String,
 
     is_static: bool,
+
+    /// Additional labels for metrics
+    labels: Vec<(String, String)>,
 }
 
 impl Hash for Endpoint {
@@ -328,6 +348,18 @@ impl MetricsRegistry for Endpoint {
             vec![self.component.basename()],
         ]
         .concat()
+    }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        // Convert Vec<(String, String)> to Vec<(&str, &str)>
+        self.labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
     }
 }
 
@@ -447,6 +479,10 @@ pub struct Namespace {
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
