@@ -700,7 +700,7 @@ func GenerateBasePodSpec(
 ) (corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType, numberOfNodes)
-	container, err := componentDefaults.GetBaseContainer(backendFramework, numberOfNodes)
+	container, err := componentDefaults.GetBaseContainer(numberOfNodes)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
 	}

@@ -20,7 +20,7 @@ func NewPlannerDefaults() *PlannerDefaults {
 	return &PlannerDefaults{&BaseComponentDefaults{}}
 }
 
-func (p *PlannerDefaults) GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error) {
+func (p *PlannerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
 	container := p.getCommonContainer()
 
 	// Add planner-specific defaults
@@ -38,7 +38,7 @@ func (p *PlannerDefaults) GetBaseContainer(backendFramework BackendFramework, nu
 	return container, nil
 }
 
-func (p *PlannerDefaults) GetBasePodSpec(backendFramework BackendFramework, numberOfNodes int32) (corev1.PodSpec, error) {
+func (p *PlannerDefaults) GetBasePodSpec(numberOfNodes int32) (corev1.PodSpec, error) {
 	podSpec := corev1.PodSpec{
 		ServiceAccountName: commonconsts.PlannerServiceAccountName,
 	}

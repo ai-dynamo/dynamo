@@ -23,7 +23,7 @@ func NewFrontendDefaults() *FrontendDefaults {
 	return &FrontendDefaults{&BaseComponentDefaults{}}
 }
 
-func (f *FrontendDefaults) GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error) {
+func (f *FrontendDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
 	// Frontend doesn't need backend-specific config
 	container := f.getCommonContainer()
 

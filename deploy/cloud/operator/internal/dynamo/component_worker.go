@@ -23,11 +23,7 @@ func NewWorkerDefaults() *WorkerDefaults {
 	return &WorkerDefaults{&BaseComponentDefaults{}}
 }
 
-func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error) {
-	if backendFramework == "" {
-		return corev1.Container{}, fmt.Errorf("worker components require a backend framework")
-	}
-
+func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
 	container := w.getCommonContainer()
 
 	// Add system port
