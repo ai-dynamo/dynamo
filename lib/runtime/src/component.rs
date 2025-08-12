@@ -276,45 +276,52 @@ impl Component {
     }
 
     /// Register Prometheus metrics for this component's service stats
-    pub fn register_metrics_callback(&self) -> Result<crate::service::ComponentSystemStatusNatsMetrics> {
+    pub fn register_metrics_callback(
+        &self,
+    ) -> Result<crate::service::ComponentSystemStatusNatsMetrics> {
         let component_metrics =
             crate::service::ComponentSystemStatusNatsMetrics::from_component(self)?;
 
         // Create a callback that scrapes stats and updates metrics when called
         let metrics_clone = component_metrics.clone();
         let component_clone = self.clone();
-        let prefix = self.prefix();
-        let service_name = self.service_name();
-        let prefix_for_closure = prefix.clone();
-        // self is component, and prefix is the prefix for the component
-        self.drt().add_metrics_callback(&prefix, move |_runtime| {
-            println!(
-                "[DEBUG]CALLING  metrics callback for component: {}, prefix:{}",
-                service_name, prefix_for_closure
-            );
-            // Use tokio::runtime::Handle to run async code in the callback
-            let handle = tokio::runtime::Handle::try_current();
-            if let Ok(handle) = handle {
+        let hierarchy = self.hierarchy();
+        assert_eq!(hierarchy, self.service_name()); // it happens that in component, hierarchy and service name are the same
+        self.drt()
+            .add_metrics_callback(&hierarchy, move |_runtime| {
                 let metrics_ref = metrics_clone.clone();
                 let comp_ref = component_clone.clone();
+
+                // Use tokio::runtime::Handle to run async code in the callback
+                let handle = match tokio::runtime::Handle::try_current() {
+                    Ok(h) => h,
+                    Err(err) => {
+                        tracing::warn!(
+                            "No Tokio runtime handle available; resetting metrics to zeros: {}",
+                            err
+                        );
+                        metrics_ref.reset_to_zeros();
+                        return Ok(String::new());
+                    }
+                };
+
                 handle.spawn(async move {
                     let timeout = std::time::Duration::from_millis(500);
                     match comp_ref.scrape_stats(timeout).await {
-                        Ok(service_set) => {
-                            metrics_ref.update_from_service_set(&service_set);
-                        }
+                        Ok(service_set) => metrics_ref.update_from_service_set(&service_set),
                         Err(err) => {
                             tracing::warn!(
                                 "Failed to scrape stats for component '{}': {}",
                                 comp_ref.service_name(),
                                 err
                             );
+                            metrics_ref.reset_to_zeros();
                         }
                     }
                 });
-            }
-            Ok("".to_string())
-        });
+
+                Ok(String::new())
+            });
 
         Ok(component_metrics)
     }

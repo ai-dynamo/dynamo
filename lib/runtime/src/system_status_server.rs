@@ -255,7 +255,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
-    // Empty prefix means this is the top-level metrics at the DistributedRuntime level
+    // Empty hierarchy means this is the top-level metrics at the DistributedRuntime level
     state.drt().execute_metrics_callbacks("");
 
     // Get all metrics from DistributedRuntime (top-level)

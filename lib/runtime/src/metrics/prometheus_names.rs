@@ -18,6 +18,32 @@
 //! This module provides centralized Prometheus metric name constants for various components
 //! to ensure consistency and avoid duplication across the codebase.
 
+/// Builds a full metric name by prepending the component prefix
+pub fn build_metric_name(metric_name: &str) -> String {
+    format!("{}{}", name_prefix::COMPONENT, metric_name)
+}
+
+/// Metric name prefixes used across the metrics system
+pub mod name_prefix {
+    /// Prefix for all Prometheus metric names.
+    pub const COMPONENT: &str = "dynamo_component_";
+
+    // TODO(keivenc): uncomment below for the frontend
+    // pub const FRONTEND: &str = "dynamo_frontend_";
+}
+
+/// Automatically inserted Prometheus label names used across the metrics system
+pub mod labels {
+    /// Label for component identification
+    pub const COMPONENT: &str = "dynamo_component";
+
+    /// Label for namespace identification
+    pub const NAMESPACE: &str = "dynamo_namespace";
+
+    /// Label for endpoint identification
+    pub const ENDPOINT: &str = "dynamo_endpoint";
+}
+
 /// NATS Prometheus metric names
 pub mod nats {
     /// Prefix for all NATS client metrics
@@ -25,10 +51,10 @@ pub mod nats {
 
     /// ===== DistributedRuntime metrics =====
     /// Total number of bytes received by NATS client
-    pub const IN_BYTES: &str = "nats_in_bytes";
+    pub const IN_TOTAL_BYTES: &str = "nats_in_total_bytes";
 
     /// Total number of bytes sent by NATS client
-    pub const OUT_BYTES: &str = "nats_out_bytes";
+    pub const OUT_OVERHEAD_BYTES: &str = "nats_out_overhead_bytes";
 
     /// Total number of messages received by NATS client
     pub const IN_MESSAGES: &str = "nats_in_messages";
@@ -63,20 +89,18 @@ pub mod nats {
 }
 
 /// All NATS client Prometheus metric names as an array for iteration/validation
-#[allow(dead_code)]
-pub const ALL_NATS_METRICS: &[&str] = &[
+pub const DRT_NATS_METRICS: &[&str] = &[
     nats::CONNECTION_STATE,
     nats::CONNECTS,
-    nats::IN_BYTES,
+    nats::IN_TOTAL_BYTES,
     nats::IN_MESSAGES,
-    nats::OUT_BYTES,
+    nats::OUT_OVERHEAD_BYTES,
     nats::OUT_MESSAGES,
 ];
 
 /// All component service Prometheus metric names as an array for iteration/validation
 /// (ordered to match NatsStatsMetrics fields)
-#[allow(dead_code)]
-pub const ALL_COMPONENT_SERVICE_METRICS: &[&str] = &[
+pub const COMPONENT_NATS_METRICS: &[&str] = &[
     nats::AVG_PROCESSING_MS,   // maps to: average_processing_time (nanoseconds)
     nats::TOTAL_ERRORS,        // maps to: num_errors
     nats::TOTAL_REQUESTS,      // maps to: num_requests
@@ -84,3 +108,21 @@ pub const ALL_COMPONENT_SERVICE_METRICS: &[&str] = &[
     nats::ACTIVE_SERVICES,     // derived from ServiceSet.services
     nats::ACTIVE_ENDPOINTS,    // derived from ServiceInfo.endpoints
 ];
+
+/// Work handler Prometheus metric names
+pub mod work_handler {
+    /// Total number of requests processed by work handler
+    pub const REQUESTS_TOTAL: &str = "requests_total";
+
+    /// Total number of bytes received in requests by work handler
+    pub const REQUEST_BYTES_TOTAL: &str = "request_bytes_total";
+
+    /// Total number of bytes sent in responses by work handler
+    pub const RESPONSE_BYTES_TOTAL: &str = "response_bytes_total";
+
+    /// Number of requests currently being processed by work handler
+    pub const CONCURRENT_REQUESTS: &str = "concurrent_requests";
+
+    /// Time spent processing requests by work handler (histogram)
+    pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
+}

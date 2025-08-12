@@ -51,25 +51,24 @@ impl ServiceClient {
 /// ServiceSet contains a collection of services with their endpoints and metrics
 ///
 /// Tree structure:
-/// ```
-/// ServiceSet
-/// └── services: Vec<ServiceInfo>
-///     ├── name: String
-///     ├── id: String
-///     ├── version: String
-///     ├── started: String
-///     └── endpoints: Vec<EndpointInfo>
-///         ├── name: String
-///         ├── subject: String
-///         └── data: Option<NatsStatsMetrics>
-///             ├── average_processing_time: f64
-///             ├── last_error: String
-///             ├── num_errors: u64
-///             ├── num_requests: u64
-///             ├── processing_time: u64
-///             ├── queue_group: String
-///             └── data: serde_json::Value (custom stats)
-/// ```
+/// Structure:
+/// - ServiceSet
+///   - services: Vec<ServiceInfo>
+///     - name: String
+///     - id: String
+///     - version: String
+///     - started: String
+///     - endpoints: Vec<EndpointInfo>
+///       - name: String
+///       - subject: String
+///       - data: Option<NatsStatsMetrics>
+///         - average_processing_time: f64
+///         - last_error: String
+///         - num_errors: u64
+///         - num_requests: u64
+///         - processing_time: u64
+///         - queue_group: String
+///         - data: serde_json::Value (custom stats)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceSet {
     services: Vec<ServiceInfo>,
@@ -416,5 +415,15 @@ impl ComponentSystemStatusNatsMetrics {
             .set((total_processing_time_nanos / 1_000_000) as i64); // maps to: processing_time (converted to milliseconds)
         self.active_services.set(service_count); // derived from ServiceSet.services
         self.active_endpoints.set(endpoint_count as i64); // derived from ServiceInfo.endpoints
+    }
+
+    /// Reset all metrics to zero. Useful when no data is available or to clear stale values.
+    pub fn reset_to_zeros(&self) {
+        self.avg_processing_ms.set(0.0);
+        self.total_errors.set(0);
+        self.total_requests.set(0);
+        self.total_processing_ms.set(0);
+        self.active_services.set(0);
+        self.active_endpoints.set(0);
     }
 }

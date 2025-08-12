@@ -147,14 +147,16 @@ impl SystemHealth {
     }
 }
 
+/// Type alias for runtime callback functions to reduce complexity
+type RuntimeCallback =
+    Box<dyn Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String> + Send + Sync>;
+
 /// Structure to hold Prometheus registries and associated callbacks for a given prefix
 pub struct MetricsRegistryEntry {
     /// The Prometheus registry for this prefix
     pub prometheus_registry: prometheus::Registry,
     /// List of function callbacks that receive a reference to any MetricsRegistry
-    pub runtime_callbacks: Vec<
-        Box<dyn Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String> + Send + Sync>,
-    >,
+    pub runtime_callbacks: Vec<RuntimeCallback>,
 }
 
 impl MetricsRegistryEntry {
@@ -186,6 +188,14 @@ impl MetricsRegistryEntry {
             .iter()
             .map(|callback| callback(runtime))
             .collect()
+    }
+
+    /// Returns true if a metric with the given name already exists in the Prometheus registry
+    pub fn has_metric_named(&self, metric_name: &str) -> bool {
+        self.prometheus_registry
+            .gather()
+            .iter()
+            .any(|mf| mf.name() == metric_name)
     }
 }
 
@@ -234,8 +244,5 @@ pub struct DistributedRuntime {
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
-    metrics_registry_by_prefix: Arc<std::sync::Mutex<HashMap<String, MetricsRegistryEntry>>>,
-
-    // Additional labels for metrics
-    labels: Vec<(String, String)>,
+    hierarchy_to_metricsregistry: Arc<std::sync::Mutex<HashMap<String, MetricsRegistryEntry>>>,
 }

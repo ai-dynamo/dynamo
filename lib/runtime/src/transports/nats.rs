@@ -83,7 +83,7 @@ impl Client {
         // Create a callback that updates the metrics when called
         let nats_metrics_clone = sys_nats_metrics.clone();
         let client_clone = self.client.clone();
-        drt.add_metrics_callback(&drt.prefix(), move |_runtime| {
+        drt.add_metrics_callback(&drt.hierarchy(), move |_runtime| {
             // Use the cloned client directly
             nats_metrics_clone.copy_from_nats_client_stats(&client_clone);
             Ok("".to_string())
@@ -547,12 +547,12 @@ impl DRTSystemStatusNatsMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime) -> Result<Self> {
         let in_bytes = drt.create_intgauge(
-            nats_metrics::IN_BYTES,
+            nats_metrics::IN_TOTAL_BYTES,
             "Total number of bytes received by NATS client",
             &[],
         )?;
         let out_bytes = drt.create_intgauge(
-            nats_metrics::OUT_BYTES,
+            nats_metrics::OUT_OVERHEAD_BYTES,
             "Total number of bytes sent by NATS client",
             &[],
         )?;

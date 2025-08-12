@@ -84,7 +84,15 @@ impl MetricsRegistry for Namespace {
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
-        vec![self.drt().basename()]
+        // Build as: [ "" (DRT), non-empty parent basenames from root -> leaf ]
+        let mut names: Vec<String> =
+            std::iter::successors(self.parent.as_deref(), |ns| ns.parent.as_deref())
+                .map(|ns| ns.basename())
+                .filter(|name| !name.is_empty())
+                .collect();
+        names.reverse();
+        names.insert(0, String::new());
+        names
     }
 
     fn stored_labels(&self) -> Vec<(&str, &str)> {
