@@ -78,6 +78,18 @@ func (w *WorkerDefaults) GetBaseContainer(backendFramework BackendFramework, num
 			FailureThreshold: 60,
 		}
 
+		container.StartupProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live",
+					Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+				},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+			FailureThreshold: 60,
+		}
+
 		container.Env = []corev1.EnvVar{
 			{
 				Name:  "DYN_SYSTEM_ENABLED",

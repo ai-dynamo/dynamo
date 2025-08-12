@@ -43,12 +43,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
+
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           args:

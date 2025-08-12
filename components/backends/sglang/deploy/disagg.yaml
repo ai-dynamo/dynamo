@@ -43,12 +43,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
+
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
           workingDir: /workspace/components/backends/sglang
           args:
@@ -86,12 +81,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
+
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
           workingDir: /workspace/components/backends/sglang
           args:

@@ -25,6 +25,8 @@ func ComponentDefaultsFactory(componentType string, numberOfNodes int32) Compone
 		return NewFrontendDefaults()
 	case commonconsts.ComponentTypeWorker:
 		return NewWorkerDefaults()
+	case commonconsts.ComponentTypePlanner:
+		return NewPlannerDefaults()
 	default:
 		return &BaseComponentDefaults{}
 	}
