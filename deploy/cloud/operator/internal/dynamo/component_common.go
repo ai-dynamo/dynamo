@@ -16,6 +16,11 @@ type ComponentDefaults interface {
 	// The backendFramework parameter may be empty for components that don't need backend-specific config
 	// The numberOfNodes parameter indicates the total number of nodes in the deployment
 	GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error)
+
+	// GetBasePodSpec returns the base pod spec configuration for this component type
+	// The backendFramework parameter may be empty for components that don't need backend-specific config
+	// The numberOfNodes parameter indicates the total number of nodes in the deployment
+	GetBasePodSpec(backendFramework BackendFramework, numberOfNodes int32) (corev1.PodSpec, error)
 }
 
 // ComponentDefaultsFactory creates appropriate defaults based on component type and number of nodes
@@ -37,6 +42,10 @@ type BaseComponentDefaults struct{}
 
 func (b *BaseComponentDefaults) GetBaseContainer(backendFramework BackendFramework, numberOfNodes int32) (corev1.Container, error) {
 	return b.getCommonContainer(), nil
+}
+
+func (b *BaseComponentDefaults) GetBasePodSpec(backendFramework BackendFramework, numberOfNodes int32) (corev1.PodSpec, error) {
+	return corev1.PodSpec{}, nil
 }
 
 func (b *BaseComponentDefaults) getCommonContainer() corev1.Container {

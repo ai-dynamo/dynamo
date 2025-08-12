@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -35,4 +36,11 @@ func (p *PlannerDefaults) GetBaseContainer(backendFramework BackendFramework, nu
 	}
 
 	return container, nil
+}
+
+func (p *PlannerDefaults) GetBasePodSpec(backendFramework BackendFramework, numberOfNodes int32) (corev1.PodSpec, error) {
+	podSpec := corev1.PodSpec{
+		ServiceAccountName: commonconsts.PlannerServiceAccountName,
+	}
+	return podSpec, nil
 }
