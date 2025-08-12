@@ -190,30 +190,39 @@ pub struct DecodeStream {
     /// the next valid chunk
     ids: Vec<u32>,
 
-    /// The previously returned chunk that needs to be discarded from the
-    /// decoding of the current ids to produce the next chunk
-    prefix: String,
+    // Index of the start of the sliding window view.
+    sliding_window_start: usize,
 
-    /// The index within the ids corresponding to the prefix so we can drain
-    /// correctlyk
-    prefix_index: usize,
+    // Text within the sliding window.
+    sliding_window: String,
 
-    /// We need to keep 2 prefixes.
-    /// Prefix is the second one that was already emitted to discard the part
-    /// of the text of all the ids
-    /// read is the prefix kept only for starting side effects of the prefix
-    read_index: usize,
+    sliding_window_size: usize,
 }
 
 impl DecodeStream {
     pub fn new(tokenizer: Arc<dyn traits::Tokenizer>, skip_special_tokens: bool) -> Self {
+        // TODO: This should be enough for practically anything.
+        const DEFAULT_SLIDING_WINDOW_SIZE: usize = 8;
+
+        Self::new_with_custom_sliding_window_size(
+            tokenizer,
+            skip_special_tokens,
+            DEFAULT_SLIDING_WINDOW_SIZE,
+        )
+    }
+
+    pub fn new_with_custom_sliding_window_size(
+        tokenizer: Arc<dyn traits::Tokenizer>,
+        skip_special_tokens: bool,
+        sliding_window_size: usize,
+    ) -> Self {
         Self {
             tokenizer,
             skip_special_tokens,
             ids: Vec::with_capacity(64),
-            prefix: String::with_capacity(64),
-            prefix_index: 0,
-            read_index: 0,
+            sliding_window_start: 0,
+            sliding_window: String::with_capacity(64),
+            sliding_window_size,
         }
     }
 
@@ -227,21 +236,32 @@ impl DecodeStream {
     /// a valid chunk.
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
         self.ids.push(id);
-        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
 
-        if decoded.len() <= self.prefix.len() || decoded.ends_with('�') {
+        let decoded = self.tokenizer.decode(
+            &self.ids[self.sliding_window_start..],
+            self.skip_special_tokens,
+        )?;
+
+        let idx = decoded.find(&self.sliding_window).and_then(|idx| {
+            if idx + self.sliding_window.len() < decoded.len() {
+                Some(idx)
+            } else {
+                None
+            }
+        });
+
+        if idx.is_none() {
             return Ok(None);
         }
-        if !decoded.starts_with(&self.prefix) {
-            anyhow::bail!("Detokenizer failure: invalid prefix");
-        }
-        let new_text = decoded[self.prefix.len()..].to_string();
+        let idx = idx.unwrap();
 
-        self.prefix = decoded;
-        self.read_index = self.prefix_index;
+        let new_text = decoded[idx + self.sliding_window.len()..].to_string();
 
-        let new_prefix_index = self.ids.len() - self.prefix_index;
-        self.prefix_index = new_prefix_index;
+        self.sliding_window_start = self.ids.len().saturating_sub(self.sliding_window_size);
+        self.sliding_window = self.tokenizer.decode(
+            &self.ids[self.sliding_window_start..],
+            self.skip_special_tokens,
+        )?;
 
         Ok(Some(new_text))
     }
