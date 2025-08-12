@@ -11,7 +11,6 @@ spec:
       dynamoNamespace: trtllm-agg
       componentType: frontend
       replicas: 1
-      # Override default resources
       resources:
         requests:
           cpu: "5"
@@ -33,7 +32,6 @@ spec:
       dynamoNamespace: trtllm-agg
       componentType: worker
       replicas: 1
-      # Override default resources
       resources:
         requests:
           cpu: "10"
@@ -45,7 +43,6 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
           args:

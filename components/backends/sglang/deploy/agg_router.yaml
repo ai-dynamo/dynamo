@@ -11,7 +11,6 @@ spec:
       dynamoNamespace: sglang-agg-router
       componentType: frontend
       replicas: 1
-      # Override default resources
       resources:
         requests:
           cpu: "10"
@@ -31,7 +30,6 @@ spec:
       dynamoNamespace: sglang-agg-router
       componentType: worker
       replicas: 1
-      # Override default resources
       resources:
         requests:
           cpu: "10"
@@ -43,7 +41,6 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           args:

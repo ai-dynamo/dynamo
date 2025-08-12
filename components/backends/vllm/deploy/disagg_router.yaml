@@ -27,14 +27,13 @@ spec:
       replicas: 2
       extraPodSpec:
         mainContainer:
-
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
@@ -42,11 +41,10 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  --is-prefill-worker 2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker

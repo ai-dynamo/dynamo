@@ -11,7 +11,6 @@ spec:
       dynamoNamespace: vllm-disagg
       componentType: frontend
       replicas: 1
-      # Override default resources for disagg mode
       resources:
         requests:
           cpu: "32"
@@ -33,7 +32,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
-      # Override default resources for disagg mode
       resources:
         requests:
           cpu: "32"
@@ -45,20 +43,18 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
-      # Override default resources for disagg mode
       resources:
         requests:
           cpu: "32"
@@ -70,11 +66,10 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker"
