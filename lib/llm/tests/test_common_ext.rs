@@ -4,10 +4,8 @@
 use dynamo_llm::protocols::{
     common::StopConditionsProvider,
     openai::{
-        chat_completions::NvCreateChatCompletionRequest,
-        common_ext::CommonExt,
-        completions::NvCreateCompletionRequest,
-        nvext::NvExt,
+        chat_completions::NvCreateChatCompletionRequest, common_ext::CommonExt,
+        completions::NvCreateCompletionRequest, nvext::NvExt,
     },
 };
 

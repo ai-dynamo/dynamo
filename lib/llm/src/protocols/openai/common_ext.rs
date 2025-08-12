@@ -64,10 +64,6 @@ mod tests {
         assert_eq!(common_ext.min_tokens, Some(5));
     }
 
-
-
-
-
     #[test]
     fn test_validation_min_tokens() {
         // Test that negative min_tokens fails validation
