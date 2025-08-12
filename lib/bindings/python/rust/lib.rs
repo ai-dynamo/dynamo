@@ -267,7 +267,7 @@ impl ModelType {
     #[classattr]
     const Chat: Self = ModelType { inner: llm_rs::model_type::ModelType::Chat };
     #[classattr]
-    const Completion: Self = ModelType { inner: llm_rs::model_type::ModelType::Completion };
+    const Completions: Self = ModelType { inner: llm_rs::model_type::ModelType::Completions };
     #[classattr]
     const Backend: Self = ModelType { inner: llm_rs::model_type::ModelType::Backend };
     #[classattr]

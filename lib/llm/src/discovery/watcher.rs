@@ -281,7 +281,7 @@ impl ModelWatcher {
             }
         };
 
-         if model_entry.model_type.supports_backend() || ((model_entry.model_type.supports_chat() || model_entry.model_type.supports_completion()) && model_entry.model_input == ModelInput::Tokens) {
+         if model_entry.model_type.supports_backend() || ((model_entry.model_type.supports_chat() || model_entry.model_type.supports_completions()) && model_entry.model_input == ModelInput::Tokens) {
             // A Backend model expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle both.
 
@@ -349,7 +349,7 @@ impl ModelWatcher {
             self.manager
                 .add_chat_completions_model(&model_entry.name, engine)?;
         }
-        else if model_entry.model_type.supports_completion() {
+        else if model_entry.model_type.supports_completions() {
             let push_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,

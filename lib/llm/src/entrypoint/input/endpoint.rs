@@ -83,7 +83,9 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                model.attach(&endpoint, ModelType::Backend, ModelInput::Tokens).await?;
+                // [oandreeva] Converting ModelType::Backend to ModelType::Chat | ModelType::Completion
+                let model_type = ModelType::Chat | ModelType::Completions;
+                model.attach(&endpoint, model_type, ModelInput::Tokens).await?;
             }
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
