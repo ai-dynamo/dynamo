@@ -20,7 +20,7 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="458e74eb907f96069e6d8a4f3c9f457001fef2ea"
+VLLM_REF="ba81acbdc1eec643ba815a76628ae3e4b2263b76"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
