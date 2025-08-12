@@ -266,7 +266,11 @@ impl Request {
         }
         let inner = inner.build().unwrap();
 
-        NvCreateChatCompletionRequest { inner, nvext: None }
+        NvCreateChatCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+        }
     }
 }
 
