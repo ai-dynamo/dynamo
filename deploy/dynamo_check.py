@@ -54,14 +54,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-try:
-    import pytz
-
-    PYTZ_AVAILABLE = True
-except ImportError:
-    PYTZ_AVAILABLE = False
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 
 class DynamoChecker:
@@ -176,7 +170,7 @@ class DynamoChecker:
 
         Note: Scans components/ and components/backends/ directories for modules with __init__.py files.
         """
-        components = []
+        components: List[str] = []
 
         if not self.workspace_dir:
             return components
@@ -246,24 +240,17 @@ class DynamoChecker:
             Formatted timestamp string in PDT or local timezone
             Example: '2025-08-10 22:22:52 PDT'
         """
-        if PYTZ_AVAILABLE:
-            try:
-                pdt = pytz.timezone("US/Pacific")
-                dt = datetime.datetime.fromtimestamp(timestamp, tz=pdt)
-                return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-            except Exception:
-                # Fallback to UTC if PDT conversion fails
-                try:
-                    dt = datetime.datetime.fromtimestamp(timestamp, tz=pytz.UTC)
-                    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-                except Exception:
-                    pass
-
-        # Fallback to local time with manual PDT offset approximation
-        # PDT is UTC-7, so subtract 7 hours from UTC
-        dt_utc = datetime.datetime.utcfromtimestamp(timestamp)
-        dt_pdt = dt_utc - datetime.timedelta(hours=7)
-        return dt_pdt.strftime("%Y-%m-%d %H:%M:%S PDT")
+        try:
+            # Use zoneinfo (standard library in Python 3.9+)
+            pdt = ZoneInfo("America/Los_Angeles")
+            dt = datetime.datetime.fromtimestamp(timestamp, tz=pdt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+            # Fallback to manual PDT offset approximation
+            # PDT is UTC-7, so subtract 7 hours from UTC
+            dt_utc = datetime.datetime.utcfromtimestamp(timestamp)
+            dt_pdt = dt_utc - datetime.timedelta(hours=7)
+            return dt_pdt.strftime("%Y-%m-%d %H:%M:%S PDT")
 
     def _get_cargo_info(self) -> Tuple[Optional[str], Optional[str]]:
         """Get cargo target directory and cargo home directory.
@@ -481,7 +468,7 @@ class DynamoChecker:
         max_width: int,
         site_packages: str,
         collect_failures: bool = False,
-        package_info: Dict = None,
+        package_info: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, str], List[str]]:
         """Test a group of components for a given package.
 
@@ -637,7 +624,7 @@ class DynamoChecker:
 
         return results, failures
 
-    def _get_package_info(self, package_name: str) -> Dict:
+    def _get_package_info(self, package_name: str) -> Dict[str, Any]:
         """Get package installation information including .pth files.
 
         Args:
@@ -652,8 +639,8 @@ class DynamoChecker:
         if hasattr(site, "getusersitepackages"):
             site_packages_dirs.append(site.getusersitepackages())
 
-        result = {}
-        pth_files = []
+        result: Dict[str, Any] = {}
+        pth_files: List[Dict[str, str]] = []
 
         for site_dir in site_packages_dirs:
             if not os.path.exists(site_dir):
@@ -776,7 +763,7 @@ class DynamoChecker:
         # Get site-packages path for comparison
         import site
 
-        site_packages = site.getsitepackages()[0] if site.getsitepackages() else None
+        site_packages = site.getsitepackages()[0] if site.getsitepackages() else ""
 
         # Get package information for headers
         runtime_package_info = self._get_package_info("ai-dynamo-runtime")
@@ -873,7 +860,7 @@ class DynamoChecker:
                         )
 
                 # Show *.so file if found
-                if has_so_file:
+                if has_so_file and so_file is not None:
                     display_so_file = self._replace_home_with_var(so_file)
                     try:
                         so_mtime = os.path.getmtime(so_file)
