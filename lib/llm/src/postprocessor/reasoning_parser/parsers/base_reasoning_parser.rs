@@ -74,6 +74,17 @@ impl ReasoningParser for BaseReasoningParser {
         let mut current_text = self._buffer.to_string();
         // If the current text is a prefix of the think token, keep buffering
 
+        println!(
+            "DEBUG: parse_reasoning_streaming_incremental called with text: {:?}",
+            text
+        );
+        println!("DEBUG: current buffer: {:?}", self._buffer);
+        println!("DEBUG: current_text: {:?}", current_text);
+        println!(
+            "DEBUG: in_reasoning: {}, stripped_think_start: {}, stream_reasoning: {}",
+            self._in_reasoning, self.stripped_think_start, self.stream_reasoning
+        );
+
         if self.think_start_token.starts_with(&current_text)
             && self.think_start_token.as_str() != current_text.as_str()
         {
@@ -94,6 +105,7 @@ impl ReasoningParser for BaseReasoningParser {
         // Strip `<think>` token if present
         if !self.stripped_think_start && current_text.contains(&self.think_start_token) {
             current_text = current_text.replace(&self.think_start_token, "");
+            self._buffer = current_text.to_string();
             self.stripped_think_start = true;
             self._in_reasoning = true;
         }
@@ -120,7 +132,7 @@ impl ReasoningParser for BaseReasoningParser {
         if self._in_reasoning {
             if self.stream_reasoning {
                 // Stream the content immediately
-                let reasoning_text = self._buffer.clone();
+                let reasoning_text = current_text;
                 self._buffer.clear();
                 return ParserResult {
                     normal_text: String::new(),
@@ -135,7 +147,7 @@ impl ReasoningParser for BaseReasoningParser {
         }
         // If we're not in a reasoning block return as normal text
         if !self._in_reasoning {
-            let normal_text = self._buffer.clone();
+            let normal_text = current_text;
             self._buffer.clear();
             ParserResult {
                 normal_text,
@@ -156,7 +168,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_and_parse_reasoning() {
+    fn test_detect_and_parse_reasoning_reasoning() {
         let mut parser =
             BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
         let result =
@@ -165,7 +177,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "with reasoning");
     }
     #[test]
-    fn test_detect_and_parse_reasoning_no_reasoning() {
+    fn test_detect_and_parse_reasoning_reasoning_no_reasoning() {
         let mut parser =
             BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
         let result = parser.detect_and_parse_reasoning("This is a test without reasoning.");
@@ -173,7 +185,7 @@ mod tests {
         assert_eq!(result.reasoning_text, "");
     }
     #[test]
-    fn test_detect_and_parse_reasoning_truncated_reasoning() {
+    fn test_detect_and_parse_reasoning_reasoning_truncated_reasoning() {
         let mut parser =
             BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
         let result = parser.detect_and_parse_reasoning("<think>with truncated reasoning");
@@ -198,5 +210,215 @@ mod tests {
             .parse_reasoning_streaming_incremental("<think>with reasoning</think> and more text.");
         assert_eq!(result.normal_text, " and more text.");
         assert_eq!(result.reasoning_text, "with reasoning");
+    }
+
+    #[test]
+    fn test_parse_reasoning_streaming_incremental_no_end_token() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let result = parser.parse_reasoning_streaming_incremental("<think>with reasoning");
+        assert_eq!(result.normal_text, "");
+        assert_eq!(result.reasoning_text, "with reasoning");
+    }
+
+    #[test]
+    fn test_detect_and_parse_reasoning_multiple_reasoning_blocks() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning(
+            "<think>first reasoning</think> middle <think>second reasoning</think> end",
+        );
+        // The current implementation only handles the first occurrence properly
+        assert_eq!(result.normal_text, "middle second reasoning</think> end");
+        assert_eq!(result.reasoning_text, "first reasoning");
+    }
+
+    #[test]
+    fn test_streaming_multiple_reasoning_blocks() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+        let result1 =
+            parser.parse_reasoning_streaming_incremental("<think>first reasoning</think> middle");
+        assert_eq!(result1.normal_text, " middle");
+        assert_eq!(result1.reasoning_text, "first reasoning");
+
+        // Basic parser assumes only one reasoning block at a time
+        let result2 =
+            parser.parse_reasoning_streaming_incremental(" <think>second reasoning</think> end");
+        assert_eq!(result2.normal_text, " <think>second reasoning</think> end");
+        assert_eq!(result2.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_partial_token_matching_opening_tag() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        // Feed partial opening tag
+        let result1 = parser.parse_reasoning_streaming_incremental("<th");
+        assert_eq!(result1.normal_text, "");
+        assert_eq!(result1.reasoning_text, "");
+
+        // Complete the opening tag and add content
+        let result2 = parser
+            .parse_reasoning_streaming_incremental("ink>reasoning content</think> normal text");
+        assert_eq!(result2.normal_text, " normal text");
+        assert_eq!(result2.reasoning_text, "reasoning content");
+    }
+
+    #[test]
+    fn test_partial_token_matching_closing_tag() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+
+        // Start with complete opening and partial content
+        let result1 = parser.parse_reasoning_streaming_incremental("<think>reasoning content</th");
+        assert_eq!(result1.normal_text, "");
+        assert_eq!(result1.reasoning_text, "");
+
+        // Complete the closing tag
+        let result2 = parser.parse_reasoning_streaming_incremental("ink> normal text");
+        assert_eq!(result2.normal_text, " normal text");
+        assert_eq!(result2.reasoning_text, "reasoning content");
+    }
+
+    #[test]
+    fn test_buffer_state_persistence_across_calls() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+
+        // First call - partial opening tag
+        let result1 = parser.parse_reasoning_streaming_incremental("<th");
+        assert_eq!(result1.normal_text, "");
+        assert_eq!(result1.reasoning_text, "");
+
+        // Second call - complete opening tag, start reasoning
+        let result2 = parser.parse_reasoning_streaming_incremental("ink>part1 ");
+        assert_eq!(result2.normal_text, "");
+        assert_eq!(result2.reasoning_text, "");
+
+        // Third call - more reasoning content
+        let result3 = parser.parse_reasoning_streaming_incremental("part2 ");
+        assert_eq!(result3.normal_text, "");
+        assert_eq!(result3.reasoning_text, "");
+
+        // Fourth call - end reasoning and normal text
+        let result4 = parser.parse_reasoning_streaming_incremental("part3</think> normal");
+        assert_eq!(result4.normal_text, " normal");
+        assert_eq!(result4.reasoning_text, "part1 part2 part3");
+    }
+
+    #[test]
+    fn test_streaming_with_stream_reasoning_enabled() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+
+        // Start reasoning block
+        let result1 = parser.parse_reasoning_streaming_incremental("<think>reasoning ");
+        assert_eq!(result1.normal_text, "");
+        assert_eq!(result1.reasoning_text, "reasoning ");
+
+        // Continue streaming reasoning
+        let result2 = parser.parse_reasoning_streaming_incremental("content ");
+        assert_eq!(result2.normal_text, "");
+        assert_eq!(result2.reasoning_text, "content ");
+
+        // End reasoning block
+        let result3 = parser.parse_reasoning_streaming_incremental("more</think> normal");
+        assert_eq!(result3.normal_text, " normal");
+        assert_eq!(result3.reasoning_text, "more");
+    }
+
+    #[test]
+    fn test_nested_reasoning_blocks() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning(
+            "<think>outer <think>inner</think> reasoning</think> normal",
+        );
+        // Current implementation should handle this by finding the first closing tag
+        assert_eq!(result.normal_text, "reasoning</think> normal");
+        // All <think> tags are stripped, so <think>inner is not included
+        assert_eq!(result.reasoning_text, "outer inner");
+    }
+
+    #[test]
+    fn test_malformed_missing_closing_tag() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning("<think>reasoning without closing tag");
+        assert_eq!(result.normal_text, "");
+        assert_eq!(result.reasoning_text, "reasoning without closing tag");
+    }
+
+    #[test]
+    fn test_malformed_stray_closing_tag() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning("normal text</think> more normal");
+        assert_eq!(result.normal_text, "normal text</think> more normal");
+        assert_eq!(result.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_malformed_multiple_opening_tags() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser
+            .detect_and_parse_reasoning("<think>first <think>second reasoning</think> normal");
+        // Should handle by replacing all opening tags and using first closing tag
+        assert_eq!(result.normal_text, "normal");
+        assert_eq!(result.reasoning_text, "first second reasoning");
+    }
+
+    #[test]
+    fn test_empty_reasoning_block() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning("<think></think> normal text");
+        assert_eq!(result.normal_text, "normal text");
+        assert_eq!(result.reasoning_text, "");
+    }
+
+    #[test]
+    fn test_whitespace_only_reasoning_block() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
+        let result = parser.detect_and_parse_reasoning("<think>   \n\t  </think> normal text");
+        assert_eq!(result.normal_text, "normal text");
+        assert_eq!(result.reasoning_text, ""); // Should be empty after trim
+    }
+
+    #[test]
+    fn test_force_reasoning_mode() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
+        let result = parser.detect_and_parse_reasoning("no think tags here");
+        assert_eq!(result.normal_text, "");
+        assert_eq!(result.reasoning_text, "no think tags here");
+    }
+
+    #[test]
+    fn test_streaming_reset_state_after_complete_block() {
+        let mut parser =
+            BaseReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
+
+        // Process complete reasoning block
+        let result1 =
+            parser.parse_reasoning_streaming_incremental("<think>reasoning</think> normal");
+        assert_eq!(result1.normal_text, " normal");
+        assert_eq!(result1.reasoning_text, "reasoning");
+
+        // Process normal text - should not be affected by previous state
+        let result2 = parser.parse_reasoning_streaming_incremental(" more normal text");
+        assert_eq!(result2.normal_text, " more normal text");
+        assert_eq!(result2.reasoning_text, "");
+
+        // Basic parser does not expect more than one reasoning block at a time
+        // So this should not affect the state
+        let result3 =
+            parser.parse_reasoning_streaming_incremental(" <think>new reasoning</think> final");
+        assert_eq!(result3.normal_text, " <think>new reasoning</think> final");
+        assert_eq!(result3.reasoning_text, "");
     }
 }
