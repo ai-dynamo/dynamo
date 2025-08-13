@@ -37,6 +37,8 @@ mod path;
 use lease::*;
 pub use path::*;
 
+use super::utils::build_in_runtime;
+
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
 
 /// ETCD Client
@@ -102,45 +104,36 @@ impl Client {
     /// If the lease expires, the [`Runtime`] will be shutdown.
     /// If the [`Runtime`] is shutdown, the lease will be revoked.
     pub async fn new(config: ClientOptions, runtime: Runtime) -> Result<Self> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()?;
-
         let token = runtime.primary_token();
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ((client, lease_id), rt) = build_in_runtime(
+            async move {
+                let client =
+                    etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options)
+                        .await?;
 
-        rt.spawn(async move {
-            let client =
-                etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options).await?;
+                let lease_id = if config.attach_lease {
+                    let lease_client = client.lease_client();
 
-            let lease_id = if config.attach_lease {
-                let lease_client = client.lease_client();
+                    let lease = create_lease(lease_client, 10, token)
+                        .await
+                        .context("creating primary lease")?;
 
-                let lease = create_lease(lease_client, 10, token)
-                    .await
-                    .context("creating primary lease")?;
+                    lease.id
+                } else {
+                    0
+                };
 
-                lease.id
-            } else {
-                0
-            };
-
-            if tx.send((client, lease_id)).is_err() {
-                anyhow::bail!("This should never happen!");
-            }
-
-            Ok(())
-        })
-        .await??;
-
-        let (client, lease_id) = rx.await.unwrap();
+                Ok((client, lease_id))
+            },
+            1,
+        )
+        .await?;
 
         Ok(Client {
             client,
             primary_lease: lease_id,
-            rt: Arc::new(rt),
+            rt,
             runtime,
         })
     }

@@ -45,13 +45,14 @@ use validator::{Validate, ValidationError};
 pub use crate::slug::Slug;
 use tracing as log;
 
+use super::utils::build_in_runtime;
+
 pub const URL_PREFIX: &str = "nats://";
 
 #[derive(Clone)]
 pub struct Client {
     client: client::Client,
     js_ctx: jetstream::Context,
-    _runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl Client {
@@ -262,27 +263,20 @@ impl ClientOptions {
             }
         };
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(NATS_WORKER_THREADS)
-            .enable_all()
-            .build()?;
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        runtime.spawn(async move {
-            let client = client.connect(self.server).await;
-            tx.send(client).unwrap();
-        });
-
-        let client = rx.await.unwrap()?;
+        let (client, _) = build_in_runtime(
+            async move {
+                client
+                    .connect(self.server)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+            },
+            NATS_WORKER_THREADS,
+        )
+        .await?;
 
         let js_ctx = jetstream::new(client.clone());
 
-        Ok(Client {
-            client,
-            js_ctx,
-            _runtime: Arc::new(runtime),
-        })
+        Ok(Client { client, js_ctx })
     }
 }
 
