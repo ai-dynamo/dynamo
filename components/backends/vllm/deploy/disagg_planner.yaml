@@ -83,12 +83,12 @@ spec:
             - --profile-results-dir=/workspace/profiling_results
     Prometheus:
       dynamoNamespace: vllm-disagg-planner
-      componentType: default
+      componentType: frontend # TODO: this is set to frontend to ensure a service is created for the prometheus component. This should be managed differently.
       replicas: 1
       envs:
         - name: PYTHONPATH
           value: "/workspace/components/planner/src"
-      livenessProbe:
+      livenessProbe: # required to override the default liveness probe for the frontend component
         exec:
           command:
             - /bin/sh
@@ -97,7 +97,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      readinessProbe:
+      readinessProbe: # required to override the default readiness probe for the frontend component
         exec:
           command:
             - /bin/sh
