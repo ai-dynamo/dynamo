@@ -189,11 +189,9 @@ impl MetricsRegistry for Component {
     }
 
     fn stored_labels(&self) -> Vec<(&str, &str)> {
-        // Convert Vec<(String, String)> to Vec<(&str, &str)>
-        self.labels
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect()
+        let mut all_labels = self.namespace.stored_labels();
+        all_labels.extend(self.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        all_labels
     }
 
     fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
@@ -236,7 +234,7 @@ impl Component {
             component: self.clone(),
             name: endpoint.into(),
             is_static: self.is_static,
-            labels: self.labels.clone(),
+            labels: Vec::new(),
         }
     }
 
@@ -351,11 +349,9 @@ impl MetricsRegistry for Endpoint {
     }
 
     fn stored_labels(&self) -> Vec<(&str, &str)> {
-        // Convert Vec<(String, String)> to Vec<(&str, &str)>
-        self.labels
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect()
+        let mut all_labels = self.component.stored_labels();
+        all_labels.extend(self.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        all_labels
     }
 
     fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
