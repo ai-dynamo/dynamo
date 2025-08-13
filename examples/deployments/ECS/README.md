@@ -2,7 +2,7 @@
 ## 1. ECS Cluster Setup 
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.
-3. Choose the GPU supported AMI `Amazon Linux 2 (GPU)` 
+3. Choose the ECS-optimized GPU AMI `Amazon Linux 2 (GPU)` (Amazon ECS–optimized), which includes NVIDIA drivers and the Docker GPU runtime out of the box.
 4. Choose `g6e.2xlarge` as the **EC2 instance type** and add an `SSH Key pair` so you can log in the instance for debugging purpose.
 5. Set **Root EBS volume size** as `200`
 6. For the networking, use the default settings. Make sure the **security group** has 
@@ -21,7 +21,7 @@ Add a task for ETCD and NATS services. A sample task definition JSON is attached
 |Container port|Protocol|Port name| App protocol|
 |-|-|-|-|
 |2379|TCP|2379|HTTP|
-|2380|TCP|2379|HTTP|
+|2380|TCP|2380|HTTP|
 - Environment variable key is `ALLOW_NONE_AUTHENTICATION` and value is `YES`
 2. NATS container
 - Container name use `nats`
@@ -55,7 +55,7 @@ Please follow steps below to create this task
 |Key|Value type|Value|
 |-|-|-|
 |ETCD_ENDPOINTS|Value|http://IP_ADDRESS:2379|
-|NATS_SERVER|Value|http://IP_ADDRESS:4222|
+|NATS_SERVER|Value|nats://IP_ADDRESS:4222|
 - Docker configuration  
 Add `sh,-c` in **Entry point** and `cd components/backends/vllm && python -m dynamo.frontend --router-mode kv & python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager` in **Command**
 
@@ -82,7 +82,7 @@ Find the public IP of the dynamo frontend task from the task page. Run following
 ```sh
 export DYNAMO_IP_ADDRESS=TASK_PUBLIC_IP_ADDRESS
 curl http://$DYNAMO_IP_ADDRESS:8000/v1/models
-curl $DYNAMO_IP_ADDRESS:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl http://$DYNAMO_IP_ADDRESS:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
