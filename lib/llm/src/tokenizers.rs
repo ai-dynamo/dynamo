@@ -171,6 +171,11 @@ pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tok
     }
 }
 
+// With incremental detokenization, we need to consider the final context tokens when handling the initial decode tokens.
+// This is the initial offset from the end of the context that we start decoding from.
+// Both Huggingface TGI and vLLM use this same value.
+// See: https://github.com/huggingface/text-generation-inference/blob/24c2bff65924801ddf90fa24fcc72752d4f45538/server/text_generation_server/models/mamba.py#L169
+// and https://github.com/vllm-project/vllm/blob/da2705198fa19030a25d0bea437f7be6547d47d4/vllm/transformers_utils/detokenizer_utils.py#L51
 const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
 
 /// DecodeStream will keep the state necessary to produce individual chunks of
@@ -221,7 +226,8 @@ impl DecodeStream {
 
     /// Step appends a token_id to the internal state and tries to produce a text chunk.
     ///
-    /// The method only fails if the internal state is corrupted.
+    /// Implementation directly copied from Huggingface's TGI:
+    /// https://github.com/huggingface/text-generation-inference/blob/24c2bff65924801ddf90fa24fcc72752d4f45538/server/text_generation_server/models/model.py#L144
     ///
     /// Returning `None` means the given id is not enough to produce a chunk.
     /// This typically happens with `byte_fallback` options where some tokens do not
