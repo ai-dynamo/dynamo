@@ -34,7 +34,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:
@@ -99,7 +99,7 @@ spec:
             - --profile-results-dir=/workspace/profiling_results
     Prometheus:
       dynamoNamespace: dynamo
-      componentType: main
+      componentType: frontend # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       replicas: 1
       envs:
         - name: PYTHONPATH
