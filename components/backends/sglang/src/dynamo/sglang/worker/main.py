@@ -391,51 +391,41 @@ async def register_llm_with_runtime_config(
 
 async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
     """Get runtime config from SGLang engine"""
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2
-
-    for attempt in range(MAX_RETRIES):
-        try:
-            server_info = engine.get_server_info()
-            if not server_info:
-                logging.warning("No server info from SGLang engine")
-                return None
-
+    try:
+        # Try to check if the engine has a scheduler attribute with the computed values
+        if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
             runtime_config = ModelRuntimeConfig()
-            if server_info.get("max_total_num_tokens") is not None:
-                runtime_config.total_kv_blocks = server_info["max_total_num_tokens"]
-                logging.info(
-                    f"Set model runtime config total KV blocks: {runtime_config.total_kv_blocks}"
-                )
 
-            if server_info.get("max_running_requests") is not None:
-                runtime_config.max_num_seqs = server_info["max_running_requests"]
-                logging.info(
-                    f"Set model runtime config max num seqs: {runtime_config.max_num_seqs}"
-                )
+            # Get max_total_num_tokens from scheduler_info
+            if "max_total_num_tokens" in engine.scheduler_info:
+                max_total_tokens = engine.scheduler_info["max_total_num_tokens"]
+                if max_total_tokens and hasattr(
+                    engine.tokenizer_manager, "server_args"
+                ):
+                    page_size = engine.tokenizer_manager.server_args.page_size
+                    if page_size:
+                        runtime_config.total_kv_blocks = max_total_tokens // page_size
+                        logging.info(
+                            f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
+                            f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                        )
 
-            if server_info.get("mem_fraction_static") is not None:
-                gpu_mem_percentage = int(server_info["mem_fraction_static"] * 100)
-                runtime_config.gpu_memory_utilization = gpu_mem_percentage
-                logging.info(
-                    f"Set model runtime config GPU memory utilization: {gpu_mem_percentage}%"
-                )
+            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info
+            # TODO: figure out where they are
 
             return runtime_config
 
-        except Exception as e:
-            logging.warning(
-                f"Attempt {attempt + 1}/{MAX_RETRIES} failed to publish runtime config: {e}"
-            )
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAY)
-                RETRY_DELAY *= 2
-            else:
-                logging.error(
-                    f"Failed to publish runtime config after {MAX_RETRIES} attempts"
-                )
+        # If scheduler approach doesn't work, log and return None to indicate we'll skip runtime config
+        logging.warning(
+            "Could not access runtime config from SGLang engine. "
+            "The engine may compute these values internally after initialization. "
+            "Proceeding without runtime config - SGLang will use its internal defaults."
+        )
+        return None
 
-    return None
+    except Exception as e:
+        logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
+        return None
 
 
 def main():

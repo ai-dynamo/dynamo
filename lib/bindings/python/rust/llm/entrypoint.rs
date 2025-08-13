@@ -164,7 +164,8 @@ pub fn make_engine<'p>(
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_port(args.http_port)
-        .is_mocker(matches!(args.engine_type, EngineType::Mocker));
+        .is_mocker(matches!(args.engine_type, EngineType::Mocker))
+        .extra_engine_args(args.extra_engine_args.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)

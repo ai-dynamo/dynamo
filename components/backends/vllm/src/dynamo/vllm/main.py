@@ -223,8 +223,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_values = get_engine_cache_info(engine_client)
         runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
         runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
-        gpu_mem_integer = runtime_values["gpu_memory_utilization"]
-        runtime_config.gpu_memory_utilization = int(gpu_mem_integer * 100)
+        runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
 
         await register_llm(
             ModelType.Backend,
@@ -258,11 +257,11 @@ def get_engine_cache_info(engine: AsyncLLM):
         # Get values directly from vllm_config instead of collective_rpc
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
-            "gpu_memory_utilization": engine.vllm_config.cache_config.gpu_memory_utilization,
         }
 
         scheduler_values = {
             "max_num_seqs": engine.vllm_config.scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
         }
 
         logging.info(f"Cache config values: {cache_values}")
@@ -270,7 +269,7 @@ def get_engine_cache_info(engine: AsyncLLM):
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
-            "gpu_memory_utilization": cache_values["gpu_memory_utilization"],
+            "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }
     except Exception as e:
         logging.error(f"Failed to get configuration values from vLLM config: {e}")
