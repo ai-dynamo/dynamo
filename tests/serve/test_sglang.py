@@ -3,7 +3,6 @@
 
 import logging
 import os
-import random
 import re
 from dataclasses import dataclass
 from typing import Any, List
@@ -15,26 +14,29 @@ from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
+
 def validate_log_patterns(log_file, patterns):
     """Validate log patterns after test completion."""
     if not os.path.exists(log_file):
         raise AssertionError(f"Log file not found: {log_file}")
-    
+
     with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
-    
+
     compiled = [re.compile(p) for p in patterns]
     missing = []
-    
+
     for pattern, rx in zip(patterns, compiled):
         if not rx.search(content):
             missing.append(pattern)
-    
+
     if missing:
         # Include sample of log content for debugging
         sample = content[-1000:] if len(content) > 1000 else content
-        raise AssertionError(f"Missing expected log patterns: {missing}\n\nLog sample:\n{sample}")
-    
+        raise AssertionError(
+            f"Missing expected log patterns: {missing}\n\nLog sample:\n{sample}"
+        )
+
     return True
 
 
@@ -147,7 +149,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             "why is novak djokovic not the best tennis player of all time?",
             "why is rafa nadal a sneaky good grass court player?",
             "explain the difference between federer and nadal's backhand.",
-            "who is the most clutch tennis player in history?"
+            "who is the most clutch tennis player in history?",
         ]
         responses = []
         for prompt in prompts:
