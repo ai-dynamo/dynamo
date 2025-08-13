@@ -389,7 +389,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         let mut max_logit = f64::NEG_INFINITY;
 
         // Calculate logits for each worker
-        for (worker_id, runtime_config) in workers.iter() {
+        for worker_id in workers.keys() {
             let overlap = *overlaps.get(worker_id).unwrap_or(&0);
 
             // this is the number of prefill tokens the worker would have if the request were scheduled there
