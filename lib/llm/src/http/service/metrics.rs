@@ -7,13 +7,29 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use std::sync::OnceLock;
 
 pub use prometheus::Registry;
 
 use super::RouteDoc;
 
-/// Metric prefix for all HTTP service metrics
+// Default metric prefix
 pub const FRONTEND_METRIC_PREFIX: &str = "dynamo_frontend";
+
+// Environment variable that overrides the default metric prefix if provided
+pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
+
+static METRICS_PREFIX: OnceLock<String> = OnceLock::new();
+
+fn metrics_prefix() -> &'static str {
+    METRICS_PREFIX
+        .get_or_init(|| std::env::var(METRICS_PREFIX_ENV).unwrap_or_else(|_| FRONTEND_METRIC_PREFIX.to_string()))
+        .as_str()
+}
+
+fn frontend_metric_name(suffix: &str) -> String {
+    format!("{}_{}", metrics_prefix(), suffix)
+}
 
 /// Value for the `status` label in the request counter for successful requests
 pub const REQUEST_STATUS_SUCCESS: &str = "success";
@@ -26,11 +42,6 @@ pub const REQUEST_TYPE_STREAM: &str = "stream";
 
 /// Partial value for the `type` label in the request counter for unary requests
 pub const REQUEST_TYPE_UNARY: &str = "unary";
-
-/// Helper function to construct metric names with the standard prefix
-fn frontend_metric_name(suffix: &str) -> String {
-    format!("{}_{}", FRONTEND_METRIC_PREFIX, suffix)
-}
 
 pub struct Metrics {
     request_counter: IntCounterVec,
@@ -107,15 +118,17 @@ impl Default for Metrics {
 }
 
 impl Metrics {
-    /// Create Metrics with the standard prefix defined by [`FRONTEND_METRIC_PREFIX`]
-    /// The following metrics will be created:
-    /// - `dynamo_frontend_requests_total` - IntCounterVec for the total number of requests processed
-    /// - `dynamo_frontend_inflight_requests` - IntGaugeVec for the number of inflight requests
-    /// - `dynamo_frontend_request_duration_seconds` - HistogramVec for the duration of requests
-    /// - `dynamo_frontend_input_sequence_tokens` - HistogramVec for input sequence length in tokens
-    /// - `dynamo_frontend_output_sequence_tokens` - HistogramVec for output sequence length in tokens
-    /// - `dynamo_frontend_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
-    /// - `dynamo_frontend_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
+    /// Create Metrics with the standard prefix defined by [`FRONTEND_METRIC_PREFIX`] or specify custom prefix via the following environment variable:
+    /// - `DYN_METRICS_PREFIX`: Override the default metrics prefix
+    ///
+    /// The following metrics will be created with the configured prefix:
+    /// - `{prefix}_requests_total` - IntCounterVec for the total number of requests processed
+    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight requests
+    /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
+    /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
+    /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
+    /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new() -> Self {
         let request_counter = IntCounterVec::new(
             Opts::new(
