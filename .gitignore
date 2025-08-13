@@ -90,3 +90,6 @@ TensorRT-LLM
 
 # Local build artifacts for devcontainer
 .build/
+
+# Pytest
+.coverage
