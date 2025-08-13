@@ -95,7 +95,7 @@ via ```./container/build.sh --framework X``` and run via
 The tests will automatically use a local cache at `~/.cache/huggingface` to avoid
 repeated downloads of model files. This cache is shared across test runs to improve performance.
 
-## Running tests locally
+## Running tests locally outside of a container
 
 To run tests locally, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
 
