@@ -19,7 +19,20 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-use super::tools::{CalledFunctionArguments, CalledFunctionParameters};
+use super::parsers::ToolCallConfig;
+// Same as CalledFunction with named parameters
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CalledFunctionParameters {
+    pub name: String,
+    pub parameters: HashMap<String, Value>,
+}
+
+// Same as CalledFunction with named parameters
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CalledFunctionArguments {
+    pub name: String,
+    pub arguments: HashMap<String, Value>,
+}
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
 ///
@@ -62,7 +75,7 @@ use super::tools::{CalledFunctionArguments, CalledFunctionParameters};
 /// let result = try_tool_call_parse_json(input)?;
 /// assert!(result.is_some());
 /// ```
-pub fn try_tool_call_parse_json(message: &str) -> anyhow::Result<Option<ToolCallResponse>> {
+pub fn try_tool_call_parse_json(message: &str, config: &ToolCallConfig) -> anyhow::Result<Option<ToolCallResponse>> {
     let trimmed = message.trim();
 
     // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]

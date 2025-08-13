@@ -13,32 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use serde_json::Value;
-
 pub use crate::preprocessor::tools::request::*;
 pub use super::response::*;
 
 // Import json_parser from postprocessor module
 pub use super::json_parser::*;
-
-
-
-// Same as CalledFunction with named parameters
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CalledFunctionParameters {
-    pub name: String,
-    pub parameters: HashMap<String, Value>,
-}
-
-// Same as CalledFunction with named parameters
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CalledFunctionArguments {
-    pub name: String,
-    pub arguments: HashMap<String, Value>,
-}
-
 
 /// Try parsing a string as a structured tool call, for aggregation usage.
 ///
@@ -163,5 +142,116 @@ mod tests {
         let input = r#"{ "foo": "bar" }"#;
         let result = try_tool_call_parse_json(input).unwrap();
         assert!(result.is_none());
+    }
+
+    // Tests for real model outputs - disabled by default
+    #[test]
+    #[ignore]
+    fn test_nvidia_llama3_nemotron_super_49b_simple() {
+        let input = r#"<think>
+Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me check the tools available.
+</think>
+
+<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_qwen_qwq_32b_simple() {
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_nousresearch_hermes3_llama31_8b_simple() {
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_ibm_granite_40_tiny_preview_simple() {
+        let input = r#"[{"arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}, "name": "get_weather"}]"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_mistralai_mistral_7b_instruct_v03_simple() {
+        let input = r#" [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_meta_llama_llama31_8b_instruct_simple() {
+        let input = r#"{"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_internlm_internlm2_5_7b_chat_simple() {
+        let input = r#"San Francisco's weather is known for its mild climate with plenty of fog, especially along the coast. Here's an overview of the weather in Fahrenheit:
+
+- **Summer (June to August)**: Average highs range from the mid-60s to low 70s Fahrenheit, with cooler mornings and evenings. Coastal areas may be cooler than inland spots.
+
+Remember, San Francisco weather can be quite unpredictable, particularly with its famous fog, which can significantly lower temperatures. Always check a local weather forecast for the most accurate and up-to-date information."#;
+        let result = try_tool_call_parse_json(input).unwrap();
+        assert!(result.is_none()); // This model doesn't produce tool calls
+    }
+
+    #[test]
+    #[ignore]
+    fn test_ai21labs_ai21_jamba_15_mini_simple() {
+        let input = r#" [
+    {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+]"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_salesforce_llama_xlam_2_8b_fc_r_simple() {
+        let input = r#"[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
+        let result = try_tool_call_parse_json(input).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
     }
 }

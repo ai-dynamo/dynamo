@@ -30,10 +30,46 @@ use regex::Regex;
 pub enum ToolCallParserType {
     /// JSON format: `{"name": "function", "arguments": {...}}`
     Json,
-    /// Pythonic format: `function_name(arg1=val1, arg2=val2)`
     Pythonic,
-    /// XML format: `<function name="function"><arguments>...</arguments></function>`
+    Harmony,
+    /// <function_call>```typescript
+    /// functions.get_current_weather({"location": "Shanghai"})
+    /// ```
+    Typescript,
     Xml,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct JsonParserConfig {
+    /// Start token for list of parallel tool calls (e.g., "<TOOLCALLS>")
+    pub parallel_tool_calls_start_tokens: Vec<String>,
+    /// End token for list of parallel tool calls (e.g., "</TOOLCALLS>")
+    pub parallel_tool_calls_end_tokens: Vec<String>,
+    /// Start token for individual tool calls (e.g., "<TOOLCALL>")
+    pub tool_call_start_tokens: Vec<String>,
+    /// End token for individual tool calls (e.g., "</TOOLCALL>")
+    pub tool_call_end_tokens: Vec<String>,
+    /// The key for the function name in the tool call
+    /// i.e. `{"name": "function", "arguments": {...}}` it would be
+    /// "name"
+    pub function_name_keys: Vec<String>,
+    /// The key for the arguments in the tool call
+    /// i.e. `{"name": "function", "arguments": {...}}` it would be
+    /// "arguments"
+    pub arguments_keys: Vec<String>,
+}
+
+impl Default for JsonParserConfig {
+    fn default() -> Self {
+        Self {
+            parallel_tool_calls_start_tokens: vec![],
+            parallel_tool_calls_end_tokens: vec![],
+            tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            function_name_keys: vec!["name".to_string()],
+            arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
+        }
+    }
 }
 
 /// Configuration for parsing tool calls with different formats
@@ -41,84 +77,81 @@ pub enum ToolCallParserType {
 pub struct ToolCallConfig {
     /// The format type for tool calls
     pub format: ToolCallParserType,
-    /// Start token for list of parallel tool calls (e.g., "<TOOLCALLS>")
-    pub parallel_tool_calls_start_token: Option<String>,
-    /// End token for list of parallel tool calls (e.g., "</TOOLCALLS>")
-    pub parallel_tool_calls_end_token: Option<String>,
-    /// Start token for individual tool calls (e.g., "<TOOLCALL>")
-    pub tool_call_start_token: Option<String>,
-    /// End token for individual tool calls (e.g., "</TOOLCALL>")
-    pub tool_call_end_token: Option<String>,
+    /// The config for the JSON parser
+    pub json: JsonParserConfig,
 }
 
 impl Default for ToolCallConfig {
     fn default() -> Self {
         Self {
             format: ToolCallParserType::Json,
-            parallel_tool_calls_start_token: None,
-            parallel_tool_calls_end_token: None,
-            tool_call_start_token: Some("<TOOLCALL>".to_string()),
-            tool_call_end_token: Some("</TOOLCALL>".to_string()),
+            json: JsonParserConfig::default(),
         }
     }
 }
 
-fn split_messages_with_tool_call_tokens(original_message: &str, config: &ToolCallConfig) -> Vec<String> {
-    // Check if parallel_tool_calls_start_token is not None
-    // If not None then remove it and everything before it
-    // For parallel_tool_calls_start_end, do the same but remove everything after it
-    let mut message = original_message.clone();
-    if config.parallel_tool_calls_start_token.is_some() {
-        let start_token = config.parallel_tool_calls_start_token.as_ref().unwrap();
-        let index = message.find(start_token);
-        if index.is_some() {
-            message = &message[index.unwrap() + start_token.len()..];
-        }
-    }
-    if config.parallel_tool_calls_end_token.is_some() {
-        let end_token = config.parallel_tool_calls_end_token.as_ref().unwrap();
-        let index = message.rfind(end_token);
-        if index.is_some() {
-            message = &message[..index.unwrap()];
-        }
-    }
+// fn split_messages_with_tool_call_tokens(original_message: &str, config: &ToolCallConfig) -> Vec<String> {
+//     // Check if parallel_tool_calls_start_token is not None
+//     // If not None then remove it and everything before it
+//     // For parallel_tool_calls_start_end, do the same but remove everything after it
+//     let mut message = original_message.clone();
+//     if config.parallel_tool_calls_start_token.is_some() {
+//         let start_token = config.parallel_tool_calls_start_token.as_ref().unwrap();
+//         let index = message.find(start_token);
+//         if index.is_some() {
+//             message = &message[index.unwrap() + start_token.len()..];
+//         }
+//     }
+//     if config.parallel_tool_calls_end_token.is_some() {
+//         let end_token = config.parallel_tool_calls_end_token.as_ref().unwrap();
+//         let index = message.rfind(end_token);
+//         if index.is_some() {
+//             message = &message[..index.unwrap()];
+//         }
+//     }
 
-    // Now find all submessages between tool_call_start_token and tool_call_end_token
-    // Use a compiled regex to find all submessages, the regex is based on the config
-    let mut regex_str = String::new();
-    if config.tool_call_start_token.is_some() {
-        let start_token = config.tool_call_start_token.as_ref().unwrap();
-        regex_str.push_str(&format!(r#"{}\s*"#, start_token));
-    }
-    if config.tool_call_end_token.is_some() {
-        let end_token = config.tool_call_end_token.as_ref().unwrap();
-        regex_str.push_str(&format!(r#"{}\s*"#, end_token));
-    }
+//     // Now find all submessages between tool_call_start_token and tool_call_end_token
+//     // Use a compiled regex to find all submessages, the regex is based on the config
+//     let mut regex_str = String::new();
+//     if config.tool_call_start_token.is_some() {
+//         let start_token = config.tool_call_start_token.as_ref().unwrap();
+//         regex_str.push_str(&format!(r#"{}\s*"#, start_token));
+//     }
+//     if config.tool_call_end_token.is_some() {
+//         let end_token = config.tool_call_end_token.as_ref().unwrap();
+//         regex_str.push_str(&format!(r#"{}\s*"#, end_token));
+//     }
 
-    let regex = Regex::new(&regex_str).unwrap();
-    let matches = regex.find_iter(&message);
+//     let regex = Regex::new(&regex_str).unwrap();
+//     let matches = regex.find_iter(&message);
     
-    let mut messages = Vec::new();
-    let mut current_message = String::new();
-    for m in matches {
-        current_message.push_str(&message[..m.start()]);
-        messages.push(current_message);
-        current_message = String::new();
-    }
-    messages
-}
+//     let mut messages = Vec::new();
+//     let mut current_message = String::new();
+//     for m in matches {
+//         current_message.push_str(&message[..m.start()]);
+//         messages.push(current_message);
+//         current_message = String::new();
+//     }
+//     messages
+// }
 
 pub fn try_tool_call_parse(message: &str, config: &ToolCallConfig) -> anyhow::Result<Option<ToolCallResponse>> {
     // Use match statement (Rust's switch statement) to call the appropriate parser
     match config.format {
         ToolCallParserType::Json => {
-            try_tool_call_parse_json(&message)
+            return try_tool_call_parse_json(&message, &config.json);
+        }
+        ToolCallParserType::Harmony => {
+            anyhow::bail!("Harmony parser not implemented");
         }
         ToolCallParserType::Pythonic => {
-            try_tool_call_parse_pythonic(&message)
+            anyhow::bail!("Pythonic parser not implemented");
+        }
+        ToolCallParserType::Typescript => {
+            anyhow::bail!("Typescript parser not implemented");
         }
         ToolCallParserType::Xml => {
-            try_tool_call_parse_xml(&message)
+            anyhow::bail!("Xml parser not implemented");
         }
     }
 }
