@@ -117,7 +117,7 @@ if [ "$ARCH" = "amd64" ]; then
     # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
     # TODO: Add it back once we have a working arm64 build.
     # Install LMCache
-    uv pip install --no-build-isolation lmcache
+    uv pip install lmcache==0.3.3
 fi
 
 # Create vllm directory and clone
