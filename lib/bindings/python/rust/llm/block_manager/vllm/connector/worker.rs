@@ -296,8 +296,6 @@ impl Worker for KvConnectorWorker {
         let mut is_finished_offloading = HashSet::new();
         let mut is_finished_onboarding = HashSet::new();
 
-
-
         // before we process the maybes, add any newly annotated finished requests
         // to the maybe finished set
         for request_id in finished_requests {
@@ -330,7 +328,9 @@ impl Worker for KvConnectorWorker {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                tracing::debug!(request_id, "request slot is not found - likely aborted");
+                // made this condition more strict slot existence checks were added as a prerequesite
+                // to be added to the maybe_finished_offloading set.
+                panic!("request slot missing for {request_id}; however, it was present when added to the maybe finished offloading set");
             }
         }
 
@@ -357,7 +357,8 @@ impl Worker for KvConnectorWorker {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                tracing::debug!(request_id, "request slot is not found - likely aborted");
+                tracing::warn!(request_id, "request slot is not found - but it must have been present to be added to the maybe finished onboarding set");
+                is_finished_onboarding.remove(request_id);
             }
         }
 
@@ -366,8 +367,6 @@ impl Worker for KvConnectorWorker {
             self.maybe_finished_onboarding.remove(request_id);
             if self.connector.has_slot(request_id) {
                 self.connector.remove_slot(request_id);
-            } else {
-                tracing::debug!(request_id, "is_finished_onboarding: request slot is not found - likely aborted, removing from is finished onboarding set");
             }
         }
 
