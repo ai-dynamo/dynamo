@@ -35,10 +35,10 @@ pub async fn run(
 
     let model_name = match &engine_config {
         EngineConfig::StaticFull { model, .. } | EngineConfig::StaticCore { model, .. } => {
-            Some(model.card().slug().to_string())
+            Some(model.service_name().to_string())
         }
         EngineConfig::StaticRemote(model) | EngineConfig::Dynamic(model) => {
-            Some(model.card().slug().to_string())
+            Some(model.service_name().to_string())
         }
     };
 
