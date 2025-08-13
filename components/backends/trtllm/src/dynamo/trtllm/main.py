@@ -56,31 +56,17 @@ async def get_engine_runtime_config(
     runtime_config = ModelRuntimeConfig()
 
     try:
-        # Get runtime stats from the engine
-        stats_generator = engine.llm.get_stats_async(timeout=5)
-        async for stat in stats_generator:
-            # Extract KV cache configuration
-            if "kvCacheStats" in stat and "maxNumBlocks" in stat["kvCacheStats"]:
-                runtime_config.total_kv_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-                logging.info(
-                    f"Set runtime config total KV blocks: {runtime_config.total_kv_blocks}"
-                )
+        # TODO: extract kv_total_blocks
 
-            # Extract max number of sequences
-            if "maxNumActiveRequests" in stat:
-                runtime_config.max_num_seqs = stat["maxNumActiveRequests"]
-                logging.info(
-                    f"Set runtime config max num seqs: {runtime_config.max_num_seqs}"
-                )
+        # Extract max number of sequences
+        runtime_config.max_num_seqs = config.max_batch_size
+        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
 
-            # Get max_num_batched_tokens from config
-            runtime_config.max_num_batched_tokens = config.max_num_tokens
-            logging.info(
-                f"Set runtime config max num batched tokens: {runtime_config.max_num_batched_tokens}"
-            )
-
-            # Only need the first stat result
-            break
+        # Get max_num_batched_tokens from config
+        runtime_config.max_num_batched_tokens = config.max_num_tokens
+        logging.info(
+            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+        )
 
         return runtime_config
 
