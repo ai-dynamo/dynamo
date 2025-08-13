@@ -13,136 +13,138 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 
+use serde_json::Value;
+use uuid::Uuid;
 
+use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
+use super::tools::{CalledFunctionArguments, CalledFunctionParameters};
 
-fn extract_json_content(&self, message: &str) -> &str {
-	let trimmed = message.trim();
-	
-	// Handle list wrapper tokens
-	if let (Some(start), Some(end)) = (&self.config.parallel_tool_start_token, &self.config.parallel_tool_end_token) {
-		if trimmed.starts_with(start) && trimmed.ends_with(end) {
-			return &trimmed[start.len()..trimmed.len() - end.len()];
-		}
-	}
-	
-	// Handle individual call wrapper tokens
-	if let (Some(start), Some(end)) = (&self.config.call_start_token, &self.config.call_end_token) {
-		if trimmed.starts_with(start) && trimmed.ends_with(end) {
-			return &trimmed[start.len()..trimmed.len() - end.len()];
-		}
-	}
-	
-	// Handle special prefixes like <|python_tag|>
-	if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
-		return stripped;
-	}
-	
-	trimmed
-}
+/// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
+///
+/// This is a flexible helper that handles a variety of potential formats emitted by LLMs for function/tool calls,
+/// including wrapped payloads (`<TOOLCALL>[...]</TOOLCALL>`, `<|python_tag|>...`) and JSON representations
+/// with either `parameters` or `arguments` fields.
+///
+/// # Supported Formats
+///
+/// The input `message` may be one of:
+///
+/// - `<TOOLCALL>[{ "name": ..., "parameters": { ... } }]</TOOLCALL>`
+/// - `<|python_tag|>{ "name": ..., "arguments": { ... } }`
+/// - Raw JSON of:
+///     - `CalledFunctionParameters`: `{ "name": ..., "parameters": { ... } }`
+///     - `CalledFunctionArguments`: `{ "name": ..., "arguments": { ... } }`
+///     - Or a list of either of those types: `[ { "name": ..., "arguments": { ... } }, ... ]`
+///
+/// # Return
+///
+/// - `Ok(Some(ToolCallResponse))` if parsing succeeds
+/// - `Ok(None)` if input format is unrecognized or invalid JSON
+/// - `Err(...)` if JSON is valid but deserialization or argument re-serialization fails
+///
+/// # Note on List Handling
+///
+/// When the input contains a list of tool calls (either with `parameters` or `arguments`),
+/// only the **last item** in the list is returned. This design choice assumes that the
+/// most recent tool call in a list is the one to execute.
+///
+/// # Errors
+///
+/// Returns a `Result::Err` only if an inner `serde_json::to_string(...)` fails
+/// (e.g., if the arguments are not serializable).
+///
+/// # Examples
+///
+/// ```ignore
+/// let input = r#"<TOOLCALL>[{ "name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
+/// let result = try_tool_call_parse_json(input)?;
+/// assert!(result.is_some());
+/// ```
+pub fn try_tool_call_parse_json(message: &str) -> anyhow::Result<Option<ToolCallResponse>> {
+    let trimmed = message.trim();
 
-fn parse_single_call(&self, json_content: &str) -> anyhow::Result<Option<ToolCallResponse>> {
-	// Try parsing as single function call
-	if let Ok(function_call) = self.parse_function_call(json_content)? {
-		return Ok(Some(function_call));
-	}
-	
-	// Try parsing as list and take the last one
-	if let Ok(mut calls) = self.parse_function_calls_list(json_content)? {
-		if let Some(last_call) = calls.pop() {
-			return Ok(Some(last_call));
-		}
-	}
-	
-	Ok(None)
-}
+    // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]
+    let json = if trimmed.starts_with("<TOOLCALL>[") && trimmed.ends_with("]</TOOLCALL>") {
+        tracing::debug!("Stripping <TOOLCALL> wrapper from tool call payload");
+        &trimmed["<TOOLCALL>[".len()..trimmed.len() - "]</TOOLCALL>".len()]
 
-fn parse_function_call(&self, json_content: &str) -> anyhow::Result<ToolCallResponse> {
-	let use_parameters = self.config.use_parameters_field.unwrap_or(false);
-	
-	if use_parameters {
-		// Try with "parameters" field
-		if let Ok(deser) = serde_json::from_str::<HashMap<String, Value>>(json_content) {
-			if let (Some(name), Some(params)) = (deser.get("name"), deser.get("parameters")) {
-				if let (Some(name_str), Some(params_obj)) = (name.as_str(), params.as_object()) {
-					return Ok(ToolCallResponse {
-						id: format!("call-{}", Uuid::new_v4()),
-						tp: ToolCallType::Function,
-						function: CalledFunction {
-							name: name_str.to_string(),
-							arguments: serde_json::to_string(params_obj)?,
-						},
-					});
-				}
-			}
-		}
-	} else {
-		// Try with "arguments" field
-		if let Ok(deser) = serde_json::from_str::<HashMap<String, Value>>(json_content) {
-			if let (Some(name), Some(args)) = (deser.get("name"), deser.get("arguments")) {
-				if let (Some(name_str), Some(args_obj)) = (name.as_str(), args.as_object()) {
-					return Ok(ToolCallResponse {
-						id: format!("call-{}", Uuid::new_v4()),
-						tp: ToolCallType::Function,
-						function: CalledFunction {
-							name: name_str.to_string(),
-							arguments: serde_json::to_string(args_obj)?,
-						},
-					});
-				}
-			}
-		}
-	}
-	
-	anyhow::bail!("Failed to parse function call from JSON")
-}
+    // Support custom/LLM-formatted `<|python_tag|>` preamble
+    } else if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
+        tracing::debug!("Stripping <|python_tag|> prefix from tool call payload");
+        stripped
 
-fn parse_function_calls_list(&self, json_content: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
-	let use_parameters = self.config.use_parameters_field.unwrap_or(false);
-	
-	if use_parameters {
-		// Try parsing as list with "parameters" field
-		if let Ok(list) = serde_json::from_str::<Vec<HashMap<String, Value>>>(json_content) {
-			return list.into_iter()
-				.filter_map(|item| {
-					if let (Some(name), Some(params)) = (item.get("name"), item.get("parameters")) {
-						if let (Some(name_str), Some(params_obj)) = (name.as_str(), params.as_object()) {
-							return Some(Ok(ToolCallResponse {
-								id: format!("call-{}", Uuid::new_v4()),
-								tp: ToolCallType::Function,
-								function: CalledFunction {
-									name: name_str.to_string(),
-									arguments: serde_json::to_string(params_obj).ok()?,
-								},
-							}));
-						}
-					}
-					None
-				})
-				.collect();
-		}
-	} else {
-		// Try parsing as list with "arguments" field
-		if let Ok(list) = serde_json::from_str::<Vec<HashMap<String, Value>>>(json_content) {
-			return list.into_iter()
-				.filter_map(|item| {
-					if let (Some(name), Some(args)) = (item.get("name"), item.get("arguments")) {
-						if let (Some(name_str), Some(args_obj)) = (name.as_str(), args.as_object()) {
-							return Some(Ok(ToolCallResponse {
-								id: format!("call-{}", Uuid::new_v4()),
-								tp: ToolCallType::Function,
-								function: CalledFunction {
-									name: name_str.to_string(),
-									arguments: serde_json::to_string(args_obj).ok()?,
-								},
-							}));
-						}
-					}
-					None
-				})
-				.collect();
-		}
-	}
-	
-	anyhow::bail!("Failed to parse function calls list from JSON")
+    // Otherwise, assume input is clean JSON
+    } else {
+        trimmed
+    };
+
+    // Anonymous function to attempt deserialization into a known representation
+    let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
+        Ok(ToolCallResponse {
+            id: format!("call-{}", Uuid::new_v4()),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name,
+                arguments: serde_json::to_string(&args)?,
+            },
+        })
+    };
+
+    // CalledFunctionParameters: Single { name, parameters }
+    // Example:
+    // {
+    //   "name": "search_docs",
+    //   "parameters": {
+    //     "query": "how to use Rust",
+    //     "limit": 5
+    //   }
+    // }
+    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
+        return parse(single.name, single.parameters).map(Some);
+
+    // CalledFunctinoArguments: Single { name, arguments }
+    // Example:
+    // {
+    //   "name": "summarize",
+    //   "arguments": {
+    //     "text": "Rust is a systems programming language.",
+    //     "length": "short"
+    //   }
+    // }
+    } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(json) {
+        return parse(single.name, single.arguments).map(Some);
+
+    // Vec<CalledFunctionParameters>: List of { name, parameters }
+    // Example:
+    // [
+    //   { "name": "lookup_user", "parameters": { "user_id": "123" } },
+    //   { "name": "send_email", "parameters": { "to": "user@example.com", "subject": "Welcome!" } }
+    // ]
+    // We pop the last item in the list to use.
+    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
+        if let Some(item) = list.pop() {
+            return parse(item.name, item.parameters).map(Some);
+        }
+
+    // Vec<CalledFunctionArguments>: List of { name, arguments }
+    // Example:
+    // [
+    //   {
+    //     "name": "get_weather",
+    //     "arguments": {
+    //       "location": "San Francisco",
+    //       "units": "celsius"
+    //     }
+    //   }
+    // ]
+    // Again, we take the last item for processing.
+    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
+        if let Some(item) = list.pop() {
+            return parse(item.name, item.arguments).map(Some);
+        }
+    }
+
+    Ok(None)
 }

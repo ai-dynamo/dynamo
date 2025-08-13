@@ -19,6 +19,11 @@
 //! 
 //! The parsers are responsible for parsing the tool calls from the response.
 
+use super::response::ToolCallResponse;
+use super::json_parser::try_tool_call_parse_json;
+use super::pythonic_parser::try_tool_call_parse_pythonic;
+use super::xml_parser::try_tool_call_parse_xml;
+use regex::Regex;
 
 /// Represents the format type for tool calls
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -52,8 +57,68 @@ impl Default for ToolCallConfig {
             format: ToolCallParserType::Json,
             parallel_tool_calls_start_token: None,
             parallel_tool_calls_end_token: None,
-            tool_call_start_token: "<TOOLCALL",
-            tool_call_end_token: "</TOOLCALL>",
+            tool_call_start_token: Some("<TOOLCALL>".to_string()),
+            tool_call_end_token: Some("</TOOLCALL>".to_string()),
+        }
+    }
+}
+
+fn split_messages_with_tool_call_tokens(original_message: &str, config: &ToolCallConfig) -> Vec<String> {
+    // Check if parallel_tool_calls_start_token is not None
+    // If not None then remove it and everything before it
+    // For parallel_tool_calls_start_end, do the same but remove everything after it
+    let mut message = original_message.clone();
+    if config.parallel_tool_calls_start_token.is_some() {
+        let start_token = config.parallel_tool_calls_start_token.as_ref().unwrap();
+        let index = message.find(start_token);
+        if index.is_some() {
+            message = &message[index.unwrap() + start_token.len()..];
+        }
+    }
+    if config.parallel_tool_calls_end_token.is_some() {
+        let end_token = config.parallel_tool_calls_end_token.as_ref().unwrap();
+        let index = message.rfind(end_token);
+        if index.is_some() {
+            message = &message[..index.unwrap()];
+        }
+    }
+
+    // Now find all submessages between tool_call_start_token and tool_call_end_token
+    // Use a compiled regex to find all submessages, the regex is based on the config
+    let mut regex_str = String::new();
+    if config.tool_call_start_token.is_some() {
+        let start_token = config.tool_call_start_token.as_ref().unwrap();
+        regex_str.push_str(&format!(r#"{}\s*"#, start_token));
+    }
+    if config.tool_call_end_token.is_some() {
+        let end_token = config.tool_call_end_token.as_ref().unwrap();
+        regex_str.push_str(&format!(r#"{}\s*"#, end_token));
+    }
+
+    let regex = Regex::new(&regex_str).unwrap();
+    let matches = regex.find_iter(&message);
+    
+    let mut messages = Vec::new();
+    let mut current_message = String::new();
+    for m in matches {
+        current_message.push_str(&message[..m.start()]);
+        messages.push(current_message);
+        current_message = String::new();
+    }
+    messages
+}
+
+pub fn try_tool_call_parse(message: &str, config: &ToolCallConfig) -> anyhow::Result<Option<ToolCallResponse>> {
+    // Use match statement (Rust's switch statement) to call the appropriate parser
+    match config.format {
+        ToolCallParserType::Json => {
+            try_tool_call_parse_json(&message)
+        }
+        ToolCallParserType::Pythonic => {
+            try_tool_call_parse_pythonic(&message)
+        }
+        ToolCallParserType::Xml => {
+            try_tool_call_parse_xml(&message)
         }
     }
 }

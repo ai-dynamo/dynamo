@@ -28,6 +28,7 @@ pub mod model_card;
 pub mod model_type;
 pub mod perf;
 pub mod preprocessor;
+pub mod postprocessor;
 pub mod protocols;
 pub mod recorder;
 pub mod request_template;
