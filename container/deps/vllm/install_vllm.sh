@@ -20,7 +20,8 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
+VLLM_REF="ba81acbdc1eec643ba815a76628ae3e4b2263b76"
+VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
@@ -47,6 +48,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --vllm-ref)
             VLLM_REF="$2"
+            shift 2
+            ;;
+        --vllm-git-url)
+            VLLM_GIT_URL="$2"
             shift 2
             ;;
         --max-jobs)
@@ -113,7 +118,7 @@ uv pip install lmcache
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
 cd $INSTALLATION_DIR
-git clone https://github.com/vllm-project/vllm.git
+git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
@@ -148,7 +153,7 @@ fi
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-bash install_python_libraries.sh # These libraries aren't pinned.
+TORCH_CUDA_ARCH_LIST="9.0;10.0" bash install_python_libraries.sh # These libraries aren't pinned.
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM

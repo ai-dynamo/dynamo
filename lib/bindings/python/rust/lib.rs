@@ -557,7 +557,7 @@ impl EtcdClient {
         let client = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             client
-                .kv_create(key, value, lease_id)
+                .kv_create(&key, value, lease_id)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())

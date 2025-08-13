@@ -1,6 +1,6 @@
 # SLA Planner Deployment Guide
 
-Quick deployment guide for the vLLM disaggregated planner with automatic scaling.
+Quick deployment guide for the disaggregated planner with automatic scaling.
 
 > [!NOTE]
 > For high-level architecture and concepts, see [SLA-based Planner](../../architecture/sla_planner.md).
@@ -34,9 +34,11 @@ export NAMESPACE=your-namespace
 
 ## 1. Deploy the System
 
+We use vllm as the backend engine in this guide. SLA planner also supports SGLang and will support TensorRT-LLM. Checkout `disagg_planner.yaml` in their example deployment folders for more details. The deployment is the same for all backends.
+
 ```bash
 # Apply the disaggregated planner deployment
-kubectl apply -f components/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
+kubectl apply -f components/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE # for vllm
 
 # Check deployment status
 kubectl get pods -n $NAMESPACE

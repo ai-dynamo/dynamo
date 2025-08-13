@@ -12,7 +12,7 @@ ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
+ARG VLLM_REF="ba81acbdc1eec643ba815a76628ae3e4b2263b76"
 ARG TORCH_BACKEND="cu128"
 
 # Match 0.10.0 vLLM release
@@ -186,6 +186,7 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
+ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 
