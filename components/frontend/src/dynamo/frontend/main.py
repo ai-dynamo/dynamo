@@ -154,7 +154,9 @@ async def async_main():
 
     # Configure Dynamo frontend HTTP service metrics prefix
     if flags.metrics_prefix is not None:
-        os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
+        prefix = flags.metrics_prefix.strip()
+        if prefix:
+            os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
 

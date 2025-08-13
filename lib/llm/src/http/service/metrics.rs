@@ -30,6 +30,31 @@ pub const REQUEST_TYPE_STREAM: &str = "stream";
 /// Partial value for the `type` label in the request counter for unary requests
 pub const REQUEST_TYPE_UNARY: &str = "unary";
 
+fn sanitize_prometheus_prefix(raw: &str) -> String {
+    // Prometheus metric name pattern: [a-zA-Z_:][a-zA-Z0-9_:]*
+    let mut s: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == ':' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if s.is_empty() {
+        return FRONTEND_METRIC_PREFIX.to_string();
+    }
+
+    let first = s.as_bytes()[0];
+    let valid_first = first.is_ascii_alphabetic() || first == b'_' || first == b':';
+    if !valid_first {
+        s.insert(0, '_');
+    }
+    s
+}
+
 pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
@@ -117,8 +142,17 @@ impl Metrics {
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new() -> Self {
-        let prefix = std::env::var(METRICS_PREFIX_ENV)
+        let raw_prefix = std::env::var(METRICS_PREFIX_ENV)
             .unwrap_or_else(|_| FRONTEND_METRIC_PREFIX.to_string());
+        let prefix = sanitize_prometheus_prefix(&raw_prefix);
+        if prefix != raw_prefix {
+            tracing::warn!(
+                raw=%raw_prefix,
+                sanitized=%prefix,
+                env=%METRICS_PREFIX_ENV,
+                "Sanitized HTTP metrics prefix"
+            );
+        }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
 
         let request_counter = IntCounterVec::new(
