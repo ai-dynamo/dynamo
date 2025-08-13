@@ -127,7 +127,7 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+    if ! uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl; then
         echo "Pinned versions failed"
         exit 1
         # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
