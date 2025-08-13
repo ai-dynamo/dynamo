@@ -309,13 +309,20 @@ impl Worker for KvConnectorWorker {
                 continue;
             }
 
-            assert!(
-                !self.maybe_finished_offloading.contains(&request_id),
-                "request_id {request_id} already in maybe storing finished"
-            );
-
-            // insert request into the maybe finished set
-            self.maybe_finished_offloading.insert(request_id.clone());
+            if self.maybe_finished_onboarding.contains(&request_id) {
+                tracing::info!(
+                    request_id,
+                    "got a finished warning for a request that is onboarding"
+                );
+            } else if self.maybe_finished_offloading.contains(&request_id) {
+                tracing::warn!(request_id, "possibly got a duplicate finished request; request_id already in the maybe_finished_offloading set");
+            } else {
+                tracing::debug!(
+                    request_id,
+                    "received finished request; adding to maybe_finished_offloading set"
+                );
+                self.maybe_finished_offloading.insert(request_id.clone());
+            }
         }
 
         // visit each request slot in the maybe finished set
@@ -357,8 +364,7 @@ impl Worker for KvConnectorWorker {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                tracing::warn!(request_id, "request slot is not found - but it must have been present to be added to the maybe finished onboarding set");
-                is_finished_onboarding.remove(request_id);
+                panic!("request slot missing for {request_id}; however, it was present when added to the maybe finished onboarding set");
             }
         }
 
