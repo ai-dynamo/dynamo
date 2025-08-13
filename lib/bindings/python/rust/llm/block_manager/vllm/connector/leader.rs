@@ -11,6 +11,7 @@ use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 use crate::llm::block_manager::BlockManager as PyBlockManager;
 use crate::llm::block_manager::{
     distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest, VllmBlockManager,
+    vllm::connector::leader::slot::VllmConnectorSlot,
 };
 use crate::DistributedRuntime as PyDistributedRuntime;
 
@@ -139,9 +140,24 @@ impl Leader for KvConnectorLeader {
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-        if slot.state() == SlotState::Prefilling {
-            tracing::warn!("slot is in the Prefilled state; this seems like we need to reset the slot and start over");
-            slot.reset();
+        debug_assert!(
+            slot.state() != SlotState::Prefilling && slot.state() != SlotState::Decoding,
+            "slot is in the Prefilled state or Decoding; shouldn't happen"
+        );
+
+        if slot.state() == SlotState::SkippedPrefill || slot.state() == SlotState::SkippedDecode {
+            tracing::warn!("slot is in the SkippedPrefill or SkippedDecode state; will resume from skipped and return early");
+            match slot.state() {
+                SlotState::SkippedPrefill => {
+                    slot.mark_as_prefilling(self.iteration_counter)?;
+                    return Ok((0, false));
+                }
+                SlotState::SkippedDecode => {
+                    slot.mark_as_decoding(self.iteration_counter)?;
+                    return Ok((0, false));
+                }
+                _ => unreachable!("slot is not in the SkippedPrefill or SkippedDecode state"),
+            }
         }
 
         // early exit if we cannot match full block
@@ -251,6 +267,11 @@ impl Leader for KvConnectorLeader {
                 tracing::debug!("adding {} pending onboarding operations", pending_ops.len());
                 md.add_operations(pending_ops);
             }
+
+            assert!(
+                inflight_requests.remove(request_id),
+                "request_id {request_id} not found in inflight_requests: "
+            );
         }
 
         // vLLM provides us with "new_requests" which are "new" after onboarding, but not before or during.
@@ -328,13 +349,12 @@ impl Leader for KvConnectorLeader {
 
                 // note, we can not trigger onboarding here -- perhaps we are supposed to or perhaps will get another
                 // pass at `get_num_new_matched_tokens` or `update_state_after_alloc`.
-            } else {
-                // note: evicition might trigger this assert
-                assert!(
-                    inflight_requests.remove(request_id),
-                    "request_id {request_id} not found in inflight_requests: "
-                );
             }
+
+            assert!(
+                inflight_requests.remove(request_id),
+                "request_id {request_id} not found in inflight_requests: "
+            );
 
             let shared_slot = self.slot_manager.get_slot(request_id)?;
             let mut slot = shared_slot
@@ -363,6 +383,20 @@ impl Leader for KvConnectorLeader {
             }
         }
 
+        for unscheduled_req in inflight_requests.iter() {
+            let shared_slot = self.slot_manager.get_slot(unscheduled_req)?;
+            let mut slot_guard = shared_slot
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+
+            let slot = slot_guard
+                .as_any_mut()
+                .downcast_mut::<VllmConnectorSlot>()
+                .ok_or_else(|| anyhow::anyhow!("Expected VllmConnectorSlot, got different type"))?;
+
+            slot.mark_as_skipped()?;
+        }
+
         tracing::debug!("metadata: {md:#?}");
         serde_json::to_vec(&md)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connector metadata: {}", e))
@@ -374,6 +408,13 @@ impl Leader for KvConnectorLeader {
         block_ids: Vec<BlockId>,
     ) -> anyhow::Result<bool> {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
+
+        if !self.slot_manager.has_slot(&request_id) {
+            tracing::warn!("request_finished called for request_id: {request_id} but slot is not found");
+            self.inflight_requests.remove(&request_id);
+            return Ok(false);
+        }
+
         // grab the slot
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
 
@@ -388,11 +429,14 @@ impl Leader for KvConnectorLeader {
         // we would like to inform it to shutdown, then have it signal to the work that is officially gone,
         // then we can remove the slot and trigger the worker to clean up as well.
 
+        // remove the request from the inflight requests
+        self.inflight_requests.remove(&request_id);
+
         // remove it from the manager as we will never use it again
         self.slot_manager.remove_slot(&request_id)?;
 
         // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
-        // otherwise, we return false, which means there are still outstanding operations on gpu blocks which
+        // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
         // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
         // of the connector api which will be used to inform vllm that the request is finished.
         if let SlotState::Finished = slot.state() {

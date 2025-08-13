@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::any::Any;
+
 use dynamo_llm::{
     block_manager::{
         block::{locality::LocalityProvider, BlockMetadata},
@@ -63,9 +65,15 @@ pub enum SlotState {
     /// The slot is actively prefilling the sequence.
     Prefilling,
 
+    /// The slot is skipped prefill.
+    SkippedPrefill,
+
     /// The slot is actively participating in a forward pass which will result in one more more tokens
     /// to be applied to the sequence.
     Decoding,
+
+    /// The slot is skipped decoding.
+    SkippedDecode,
 
     /// The slot is marked as finished, but not all resources have been released.
     Finishing,
@@ -97,6 +105,9 @@ pub trait Slot: std::fmt::Debug {
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
+
+    fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError>;
+    fn mark_as_decoding(&mut self, iteration: u64) -> Result<(), SlotError>;
 
     fn mark_as_finished(&mut self, iteration: u64) -> Result<(), SlotError>;
 
@@ -131,6 +142,9 @@ pub trait Slot: std::fmt::Debug {
 
     /// Reset the slot.
     fn reset(&mut self);
+
+    /// Get a mutable reference to the slot as a dynamic Any.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub trait ExternallyManagedDeviceSlot: Slot {
@@ -329,6 +343,41 @@ impl VllmConnectorSlot {
             tokens_cached_from_disk: 0,
         }
     }
+
+    fn mark_as_skipped_prefill(&mut self) -> Result<(), SlotError> {
+        if self.state != SlotState::Prefilling {
+            return Err(SlotError::InvalidState(format!(
+                "cannot mark slot as skipped prefill in state {:?}",
+                self.state
+            )));
+        }
+        self.state = SlotState::SkippedPrefill;
+        Ok(())
+    }
+
+    fn mark_as_skipped_decode(&mut self) -> Result<(), SlotError> {
+        if self.state != SlotState::Decoding {
+            return Err(SlotError::InvalidState(format!(
+                "cannot mark slot as skipped decode in state {:?}",
+                self.state
+            )));
+        }
+        self.state = SlotState::SkippedDecode;
+        Ok(())
+    }
+
+    pub fn mark_as_skipped(&mut self) -> Result<(), SlotError> {
+        match self.state {
+            SlotState::Prefilling => self.mark_as_skipped_prefill(),
+            SlotState::Decoding => self.mark_as_skipped_decode(),
+            SlotState::SkippedPrefill => Ok(()), // already skipped
+            SlotState::SkippedDecode => Ok(()), // already skipped
+            _ => {
+                tracing::warn!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
+                Ok(())
+            },
+        }
+    }
 }
 
 impl std::fmt::Debug for VllmConnectorSlot {
@@ -368,6 +417,16 @@ impl Slot for VllmConnectorSlot {
     fn reset(&mut self) {
         self.reset_after_preemption();
         self.state = SlotState::Initialized;
+    }
+
+    fn mark_as_prefilling(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        self.state = SlotState::Prefilling;
+        Ok(())
+    }
+
+    fn mark_as_decoding(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        self.state = SlotState::Decoding;
+        Ok(())
     }
 
     fn record_cached_device_tokens(&mut self, num_tokens: usize) {
@@ -542,7 +601,7 @@ impl Slot for VllmConnectorSlot {
 
         if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted) {
             return Err(SlotError::InvalidOperation(format!(
-                "slot must be in the NotScheduled state to acquire local matches; got {:?}",
+                "slot must be in the NotScheduled or Preempted state to acquire local matches; got {:?}",
                 self.state()
             )));
         }
@@ -728,6 +787,10 @@ impl Slot for VllmConnectorSlot {
         self.advance_computed_position(num_external_tokens)?;
 
         Ok(())
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
