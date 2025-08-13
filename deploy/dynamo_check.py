@@ -10,7 +10,7 @@ Features dynamic component discovery and comprehensive troubleshooting guidance.
 
 Usage:
     dynamo_check.py                        # Run all checks
-    dynamo_check.py --imports              # Only test imports
+    dynamo_check.py --import-check-only    # Only test imports
     dynamo_check.py --examples             # Only show examples
     dynamo_check.py --try-pythonpath      # Test imports with workspace paths
     dynamo_check.py --help                 # Show help
@@ -40,7 +40,7 @@ Dynamo Environment ($HOME/dynamo):
 
 Missing framework components. You can choose one of the following options:
 1. For local development, set the PYTHONPATH environment variable:
-   dynamo_check.py --try-pythonpath --imports
+   dynamo_check.py --try-pythonpath --import-check-only
    export PYTHONPATH="$HOME/dynamo/components/router/src:$HOME/dynamo/components/metrics/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src"
 2. For a production-release (slower build time), build the packages with:
    dynamo_build.sh --release
@@ -49,6 +49,7 @@ Missing framework components. You can choose one of the following options:
 import argparse
 import datetime
 import importlib.metadata
+import json
 import logging
 import os
 import platform
@@ -63,11 +64,16 @@ from zoneinfo import ZoneInfo
 class DynamoChecker:
     """Comprehensive dynamo package checker."""
 
-    def __init__(self):
-        self.workspace_dir = self._find_workspace()
-        self.results = {}
+    def __init__(self, workspace_dir: Optional[str] = None):
+        # If a path is provided, use it directly; otherwise discover
+        self.workspace_dir = (
+            os.path.abspath(workspace_dir) if workspace_dir else self._find_workspace()
+        )
+        self.results: Dict[str, Any] = {}
         self._suppress_planner_warnings()
         self.clear_cuda_memory: bool = False
+        # Collect warnings that should be printed later (after specific headers)
+        self._deferred_messages: List[str] = []
 
     def _suppress_planner_warnings(self):
         """Suppress Prometheus endpoint warnings from planner module during import testing."""
@@ -290,18 +296,19 @@ class DynamoChecker:
                 capture_output=True,
                 text=True,
                 timeout=10,
-                cwd=self.workspace_dir if self.workspace_dir else None,
+                cwd=self.workspace_dir
+                if (self.workspace_dir and os.path.isdir(self.workspace_dir))
+                else None,
             )
 
             if result.returncode == 0:
                 # Parse JSON output to extract target_directory
-                import json
-
                 metadata = json.loads(result.stdout)
                 target_directory = metadata.get("target_directory")
         except (
             subprocess.TimeoutExpired,
             subprocess.CalledProcessError,
+            FileNotFoundError,
             json.JSONDecodeError,
         ):
             # cargo metadata failed or JSON parsing failed
@@ -309,7 +316,7 @@ class DynamoChecker:
 
         return target_directory, cargo_home
 
-    def _print_system_info(self, clear_cuda: bool = False) -> None:
+    def _print_system_info(self, clear_cuda: bool = False) -> bool:
         """Print concise system information as a top-level section.
 
         Tree structure:
@@ -718,6 +725,16 @@ class DynamoChecker:
         else:
             # Cargo not found line as a top-level sibling, Dynamo follows so use mid connector
             print("├─ ❌ Cargo: not found")
+            print(
+                "   ⚠️  Warning: cargo command not found. Install Rust toolchain to see cargo target directory."
+            )
+        # Determine if any errors were printed in system info (treat only Python and Cargo as fatal here)
+        system_errors_found = False
+        if isinstance(python_line, str) and python_line.startswith("❌"):
+            system_errors_found = True
+        if not has_cargo:
+            system_errors_found = True
+        return system_errors_found
 
     def _find_so_file(self, target_directory: str) -> Optional[str]:
         """Find the compiled *.so file in target directory or Python bindings.
@@ -1159,15 +1176,38 @@ class DynamoChecker:
         results = {}
 
         # Print system info at top-level, before Dynamo Environment
-        self._print_system_info(clear_cuda=self.clear_cuda_memory)
+        system_errors = self._print_system_info(clear_cuda=self.clear_cuda_memory)
 
         # Then print main environment header as a subtree under System info
-        if self.workspace_dir:
+        if (
+            self.workspace_dir
+            and os.path.exists(self.workspace_dir)
+            and self._is_dynamo_workspace(self.workspace_dir)
+        ):
             workspace_path = os.path.abspath(self.workspace_dir)
             display_workspace = self._replace_home_with_var(workspace_path)
             print(f"└─ Dynamo ({display_workspace}):")
+            # Backend components directory warning after the Dynamo line
+            backend_path = f"{self.workspace_dir}/components/backends"
+            if not os.path.exists(backend_path):
+                print(
+                    f"   ⚠️  Warning: Backend components directory not found: {self._replace_home_with_var(backend_path)}"
+                )
+            # If there were deferred messages (e.g., invalid --path), show them here under Dynamo
+            for message in self._deferred_messages:
+                print(f"   {message}")
         else:
-            print("└─ Dynamo (workspace not found):")
+            # If a user provided an invalid --path, reflect that, otherwise generic not found
+            if self.workspace_dir and not os.path.exists(self.workspace_dir):
+                print(f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}):")
+                print("   ❌ Workspace path does not exist")
+            elif self.workspace_dir and not self._is_dynamo_workspace(
+                self.workspace_dir
+            ):
+                print(f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}):")
+                print("   ❌ Invalid dynamo workspace (missing expected files)")
+            else:
+                print("└─ Dynamo (workspace not found):")
 
         # Discover all components
         runtime_components = self._discover_runtime_components()
@@ -1227,7 +1267,7 @@ class DynamoChecker:
                     "1. For local development, set the PYTHONPATH environment variable:"
                 )
                 print(
-                    f'   dynamo_check.py --try-pythonpath --imports\n   export PYTHONPATH="{display_pythonpath}"'
+                    f'   dynamo_check.py --try-pythonpath --import-check-only\n   export PYTHONPATH="{display_pythonpath}"'
                 )
                 not_found_suffix = (
                     ""
@@ -1239,6 +1279,15 @@ class DynamoChecker:
                 )
                 print(f"   dynamo_build.sh --release{not_found_suffix}")
 
+        # Exit with non-zero status if any errors detected
+        # Treat Python or Cargo failures from system info, and invalid path, as failures.
+        any_failures = (
+            system_errors
+            or any(msg.startswith("❌ Error:") for msg in self._deferred_messages)
+            or bool(framework_failures)
+        )
+        # Store whether errors occurred for overall run
+        self.results["had_errors"] = any_failures
         return results
 
     # ====================================================================
@@ -1283,7 +1332,7 @@ Usage Examples
         -d '{"model": "Qwen/Qwen2.5-0.5B", "prompt": "Hello", "max_tokens": 50}'
 
 4. For local development: Set PYTHONPATH to use workspace sources without rebuilding:
-   • Discover what PYTHONPATH to set: dynamo_check.py --try-pythonpath --imports"""
+   • Discover what PYTHONPATH to set: dynamo_check.py --try-pythonpath --import-check-only"""
         )
         if self.workspace_dir:
             pythonpath = self._get_pythonpath()
@@ -1342,60 +1391,12 @@ Usage Examples
     # ====================================================================
 
     def show_troubleshooting(self):
-        """Show troubleshooting guidance only if there were import failures."""
-        # Check if any imports failed
-        import_results = self.results.get("imports", {})
-        failed_imports = [
-            component
-            for component, result in import_results.items()
-            if result.startswith("❌")
-        ]
-
-        if not failed_imports:
-            return  # No failures, skip troubleshooting section
-
-        not_found_suffix = (
-            ""
-            if self._is_dynamo_build_available()
-            else "  # (dynamo_build.sh not found)"
-        )
-        troubleshooting_msg = f"""
-Troubleshooting
-========================================
-
-Found {len(failed_imports)} failed import(s). Common Issues:
-1. ImportError for framework components:
-   $ export PYTHONPATH=...
-
-2. Package not found:
-   $ dynamo_build.sh --release{not_found_suffix}
-
-3. Check current status:
-   $ dynamo_build.sh --check{not_found_suffix}"""
-
-        print(troubleshooting_msg)
-
-        if not self.workspace_dir:
-            print(
-                """
-⚠️  Workspace not found!
-   → Ensure you're running from a dynamo workspace
-   → Expected locations: ~/dynamo, /workspace, /home/ubuntu/dynamo"""
-            )
+        """Troubleshooting section removed for terse output."""
+        return
 
     def show_summary(self):
-        """Show comprehensive summary."""
-        print("Summary")
-
-        # Import status
-        import_results = self.results.get("imports", {})
-        if import_results:
-            total = len(import_results)
-            passed = sum(1 for r in import_results.values() if r.startswith("✅"))
-            if passed == total:
-                print(f"✅ Import tests: {passed}/{total} passed")
-            else:
-                print(f"❌ Import tests: {passed}/{total} passed")
+        """Summary output intentionally omitted for terse mode."""
+        return
 
     # ====================================================================
     # MAIN ORCHESTRATION
@@ -1409,25 +1410,7 @@ Found {len(failed_imports)} failed import(s). Common Issues:
         - Usage examples and troubleshooting guidance
         - Summary of results
 
-        Console output example:
-            Dynamo Comprehensive Check
-            ============================================================
-            Runtime components (ai-dynamo-runtime 0.4.0):
-               ✅ dynamo._core        /opt/dynamo/venv/lib/.../dynamo/_core.cpython-312-x86_64-linux-gnu.so
-               ✅ dynamo.llm          /opt/dynamo/venv/lib/.../dynamo/llm/__init__.py
-
-            Framework components (ai-dynamo 0.4.0):
-               ✅ dynamo.frontend     /opt/dynamo/venv/lib/.../dynamo/frontend/__init__.py
-
-            Usage Examples
-            ========================================
-            1. Start Frontend Server:
-               python -m dynamo.frontend --http-port 8000
-               ...
-
-            Summary
-            ========================================
-            ✅ Import tests: 5/5 passed
+        Console output: terse, tree-formatted sections
         """
         # Terse mode: no banner or separators
 
@@ -1438,22 +1421,35 @@ Found {len(failed_imports)} failed import(s). Common Issues:
         import_results = self.results.get("imports", {})
         has_failures = any(result.startswith("❌") for result in import_results.values())
 
-        # Provide guidance
-        if not has_failures:
+        # Provide guidance (show examples only if all checks succeed and no errors flagged)
+        had_errors_flag = bool(self.results.get("had_errors"))
+        if not has_failures and not had_errors_flag:
             self.show_usage_examples()
         self.show_troubleshooting()
         self.show_summary()
+        # If any errors found, exit with status 1
+        had_errors = bool(self.results.get("had_errors"))
+        if had_errors:
+            sys.exit(1)
 
 
 def main():
     """Main function with command line argument parsing."""
     parser = argparse.ArgumentParser(description="Comprehensive dynamo package checker")
-    parser.add_argument("--imports", action="store_true", help="Only test imports")
+    parser.add_argument(
+        "--import-check-only", action="store_true", help="Only test imports"
+    )
     parser.add_argument("--examples", action="store_true", help="Only show examples")
     parser.add_argument(
         "--try-pythonpath",
         action="store_true",
         help="Test imports with workspace component source directories in sys.path",
+    )
+    parser.add_argument(
+        "--path",
+        type=str,
+        default=None,
+        help="Explicit path to dynamo workspace; if set, bypass workspace auto-discovery",
     )
     parser.add_argument(
         "--clear-cuda-memory",
@@ -1462,15 +1458,28 @@ def main():
     )
 
     args = parser.parse_args()
-    checker = DynamoChecker()
+    checker = DynamoChecker(workspace_dir=args.path)
+    # If --path is provided, validate it; do not exit early, but record error to display and for exit code
+    if args.path:
+        abs_path = os.path.abspath(args.path)
+        if (not os.path.exists(abs_path)) or (
+            not checker._is_dynamo_workspace(abs_path)
+        ):
+            checker._deferred_messages.append(
+                f"❌ Error: invalid workspace path: {abs_path}"
+            )
     checker.clear_cuda_memory = bool(args.clear_cuda_memory)
 
     # Set up sys.path if requested
     if args.try_pythonpath:
         checker._setup_pythonpath()
 
-    if args.imports:
+    if args.import_check_only:
         checker.test_imports()
+        # Exit code handled inside run; reflect errors if set
+        had_errors = bool(checker.results.get("had_errors"))
+        if had_errors:
+            sys.exit(1)
     elif args.examples:
         # Always show system info first, then environment header
         checker._print_system_info(clear_cuda=checker.clear_cuda_memory)
