@@ -20,10 +20,10 @@ from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
 from transformers import AutoConfig
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.engine import get_llm_engine
+from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -47,6 +47,49 @@ async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
+
+
+async def get_engine_runtime_config(
+    engine: TensorRTLLMEngine, config: Config
+) -> ModelRuntimeConfig:
+    """Retrieve runtime configuration from TensorRT-LLM engine."""
+    runtime_config = ModelRuntimeConfig()
+
+    try:
+        # Get runtime stats from the engine
+        stats_generator = engine.llm.get_stats_async(timeout=5)
+        async for stat in stats_generator:
+            # Extract KV cache configuration
+            if "kvCacheStats" in stat and "maxNumBlocks" in stat["kvCacheStats"]:
+                runtime_config.total_kv_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+                logging.info(
+                    f"Set runtime config total KV blocks: {runtime_config.total_kv_blocks}"
+                )
+
+            # Extract max number of sequences
+            if "maxNumActiveRequests" in stat:
+                runtime_config.max_num_seqs = stat["maxNumActiveRequests"]
+                logging.info(
+                    f"Set runtime config max num seqs: {runtime_config.max_num_seqs}"
+                )
+
+            # Get GPU memory utilization from the config
+            # Convert free_gpu_memory_fraction to utilization percentage
+            gpu_mem_percentage = int(config.free_gpu_memory_fraction * 100)
+            runtime_config.gpu_memory_utilization = gpu_mem_percentage
+            logging.info(
+                f"Set runtime config GPU memory utilization: {gpu_mem_percentage}%"
+            )
+
+            # Only need the first stat result
+            break
+
+        return runtime_config
+
+    except Exception as e:
+        logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
+        # Return config with default/None values if retrieval fails
+        return runtime_config
 
 
 @dynamo_worker(static=False)
@@ -196,7 +239,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         endpoint = component.endpoint(config.endpoint)
 
         if is_first_worker(config):
-            # Register the model with the endpoint if only the worker is first in the disaggregation chain.
+            # Get runtime configuration from the engine
+            runtime_config = await get_engine_runtime_config(engine, config)
+
+            # Register the model with runtime config
             await register_llm(
                 modelType,
                 endpoint,
@@ -204,6 +250,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
+                runtime_config=runtime_config,  # Add runtime config here
             )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
