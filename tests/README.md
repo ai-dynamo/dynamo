@@ -97,7 +97,7 @@ repeated downloads of model files. This cache is shared across test runs to impr
 
 ## Running tests locally outside of a container
 
-To run tests locally, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
+To run tests outside of the development container, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
 
 ```bash
 uv pip install pytest-mypy
