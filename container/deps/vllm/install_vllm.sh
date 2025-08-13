@@ -112,9 +112,6 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 # Install common dependencies
 uv pip install pip cuda-python
 
-# Install LMCache
-uv pip install --no-build-isolation lmcache
-
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
 cd $INSTALLATION_DIR
@@ -149,6 +146,10 @@ else
         VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
+
+
+# Install LMCache
+uv pip install --no-build-isolation lmcache
 
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
