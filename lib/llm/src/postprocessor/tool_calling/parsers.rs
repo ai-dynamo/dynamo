@@ -87,51 +87,6 @@ impl Default for ToolCallConfig {
     }
 }
 
-// fn split_messages_with_tool_call_tokens(original_message: &str, config: &ToolCallConfig) -> Vec<String> {
-//     // Check if parallel_tool_calls_start_token is not None
-//     // If not None then remove it and everything before it
-//     // For parallel_tool_calls_start_end, do the same but remove everything after it
-//     let mut message = original_message.clone();
-//     if config.parallel_tool_calls_start_token.is_some() {
-//         let start_token = config.parallel_tool_calls_start_token.as_ref().unwrap();
-//         let index = message.find(start_token);
-//         if index.is_some() {
-//             message = &message[index.unwrap() + start_token.len()..];
-//         }
-//     }
-//     if config.parallel_tool_calls_end_token.is_some() {
-//         let end_token = config.parallel_tool_calls_end_token.as_ref().unwrap();
-//         let index = message.rfind(end_token);
-//         if index.is_some() {
-//             message = &message[..index.unwrap()];
-//         }
-//     }
-
-//     // Now find all submessages between tool_call_start_token and tool_call_end_token
-//     // Use a compiled regex to find all submessages, the regex is based on the config
-//     let mut regex_str = String::new();
-//     if config.tool_call_start_token.is_some() {
-//         let start_token = config.tool_call_start_token.as_ref().unwrap();
-//         regex_str.push_str(&format!(r#"{}\s*"#, start_token));
-//     }
-//     if config.tool_call_end_token.is_some() {
-//         let end_token = config.tool_call_end_token.as_ref().unwrap();
-//         regex_str.push_str(&format!(r#"{}\s*"#, end_token));
-//     }
-
-//     let regex = Regex::new(&regex_str).unwrap();
-//     let matches = regex.find_iter(&message);
-
-//     let mut messages = Vec::new();
-//     let mut current_message = String::new();
-//     for m in matches {
-//         current_message.push_str(&message[..m.start()]);
-//         messages.push(current_message);
-//         current_message = String::new();
-//     }
-//     messages
-// }
-
 pub fn try_tool_call_parse(
     message: &str,
     config: &ToolCallConfig,
