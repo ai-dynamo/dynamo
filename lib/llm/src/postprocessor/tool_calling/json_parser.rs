@@ -85,9 +85,13 @@ pub fn try_tool_call_parse_json(
     let trimmed = message.trim();
 
     // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]
-    let json = if trimmed.starts_with("<TOOLCALL>[") && trimmed.ends_with("]</TOOLCALL>") {
-        tracing::debug!("Stripping <TOOLCALL> wrapper from tool call payload");
-        &trimmed["<TOOLCALL>[".len()..trimmed.len() - "]</TOOLCALL>".len()]
+    let json = if let Some(stripped) = trimmed.strip_prefix("<TOOLCALL>[") {
+        if let Some(stripped) = stripped.strip_suffix("]</TOOLCALL>") {
+            tracing::debug!("Stripping <TOOLCALL> wrapper from tool call payload");
+            stripped
+        } else {
+            trimmed
+        }
 
     // Support custom/LLM-formatted `<|python_tag|>` preamble
     } else if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
