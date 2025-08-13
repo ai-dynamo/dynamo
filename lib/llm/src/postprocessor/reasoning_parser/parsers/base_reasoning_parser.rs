@@ -105,7 +105,12 @@ impl ReasoningParser for BaseReasoningParser {
             let reasoning_text = &current_text[..end_idx];
             self._buffer = String::new();
             self._in_reasoning = false;
-            let normal_text = &current_text[end_idx + self.think_end_token.len()..];
+            let start_idx = end_idx + self.think_end_token.len();
+            let normal_text = if start_idx < current_text.len() {
+                &current_text[start_idx..]
+            } else {
+                ""
+            };
             return ParserResult {
                 normal_text: normal_text.to_string(),
                 reasoning_text: reasoning_text.trim().to_string(),

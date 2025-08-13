@@ -3,10 +3,10 @@
 
 pub mod parsers;
 pub struct ParserResult {
-    /// The parsed reasoning as a string.
+    /// The normal text outside of reasoning blocks.
     pub normal_text: String,
 
-    /// The parsed reasoning as a JSON object.
+    /// The extracted reasoning text from within reasoning blocks.
     pub reasoning_text: String,
 }
 
