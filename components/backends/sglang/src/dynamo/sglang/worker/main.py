@@ -9,12 +9,12 @@ import socket
 import sys
 from typing import Any, Dict, Optional, Union
 
-import sglang as sgl
 import uvloop
 import zmq
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip, get_zmq_socket
 
+import sglang as sgl
 from dynamo._core import Endpoint
 from dynamo.llm import (
     ForwardPassMetrics,
@@ -392,80 +392,39 @@ async def register_llm_with_runtime_config(
 async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
     """Get runtime config from SGLang engine"""
     try:
-        runtime_config = ModelRuntimeConfig()
+        # Try to check if the engine has a scheduler attribute with the computed values
+        if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
+            runtime_config = ModelRuntimeConfig()
 
-        # Access server_args directly from the engine
-        if hasattr(engine, "tokenizer_manager") and hasattr(
-            engine.tokenizer_manager, "server_args"
-        ):
-            server_args = engine.tokenizer_manager.server_args
+            # Get max_total_num_tokens from scheduler_info
+            if "max_total_num_tokens" in engine.scheduler_info:
+                max_total_tokens = engine.scheduler_info["max_total_num_tokens"]
+                if max_total_tokens and hasattr(
+                    engine.tokenizer_manager, "server_args"
+                ):
+                    page_size = engine.tokenizer_manager.server_args.page_size
+                    if page_size:
+                        runtime_config.total_kv_blocks = max_total_tokens // page_size
+                        logging.info(
+                            f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
+                            f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                        )
 
-            # Calculate total_kv_blocks from max_total_tokens and page_size
-            if (
-                hasattr(server_args, "max_total_tokens")
-                and server_args.max_total_tokens is not None
-            ):
-                page_size = getattr(server_args, "page_size", None)
-                if page_size:
-                    runtime_config.total_kv_blocks = (
-                        server_args.max_total_tokens // page_size
-                    )
-                    logging.info(
-                        f"Calculated total KV blocks: {runtime_config.total_kv_blocks} "
-                        f"(max_total_tokens={server_args.max_total_tokens}, page_size={page_size})"
-                    )
+            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info
+            # TODO: figure out where they are
 
-            # Set max_num_seqs from max_running_requests
-            if (
-                hasattr(server_args, "max_running_requests")
-                and server_args.max_running_requests is not None
-            ):
-                runtime_config.max_num_seqs = server_args.max_running_requests
-                logging.info(
-                    f"Set model runtime config max num seqs: {runtime_config.max_num_seqs}"
-                )
+            return runtime_config
 
-            # Set max_num_batched_tokens
-            if (
-                hasattr(server_args, "max_num_batched_tokens")
-                and server_args.max_num_batched_tokens is not None
-            ):
-                runtime_config.max_num_batched_tokens = (
-                    server_args.max_num_batched_tokens
-                )
-                logging.info(
-                    f"Set model runtime config max num batched tokens: {runtime_config.max_num_batched_tokens}"
-                )
-            # Fallback to max_total_tokens if max_num_batched_tokens not available
-            elif (
-                hasattr(server_args, "max_total_tokens")
-                and server_args.max_total_tokens is not None
-            ):
-                runtime_config.max_num_batched_tokens = server_args.max_total_tokens
-                logging.info(
-                    f"Using max_total_tokens as max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
-                )
-
-            # Log a warning if we couldn't get all required values
-            if runtime_config.total_kv_blocks is None:
-                logging.warning("Could not determine total_kv_blocks from server_args")
-            if runtime_config.max_num_seqs is None:
-                logging.warning("Could not determine max_num_seqs from server_args")
-            if runtime_config.max_num_batched_tokens is None:
-                logging.warning(
-                    "Could not determine max_num_batched_tokens from server_args"
-                )
-
-        else:
-            logging.warning(
-                "Could not access server_args from engine.tokenizer_manager"
-            )
-            return None
-
-        return runtime_config
+        # If scheduler approach doesn't work, log and return None to indicate we'll skip runtime config
+        logging.warning(
+            "Could not access runtime config from SGLang engine. "
+            "The engine may compute these values internally after initialization. "
+            "Proceeding without runtime config - SGLang will use its internal defaults."
+        )
+        return None
 
     except Exception as e:
-        logging.error(f"Failed to get runtime config: {e}")
+        logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return None
 
 
