@@ -152,7 +152,7 @@ async def async_main():
     flags = parse_args()
     is_static = bool(flags.static_endpoint)  # true if the string has a value
 
-    # Configure Dynamo frontend HTTP service metrics prefix (consumed by Rust via DYN_METRICS_PREFIX)
+    # Configure Dynamo frontend HTTP service metrics prefix
     if flags.metrics_prefix is not None:
         os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
