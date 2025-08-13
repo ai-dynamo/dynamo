@@ -56,7 +56,13 @@ async def get_engine_runtime_config(
     runtime_config = ModelRuntimeConfig()
 
     try:
-        # TODO: extract kv_total_blocks
+        # Extract total_kv_blocks from engine stats
+        stats = engine.llm.get_stats_async(timeout=5)
+        stat = await anext(stats)
+        runtime_config.total_kv_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+        logging.info(
+            f"Set runtime config total_kv_blocks: {runtime_config.total_kv_blocks}"
+        )
 
         # Extract max number of sequences
         runtime_config.max_num_seqs = config.max_batch_size
