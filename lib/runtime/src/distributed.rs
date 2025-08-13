@@ -51,16 +51,10 @@ impl DistributedRuntime {
         let etcd_client = if is_static {
             None
         } else {
-            Some(
-                Self::build_with_runtime(move || {
-                    etcd::Client::new(etcd_config.clone(), runtime_clone)
-                })
-                .await?,
-            )
+            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
         };
 
-        // TODO(jthomson04): We may want to consider running the NATS client across multiple threads.
-        let nats_client = Self::build_with_runtime(move || nats_config.clone().connect()).await?;
+        let nats_client = nats_config.clone().connect().await?;
 
         // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
@@ -137,30 +131,6 @@ impl DistributedRuntime {
         }
 
         Ok(distributed_runtime)
-    }
-
-    async fn build_with_runtime<T: Send + Sync + 'static>(
-        f: impl AsyncFnOnce() -> Result<T> + Send + Sync + 'static,
-    ) -> Result<T> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            runtime.block_on(async move {
-                let value = f().await;
-
-                tx.send(value)
-                    .unwrap_or_else(|_| panic!("This should never happen!"));
-
-                std::future::pending::<()>().await;
-            });
-        });
-
-        rx.await
-            .unwrap_or_else(|e| panic!("Failed to build with runtime: {:?}", e))
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {

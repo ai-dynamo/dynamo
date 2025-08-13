@@ -35,6 +35,7 @@ use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
@@ -50,6 +51,7 @@ pub const URL_PREFIX: &str = "nats://";
 pub struct Client {
     client: client::Client,
     js_ctx: jetstream::Context,
+    _runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl Client {
@@ -236,7 +238,9 @@ fn validate_nats_server(server: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
+// TODO(jthomson04): We really shouldn't be hardcoding this.
+const NATS_WORKER_THREADS: usize = 4;
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
@@ -258,10 +262,27 @@ impl ClientOptions {
             }
         };
 
-        let client = client.connect(self.server).await?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(NATS_WORKER_THREADS)
+            .enable_all()
+            .build()?;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        runtime.spawn(async move {
+            let client = client.connect(self.server).await;
+            tx.send(client).unwrap();
+        });
+
+        let client = rx.await.unwrap()?;
+
         let js_ctx = jetstream::new(client.clone());
 
-        Ok(Client { client, js_ctx })
+        Ok(Client {
+            client,
+            js_ctx,
+            _runtime: Arc::new(runtime),
+        })
     }
 }
 
