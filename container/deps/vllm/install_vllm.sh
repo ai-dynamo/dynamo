@@ -112,6 +112,14 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 # Install common dependencies
 uv pip install pip cuda-python
 
+if [ "$ARCH" = "amd64" ]; then
+    # Build issues with LMCache installation on arm64:
+    # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
+    # TODO: Add it back once we have a working arm64 build.
+    # Install LMCache
+    uv pip install --no-build-isolation lmcache
+fi
+
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
 cd $INSTALLATION_DIR
@@ -146,10 +154,6 @@ else
         VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
-
-
-# Install LMCache
-uv pip install --no-build-isolation lmcache
 
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
