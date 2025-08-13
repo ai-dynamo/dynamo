@@ -105,8 +105,12 @@ impl Tokenizer {
     }
 
     /// Create a stateful sequence object for decoding token_ids into text
-    pub fn decode_stream(&self, skip_special_tokens: bool) -> DecodeStream {
-        DecodeStream::new(self.0.clone(), skip_special_tokens)
+    pub fn decode_stream(
+        &self,
+        prompt_token_ids: &[TokenIdType],
+        skip_special_tokens: bool,
+    ) -> DecodeStream {
+        DecodeStream::new(self.0.clone(), prompt_token_ids, skip_special_tokens)
     }
 }
 
@@ -167,6 +171,8 @@ pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tok
     }
 }
 
+const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
+
 /// DecodeStream will keep the state necessary to produce individual chunks of
 /// strings given an input stream of token_ids.
 ///
@@ -188,41 +194,28 @@ pub struct DecodeStream {
     /// so decoding the whole ids produces a valid prefix.
     /// Prefix is the previously produced string, kept around to trim off of
     /// the next valid chunk
-    ids: Vec<u32>,
+    all_token_ids: Vec<u32>,
 
-    // Index of the start of the sliding window view.
-    sliding_window_start: usize,
+    prefix_offset: usize,
 
-    // Text within the sliding window.
-    sliding_window: String,
-
-    sliding_window_size: usize,
+    read_offset: usize,
 }
 
 impl DecodeStream {
-    pub fn new(tokenizer: Arc<dyn traits::Tokenizer>, skip_special_tokens: bool) -> Self {
-        // TODO: This should be enough for practically anything.
-        const DEFAULT_SLIDING_WINDOW_SIZE: usize = 8;
-
-        Self::new_with_custom_sliding_window_size(
-            tokenizer,
-            skip_special_tokens,
-            DEFAULT_SLIDING_WINDOW_SIZE,
-        )
-    }
-
-    pub fn new_with_custom_sliding_window_size(
+    pub fn new(
         tokenizer: Arc<dyn traits::Tokenizer>,
+        prompt_token_ids: &[TokenIdType],
         skip_special_tokens: bool,
-        sliding_window_size: usize,
     ) -> Self {
+        let num_input_tokens = prompt_token_ids.len();
+        let prompt_token_ids = prompt_token_ids.to_vec();
         Self {
             tokenizer,
             skip_special_tokens,
-            ids: Vec::with_capacity(64),
-            sliding_window_start: 0,
-            sliding_window: String::with_capacity(64),
-            sliding_window_size,
+            all_token_ids: prompt_token_ids,
+            prefix_offset: num_input_tokens
+                .saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET),
+            read_offset: num_input_tokens,
         }
     }
 
@@ -235,35 +228,28 @@ impl DecodeStream {
     /// represent valid UTF-8, and only follow-up token_ids will help produce
     /// a valid chunk.
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
-        self.ids.push(id);
+        self.all_token_ids.push(id);
 
-        let decoded = self.tokenizer.decode(
-            &self.ids[self.sliding_window_start..],
+        let prefix_text = self.tokenizer.decode(
+            &self.all_token_ids[self.prefix_offset..self.read_offset],
             self.skip_special_tokens,
         )?;
 
-        let idx = decoded.find(&self.sliding_window).and_then(|idx| {
-            if idx + self.sliding_window.len() < decoded.len() {
-                Some(idx)
-            } else {
-                None
-            }
-        });
+        let new_text = self.tokenizer.decode(
+            &self.all_token_ids[self.prefix_offset..],
+            self.skip_special_tokens,
+        )?;
 
-        if idx.is_none() {
-            return Ok(None);
+        if new_text.len() > prefix_text.len() && !new_text.ends_with("�") {
+            let new_text = new_text[prefix_text.len()..].to_string();
+
+            self.prefix_offset = self.read_offset;
+            self.read_offset = self.all_token_ids.len();
+
+            Ok(Some(new_text))
+        } else {
+            Ok(None)
         }
-        let idx = idx.unwrap();
-
-        let new_text = decoded[idx + self.sliding_window.len()..].to_string();
-
-        self.sliding_window_start = self.ids.len().saturating_sub(self.sliding_window_size);
-        self.sliding_window = self.tokenizer.decode(
-            &self.ids[self.sliding_window_start..],
-            self.skip_special_tokens,
-        )?;
-
-        Ok(Some(new_text))
     }
 }
 

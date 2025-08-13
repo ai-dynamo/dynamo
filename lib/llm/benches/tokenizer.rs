@@ -53,7 +53,7 @@ pub fn decode(c: &mut Criterion) {
             || {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
-                let ds = DecodeStream::new(tokenizer, false);
+                let ds = DecodeStream::new(tokenizer, &[], false);
                 Decoder::new(ds, StopConditions::default())
             },
             |mut decoder| {
@@ -77,7 +77,7 @@ pub fn decode_big(c: &mut Criterion) {
             || {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
-                let ds = DecodeStream::new(tokenizer, false);
+                let ds = DecodeStream::new(tokenizer, &[], false);
                 Decoder::new(ds, StopConditions::default())
             },
             |mut decoder| {
