@@ -11,7 +11,7 @@ pub struct ModelRuntimeConfig {
 
     pub max_num_seqs: Option<u64>,
 
-    pub gpu_memory_utilization: Option<u64>,
+    pub max_num_batched_tokens: Option<u64>,
 
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

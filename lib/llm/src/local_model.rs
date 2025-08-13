@@ -246,6 +246,8 @@ impl LocalModelBuilder {
                     Some(mocker_engine_args.num_gpu_blocks as u64);
                 self.runtime_config.max_num_seqs =
                     mocker_engine_args.max_num_seqs.map(|v| v as u64);
+                self.runtime_config.max_num_batched_tokens =
+                    mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
             }
         }
 

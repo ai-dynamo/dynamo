@@ -73,12 +73,10 @@ async def get_engine_runtime_config(
                     f"Set runtime config max num seqs: {runtime_config.max_num_seqs}"
                 )
 
-            # Get GPU memory utilization from the config
-            # Convert free_gpu_memory_fraction to utilization percentage
-            gpu_mem_percentage = int(config.free_gpu_memory_fraction * 100)
-            runtime_config.gpu_memory_utilization = gpu_mem_percentage
+            # Get max_num_batched_tokens from config
+            runtime_config.max_num_batched_tokens = config.max_num_tokens
             logging.info(
-                f"Set runtime config GPU memory utilization: {gpu_mem_percentage}%"
+                f"Set runtime config max num batched tokens: {runtime_config.max_num_batched_tokens}"
             )
 
             # Only need the first stat result

@@ -30,8 +30,8 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_gpu_memory_utilization(&mut self, gpu_memory_utilization: u64) {
-        self.inner.gpu_memory_utilization = Some(gpu_memory_utilization);
+    fn set_max_num_batched_tokens(&mut self, max_num_batched_tokens: u64) {
+        self.inner.max_num_batched_tokens = Some(max_num_batched_tokens);
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -53,8 +53,8 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn gpu_memory_utilization(&self) -> Option<u64> {
-        self.inner.gpu_memory_utilization
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        self.inner.max_num_batched_tokens
     }
 
     #[getter]

@@ -414,11 +414,12 @@ async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig
                     f"Set model runtime config max num seqs: {runtime_config.max_num_seqs}"
                 )
 
-            if server_info.get("mem_fraction_static") is not None:
-                gpu_mem_percentage = int(server_info["mem_fraction_static"] * 100)
-                runtime_config.gpu_memory_utilization = gpu_mem_percentage
+            if server_info.get("max_num_batched_tokens") is not None:
+                runtime_config.max_num_batched_tokens = server_info[
+                    "max_num_batched_tokens"
+                ]
                 logging.info(
-                    f"Set model runtime config GPU memory utilization: {gpu_mem_percentage}%"
+                    f"Set model runtime config max num batched tokens: {runtime_config.max_num_batched_tokens}"
                 )
 
             return runtime_config
