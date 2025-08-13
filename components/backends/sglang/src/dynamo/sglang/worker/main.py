@@ -404,7 +404,9 @@ async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig
                 ):
                     page_size = engine.tokenizer_manager.server_args.page_size
                     if page_size:
-                        runtime_config.total_kv_blocks = (max_total_tokens + page_size - 1) // page_size
+                        runtime_config.total_kv_blocks = (
+                            max_total_tokens + page_size - 1
+                        ) // page_size
                         logging.info(
                             f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
                             f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
