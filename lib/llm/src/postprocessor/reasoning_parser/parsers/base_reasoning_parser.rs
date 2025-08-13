@@ -71,7 +71,7 @@ impl ReasoningParser for BaseReasoningParser {
     fn parse_reasoning_streaming_incremental(&mut self, text: &str) -> ParserResult {
         // Incrementally parse the streaming text
         self._buffer.push_str(text);
-        let mut current_text = self._buffer.clone();
+        let mut current_text = self._buffer.to_string();
         // If the current text is a prefix of the think token, keep buffering
 
         if self.think_start_token.starts_with(&current_text)
@@ -103,7 +103,7 @@ impl ReasoningParser for BaseReasoningParser {
                 .find(&self.think_end_token)
                 .unwrap_or(current_text.len());
             let reasoning_text = &current_text[..end_idx];
-            self._buffer = String::new();
+            self._buffer.clear();
             self._in_reasoning = false;
             let start_idx = end_idx + self.think_end_token.len();
             let normal_text = if start_idx < current_text.len() {
