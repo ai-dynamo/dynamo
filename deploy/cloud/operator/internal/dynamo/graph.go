@@ -708,12 +708,26 @@ func GenerateBasePodSpec(
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
 		main := component.ExtraPodSpec.MainContainer.DeepCopy()
 		if main != nil {
+			// block merge if main container has overrides for which there are top level fields
+			// e.g liveness probe, readiness probe, resources.requests, resources.limits, etc.
+			err := checkMainContainerOverrides(main)
+			if err != nil {
+				return corev1.PodSpec{}, fmt.Errorf("failed to check main container overrides: %w", err)
+			}
+
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
-			err := mergo.Merge(&container, *main, mergo.WithOverride)
+			err = mergo.Merge(&container, *main, mergo.WithOverride)
 			if err != nil {
 				return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
+
+			// main container fields that require special handling
 			container.Env = MergeEnvs(component.Envs, container.Env)
+			// Note: startup probe does not have its own top level field so it must be passed in extraPodSpec.MainContainer
+			// We want to overwrite entirely if provided rather than merge
+			if main.StartupProbe != nil {
+				container.StartupProbe = main.StartupProbe
+			}
 		}
 	}
 
@@ -1188,4 +1202,22 @@ func generateSharedMemoryVolumeAndMount(resources *corev1.ResourceRequirements) 
 		MountPath: "/dev/shm",
 	}
 	return volume, volumeMount
+}
+
+// Helper function to tally what attributes should not be passed in extraPodSpec.MainContainer
+// This is to prevent confusing behavior where they are passed in here and in their respected top level fields on the CR
+func checkMainContainerOverrides(main *corev1.Container) error {
+	if main.LivenessProbe != nil {
+		return fmt.Errorf("liveness probe is not supported in main container")
+	}
+	if main.ReadinessProbe != nil {
+		return fmt.Errorf("readiness probe is not supported in main container")
+	}
+	if main.Resources.Requests != nil {
+		return fmt.Errorf("resources.requests is not supported in main container")
+	}
+	if main.Resources.Limits != nil {
+		return fmt.Errorf("resources.limits is not supported in main container")
+	}
+	return nil
 }
