@@ -119,7 +119,6 @@ speculative_config:
   num_nextn_predict_layers: ${mtp}
 moe_config:
     backend: ${moe_backend}
-    max_num_tokens: 37376
 EOF
 else
 cat << EOF > ${extra_llm_api_file}
@@ -141,7 +140,6 @@ kv_cache_config:
 stream_interval: 10
 moe_config:
     backend: ${moe_backend}
-    max_num_tokens: 37376
 EOF
 fi
 
