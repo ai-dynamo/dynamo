@@ -113,7 +113,7 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 uv pip install pip cuda-python
 
 # Install LMCache
-uv pip install lmcache
+uv pip install --no-build-isolation lmcache
 
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
