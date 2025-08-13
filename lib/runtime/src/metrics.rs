@@ -1524,7 +1524,7 @@ mod test_metricsregistry_nats {
             (build_metric_name(nats::CONNECTS), 1.0, 1.0),         // Should remain 1 connection
             (build_metric_name(nats::IN_TOTAL_BYTES), 22000.0, 28000.0), // ~75% to ~125% of 24977 (10 messages × 2000 bytes + overhead)
             (build_metric_name(nats::IN_MESSAGES), 10.0, 12.0), // Allow small drift (callback may run twice)
-            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 1500.0, 2000.0), // ~75% to ~125% of 1752 (10 messages + overhead)
+            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 2076.0, 3461.0), // ~75% to ~125% of 2769 (synchronous metrics collection overhead)
             (build_metric_name(nats::OUT_MESSAGES), 10.0, 12.0), // Allow small drift (callback may run twice)
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 1.0), // Should be low processing time

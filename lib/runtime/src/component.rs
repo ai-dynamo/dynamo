@@ -277,52 +277,68 @@ impl Component {
     }
 
     /// Add Prometheus metrics for this component's service stats.
-    /// Registers a lightweight `Fn()` callback that scrapes stats asynchronously
-    /// and updates gauges.
+    ///
+    /// Uses a channel to synchronize with the spawned async task, ensuring
+    /// metrics are updated before the callback returns.
     pub fn add_metrics_callback(&self) -> Result<()> {
         let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
 
-        // Callback clones per-invocation so it remains `Fn()` and can move owned values
-        // into the spawned task (requires `'static`).
         let component_clone = self.clone();
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
-        assert_eq!(
+        debug_assert_eq!(
             hierarchies.last().cloned().unwrap_or_default(),
             self.service_name()
         ); // it happens that in component, hierarchy and service name are the same
+
         self.drt().register_metrics_callback(hierarchies, move || {
-            // Use the current Tokio runtime to run the async scrape
-            let handle = match tokio::runtime::Handle::try_current() {
-                Ok(h) => h,
-                Err(err) => {
-                    tracing::warn!(
-                        "No Tokio runtime handle available; resetting metrics to zeros: {}",
-                        err
-                    );
-                    component_metrics.clone().reset_to_zeros();
-                    return Ok(());
-                }
-            };
+            // Timeout for scraping metrics from components (in milliseconds)
+            // This value is also used by KV Router metrics aggregator (300ms) and other components
+            const METRICS_SCRAPE_TIMEOUT_MS: u64 = 300;
+
+            // Get the current Tokio runtime handle
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|err| anyhow::anyhow!("No Tokio runtime handle available: {}", err))?;
 
             let m = component_metrics.clone();
             let c = component_clone.clone();
+
+            // Create a channel to synchronize with the spawned task
+            let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+
+            let timeout = std::time::Duration::from_millis(METRICS_SCRAPE_TIMEOUT_MS);
             handle.spawn(async move {
-                let timeout = std::time::Duration::from_millis(500);
-                match c.scrape_stats(timeout).await {
-                    Ok(service_set) => m.update_from_service_set(&service_set),
-                    Err(err) => {
-                        tracing::warn!(
-                            "Failed to scrape stats for component '{}': {}",
-                            c.service_name(),
-                            err
-                        );
-                        m.reset_to_zeros();
+                let result = match c.scrape_stats(timeout).await {
+                    Ok(service_set) => {
+                        m.update_from_service_set(&service_set);
+                        Ok(())
                     }
-                }
+                    Err(err) => {
+                        // Reset metrics on failure
+                        m.reset_to_zeros();
+                        Err(anyhow::anyhow!("Failed to scrape stats: {}", err))
+                    }
+                };
+
+                // Send the result back to the waiting thread
+                // If send fails, the receiver has already given up waiting
+                let _ = tx.send(result);
             });
 
-            Ok(())
+            // Wait for the spawned task to complete (with a timeout to prevent hanging)
+            // Add 100ms buffer to the scrape timeout to account for processing overhead
+            let recv_timeout = std::time::Duration::from_millis(METRICS_SCRAPE_TIMEOUT_MS + 100);
+            match rx.recv_timeout(recv_timeout) {
+                Ok(result) => result, // Return the actual result from scraping
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    component_metrics.reset_to_zeros();
+                    Err(anyhow::anyhow!("Metrics collection timed out"))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    component_metrics.reset_to_zeros();
+                    Err(anyhow::anyhow!("Metrics collection task failed"))
+                }
+            }
         });
 
         Ok(())
@@ -583,7 +599,18 @@ impl Namespace {
             .namespace(self.clone())
             .is_static(self.is_static)
             .build()?;
-        component.add_metrics_callback()?; // register a callback to scrape stats and update metrics
+
+        // Register the metrics callback for this component.
+        // If registration fails, log a warning but do not propagate the error,
+        // as metrics are not mission critical and should not block component creation.
+        if let Err(err) = component.add_metrics_callback() {
+            tracing::warn!(
+                "Failed to add metrics callback for component '{}': {}",
+                component.service_name(),
+                err
+            );
+        }
+
         Ok(component)
     }
 
