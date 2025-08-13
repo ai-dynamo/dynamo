@@ -141,6 +141,9 @@ cd $DYNAMO_HOME/components/backends/sglang
 
 ### Aggregated Serving with KV Routing
 
+> [!NOTE]
+> Until sglang releases a version > v0.5.0rc0, you will have to install from source to use kv_routing. You can do this by running `git clone https://github.com/sgl-project/sglang.git && cd sglang && uv pip install -e "python[all]"`. We will update this section once sglang releases a newer version.
+
 ```bash
 cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_router.sh

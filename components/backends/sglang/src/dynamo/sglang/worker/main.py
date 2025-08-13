@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import random
 import signal
@@ -357,11 +358,18 @@ async def init(
     handler.setup_metrics()
 
     # Set up ZMQ kv event publisher
-    zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=endpoint.lease_id(),
-        kv_block_size=server_args.page_size,
-    )
-    _ = ZmqKvEventPublisher(component=component, config=zmq_config)
+    if server_args.kv_events_config:
+        kv_events = json.loads(server_args.kv_events_config)
+        ep = kv_events.get("endpoint")
+        zmq_ep = ep.replace("*", get_ip()) if ep else None
+
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=endpoint.lease_id(),
+            kv_block_size=server_args.page_size,
+            zmq_endpoint=zmq_ep,
+        )
+        logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
+        _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     tasks = [endpoint.serve_endpoint(handler.generate)]
 
