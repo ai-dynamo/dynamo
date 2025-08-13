@@ -391,73 +391,82 @@ async def register_llm_with_runtime_config(
 
 async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
     """Get runtime config from SGLang engine"""
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2
+    try:
+        runtime_config = ModelRuntimeConfig()
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            # Run the synchronous get_server_info in a thread executor to avoid event loop conflict
-            loop = asyncio.get_event_loop()
-            server_info = await loop.run_in_executor(None, engine.get_server_info)
+        # Access server_args directly from the engine
+        if hasattr(engine, "tokenizer_manager") and hasattr(
+            engine.tokenizer_manager, "server_args"
+        ):
+            server_args = engine.tokenizer_manager.server_args
 
-            if not server_info:
-                logging.warning("No server info from SGLang engine")
-                return None
-
-            runtime_config = ModelRuntimeConfig()
-
-            # Calculate total_kv_blocks from max_total_num_tokens and page_size
-            if server_info.get("max_total_num_tokens") is not None and hasattr(
-                engine, "tokenizer_manager"
+            # Calculate total_kv_blocks from max_total_tokens and page_size
+            if (
+                hasattr(server_args, "max_total_tokens")
+                and server_args.max_total_tokens is not None
             ):
-                page_size = engine.tokenizer_manager.server_args.page_size
+                page_size = getattr(server_args, "page_size", None)
                 if page_size:
                     runtime_config.total_kv_blocks = (
-                        server_info["max_total_num_tokens"] // page_size
+                        server_args.max_total_tokens // page_size
                     )
                     logging.info(
                         f"Calculated total KV blocks: {runtime_config.total_kv_blocks} "
-                        f"(max_total_num_tokens={server_info['max_total_num_tokens']}, page_size={page_size})"
+                        f"(max_total_tokens={server_args.max_total_tokens}, page_size={page_size})"
                     )
 
-            if server_info.get("max_running_requests") is not None:
-                runtime_config.max_num_seqs = server_info["max_running_requests"]
+            # Set max_num_seqs from max_running_requests
+            if (
+                hasattr(server_args, "max_running_requests")
+                and server_args.max_running_requests is not None
+            ):
+                runtime_config.max_num_seqs = server_args.max_running_requests
                 logging.info(
                     f"Set model runtime config max num seqs: {runtime_config.max_num_seqs}"
                 )
 
-            # max_num_batched_tokens might be provided directly by SGLang
-            if server_info.get("max_num_batched_tokens") is not None:
-                runtime_config.max_num_batched_tokens = server_info[
-                    "max_num_batched_tokens"
-                ]
+            # Set max_num_batched_tokens
+            if (
+                hasattr(server_args, "max_num_batched_tokens")
+                and server_args.max_num_batched_tokens is not None
+            ):
+                runtime_config.max_num_batched_tokens = (
+                    server_args.max_num_batched_tokens
+                )
                 logging.info(
                     f"Set model runtime config max num batched tokens: {runtime_config.max_num_batched_tokens}"
                 )
-            # If not provided, we could use max_total_num_tokens as a fallback
-            elif server_info.get("max_total_num_tokens") is not None:
-                runtime_config.max_num_batched_tokens = server_info[
-                    "max_total_num_tokens"
-                ]
+            # Fallback to max_total_tokens if max_num_batched_tokens not available
+            elif (
+                hasattr(server_args, "max_total_tokens")
+                and server_args.max_total_tokens is not None
+            ):
+                runtime_config.max_num_batched_tokens = server_args.max_total_tokens
                 logging.info(
-                    f"Using max_total_num_tokens as max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+                    f"Using max_total_tokens as max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
                 )
 
-            return runtime_config
+            # Log a warning if we couldn't get all required values
+            if runtime_config.total_kv_blocks is None:
+                logging.warning("Could not determine total_kv_blocks from server_args")
+            if runtime_config.max_num_seqs is None:
+                logging.warning("Could not determine max_num_seqs from server_args")
+            if runtime_config.max_num_batched_tokens is None:
+                logging.warning(
+                    "Could not determine max_num_batched_tokens from server_args"
+                )
 
-        except Exception as e:
+        else:
             logging.warning(
-                f"Attempt {attempt + 1}/{MAX_RETRIES} failed to get runtime config: {e}"
+                "Could not access server_args from engine.tokenizer_manager"
             )
-            if attempt < MAX_RETRIES - 1:
-                await asyncio.sleep(RETRY_DELAY)
-                RETRY_DELAY *= 2
-            else:
-                logging.error(
-                    f"Failed to get runtime config after {MAX_RETRIES} attempts"
-                )
+            return None
 
-    return None
+        return runtime_config
+
+    except Exception as e:
+        logging.error(f"Failed to get runtime config: {e}")
+        return None
 
 
 def main():
