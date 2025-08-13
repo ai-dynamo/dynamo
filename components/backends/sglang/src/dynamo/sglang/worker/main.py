@@ -9,12 +9,12 @@ import socket
 import sys
 from typing import Any, Dict, Optional, Union
 
+import sglang as sgl
 import uvloop
 import zmq
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip, get_zmq_socket
 
-import sglang as sgl
 from dynamo._core import Endpoint
 from dynamo.llm import (
     ForwardPassMetrics,
