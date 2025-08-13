@@ -77,7 +77,7 @@ impl DistributedRuntime {
             })
             .await??;
 
-        // Start HTTP server for health and metrics if enabled in configuration
+        // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
         // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
@@ -102,7 +102,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            http_server: Arc::new(OnceLock::new()),
+            system_status_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -113,13 +113,13 @@ impl DistributedRuntime {
             system_health,
         };
 
-        // Start HTTP server if enabled
+        // Start system status server if enabled
         if let Some(cancel_token) = cancel_token {
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start HTTP server (it spawns its own task internally)
-            match crate::http_server::spawn_http_server(
+            // Start system status server (it spawns its own task internally)
+            match crate::system_status_server::spawn_system_status_server(
                 &host,
                 port,
                 cancel_token,
@@ -128,24 +128,27 @@ impl DistributedRuntime {
             .await
             {
                 Ok((addr, handle)) => {
-                    tracing::info!("HTTP server started successfully on {}", addr);
+                    tracing::info!("System status server started successfully on {}", addr);
 
-                    // Store HTTP server information
-                    let http_server_info =
-                        crate::http_server::HttpServerInfo::new(addr, Some(handle));
+                    // Store system status server information
+                    let system_status_server_info =
+                        crate::system_status_server::SystemStatusServerInfo::new(
+                            addr,
+                            Some(handle),
+                        );
 
-                    // Initialize the http_server field
+                    // Initialize the system_status_server field
                     distributed_runtime
-                        .http_server
-                        .set(Arc::new(http_server_info))
-                        .expect("HTTP server info should only be set once");
+                        .system_status_server
+                        .set(Arc::new(system_status_server_info))
+                        .expect("System status server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("HTTP server startup failed: {}", e);
+                    tracing::error!("System status server startup failed: {}", e);
                 }
             }
         } else {
-            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
+            tracing::debug!("Health and system status server is disabled via DYN_SYSTEM_ENABLED");
         }
 
         Ok(distributed_runtime)
@@ -226,9 +229,11 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
-    /// Get HTTP server information if available
-    pub fn http_server_info(&self) -> Option<Arc<crate::http_server::HttpServerInfo>> {
-        self.http_server.get().cloned()
+    /// Get system status server information if available
+    pub fn system_status_server_info(
+        &self,
+    ) -> Option<Arc<crate::system_status_server::SystemStatusServerInfo>> {
+        self.system_status_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers

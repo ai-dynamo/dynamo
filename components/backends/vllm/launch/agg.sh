@@ -8,4 +8,5 @@ trap 'echo Cleaning up...; kill 0' EXIT
 python -m dynamo.frontend &
 
 # run worker
-python -m dynamo.vllm  --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching
+# --enforce-eager is added for quick deployment. for production use, need to remove this flag
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching

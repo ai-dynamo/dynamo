@@ -37,7 +37,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ❌ | Planned |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
@@ -62,20 +62,67 @@ Start using [Docker Compose](../../../deploy/docker-compose.yml)
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-### Build container
+### Install `ai-dynamo[sglang]`
+
+#### Install latest release
+We suggest using uv to install the latest release of ai-dynamo[sglang]. You can install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ```bash
-# pull our pre-build sglang runtime container
+# create a virtual env
+uv venv --python 3.12 --seed
+# install the latest release
+uv pip install "ai-dynamo[sglang]"
+```
+
+#### Installing editable version for development
+
+<details>
+<summary>Instructions</summary>
+
+This requires having rust installed. We also recommend having a proper installation of the cuda toolkit as sglang requires `nvcc` to be available.
+
+```bash
+# create a virtual env
+uv venv --python 3.12 --seed
+# build dynamo runtime bindings
+uv pip install maturin
+cd $DYNAMO_HOME/lib/bindings/python
+maturin develop --uv
+cd $DYNAMO_HOME
+uv pip install .
+export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/backends/sglang/src"
+# install target sglang version (you can choose any version)
+# we include the prerelease flag in order to install flashinfer rc versions
+uv pip install --prerelease=allow sglang[all]==0.4.9.post6
+```
+
+</details>
+
+#### Using prebuilt docker containers
+
+<details>
+<summary>Instructions</summary>
+
+```bash
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
-# or build from source
-./container/build.sh --framework sglang
 ```
 
-### Run container
+</details>
+
+#### Building docker container from source
+
+<details>
+<summary>Instructions</summary>
 
 ```bash
-./container/run.sh -it --framework sglang
+./container/build.sh --framework sglang
+# run container using prebuild wheel
+./container/run.sh --framework sglang -it
+# mount workspace for development
+./container/run.sh --framework sglang --mount-workspace
 ```
+
+</details>
 
 ## Run Single Node Examples
 
@@ -150,7 +197,7 @@ curl localhost:8000/v1/chat/completions \
         "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
     }
     ],
-    "stream": false,
+    "stream": true,
     "max_tokens": 30
   }'
 ```
@@ -178,6 +225,9 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Supporting SGLang's native endpoints via Dynamo
 - **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
+
+### Hierarchical Cache (HiCache)
+- **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**
 
 ## Deployment
 

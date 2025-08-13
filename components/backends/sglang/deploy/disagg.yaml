@@ -38,7 +38,7 @@ spec:
           memory: "40Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0808-07
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
@@ -87,8 +87,11 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0808-07
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3"
             - "-m"
@@ -151,8 +154,11 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0808-07
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3"
             - "-m"

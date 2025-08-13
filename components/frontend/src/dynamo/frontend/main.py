@@ -113,6 +113,12 @@ def parse_args():
     )
     parser.set_defaults(use_kv_events=True)
     parser.add_argument(
+        "--router-replica-sync",
+        action="store_true",
+        default=False,
+        help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
+    )
+    parser.add_argument(
         "--static-endpoint",
         type=validate_static_endpoint,
         help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
@@ -148,6 +154,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            router_replica_sync=flags.router_replica_sync,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

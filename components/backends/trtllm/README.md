@@ -43,6 +43,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Client](#client)
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
+- [Performance Sweep](#performance-sweep)
 
 ## Feature Support Matrix
 
@@ -420,3 +421,7 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 ### Supported Multimodal Models
 
 Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by dynamo.
+
+## Performance Sweep
+
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](./performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
