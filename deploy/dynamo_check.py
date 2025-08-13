@@ -195,7 +195,10 @@ class DynamoChecker:
                 ):
                     components.append(f"dynamo.{item}")
         else:
-            print(f"⚠️  Warning: Components directory not found: {comp_path}")
+            # Defer this message to print under the Dynamo header for alignment
+            self._deferred_messages.append(
+                f"⚠️  Warning: Components directory not found: {self._replace_home_with_var(comp_path)}"
+            )
 
         # Scan backend components (vllm, sglang, etc.)
         # Examples: components/backends/{vllm,sglang,llama_cpp}/src/dynamo/{vllm,sglang,llama_cpp}/__init__.py
@@ -208,8 +211,9 @@ class DynamoChecker:
                 ):
                     components.append(f"dynamo.{item}")
         else:
-            print(
-                f"⚠️  Warning: Backend components directory not found: {backend_path}"
+            # Defer this message to print under the Dynamo header for alignment
+            self._deferred_messages.append(
+                f"⚠️  Warning: Backend components directory not found: {self._replace_home_with_var(backend_path)}"
             )
 
         return components
@@ -273,13 +277,8 @@ class DynamoChecker:
             subprocess.run(
                 ["cargo", "--version"], capture_output=True, text=True, timeout=5
             )
-        except FileNotFoundError:
-            print(
-                "⚠️  Warning: cargo command not found. Install Rust toolchain to see cargo target directory."
-            )
-            return None, None
-        except subprocess.TimeoutExpired:
-            print("⚠️  Warning: cargo command timed out")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Do not print here; caller will render a nicely aligned warning
             return None, None
 
         # Get cargo home directory
@@ -325,7 +324,7 @@ class DynamoChecker:
         ├─ GPU: ...
         └─ Python: ...
         """
-        # Linux info
+        # OS info
         distro = ""
         version = ""
         try:
@@ -369,9 +368,11 @@ class DynamoChecker:
         cores = os.cpu_count() or 0
 
         if distro:
-            base_linux = f"Linux: {distro} {version} ({uname.system} {uname.release} {uname.machine})".strip()
+            base_linux = f"OS: {distro} {version} ({uname.system} {uname.release} {uname.machine})".strip()
         else:
-            base_linux = f"Linux: {uname.system} {uname.release} {uname.version} ({uname.machine})"
+            base_linux = (
+                f"OS: {uname.system} {uname.release} {uname.version} ({uname.machine})"
+            )
 
         extras = []
         if mem_used_gib is not None and mem_total_gib is not None:
@@ -625,6 +626,7 @@ class DynamoChecker:
         if torch_version:
             print("   └─ Torch: " + str(torch_version))
         else:
+            # Show as a child under Python
             print("   └─ ❌ Torch: not installed")
         # Extra lines (e.g., CUDA memory clear status)
         for i, line in enumerate(extra_lines):
@@ -723,10 +725,9 @@ class DynamoChecker:
                             f"      └─ Binary:  {display_so_file} (unable to read timestamp)"
                         )
         else:
-            # Cargo not found line as a top-level sibling, Dynamo follows so use mid connector
-            print("├─ ❌ Cargo: not found")
+            # Cargo not found: show as a top-level sibling; Dynamo follows, so use mid connector
             print(
-                "   ⚠️  Warning: cargo command not found. Install Rust toolchain to see cargo target directory."
+                "├─ ❌ Cargo: not found (install Rust toolchain to see cargo target directory)"
             )
         # Determine if any errors were printed in system info (treat only Python and Cargo as fatal here)
         system_errors_found = False
