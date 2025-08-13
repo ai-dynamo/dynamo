@@ -3,6 +3,8 @@
 
 import logging
 import os
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, List
 
@@ -12,7 +14,34 @@ import requests
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
+def _wait_for_log_patterns(log_file, patterns, timeout_s=60):
+    """Poll the log file until all regex patterns appear or timeout."""
+    deadline = time.time() + timeout_s
+    compiled = [re.compile(p) for p in patterns]
 
+    found = {i: False for i in range(len(compiled))}
+
+    while time.time() < deadline:
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()  
+                if content.strip():
+                    logger.info(f"Log file content length: {len(content)} chars")
+        except FileNotFoundError:
+            time.sleep(1)
+            continue
+
+        for idx, rx in enumerate(compiled):
+            if not found[idx] and rx.search(content):
+                found[idx] = True
+
+        if all(found.values()):
+            return True
+
+        time.sleep(1)
+
+    missing = [patterns[i] for i, ok in found.items() if not ok]
+    raise AssertionError(f"Missing expected log patterns: {missing}")
 
 @dataclass
 class SGLangConfig:
@@ -26,9 +55,9 @@ class SGLangConfig:
 class SGLangProcess(ManagedProcess):
     """Simple process manager for sglang shell scripts"""
 
-    def __init__(self, script_name, request):
+    def __init__(self, script_name, request, log_dir=None):
         self.port = 8000
-        sglang_dir = "/workspace/components/backends/sglang"
+        sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
         script_path = os.path.join(sglang_dir, "launch", script_name)
 
         # Verify script exists
@@ -38,8 +67,17 @@ class SGLangProcess(ManagedProcess):
         # Make script executable and run it
         command = ["bash", script_path]
 
+        # Focus kv-router logs for kv_events run
+        env = os.environ.copy()
+        if script_name == "agg_router.sh":
+            env.setdefault(
+                "DYN_LOG",
+                "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+            )
+
         super().__init__(
             command=command,
+            env=env,
             timeout=900,
             display_output=True,
             working_dir=sglang_dir,
@@ -72,6 +110,9 @@ sglang_configs = {
     "disaggregated": SGLangConfig(
         script_name="disagg.sh", marks=[pytest.mark.gpu_2], name="disaggregated"
     ),
+    "kv_events": SGLangConfig(
+        script_name="agg_router.sh", marks=[pytest.mark.gpu_2], name="kv_events"
+    ),
 }
 
 
@@ -79,6 +120,7 @@ sglang_configs = {
     params=[
         pytest.param("aggregated", marks=[pytest.mark.gpu_1]),
         pytest.param("disaggregated", marks=[pytest.mark.gpu_2]),
+        pytest.param("kv_events", marks=[pytest.mark.gpu_2]),
     ]
 )
 def sglang_config_test(request):
@@ -126,6 +168,19 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
         content = result["choices"][0]["message"]["content"]
         assert len(content) > 0
         logger.info(f"SGLang {config.name} response: {content}")
+
+        # For kv_events (KV routing path), assert KV publisher/scheduler log lines appear
+        if config.name == "kv_events":
+            log_file = os.path.join(server.log_dir, "bash.log.txt")
+            assert os.path.exists(log_file), f"Log file not found: {log_file}"
+
+            patterns = [
+                r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
+                r"Event processor for worker_id \d+ processing event: Stored\(",
+                r"Selected worker: \d+, logit: ",
+            ]
+
+            _wait_for_log_patterns(log_file, patterns, timeout_s=120)
 
         # Test completions endpoint for disaggregated only
         if config.name == "disaggregated":
