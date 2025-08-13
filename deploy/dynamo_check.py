@@ -51,6 +51,8 @@ import datetime
 import importlib.metadata
 import logging
 import os
+import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +67,7 @@ class DynamoChecker:
         self.workspace_dir = self._find_workspace()
         self.results = {}
         self._suppress_planner_warnings()
+        self.clear_cuda_memory: bool = False
 
     def _suppress_planner_warnings(self):
         """Suppress Prometheus endpoint warnings from planner module during import testing."""
@@ -306,6 +309,416 @@ class DynamoChecker:
 
         return target_directory, cargo_home
 
+    def _print_system_info(self, clear_cuda: bool = False) -> None:
+        """Print concise system information as a top-level section.
+
+        Tree structure:
+        System info:
+        ├─ Linux: ...
+        ├─ GPU: ...
+        └─ Python: ...
+        """
+        # Linux info
+        distro = ""
+        version = ""
+        try:
+            os_release_path = "/etc/os-release"
+            if os.path.exists(os_release_path):
+                with open(os_release_path, "r") as f:
+                    data = f.read()
+                name = ""
+                ver = ""
+                for line in data.splitlines():
+                    if line.startswith("NAME=") and not name:
+                        name = line.split("=", 1)[1].strip().strip('"')
+                    elif line.startswith("VERSION=") and not ver:
+                        ver = line.split("=", 1)[1].strip().strip('"')
+                distro = name
+                version = ver
+        except Exception:
+            pass
+
+        uname = platform.uname()
+        # Memory (used/total) and CPU cores
+        mem_used_gib = None
+        mem_total_gib = None
+        try:
+            meminfo = {}
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meminfo[k.strip()] = v.strip()
+            if "MemTotal" in meminfo and "MemAvailable" in meminfo:
+                # Values are in kB
+                total_kib = float(meminfo["MemTotal"].split()[0])
+                avail_kib = float(meminfo["MemAvailable"].split()[0])
+                used_kib = max(total_kib - avail_kib, 0.0)
+                mem_total_gib = total_kib / (1024.0 * 1024.0)
+                mem_used_gib = used_kib / (1024.0 * 1024.0)
+        except Exception:
+            pass
+
+        cores = os.cpu_count() or 0
+
+        if distro:
+            base_linux = f"Linux: {distro} {version} ({uname.system} {uname.release} {uname.machine})".strip()
+        else:
+            base_linux = f"Linux: {uname.system} {uname.release} {uname.version} ({uname.machine})"
+
+        extras = []
+        if mem_used_gib is not None and mem_total_gib is not None:
+            extras.append(f"Memory: {mem_used_gib:.1f}/{mem_total_gib:.1f} GiB")
+        if cores:
+            extras.append(f"Cores: {cores}")
+        linux_line = base_linux if not extras else base_linux + "; " + "; ".join(extras)
+        # Defer printing until we have all three lines; we print as a tree below
+
+        # GPU info
+        gpu_line = "GPU: none detected"
+        gpu_driver_version: Optional[str] = None
+        gpu_cuda_version: Optional[str] = None
+        try:
+            # Locate nvidia-smi robustly
+            nvsmi = shutil.which("nvidia-smi")
+            if not nvsmi:
+                for candidate in [
+                    "/usr/bin/nvidia-smi",
+                    "/usr/local/bin/nvidia-smi",
+                    "/usr/local/nvidia/bin/nvidia-smi",
+                ]:
+                    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                        nvsmi = candidate
+                        break
+
+            if nvsmi:
+                # Fast list to count GPUs and get first name
+                proc_list = subprocess.run(
+                    [nvsmi, "-L"], capture_output=True, text=True, timeout=10
+                )
+                names: List[str] = []
+                if proc_list.returncode == 0 and proc_list.stdout:
+                    for line in proc_list.stdout.splitlines():
+                        line = line.strip()
+                        # Example: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-...)"
+                        if ":" in line:
+                            part = line.split(":", 1)[1].strip()
+                            # Take up to first parenthesis for clean model name
+                            name_only = part.split("(")[0].strip()
+                            names.append(name_only)
+
+                # Query driver and CUDA
+                driver = "?"
+                cuda = "?"
+                proc_q = subprocess.run(
+                    [
+                        nvsmi,
+                        "--query-gpu=driver_version,cuda_version",
+                        "--format=csv,noheader",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if proc_q.returncode == 0 and proc_q.stdout.strip():
+                    first = proc_q.stdout.strip().splitlines()[0].split(",")
+                    if len(first) >= 1:
+                        driver = first[0].strip()
+                    if len(first) >= 2:
+                        cuda = first[1].strip()
+                else:
+                    # Fallback: parse banner
+                    proc_b = subprocess.run(
+                        [nvsmi], capture_output=True, text=True, timeout=10
+                    )
+                    if proc_b.returncode == 0 and proc_b.stdout:
+                        import re
+
+                        m = re.search(r"Driver Version:\s*([0-9.]+)", proc_b.stdout)
+                        if m:
+                            driver = m.group(1)
+                        m = re.search(r"CUDA Version:\s*([0-9.]+)", proc_b.stdout)
+                        if m:
+                            cuda = m.group(1)
+
+                gpu_driver_version = driver
+                gpu_cuda_version = cuda
+
+                # Query power and memory usage/limits (first GPU)
+                power_draw_w: Optional[str] = None
+                power_limit_w: Optional[str] = None
+                mem_used_mib: Optional[str] = None
+                mem_total_mib: Optional[str] = None
+                try:
+                    proc_pm = subprocess.run(
+                        [
+                            nvsmi,
+                            "--query-gpu=power.draw,power.limit,memory.used,memory.total",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if proc_pm.returncode == 0 and proc_pm.stdout.strip():
+                        first_pm = proc_pm.stdout.strip().splitlines()[0].split(",")
+                        if len(first_pm) >= 1:
+                            power_draw_w = first_pm[0].strip()
+                        if len(first_pm) >= 2:
+                            power_limit_w = first_pm[1].strip()
+                        if len(first_pm) >= 3:
+                            mem_used_mib = first_pm[2].strip()
+                        if len(first_pm) >= 4:
+                            mem_total_mib = first_pm[3].strip()
+                except Exception:
+                    pass
+
+                power_mem_suffix = ""
+                if any([power_draw_w, power_limit_w, mem_used_mib, mem_total_mib]):
+                    # Build terse summary; include only available parts
+                    parts = []
+                    if power_draw_w or power_limit_w:
+                        pd = power_draw_w if power_draw_w is not None else "?"
+                        pl = power_limit_w if power_limit_w is not None else "?"
+                        parts.append(f"Power: {pd}/{pl} W")
+                    if mem_used_mib or mem_total_mib:
+                        mu = mem_used_mib if mem_used_mib is not None else "?"
+                        mt = mem_total_mib if mem_total_mib is not None else "?"
+                        parts.append(f"Memory: {mu}/{mt} MiB")
+                    power_mem_suffix = "; " + "; ".join(parts)
+
+                if names:
+                    gpu_count = len(names)
+                    first_name = names[0]
+                    if gpu_count == 1:
+                        gpu_line = f"GPU: NVIDIA {first_name} (driver {driver}, CUDA {cuda}){power_mem_suffix}"
+                    else:
+                        gpu_line = f"GPU: NVIDIA x{gpu_count} ({first_name} first) (driver {driver}, CUDA {cuda}){power_mem_suffix}"
+                else:
+                    # No names but nvidia-smi present; still report driver/cuda
+                    gpu_line = (
+                        f"GPU: NVIDIA (driver {driver}, CUDA {cuda}){power_mem_suffix}"
+                    )
+
+            elif shutil.which("rocm-smi"):
+                proc = subprocess.run(
+                    ["rocm-smi", "-i"], capture_output=True, text=True, timeout=3
+                )
+                if proc.returncode == 0:
+                    # Heuristic: count lines mentioning gfx or card
+                    lines = proc.stdout.splitlines()
+                    amd_gpus = [
+                        line_text
+                        for line_text in lines
+                        if "Card" in line_text or "gfx" in line_text
+                    ]
+                    count = len(amd_gpus) if amd_gpus else 1
+                    gpu_line = f"GPU: AMD ROCm x{count}"
+            elif shutil.which("lspci"):
+                proc = subprocess.run(
+                    ["lspci"], capture_output=True, text=True, timeout=3
+                )
+                if proc.returncode == 0:
+                    txt = proc.stdout.lower()
+                    if "nvidia" in txt:
+                        gpu_line = "GPU: NVIDIA (detected via lspci)"
+                    elif "advanced micro devices" in txt or "amd" in txt:
+                        gpu_line = "GPU: AMD (detected via lspci)"
+                    elif "intel corporation" in txt and ("vga" in txt or "3d" in txt):
+                        gpu_line = "GPU: Intel (detected via lspci)"
+        except Exception:
+            pass
+        # Mark clearly when GPU not found
+        if gpu_line == "GPU: none detected":
+            gpu_line = "❌ " + gpu_line
+        # Python info
+        py_ver = platform.python_version()
+        py_exec = sys.executable or "python"
+        py_path_env = os.environ.get("PYTHONPATH")
+        py_path_str = py_path_env if py_path_env else "unset"
+        python_line = f"Python: {py_ver} ({py_exec}); PYTHONPATH={py_path_str}"
+        if not os.path.exists(py_exec):
+            python_line = "❌ Python: not found"
+
+        # PyTorch info
+        torch_version: Optional[str] = None
+        try:
+            import importlib
+
+            torch = importlib.import_module("torch")  # type: ignore
+            try:
+                torch_version = getattr(torch, "__version__", None)  # type: ignore[attr-defined]
+            except Exception:
+                torch_version = None
+        except Exception:
+            # torch not installed
+            pass
+
+        # Optionally clear CUDA memory via torch
+        extra_lines: List[str] = []
+        if clear_cuda:
+            status = "CUDA memory: torch not available"
+            try:
+                import importlib
+
+                torch = importlib.import_module("torch")  # type: ignore
+                if hasattr(torch, "cuda") and torch.cuda.is_available():
+                    try:
+                        torch.cuda.empty_cache()
+                        if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                            torch.cuda.reset_peak_memory_stats()
+                        status = "CUDA memory: cache cleared; peak stats reset"
+                    except Exception as e:
+                        status = (
+                            f"CUDA memory: failed to clear ({e.__class__.__name__})"
+                        )
+                else:
+                    status = "CUDA memory: CUDA not available"
+            except Exception:
+                pass
+            extra_lines.append(status)
+
+        # Prepare CUDA line (single, compact) and print System info in required order
+        # Use driver/CUDA version from nvidia-smi when available
+        cuda_line: Optional[str] = None
+        if gpu_driver_version is not None or gpu_cuda_version is not None:
+            d = gpu_driver_version if gpu_driver_version is not None else "unknown"
+            c = gpu_cuda_version if gpu_cuda_version is not None else "unknown"
+            cuda_line = f"CUDA: driver {d}, CUDA {c}"
+        else:
+            cuda_line = "❌ CUDA: not found"
+
+        # Detect cargo binary path and version for heading
+        cargo_path = shutil.which("cargo")
+        cargo_version = None
+        try:
+            proc = subprocess.run(
+                ["cargo", "--version"], capture_output=True, text=True, timeout=5
+            )
+            if proc.returncode == 0 and proc.stdout:
+                cargo_version = proc.stdout.strip()
+        except Exception:
+            pass
+
+        cargo_target, cargo_home = self._get_cargo_info()
+        has_cargo = bool(cargo_path or cargo_home or cargo_target)
+
+        print("System info:")
+        # Linux
+        print(f"├─ {linux_line}")
+        # GPU
+        print(f"├─ {gpu_line}")
+        # CUDA right after GPU, if available (power/memory already appended to GPU line)
+        if cuda_line:
+            print(f"├─ {cuda_line}")
+        # Python line; if more top-level entries come after Python subtree, use mid symbol
+        more_after_python = bool(extra_lines or has_cargo)
+        print(f"{'├─' if more_after_python else '└─'} {python_line}")
+        # Torch version as a child under Python
+        if torch_version:
+            print("   └─ Torch: " + str(torch_version))
+        else:
+            print("   └─ ❌ Torch: not installed")
+        # Extra lines (e.g., CUDA memory clear status)
+        for i, line in enumerate(extra_lines):
+            # If cargo follows after extra lines, use mid symbol; else close on last
+            is_last_extra = i == len(extra_lines) - 1
+            symbol = "├─" if (has_cargo or not is_last_extra) else "└─"
+            print(f"{symbol} {line}")
+
+        # Cargo Info block
+        if has_cargo:
+            cargo_heading = "Cargo ("
+            if cargo_path:
+                cargo_heading += f"{cargo_path}"
+            else:
+                cargo_heading += "cargo not found"
+            if cargo_version:
+                cargo_heading += f", {cargo_version}"
+            cargo_heading += ")"
+
+            # Cargo heading is not the last top-level child (Dynamo Environment follows)
+            print(f"├─ {cargo_heading}")
+
+            # Under cargo heading, indent nested details
+            if cargo_home:
+                cargo_home_env = os.environ.get("CARGO_HOME")
+                display_cargo_home = self._replace_home_with_var(cargo_home)
+                if cargo_home_env:
+                    print(
+                        f"   ├─ Cargo home directory: {display_cargo_home} (CARGO_HOME is set)"
+                    )
+                else:
+                    # If there's also a target below, keep mid connector, else close
+                    print(
+                        f"   {'├─' if cargo_target else '└─'} Cargo home directory: {display_cargo_home}"
+                    )
+
+            if cargo_target:
+                cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
+                display_cargo_target = self._replace_home_with_var(cargo_target)
+                target_msg = (
+                    f"   └─ Cargo target directory: {display_cargo_target} (CARGO_TARGET_DIR is set)"
+                    if cargo_target_env
+                    else f"   └─ Cargo target directory: {display_cargo_target}"
+                )
+                print(target_msg)
+
+                # Nested details under Cargo target directory
+                debug_dir = os.path.join(cargo_target, "debug")
+                release_dir = os.path.join(cargo_target, "release")
+
+                debug_exists = os.path.exists(debug_dir)
+                release_exists = os.path.exists(release_dir)
+
+                # Find *.so file
+                so_file = self._find_so_file(cargo_target)
+                has_so_file = so_file is not None
+
+                if debug_exists:
+                    symbol = "├─" if release_exists or has_so_file else "└─"
+                    display_debug_dir = self._replace_home_with_var(debug_dir)
+                    try:
+                        debug_mtime = os.path.getmtime(debug_dir)
+                        debug_time = self._format_timestamp_pdt(debug_mtime)
+                        print(
+                            f"      {symbol} Debug:   {display_debug_dir} (modified: {debug_time})"
+                        )
+                    except OSError:
+                        print(
+                            f"      {symbol} Debug:   {display_debug_dir} (unable to read timestamp)"
+                        )
+
+                if release_exists:
+                    symbol = "├─" if has_so_file else "└─"
+                    display_release_dir = self._replace_home_with_var(release_dir)
+                    try:
+                        release_mtime = os.path.getmtime(release_dir)
+                        release_time = self._format_timestamp_pdt(release_mtime)
+                        print(
+                            f"      {symbol} Release: {display_release_dir} (modified: {release_time})"
+                        )
+                    except OSError:
+                        print(
+                            f"      {symbol} Release: {display_release_dir} (unable to read timestamp)"
+                        )
+
+                if has_so_file and so_file is not None:
+                    display_so_file = self._replace_home_with_var(so_file)
+                    try:
+                        so_mtime = os.path.getmtime(so_file)
+                        so_time = self._format_timestamp_pdt(so_mtime)
+                        print(
+                            f"      └─ Binary:  {display_so_file} (modified: {so_time})"
+                        )
+                    except OSError:
+                        print(
+                            f"      └─ Binary:  {display_so_file} (unable to read timestamp)"
+                        )
+        else:
+            # Cargo not found line as a top-level sibling, Dynamo follows so use mid connector
+            print("├─ ❌ Cargo: not found")
+
     def _find_so_file(self, target_directory: str) -> Optional[str]:
         """Find the compiled *.so file in target directory or Python bindings.
 
@@ -469,6 +882,7 @@ class DynamoChecker:
         site_packages: str,
         collect_failures: bool = False,
         package_info: Optional[Dict[str, Any]] = None,
+        sub_indent: str = "   ",
     ) -> Tuple[Dict[str, str], List[str]]:
         """Test a group of components for a given package.
 
@@ -523,10 +937,10 @@ class DynamoChecker:
             display_path = self._replace_home_with_var(package_path)
             if package_created:
                 print(
-                    f"   {package_symbol} {display_path} (created: {package_created})"
+                    f"{sub_indent}{package_symbol} {display_path} (created: {package_created})"
                 )
             else:
-                print(f"   {package_symbol} {display_path}")
+                print(f"{sub_indent}{package_symbol} {display_path}")
 
             # Show .pth files if they exist (editable installs) - at same level as package info
             pth_files = package_info.get("pth_files", [])
@@ -536,16 +950,16 @@ class DynamoChecker:
                 display_pth_path = self._replace_home_with_var(pth_file["path"])
                 display_points_to = self._replace_home_with_var(pth_file["points_to"])
                 print(
-                    f"   {pth_symbol} {display_pth_path} (modified: {pth_file['modified']})"
+                    f"{sub_indent}{pth_symbol} {display_pth_path} (modified: {pth_file['modified']})"
                 )
-                print(f"      └─ Points to: {display_points_to}")
+                print(f"{sub_indent}   └─ Points to: {display_points_to}")
         # Don't print anything for "Not found" - just skip it
 
         # Test each component as subitems of the package
         for i, component in enumerate(components):
             # Determine tree symbol - last component gets └─, others get ├─, with proper indentation (deeper nesting)
             is_last = i == len(components) - 1
-            tree_symbol = "   └─" if is_last else "   ├─"
+            tree_symbol = f"{sub_indent}{'└─' if is_last else '├─'}"
 
             try:
                 module = __import__(component, fromlist=[""])
@@ -744,13 +1158,16 @@ class DynamoChecker:
         """
         results = {}
 
-        # Print main environment header with workspace path
+        # Print system info at top-level, before Dynamo Environment
+        self._print_system_info(clear_cuda=self.clear_cuda_memory)
+
+        # Then print main environment header as a subtree under System info
         if self.workspace_dir:
             workspace_path = os.path.abspath(self.workspace_dir)
             display_workspace = self._replace_home_with_var(workspace_path)
-            print(f"Dynamo Environment ({display_workspace}):")
+            print(f"└─ Dynamo ({display_workspace}):")
         else:
-            print("Dynamo Environment (workspace not found):")
+            print("└─ Dynamo (workspace not found):")
 
         # Discover all components
         runtime_components = self._discover_runtime_components()
@@ -769,107 +1186,33 @@ class DynamoChecker:
         runtime_package_info = self._get_package_info("ai-dynamo-runtime")
         framework_package_info = self._get_package_info("ai-dynamo")
 
-        # Test runtime components (as subitem of Dynamo Environment)
+        # Test runtime components (as subitem of Dynamo Environment, indented; components printed below group header)
         runtime_results, _ = self._test_component_group(
             runtime_components,
             "ai-dynamo-runtime",
-            "└─ Runtime components",
+            "   └─ Runtime components",
             max_width,
             site_packages,
             collect_failures=False,
             package_info=runtime_package_info,
+            sub_indent="      ",
         )
         results.update(runtime_results)
 
-        # Test framework components (as subitem of Dynamo Environment)
+        # Test framework components (as subitem of Dynamo Environment, indented; components printed below group header)
         framework_results, framework_failures = self._test_component_group(
             framework_components,
             "ai-dynamo",
-            "└─ Framework components",
+            "   └─ Framework components",
             max_width,
             site_packages,
             collect_failures=True,
             package_info=framework_package_info,
+            sub_indent="      ",
         )
         results.update(framework_results)
 
-        # Show Rust cargo information as subitem of Dynamo Environment
-        cargo_target, cargo_home = self._get_cargo_info()
-        if cargo_target or cargo_home:
-            if cargo_home:
-                cargo_home_env = os.environ.get("CARGO_HOME")
-                display_cargo_home = self._replace_home_with_var(cargo_home)
-                if cargo_home_env:
-                    print(
-                        f"└─ Cargo home directory: {display_cargo_home} (CARGO_HOME is set)"
-                    )
-                else:
-                    print(f"└─ Cargo home directory: {display_cargo_home}")
-
-            if cargo_target:
-                cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
-
-                # Build the target directory message
-                display_cargo_target = self._replace_home_with_var(cargo_target)
-                if cargo_target_env:
-                    target_msg = f"└─ Cargo target directory: {display_cargo_target} (CARGO_TARGET_DIR is set)"
-                else:
-                    target_msg = f"└─ Cargo target directory: {display_cargo_target}"
-
-                print(target_msg)
-
-                # Show debug and release directories on separate lines
-                debug_dir = os.path.join(cargo_target, "debug")
-                release_dir = os.path.join(cargo_target, "release")
-
-                debug_exists = os.path.exists(debug_dir)
-                release_exists = os.path.exists(release_dir)
-
-                # Find *.so file
-                so_file = self._find_so_file(cargo_target)
-                has_so_file = so_file is not None
-
-                if debug_exists:
-                    # Use ├─ if there are more items below
-                    symbol = "├─" if release_exists or has_so_file else "└─"
-                    display_debug_dir = self._replace_home_with_var(debug_dir)
-                    try:
-                        debug_mtime = os.path.getmtime(debug_dir)
-                        debug_time = self._format_timestamp_pdt(debug_mtime)
-                        print(
-                            f"   {symbol} Debug:   {display_debug_dir} (modified: {debug_time})"
-                        )
-                    except OSError:
-                        print(
-                            f"   {symbol} Debug:   {display_debug_dir} (unable to read timestamp)"
-                        )
-
-                if release_exists:
-                    # Use ├─ if there's a *.so file below
-                    symbol = "├─" if has_so_file else "└─"
-                    display_release_dir = self._replace_home_with_var(release_dir)
-                    try:
-                        release_mtime = os.path.getmtime(release_dir)
-                        release_time = self._format_timestamp_pdt(release_mtime)
-                        print(
-                            f"   {symbol} Release: {display_release_dir} (modified: {release_time})"
-                        )
-                    except OSError:
-                        print(
-                            f"   {symbol} Release: {display_release_dir} (unable to read timestamp)"
-                        )
-
-                # Show *.so file if found
-                if has_so_file and so_file is not None:
-                    display_so_file = self._replace_home_with_var(so_file)
-                    try:
-                        so_mtime = os.path.getmtime(so_file)
-                        so_time = self._format_timestamp_pdt(so_mtime)
-                        print(f"   └─ Binary:  {display_so_file} (modified: {so_time})")
-                    except OSError:
-                        print(
-                            f"   └─ Binary:  {display_so_file} (unable to read timestamp)"
-                        )
+        # Cargo information is printed under System info
 
         # Show PYTHONPATH recommendation if any framework components failed (moved to end)
         if framework_failures and self.workspace_dir:
@@ -1042,8 +1385,7 @@ Found {len(failed_imports)} failed import(s). Common Issues:
 
     def show_summary(self):
         """Show comprehensive summary."""
-        print("\nSummary")
-        print("=" * 40)
+        print("Summary")
 
         # Import status
         import_results = self.results.get("imports", {})
@@ -1087,8 +1429,7 @@ Found {len(failed_imports)} failed import(s). Common Issues:
             ========================================
             ✅ Import tests: 5/5 passed
         """
-        print("Dynamo Comprehensive Check")
-        print("=" * 60)
+        # Terse mode: no banner or separators
 
         # Execute all checks (package versions now shown in import testing headers)
         self.results["imports"] = self.test_imports()
@@ -1114,9 +1455,15 @@ def main():
         action="store_true",
         help="Test imports with workspace component source directories in sys.path",
     )
+    parser.add_argument(
+        "--clear-cuda-memory",
+        action="store_true",
+        help="Attempt to clear CUDA cache and reset peak memory stats via torch",
+    )
 
     args = parser.parse_args()
     checker = DynamoChecker()
+    checker.clear_cuda_memory = bool(args.clear_cuda_memory)
 
     # Set up sys.path if requested
     if args.try_pythonpath:
@@ -1125,6 +1472,14 @@ def main():
     if args.imports:
         checker.test_imports()
     elif args.examples:
+        # Always show system info first, then environment header
+        checker._print_system_info(clear_cuda=checker.clear_cuda_memory)
+        if checker.workspace_dir:
+            workspace_path = os.path.abspath(checker.workspace_dir)
+            display_workspace = checker._replace_home_with_var(workspace_path)
+            print(f"Dynamo ({display_workspace}):")
+        else:
+            print("Dynamo (workspace not found):")
         checker.show_usage_examples()
     else:
         checker.run_all()
