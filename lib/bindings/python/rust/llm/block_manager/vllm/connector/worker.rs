@@ -301,14 +301,17 @@ impl Worker for KvConnectorWorker {
         for request_id in finished_requests {
             tracing::debug!(request_id, "marking request as finished");
 
-            debug_assert!(
-                self.connector.has_slot(&request_id),
-                "request slot not found"
-            );
+            if !self.connector.has_slot(&request_id) {
+                tracing::warn!(
+                    request_id,
+                    "finished request received for unknown request_id; assuming never started"
+                );
+                continue;
+            }
 
-            debug_assert!(
+            assert!(
                 !self.maybe_finished_offloading.contains(&request_id),
-                "request already in maybe storing finished"
+                "request_id {request_id} already in maybe storing finished"
             );
 
             // insert request into the maybe finished set
