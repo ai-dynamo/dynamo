@@ -103,9 +103,9 @@ for ((i=1; i<=50; i++)); do
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
 
-    if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\["dyn://dynamo.tensorrt_llm.generate"\]'; then
+    if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
         if [[ "$kind" == *disagg* ]]; then
-            etcd_response=$(curl -s -L http://localhost:2379/v3/kv/range -X POST -d '{"key": "Lw", "range_end": "AA"}')
+            etcd_response=$(curl -s -L http://localhost:2379/v3/kv/range -X POST -d '{"key": "Lw==", "range_end": "AA=="}')
             etcd_keys=$(echo "$etcd_response" | jq -r '.kvs // [] | .[] | .key |= @base64d | select(.key | contains("tensorrt_llm_next")) | .key')
             if [[ -n "$etcd_keys" ]]; then
                 echo "Health check succeeded on attempt $i"
