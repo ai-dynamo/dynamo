@@ -15,7 +15,9 @@
 
 pub mod json_parser;
 pub mod parsers;
-pub mod pythonic_parser;
 pub mod response;
 pub mod tools;
-pub mod xml_parser; 
+// pub mod pythonic_parser;
+// pub mod harmony_parser;
+// pub mod xml_parser;
+// pub mod typescript_parser;

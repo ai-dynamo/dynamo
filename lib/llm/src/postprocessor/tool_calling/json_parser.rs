@@ -18,8 +18,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::parsers::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-use super::parsers::ToolCallConfig;
+
 // Same as CalledFunction with named parameters
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CalledFunctionParameters {
@@ -75,7 +76,12 @@ pub struct CalledFunctionArguments {
 /// let result = try_tool_call_parse_json(input)?;
 /// assert!(result.is_some());
 /// ```
-pub fn try_tool_call_parse_json(message: &str, config: &ToolCallConfig) -> anyhow::Result<Option<ToolCallResponse>> {
+pub fn try_tool_call_parse_json(
+    message: &str,
+    config: &JsonParserConfig,
+) -> anyhow::Result<Option<ToolCallResponse>> {
+    // Log the config we are using
+    tracing::debug!("Using JSON parser config: {:?}", config);
     let trimmed = message.trim();
 
     // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]
