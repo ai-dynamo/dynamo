@@ -186,6 +186,10 @@ deployment across 8 nodes:
 ./srun_disaggregated.sh
 ```
 
+> [!Tip]
+> To launch multiple replicas of the configured prefill/decode workers, you can set
+> NUM_PREFILL_WORKERS and NUM_DECODE_WORKERS respectively (default: 1).
+
 ## Understanding the Output
 
 1. The `srun_aggregated.sh` launches two `srun` jobs. The first launches
