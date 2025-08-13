@@ -14,6 +14,8 @@ import requests
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
+
+
 def _wait_for_log_patterns(log_file, patterns, timeout_s=60):
     """Poll the log file until all regex patterns appear or timeout."""
     deadline = time.time() + timeout_s
@@ -24,7 +26,7 @@ def _wait_for_log_patterns(log_file, patterns, timeout_s=60):
     while time.time() < deadline:
         try:
             with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()  
+                content = f.read()
                 if content.strip():
                     logger.info(f"Log file content length: {len(content)} chars")
         except FileNotFoundError:
@@ -43,6 +45,7 @@ def _wait_for_log_patterns(log_file, patterns, timeout_s=60):
     missing = [patterns[i] for i, ok in found.items() if not ok]
     raise AssertionError(f"Missing expected log patterns: {missing}")
 
+
 @dataclass
 class SGLangConfig:
     """Configuration for SGLang test scenarios"""
@@ -57,7 +60,9 @@ class SGLangProcess(ManagedProcess):
 
     def __init__(self, script_name, request, log_dir=None):
         self.port = 8000
-        sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
+        sglang_dir = os.environ.get(
+            "SGLANG_DIR", "/workspace/components/backends/sglang"
+        )
         script_path = os.path.join(sglang_dir, "launch", script_name)
 
         # Verify script exists
