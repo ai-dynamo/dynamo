@@ -7,7 +7,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use std::sync::OnceLock;
 
 pub use prometheus::Registry;
 
@@ -18,18 +17,6 @@ pub const FRONTEND_METRIC_PREFIX: &str = "dynamo_frontend";
 
 // Environment variable that overrides the default metric prefix if provided
 pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
-
-static METRICS_PREFIX: OnceLock<String> = OnceLock::new();
-
-fn metrics_prefix() -> &'static str {
-    METRICS_PREFIX
-        .get_or_init(|| std::env::var(METRICS_PREFIX_ENV).unwrap_or_else(|_| FRONTEND_METRIC_PREFIX.to_string()))
-        .as_str()
-}
-
-fn frontend_metric_name(suffix: &str) -> String {
-    format!("{}_{}", metrics_prefix(), suffix)
-}
 
 /// Value for the `status` label in the request counter for successful requests
 pub const REQUEST_STATUS_SUCCESS: &str = "success";
@@ -130,6 +117,10 @@ impl Metrics {
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new() -> Self {
+        let prefix = std::env::var(METRICS_PREFIX_ENV)
+            .unwrap_or_else(|_| FRONTEND_METRIC_PREFIX.to_string());
+        let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
+
         let request_counter = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name("requests_total"),
