@@ -143,6 +143,7 @@ proptest = "1.5.0"
 reqwest = { workspace = true }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
+serial_test = "3"
 tempfile = "3.17.1"
 insta = { version = "1.41", features = [
   "glob",

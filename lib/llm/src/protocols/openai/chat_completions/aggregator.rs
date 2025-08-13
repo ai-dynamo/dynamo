@@ -164,7 +164,9 @@ impl DeltaAggregator {
         for choice in aggregator.choices.values_mut() {
             if choice.tool_calls.is_none() {
                 if let Ok(Some(tool_call)) =
-                    crate::preprocessor::tools::try_parse_tool_call_aggregate(&choice.text)
+                    crate::postprocessor::tool_calling::tools::try_tool_call_parse_aggregate(
+                        &choice.text,
+                    )
                 {
                     tracing::debug!(
                         tool_call_id = %tool_call.id,

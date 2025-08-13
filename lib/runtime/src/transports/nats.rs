@@ -35,6 +35,7 @@ use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
@@ -43,6 +44,8 @@ use validator::{Validate, ValidationError};
 
 pub use crate::slug::Slug;
 use tracing as log;
+
+use super::utils::build_in_runtime;
 
 pub const URL_PREFIX: &str = "nats://";
 
@@ -236,7 +239,9 @@ fn validate_nats_server(server: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
+// TODO(jthomson04): We really shouldn't be hardcoding this.
+const NATS_WORKER_THREADS: usize = 4;
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
@@ -258,7 +263,17 @@ impl ClientOptions {
             }
         };
 
-        let client = client.connect(self.server).await?;
+        let (client, _) = build_in_runtime(
+            async move {
+                client
+                    .connect(self.server)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+            },
+            NATS_WORKER_THREADS,
+        )
+        .await?;
+
         let js_ctx = jetstream::new(client.clone());
 
         Ok(Client { client, js_ctx })
