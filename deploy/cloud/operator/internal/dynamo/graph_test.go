@@ -4150,3 +4150,59 @@ func TestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name               string
+		component          *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectedServiceAcc string
+	}{
+		{
+			name: "Planner component should have planner service account",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypePlanner,
+				},
+			},
+			expectedServiceAcc: commonconsts.PlannerServiceAccountName,
+		},
+		{
+			name: "Planner service account should not be set for non-planner components",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeWorker,
+				},
+			},
+			expectedServiceAcc: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkSGLang,
+				secretsRetriever,
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() error = %v", err)
+				return
+			}
+
+			if podSpec.ServiceAccountName != tt.expectedServiceAcc {
+				t.Errorf("GenerateBasePodSpec() serviceAccountName = %v, want %v",
+					podSpec.ServiceAccountName, tt.expectedServiceAcc)
+			}
+		})
+	}
+}

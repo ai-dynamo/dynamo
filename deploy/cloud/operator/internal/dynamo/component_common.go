@@ -49,6 +49,10 @@ func (b *BaseComponentDefaults) GetBasePodSpec(numberOfNodes int32) (corev1.PodS
 func (b *BaseComponentDefaults) getCommonContainer() corev1.Container {
 	container := corev1.Container{
 		Name: "main",
+		Command: []string{
+			"/bin/sh",
+			"-c",
+		},
 	}
 
 	return container

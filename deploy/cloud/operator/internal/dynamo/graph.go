@@ -789,9 +789,19 @@ func GenerateBasePodSpec(
 		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
-	var podSpec corev1.PodSpec
+
+	// get base podspec from component
+	podSpec, err := componentDefaults.GetBasePodSpec(numberOfNodes)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to get base podspec: %w", err)
+	}
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
-		podSpec = *component.ExtraPodSpec.PodSpec.DeepCopy()
+		// merge extraPodSpec PodSpec with base podspec
+		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
+		if err != nil {
+			return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+		}
 	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
