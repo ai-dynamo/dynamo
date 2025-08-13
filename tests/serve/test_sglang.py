@@ -3,8 +3,8 @@
 
 import logging
 import os
+import random
 import re
-import time
 from dataclasses import dataclass
 from typing import Any, List
 
@@ -15,35 +15,27 @@ from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
 
-
-def _wait_for_log_patterns(log_file, patterns, timeout_s=60):
-    """Poll the log file until all regex patterns appear or timeout."""
-    deadline = time.time() + timeout_s
+def validate_log_patterns(log_file, patterns):
+    """Validate log patterns after test completion."""
+    if not os.path.exists(log_file):
+        raise AssertionError(f"Log file not found: {log_file}")
+    
+    with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+    
     compiled = [re.compile(p) for p in patterns]
-
-    found = {i: False for i in range(len(compiled))}
-
-    while time.time() < deadline:
-        try:
-            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-                if content.strip():
-                    logger.info(f"Log file content length: {len(content)} chars")
-        except FileNotFoundError:
-            time.sleep(1)
-            continue
-
-        for idx, rx in enumerate(compiled):
-            if not found[idx] and rx.search(content):
-                found[idx] = True
-
-        if all(found.values()):
-            return True
-
-        time.sleep(1)
-
-    missing = [patterns[i] for i, ok in found.items() if not ok]
-    raise AssertionError(f"Missing expected log patterns: {missing}")
+    missing = []
+    
+    for pattern, rx in zip(patterns, compiled):
+        if not rx.search(content):
+            missing.append(pattern)
+    
+    if missing:
+        # Include sample of log content for debugging
+        sample = content[-1000:] if len(content) > 1000 else content
+        raise AssertionError(f"Missing expected log patterns: {missing}\n\nLog sample:\n{sample}")
+    
+    return True
 
 
 @dataclass
@@ -58,7 +50,7 @@ class SGLangConfig:
 class SGLangProcess(ManagedProcess):
     """Simple process manager for sglang shell scripts"""
 
-    def __init__(self, script_name, request, log_dir=None):
+    def __init__(self, script_name, request):
         self.port = 8000
         sglang_dir = os.environ.get(
             "SGLANG_DIR", "/workspace/components/backends/sglang"
@@ -93,7 +85,6 @@ class SGLangProcess(ManagedProcess):
             delayed_start=60,  # Give SGLang more time to fully start
             terminate_existing=False,
             stragglers=[],  # Don't kill any stragglers automatically
-            log_dir=request.node.name,
         )
 
     def _check_models_api(self, response):
@@ -151,28 +142,37 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
 
     with SGLangProcess(config.script_name, request) as server:
         # Test chat completions
-        response = requests.post(
-            f"http://localhost:{server.port}/v1/chat/completions",
-            json={
-                "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Why is Roger Federer the best tennis player of all time?",
-                    }
-                ],
-                "max_tokens": 50,
-            },
-            timeout=120,
-        )
-
-        assert response.status_code == 200
-        result = response.json()
-        assert "choices" in result
-        assert len(result["choices"]) > 0
-        content = result["choices"][0]["message"]["content"]
-        assert len(content) > 0
-        logger.info(f"SGLang {config.name} response: {content}")
+        prompts = [
+            "why is roger federer the best tennis player of all time?",
+            "why is novak djokovic not the best tennis player of all time?",
+            "why is rafa nadal a sneaky good grass court player?",
+            "explain the difference between federer and nadal's backhand.",
+            "who is the most clutch tennis player in history?"
+        ]
+        responses = []
+        for prompt in prompts:
+            response = requests.post(
+                f"http://localhost:{server.port}/v1/chat/completions",
+                json={
+                    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                    "max_tokens": 50,
+                },
+                timeout=120,
+            )
+            assert response.status_code == 200
+            result = response.json()
+            assert "choices" in result
+            assert len(result["choices"]) > 0
+            content = result["choices"][0]["message"]["content"]
+            assert len(content) > 0
+            responses.append(content)
+            logger.info(f"SGLang {config.name} response: {content}")
 
         # For kv_events (KV routing path), assert KV publisher/scheduler log lines appear
         if config.name == "kv_events":
@@ -185,7 +185,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
                 r"Selected worker: \d+, logit: ",
             ]
 
-            _wait_for_log_patterns(log_file, patterns, timeout_s=120)
+            validate_log_patterns(log_file, patterns)
 
         # Test completions endpoint for disaggregated only
         if config.name == "disaggregated":
