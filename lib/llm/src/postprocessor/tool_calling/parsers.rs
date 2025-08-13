@@ -1,23 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-//! Parsers for tool calls
-//!
-//! This module contains the parsers for tool calls.
-//!
-//! The parsers are responsible for parsing the tool calls from the response.
 
 use super::json_parser::try_tool_call_parse_json;
 use super::response::ToolCallResponse;
@@ -93,9 +75,7 @@ pub fn try_tool_call_parse(
 ) -> anyhow::Result<Option<ToolCallResponse>> {
     // Use match statement (Rust's switch statement) to call the appropriate parser
     match config.format {
-        ToolCallParserType::Json => {
-            return try_tool_call_parse_json(&message, &config.json);
-        }
+        ToolCallParserType::Json => try_tool_call_parse_json(message, &config.json),
         ToolCallParserType::Harmony => {
             anyhow::bail!("Harmony parser not implemented");
         }
@@ -229,11 +209,15 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec!["<tool_call>".to_string()];
-        config.json.tool_call_end_tokens = vec!["</tool_call>".to_string()];
-        config.json.arguments_keys = vec!["arguments".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<tool_call>".to_string()],
+                tool_call_end_tokens: vec!["</tool_call>".to_string()],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
@@ -247,11 +231,15 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec!["<tool_call>".to_string()];
-        config.json.tool_call_end_tokens = vec!["</tool_call>".to_string()];
-        config.json.arguments_keys = vec!["arguments".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<tool_call>".to_string()],
+                tool_call_end_tokens: vec!["</tool_call>".to_string()],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
@@ -263,11 +251,15 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[ignore]
     fn test_ibm_granite_40_tiny_preview_simple() {
         let input = r#"[{"arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}, "name": "get_weather"}]"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec![];
-        config.json.tool_call_end_tokens = vec![];
-        config.json.arguments_keys = vec!["arguments".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec![],
+                tool_call_end_tokens: vec![],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
@@ -279,11 +271,15 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[ignore]
     fn test_mistralai_mistral_7b_instruct_v03_simple() {
         let input = r#" [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec![];
-        config.json.tool_call_end_tokens = vec![];
-        config.json.arguments_keys = vec!["arguments".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec![],
+                tool_call_end_tokens: vec![],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
@@ -295,11 +291,15 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[ignore]
     fn test_meta_llama_llama31_8b_instruct_simple() {
         let input = r#"{"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec![];
-        config.json.tool_call_end_tokens = vec![];
-        config.json.arguments_keys = vec!["parameters".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec![],
+                tool_call_end_tokens: vec![],
+                arguments_keys: vec!["parameters".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
@@ -325,11 +325,15 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let input = r#" [
     {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 ]"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec![];
-        config.json.tool_call_end_tokens = vec![];
-        config.json.arguments_keys = vec!["arguments".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec![],
+                tool_call_end_tokens: vec![],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
@@ -341,11 +345,15 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[ignore]
     fn test_salesforce_llama_xlam_2_8b_fc_r_simple() {
         let input = r#"[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
-        let mut config = ToolCallConfig::default();
-        config.format = ToolCallParserType::Json;
-        config.json.tool_call_start_tokens = vec![];
-        config.json.tool_call_end_tokens = vec![];
-        config.json.arguments_keys = vec!["arguments".to_string()];
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec![],
+                tool_call_end_tokens: vec![],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
