@@ -1,18 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-mod reasoning_parser;
+pub mod parsers;
+pub struct ParserResult {
+    /// The parsed reasoning as a string.
+    pub normal_text: String,
 
-pub use reasoning_parser::{BaseReasoningParser, ParserResult};
+    /// The parsed reasoning as a JSON object.
+    pub reasoning_text: String,
+}
+
+pub trait ReasoningParser {
+    /// Detects and parses reasoning from the input text.
+    fn detect_and_parse_reasoning(&mut self, text: &str) -> ParserResult;
+
+    /// Parses reasoning incrementally from streaming input.
+    fn parse_reasoning_streaming_incremental(&mut self, text: &str) -> ParserResult;
+}
