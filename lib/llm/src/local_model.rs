@@ -16,6 +16,7 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
@@ -51,6 +52,7 @@ pub struct LocalModelBuilder {
     http_port: u16,
     migration_limit: u32,
     is_mocker: bool,
+    extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
 }
@@ -69,6 +71,7 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             is_mocker: Default::default(),
+            extra_engine_args: Default::default(),
             runtime_config: Default::default(),
             user_data: Default::default(),
         }
@@ -130,6 +133,11 @@ impl LocalModelBuilder {
 
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
+        self
+    }
+
+    pub fn extra_engine_args(&mut self, extra_engine_args: Option<PathBuf>) -> &mut Self {
+        self.extra_engine_args = extra_engine_args;
         self
     }
 
@@ -227,6 +235,18 @@ impl LocalModelBuilder {
         // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
         if let Some(context_length) = self.context_length {
             card.context_length = context_length;
+        }
+
+        // Override runtime configs with mocker engine args
+        if self.is_mocker {
+            if let Some(path) = &self.extra_engine_args {
+                let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                    .expect("Failed to load mocker engine args for runtime config overriding.");
+                self.runtime_config.total_kv_blocks =
+                    Some(mocker_engine_args.num_gpu_blocks as u64);
+                self.runtime_config.max_num_seqs =
+                    mocker_engine_args.max_num_seqs.map(|v| v as u64);
+            }
         }
 
         card.migration_limit = self.migration_limit;
