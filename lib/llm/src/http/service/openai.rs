@@ -290,11 +290,9 @@ async fn completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // Process the stream to collect metrics for non-streaming requests
-        let stream = stream.map(move |response| {
-            // Process metrics but return the original response for aggregation
-            process_metrics_only(&response, &mut response_collector);
-            response
+        // Tap the stream to collect metrics for non-streaming requests without altering items
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
         });
 
         let response = NvCreateCompletionResponse::from_annotated_stream(stream)
@@ -521,11 +519,8 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // Process the stream to collect metrics for non-streaming requests
-        let stream = stream.map(move |response| {
-            // Process metrics but return the original response for aggregation
-            process_metrics_only(&response, &mut response_collector);
-            response
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
         });
 
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
