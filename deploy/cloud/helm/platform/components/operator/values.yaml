@@ -26,6 +26,7 @@ namespaceRestriction:
   # The target namespace to restrict to. If empty, defaults to the release namespace
   targetNamespace: ""
 controllerManager:
+  tolerations: []
   kubeRbacProxy:
     args:
     - --secure-listen-address=0.0.0.0:8443
