@@ -86,6 +86,18 @@ impl MetricsRegistry for Namespace {
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![self.drt().basename()]
     }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        // Convert Vec<(String, String)> to Vec<(&str, &str)>
+        self.labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
+    }
 }
 
 #[cfg(feature = "integration")]

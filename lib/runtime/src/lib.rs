@@ -178,4 +178,7 @@ pub struct DistributedRuntime {
 
     // This map associates metric prefixes with their corresponding Prometheus registries.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
+
+    // Additional labels for metrics
+    labels: Vec<(String, String)>,
 }

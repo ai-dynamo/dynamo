@@ -125,6 +125,10 @@ pub struct Component {
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
+
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
     #[builder(setter(into))]
@@ -183,6 +187,16 @@ impl MetricsRegistry for Component {
         ]
         .concat()
     }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        let mut all_labels = self.namespace.stored_labels();
+        all_labels.extend(self.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        all_labels
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
+    }
 }
 
 impl Component {
@@ -220,6 +234,7 @@ impl Component {
             component: self.clone(),
             name: endpoint.into(),
             is_static: self.is_static,
+            labels: Vec::new(),
         }
     }
 
@@ -285,6 +300,9 @@ pub struct Endpoint {
     name: String,
 
     is_static: bool,
+
+    /// Additional labels for metrics
+    labels: Vec<(String, String)>,
 }
 
 impl Hash for Endpoint {
@@ -328,6 +346,16 @@ impl MetricsRegistry for Endpoint {
             vec![self.component.basename()],
         ]
         .concat()
+    }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        let mut all_labels = self.component.stored_labels();
+        all_labels.extend(self.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        all_labels
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
     }
 }
 
@@ -447,6 +475,10 @@ pub struct Namespace {
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 }
 
 impl DistributedRuntimeProvider for Namespace {

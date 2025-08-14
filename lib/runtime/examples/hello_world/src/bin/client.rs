@@ -14,8 +14,8 @@
 // limitations under the License.
 
 use dynamo_runtime::{
-    logging, pipeline::PushRouter, protocols::annotated::Annotated, stream::StreamExt,
-    DistributedRuntime, Result, Runtime, Worker,
+    logging, metrics::MetricsRegistry, pipeline::PushRouter, protocols::annotated::Annotated,
+    stream::StreamExt, DistributedRuntime, Result, Runtime, Worker,
 };
 use hello_world::DEFAULT_NAMESPACE;
 
@@ -31,6 +31,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let client = distributed
         .namespace(DEFAULT_NAMESPACE)?
         .component("backend")?
+        .add_labels(&[("model", "hello_world_model")])?
         .endpoint("generate")
         .client()
         .await?;

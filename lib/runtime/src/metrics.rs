@@ -65,6 +65,21 @@ fn lint_prometheus_name(name: &str) -> anyhow::Result<String> {
     Ok(sanitized)
 }
 
+/// Validate that a label slice has no duplicate keys.
+/// Returns Ok(()) when all keys are unique; otherwise returns an error naming the duplicate key.
+fn validate_no_duplicate_label_keys(labels: &[(&str, &str)]) -> anyhow::Result<()> {
+    let mut seen_keys = std::collections::HashSet::new();
+    for (key, _) in labels {
+        if !seen_keys.insert(*key) {
+            return Err(anyhow::anyhow!(
+                "Duplicate label key '{}' found in labels",
+                key
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Trait that defines common behavior for Prometheus metric types
 pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 'static {
     /// Create a new metric with the given options
@@ -196,7 +211,16 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     const_labels: Option<&[&str]>,
 ) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
-    let mut seen_keys = std::collections::HashSet::new();
+    validate_no_duplicate_label_keys(labels)?;
+    // Validate that user-provided labels don't conflict with stored labels
+    for (key, _) in registry.stored_labels() {
+        if labels.iter().any(|(k, _)| *k == key) {
+            return Err(anyhow::anyhow!(
+                "Label key '{}' already exists in registry.",
+                key
+            ));
+        }
+    }
 
     let basename = registry.basename();
     let parent_hierarchy = registry.parent_hierarchy();
@@ -206,16 +230,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 
     let metric_name = build_metric_name(metric_name);
 
-    // Validate that user-provided labels don't have duplicate keys
-    for (key, _) in labels {
-        if !seen_keys.insert(*key) {
-            return Err(anyhow::anyhow!(
-                "Duplicate label key '{}' found in labels",
-                key
-            ));
-        }
-    }
-    // Build updated_labels: auto-labels first, then user labels
+    // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
     if USE_AUTO_LABELS {
@@ -265,6 +280,13 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         labels
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
+    );
+    // Add stored labels (safe because overlaps were rejected above)
+    updated_labels.extend(
+        registry
+            .stored_labels()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())),
     );
 
     // Handle different metric types
@@ -387,6 +409,47 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvider {
     // Get the name of this registry (without any prefix)
     fn basename(&self) -> String;
+
+    /// Get any stored labels for this registry
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        Vec::new()
+    }
+
+    /// Get mutable access to the labels storage - implementors must provide this
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)>;
+
+    /// Add labels to this registry and return a new instance with the labels.
+    ///   This allows for method chaining like: runtime.namespace(...).add_labels(...)?
+    /// Fails if:
+    /// - Provided `labels` contains duplicate keys, or
+    /// - Any provided key already exists in the registry's stored labels.
+    fn add_labels(mut self, labels: &[(&str, &str)]) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        validate_no_duplicate_label_keys(labels)?;
+
+        // 2) Validate no overlap with existing stored labels
+        let existing: std::collections::HashSet<&str> =
+            self.stored_labels().into_iter().map(|(k, _)| k).collect();
+        if let Some(conflict) = labels
+            .iter()
+            .map(|(k, _)| *k)
+            .find(|k| existing.contains(k))
+        {
+            return Err(anyhow::anyhow!(
+                "Label key '{}' already exists in registry; refusing to overwrite",
+                conflict
+            ));
+        }
+
+        // 3) Safe to append
+        let labels_storage = self.labels_mut();
+        for (key, value) in labels {
+            labels_storage.push((key.to_string(), value.to_string()));
+        }
+        Ok(self)
+    }
 
     /// Retrieve the complete hierarchy and basename for this registry. Currently, the prefix for drt is an empty string,
     /// so we must account for the leading underscore. The existing code remains unchanged to accommodate any future
@@ -849,6 +912,33 @@ mod test_simple_metricsregistry_trait {
     use super::*;
     use prometheus::Counter;
     use std::sync::Arc;
+
+    #[test]
+    fn test_component_prometheus_output_contains_custom_label() {
+        // Arrange: DRT → namespace → component with a custom label
+        let drt = create_test_drt();
+        let namespace = drt.namespace("testnamespace").unwrap();
+        let component = namespace
+            .component("testcomponent")
+            .unwrap()
+            .add_labels(&[("service", "api")])
+            .unwrap();
+
+        // Act: create a simple gauge and render Prometheus text
+        let gauge = component
+            .create_gauge("with_label", "Gauge with custom label", &[])
+            .unwrap();
+        gauge.set(1.0);
+
+        let output = component.prometheus_metrics_fmt().unwrap();
+
+        // Assert: custom label is present (don’t rely on label ordering)
+        assert!(
+            output.contains("dynamo_component_with_label{") && output.contains(r#"service="api""#),
+            "Expected custom label service=\"api\" in Prometheus output:\n{}",
+            output
+        );
+    }
 
     #[test]
     fn test_factory_methods_via_registry_trait() {

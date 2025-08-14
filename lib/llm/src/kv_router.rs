@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,16 +35,16 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
             KvRouterError, OverlapScores, RouterEvent,
         },
-        // metrics_aggregator::EndpointCollector,
+        metrics_aggregator::watch_model_runtime_configs,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
+    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
 
-use dynamo_runtime::component::Instance;
 use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
@@ -65,7 +66,7 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &[Instance],
+        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
@@ -176,6 +177,15 @@ impl KvRouter {
             }
         };
 
+        // Create runtime config watcher
+        // TODO: Migrate to discovery_client() once it exposes kv_get_and_watch_prefix functionality
+        let etcd_client = component
+            .drt()
+            .etcd_client()
+            .expect("Cannot KV route without etcd client");
+        let runtime_configs_rx =
+            watch_model_runtime_configs(etcd_client, cancellation_token.clone()).await?;
+
         let indexer = if kv_router_config.use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
         } else {
@@ -191,6 +201,7 @@ impl KvRouter {
             component.clone(),
             block_size,
             instances_rx,
+            runtime_configs_rx,
             selector,
             kv_router_config.router_replica_sync,
         )

@@ -17,7 +17,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
@@ -77,6 +77,16 @@ trait OpenAIStopConditionsProvider {
         self.get_common_ignore_eos()
             .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
     }
+}
+
+trait OpenAIOutputOptionsProvider {
+    fn get_logprobs(&self) -> Option<u32>;
+
+    fn get_prompt_logprobs(&self) -> Option<u32>;
+
+    fn get_skip_special_tokens(&self) -> Option<bool>;
+
+    fn get_formatted_prompt(&self) -> Option<bool>;
 }
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
@@ -164,6 +174,22 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             stop,
             stop_token_ids_hidden: None,
             ignore_eos,
+        })
+    }
+}
+
+impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
+    fn extract_output_options(&self) -> Result<common::OutputOptions> {
+        let logprobs = self.get_logprobs();
+        let prompt_logprobs = self.get_prompt_logprobs();
+        let skip_special_tokens = self.get_skip_special_tokens();
+        let formatted_prompt = self.get_formatted_prompt();
+
+        Ok(common::OutputOptions {
+            logprobs,
+            prompt_logprobs,
+            skip_special_tokens,
+            formatted_prompt,
         })
     }
 }

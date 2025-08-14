@@ -17,6 +17,7 @@ use service_metrics::{MyStats, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
     logging,
+    metrics::MetricsRegistry,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
@@ -71,6 +72,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     runtime
         .namespace(DEFAULT_NAMESPACE)?
         .component("backend")?
+        .add_labels(&[("model", "service_metrics_model")])?
         .service_builder()
         .create()
         .await?

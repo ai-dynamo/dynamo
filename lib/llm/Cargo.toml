@@ -34,7 +34,6 @@ testing-full  = ["testing-cuda", "testing-nixl"]
 testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
-sentencepiece = ["dep:sentencepiece"]
 cuda          = ["dep:cudarc"]
 integration = []
 
@@ -111,7 +110,6 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
-sentencepiece = { version = "0.11.2", optional = true }
 
 # backend
 galil-seiferas = { version = "0.1" }
