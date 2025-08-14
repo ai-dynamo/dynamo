@@ -236,16 +236,13 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
 impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     fn get_logprobs(&self) -> Option<u32> {
         match self.inner.logprobs {
-            Some(logprobs) => {
-                if logprobs {
-                    match self.inner.top_logprobs {
-                        Some(top_logprobs) => Some(top_logprobs as u32),
-                        None => Some(1_u32),
-                    }
-                } else {
-                    None
+            Some(true) => {
+                match self.inner.top_logprobs {
+                    Some(top_logprobs) => Some(top_logprobs as u32),
+                    None => Some(1_u32),
                 }
-            }
+            },
+            Some(false) => None,
             None => None,
         }
     }

@@ -225,7 +225,6 @@ impl
         //let mdcsum = self.mdcsum.clone();
         let stream = processed_stream.map(move |output| {
             output.map_data(|data| {
-                log::info!("data: {:?}", data);
                 Ok(BackendOutput {
                     token_ids: data.token_ids,
                     tokens: data.tokens.unwrap_or_default(),

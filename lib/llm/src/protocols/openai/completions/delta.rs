@@ -104,7 +104,7 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
-        let top_lps = top_logprobs.map_or(Vec::new(), |top_logprobs| {
+        let top_lps = top_logprobs.map_or(vec![], |top_logprobs| {
             toks.iter()
                 .zip(tok_lps.iter())
                 .zip(top_logprobs.iter())
@@ -139,7 +139,7 @@ impl DeltaGenerator {
         Some(async_openai::types::Logprobs {
             tokens: toks.iter().map(|(t, _)| t.clone()).collect(),
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
-            text_offset: Vec::new(),
+            text_offset: vec![],
             top_logprobs: top_lps,
         })
     }
