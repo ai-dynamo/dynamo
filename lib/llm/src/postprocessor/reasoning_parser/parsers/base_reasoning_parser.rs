@@ -3,6 +3,8 @@
 
 use crate::postprocessor::reasoning_parser::{ParserResult, ReasoningParser};
 
+use tracing as log;
+
 #[derive(Default)]
 pub struct BaseReasoningParser {
     think_start_token: String,
@@ -33,9 +35,13 @@ impl BaseReasoningParser {
 
 impl ReasoningParser for BaseReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str) -> ParserResult {
+        log::debug!("detect_and_parse_reasoning called with text: {:?}", text);
+
         let in_reasoning = self._in_reasoning || text.contains(&self.think_start_token);
+        log::debug!("in_reasoning: {}", in_reasoning);
 
         if !in_reasoning {
+            log::debug!("No reasoning detected, returning normal text.");
             return ParserResult {
                 normal_text: text.to_string(),
                 reasoning_text: String::new(),
@@ -43,10 +49,16 @@ impl ReasoningParser for BaseReasoningParser {
         }
 
         // The text is considered to be in a reasoning block.
-
         let processed_text = text.replace(&self.think_start_token, "").trim().to_string();
+        log::debug!(
+            "Processed text after removing think_start_token: {:?}",
+            processed_text
+        );
 
         if !processed_text.contains(&self.think_end_token) {
+            log::debug!(
+                "Reasoning truncated, think_end_token not found. Returning reasoning text."
+            );
             // Assume reasoning was truncated before `think_end_token`
             return ParserResult {
                 normal_text: String::new(),
@@ -62,6 +74,9 @@ impl ReasoningParser for BaseReasoningParser {
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
+        log::debug!("Extracted reasoning_text: {:?}", reasoning_text);
+        log::debug!("Extracted normal_text: {:?}", normal_text);
+
         ParserResult {
             normal_text,
             reasoning_text,
@@ -74,15 +89,17 @@ impl ReasoningParser for BaseReasoningParser {
         let mut current_text = self._buffer.to_string();
         // If the current text is a prefix of the think token, keep buffering
 
-        println!(
-            "DEBUG: parse_reasoning_streaming_incremental called with text: {:?}",
+        log::debug!(
+            "parse_reasoning_streaming_incremental called with text: {:?}",
             text
         );
-        println!("DEBUG: current buffer: {:?}", self._buffer);
-        println!("DEBUG: current_text: {:?}", current_text);
-        println!(
-            "DEBUG: in_reasoning: {}, stripped_think_start: {}, stream_reasoning: {}",
-            self._in_reasoning, self.stripped_think_start, self.stream_reasoning
+        log::debug!("current buffer: {:?}", self._buffer);
+        log::debug!("current_text: {:?}", current_text);
+        log::debug!(
+            "in_reasoning: {}, stripped_think_start: {}, stream_reasoning: {}",
+            self._in_reasoning,
+            self.stripped_think_start,
+            self.stream_reasoning
         );
 
         if self.think_start_token.starts_with(&current_text)
@@ -110,14 +127,17 @@ impl ReasoningParser for BaseReasoningParser {
             self._in_reasoning = true;
         }
         // Handle end of reasoning block
-        if self._in_reasoning && current_text.contains(&self.think_end_token) {
-            let end_idx = current_text
+        let mut think_end_idx = current_text.len();
+        if self._in_reasoning {
+            think_end_idx = current_text
                 .find(&self.think_end_token)
                 .unwrap_or(current_text.len());
-            let reasoning_text = &current_text[..end_idx];
+        }
+        if self._in_reasoning && think_end_idx < current_text.len() {
+            let reasoning_text = &current_text[..think_end_idx];
             self._buffer.clear();
             self._in_reasoning = false;
-            let start_idx = end_idx + self.think_end_token.len();
+            let start_idx = think_end_idx + self.think_end_token.len();
             let normal_text = if start_idx < current_text.len() {
                 &current_text[start_idx..]
             } else {
@@ -129,24 +149,16 @@ impl ReasoningParser for BaseReasoningParser {
             };
         }
         // Continue with reasoning content
-        if self._in_reasoning {
-            if self.stream_reasoning {
-                // Stream the content immediately
-                let reasoning_text = current_text;
-                self._buffer.clear();
-                return ParserResult {
-                    normal_text: String::new(),
-                    reasoning_text,
-                };
-            } else {
-                return ParserResult {
-                    normal_text: String::new(),
-                    reasoning_text: String::new(),
-                };
+        if self._in_reasoning && self.stream_reasoning {
+            // Stream the content immediately
+            let reasoning_text = current_text;
+            self._buffer.clear();
+            ParserResult {
+                normal_text: String::new(),
+                reasoning_text,
             }
-        }
-        // If we're not in a reasoning block return as normal text
-        if !self._in_reasoning {
+        } else if !self._in_reasoning {
+            // If we're not in a reasoning block return as normal text
             let normal_text = current_text;
             self._buffer.clear();
             ParserResult {
