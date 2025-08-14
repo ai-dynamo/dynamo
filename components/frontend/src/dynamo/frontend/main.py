@@ -24,7 +24,6 @@ import re
 
 import uvloop
 
-from dynamo.frontend import __version__
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
@@ -35,6 +34,8 @@ from dynamo.llm import (
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
+
+from . import __version__
 
 
 def validate_static_endpoint(value):

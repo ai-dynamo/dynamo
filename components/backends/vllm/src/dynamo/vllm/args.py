@@ -12,8 +12,7 @@ from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
-from dynamo.vllm import __version__
-
+from . import __version__
 from .ports import (
     DEFAULT_DYNAMO_PORT_MAX,
     DEFAULT_DYNAMO_PORT_MIN,

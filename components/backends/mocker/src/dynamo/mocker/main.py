@@ -9,9 +9,10 @@ from pathlib import Path
 import uvloop
 
 from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
-from dynamo.mocker import __version__
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+
+from . import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 

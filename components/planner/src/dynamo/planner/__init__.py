@@ -16,6 +16,12 @@ from dynamo.planner.defaults import LoadPlannerDefaults, SLAPlannerDefaults
 from dynamo.planner.kubernetes_connector import KubernetesConnector
 from dynamo.planner.planner_connector import PlannerConnector
 
-from ._version import __version__
+try:
+    from ._version import __version__
+except Exception:
+    try:
+        from importlib.metadata import version as _pkg_version
 
-__version__ = __version__
+        __version__ = _pkg_version("ai-dynamo")
+    except Exception:
+        __version__ = "0.0.0+unknown"

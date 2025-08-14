@@ -11,10 +11,11 @@ from typing import Optional
 import uvloop
 from llama_cpp import Llama
 
-from dynamo.llama_cpp import __version__
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+
+from . import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 
