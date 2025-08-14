@@ -37,7 +37,7 @@ from utils.profile_cache import (
 )
 from utils.profile_prefill import profile_prefill
 
-from benchmarks.profiler.utils.profile_decode import profile_decode
+from utils.profile_decode import profile_decode
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
