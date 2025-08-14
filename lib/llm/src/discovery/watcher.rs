@@ -22,7 +22,7 @@ use crate::{
     kv_router::{KvPushRouter, KvRouterConfig},
     migration::Migration,
     model_type::ModelInput,
-    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest},
+    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest, prompt::PromptFormatter},
     protocols::common::llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -357,36 +357,9 @@ impl ModelWatcher {
                     client, Default::default(), self.busy_threshold
                 )
                 .await?;
-            let service_backend = match self.router_mode {
-                RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-                    ServiceBackend::from_engine(Arc::new(router))
-                }
-                RouterMode::KV => {
-                    let chooser = self
-                        .manager
-                        .kv_chooser_for(
-                            &model_entry.name,
-                            &component,
-                            card.kv_cache_block_size,
-                            self.kv_router_config,
-                        )
-                        .await?;
-                    let kv_push_router = KvPushRouter::new(router, chooser);
-                    ServiceBackend::from_engine(Arc::new(kv_push_router))
-                }
-            };
-
-            let completions_engine = frontend
-                .link(preprocessor.forward_edge())?
-                .link(backend.forward_edge())?
-                .link(migration.forward_edge())?
-                .link(service_backend)?
-                .link(migration.backward_edge())?
-                .link(backend.backward_edge())?
-                .link(preprocessor.backward_edge())?
-                .link(frontend)?;
-            self.manager
-                .add_completions_model(&model_entry.name, completions_engine)?;
+                let engine = Arc::new(push_router);
+                self.manager
+                    .add_completions_model(&model_entry.name, engine)?;
         }
         else if model_entry.model_type.supports_embedding() {
             let Some(mut card) = card else {
