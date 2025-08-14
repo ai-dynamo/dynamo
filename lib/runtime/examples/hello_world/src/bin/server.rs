@@ -69,7 +69,6 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     runtime
         .namespace(DEFAULT_NAMESPACE)?
         .component("backend")?
-
         .service_builder()
         .create()
         .await?
