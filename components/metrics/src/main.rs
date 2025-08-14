@@ -31,7 +31,6 @@ use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_llm::kv_router::KV_HIT_RATE_SUBJECT;
 use dynamo_runtime::{
     error, logging,
-    metrics::MetricsRegistry,
     traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
     DistributedRuntime, ErrorContext, Result, Runtime, Worker,
@@ -137,14 +136,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 
-    let target_component = {
-        let c = namespace.component(&config.component_name)?;
-        if let Some(ref model) = config.model_name {
-            c.add_labels(&[("model", model.as_str())])?
-        } else {
-            c
-        }
-    };
+    let target_component = namespace.component(&config.component_name)?;
     let target_endpoint = target_component.endpoint(&config.endpoint_name);
 
     let service_path = target_endpoint.path();

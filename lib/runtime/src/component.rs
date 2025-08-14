@@ -191,16 +191,6 @@ impl MetricsRegistry for Component {
         ]
         .concat()
     }
-
-    fn stored_labels(&self) -> Vec<(&str, &str)> {
-        let mut all_labels = self.namespace.stored_labels();
-        all_labels.extend(self.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        all_labels
-    }
-
-    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
-        &mut self.labels
-    }
 }
 
 impl Component {
@@ -424,16 +414,6 @@ impl MetricsRegistry for Endpoint {
             vec![self.component.basename()],
         ]
         .concat()
-    }
-
-    fn stored_labels(&self) -> Vec<(&str, &str)> {
-        let mut all_labels = self.component.stored_labels();
-        all_labels.extend(self.labels.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        all_labels
-    }
-
-    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
-        &mut self.labels
     }
 }
 

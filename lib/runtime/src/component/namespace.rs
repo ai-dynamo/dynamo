@@ -98,18 +98,6 @@ impl MetricsRegistry for Namespace {
         names.extend(parent_names.into_iter().rev());
         names
     }
-
-    fn stored_labels(&self) -> Vec<(&str, &str)> {
-        // Convert Vec<(String, String)> to Vec<(&str, &str)>
-        self.labels
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect()
-    }
-
-    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
-        &mut self.labels
-    }
 }
 
 #[cfg(feature = "integration")]

@@ -27,7 +27,6 @@ use dynamo_runtime::{
     component::Client,
     distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
-    metrics::MetricsRegistry,
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
         ServiceEngine, ServiceFrontend, SingleIn, Source,
@@ -111,8 +110,7 @@ pub async fn prepare_engine(
             let endpoint_id = local_model.endpoint_id();
             let component = distributed_runtime
                 .namespace(&endpoint_id.namespace)?
-                .component(&endpoint_id.component)
-                .and_then(|c| c.add_labels(&[("model", card.slug().to_string().as_str())]))?;
+                .component(&endpoint_id.component)?;
 
             let client = component.endpoint(&endpoint_id.name).client().await?;
 

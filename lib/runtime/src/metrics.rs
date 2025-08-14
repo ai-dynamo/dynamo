@@ -1183,14 +1183,28 @@ dynamo_component_testintcounter{{dynamo_namespace="ns345"}} 12345"#
 
         // Test IntGaugeVec creation
         let intgaugevec = namespace
-            .create_intgaugevec("testintgaugevec", "A test int gauge vector", &["instance", "service", "status"], &[("service", "api")])
+            .create_intgaugevec(
+                "testintgaugevec",
+                "A test int gauge vector",
+                &["instance", "service", "status"],
+                &[("service", "api")],
+            )
             .unwrap();
-        intgaugevec.with_label_values(&["server1", "active"]).set(10);
-        intgaugevec.with_label_values(&["server2", "inactive"]).set(0);
+        intgaugevec
+            .with_label_values(&["server1", "active"])
+            .set(10);
+        intgaugevec
+            .with_label_values(&["server2", "inactive"])
+            .set(0);
 
         // Test CounterVec creation
         let countervec = endpoint
-            .create_countervec("testcountervec", "A test counter vector", &["method", "status"], &[("service", "api")])
+            .create_countervec(
+                "testcountervec",
+                "A test counter vector",
+                &["method", "status"],
+                &[("service", "api")],
+            )
             .unwrap();
         countervec.with_label_values(&["GET", "200"]).inc_by(10.0);
         countervec.with_label_values(&["POST", "201"]).inc_by(5.0);
@@ -1209,7 +1223,8 @@ dynamo_component_testintcounter{{dynamo_namespace="ns345"}} 12345"#
         println!("{}", drt_output_raw);
 
         // Filter out all NATS metrics for comparison
-        let filtered_drt_output = super::test_helpers::remove_nats_lines(&drt_output_raw).join("\n");
+        let filtered_drt_output =
+            super::test_helpers::remove_nats_lines(&drt_output_raw).join("\n");
 
         let expected_drt_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter

@@ -7,7 +7,6 @@ use anyhow::Context as _;
 use tokio::sync::{mpsc::Receiver, Notify};
 
 use dynamo_runtime::{
-    metrics::MetricsRegistry,
     pipeline::{
         network::egress::push_router::PushRouter, ManyOut, Operator, RouterMode, SegmentSource,
         ServiceBackend, SingleIn, Source,
@@ -170,8 +169,7 @@ impl ModelWatcher {
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
-            .component(&endpoint_id.component)
-            .and_then(|c| c.add_labels(&[("model", &model_entry.name)]))?;
+            .component(&endpoint_id.component)?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
 
         let Some(etcd_client) = self.drt.etcd_client() else {
