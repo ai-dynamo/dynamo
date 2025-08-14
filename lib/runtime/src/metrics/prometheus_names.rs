@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Prometheus metric name constants
 //!
@@ -69,7 +57,7 @@ pub mod nats {
     pub const CONNECTION_STATE: &str = "nats_connection_state";
 
     /// ===== Component metrics (ordered to match NatsStatsMetrics fields) =====
-    /// Average processing time in milliseconds (maps to: average_processing_time in nanoseconds)
+    /// Average processing time in milliseconds (maps to: average_processing_time in ms)
     pub const AVG_PROCESSING_MS: &str = "nats_avg_processing_time_ms";
 
     /// Total errors across all endpoints (maps to: num_errors)
@@ -78,7 +66,7 @@ pub mod nats {
     /// Total requests across all endpoints (maps to: num_requests)
     pub const TOTAL_REQUESTS: &str = "nats_total_requests";
 
-    /// Total processing time in milliseconds (maps to: processing_time in nanoseconds)
+    /// Total processing time in milliseconds (maps to: processing_time in ms)
     pub const TOTAL_PROCESSING_MS: &str = "nats_total_processing_time_ms";
 
     /// Number of active services (derived from ServiceSet.services)

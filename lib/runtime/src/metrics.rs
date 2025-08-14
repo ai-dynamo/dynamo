@@ -557,7 +557,7 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
 
         // Get the Prometheus registry for this hierarchy
         let prometheus_registry = {
-            let mut registry_entry = self.drt().hierarchy_to_metricsregistry.lock().unwrap();
+            let mut registry_entry = self.drt().hierarchy_to_metricsregistry.write().unwrap();
             registry_entry
                 .entry(self.hierarchy())
                 .or_default()
@@ -828,36 +828,98 @@ mod test_metricsregistry_units {
 
     #[cfg(feature = "integration")]
     #[test]
-    fn test_metrics_registry_entry_with_callbacks() {
+    fn test_metrics_registry_entry_callbacks() {
         use crate::MetricsRegistryEntry;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // Create a new metrics registry entry
-        let mut entry = MetricsRegistryEntry::new();
+        // Test 1: Basic callback execution with counter increments
+        {
+            let mut entry = MetricsRegistryEntry::new();
+            let counter = Arc::new(AtomicUsize::new(0));
 
-        // Create a test DistributedRuntime for the callbacks using the helper function
-        // Note: DRT uses NATS, therefore this is an integration test
-        let drt = super::test_helpers::create_test_drt();
+            // Add callbacks with different increment values
+            for increment in [1, 10, 100] {
+                let counter_clone = counter.clone();
+                entry.add_callback(Arc::new(move || {
+                    counter_clone.fetch_add(increment, Ordering::SeqCst);
+                    Ok(())
+                }));
+            }
 
-        // Add some runtime callbacks
-        entry.add_callback(|| Ok(()));
-        entry.add_callback(|| Ok(()));
-        entry.add_callback(|| Ok(()));
+            // Verify counter starts at 0
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-        // Execute runtime callbacks
-        let results = entry.execute_callbacks();
+            // First execution
+            let results = entry.execute_callbacks();
+            assert_eq!(results.len(), 3);
+            assert!(results.iter().all(|r| r.is_ok()));
+            assert_eq!(counter.load(Ordering::SeqCst), 111); // 1 + 10 + 100
 
-        // Verify results
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|r| r.is_ok()));
+            // Second execution - callbacks should be reusable
+            let results = entry.execute_callbacks();
+            assert_eq!(results.len(), 3);
+            assert_eq!(counter.load(Ordering::SeqCst), 222); // 111 + 111
 
-        // Test cloning (callbacks should be empty after clone)
-        let cloned_entry = entry.clone();
-        let cloned_results = cloned_entry.execute_callbacks();
-        assert_eq!(cloned_results.len(), 0);
+            // Test cloning - cloned entry should have no callbacks
+            let cloned = entry.clone();
+            assert_eq!(cloned.execute_callbacks().len(), 0);
+            assert_eq!(counter.load(Ordering::SeqCst), 222); // No change
 
-        // Original should still have callbacks
-        let original_results = entry.execute_callbacks();
-        assert_eq!(original_results.len(), 3);
+            // Original still has callbacks
+            entry.execute_callbacks();
+            assert_eq!(counter.load(Ordering::SeqCst), 333); // 222 + 111
+        }
+
+        // Test 2: Mixed success and error callbacks
+        {
+            let mut entry = MetricsRegistryEntry::new();
+            let counter = Arc::new(AtomicUsize::new(0));
+
+            // Successful callback
+            let counter_clone = counter.clone();
+            entry.add_callback(Arc::new(move || {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+
+            // Error callback
+            entry.add_callback(Arc::new(|| Err(anyhow::anyhow!("Simulated error"))));
+
+            // Another successful callback
+            let counter_clone = counter.clone();
+            entry.add_callback(Arc::new(move || {
+                counter_clone.fetch_add(10, Ordering::SeqCst);
+                Ok(())
+            }));
+
+            // Execute and verify mixed results
+            let results = entry.execute_callbacks();
+            assert_eq!(results.len(), 3);
+            assert!(results[0].is_ok());
+            assert!(results[1].is_err());
+            assert!(results[2].is_ok());
+
+            // Verify error message
+            assert_eq!(
+                results[1].as_ref().unwrap_err().to_string(),
+                "Simulated error"
+            );
+
+            // Verify successful callbacks still executed
+            assert_eq!(counter.load(Ordering::SeqCst), 11); // 1 + 10
+
+            // Execute again - errors should be consistent
+            let results = entry.execute_callbacks();
+            assert!(results[1].is_err());
+            assert_eq!(counter.load(Ordering::SeqCst), 22); // 11 + 11
+        }
+
+        // Test 3: Empty registry
+        {
+            let entry = MetricsRegistryEntry::new();
+            let results = entry.execute_callbacks();
+            assert_eq!(results.len(), 0);
+        }
     }
 }
 

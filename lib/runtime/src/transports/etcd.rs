@@ -632,15 +632,11 @@ mod tests {
             .id();
 
         // Create the key
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
+        let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
         // Try to create the key again - this should fail
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
+        let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_err());
 
         // Create or validate should succeed as the values match

@@ -291,7 +291,8 @@ impl Component {
             self.service_name()
         ); // it happens that in component, hierarchy and service name are the same
 
-        self.drt().register_metrics_callback(hierarchies, move || {
+        // Register a metrics callback that scrapes component statistics
+        let metrics_callback = Arc::new(move || {
             // Timeout for scraping metrics from components (in milliseconds)
             // This value is also used by KV Router metrics aggregator (300ms) and other components
             const METRICS_SCRAPE_TIMEOUT_MS: u64 = 300;
@@ -340,6 +341,9 @@ impl Component {
                 }
             }
         });
+
+        self.drt()
+            .register_metrics_callback(hierarchies, metrics_callback);
 
         Ok(())
     }

@@ -138,7 +138,7 @@ impl EndpointInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
 pub struct NatsStatsMetrics {
     // Standard NATS Stats Service API fields from $SRV.STATS.<service_name> requests
-    pub average_processing_time: f64, // in nanoseconds according to nats-io
+    pub average_processing_time: u64, // in nanoseconds according to nats-io
     pub last_error: String,
     pub num_errors: u64,
     pub num_requests: u64,
@@ -235,7 +235,7 @@ mod tests {
                         name: "endpoint1".to_string(),
                         subject: "subject1".to_string(),
                         data: Some(NatsStatsMetrics {
-                            average_processing_time: 0.1,
+                            average_processing_time: 100_000, // 0.1ms = 100,000 nanoseconds
                             last_error: "none".to_string(),
                             num_errors: 0,
                             num_requests: 10,
@@ -248,7 +248,7 @@ mod tests {
                         name: "endpoint2-foo".to_string(),
                         subject: "subject2".to_string(),
                         data: Some(NatsStatsMetrics {
-                            average_processing_time: 0.1,
+                            average_processing_time: 100_000, // 0.1ms = 100,000 nanoseconds
                             last_error: "none".to_string(),
                             num_errors: 0,
                             num_requests: 10,
@@ -269,7 +269,7 @@ mod tests {
                         name: "endpoint1".to_string(),
                         subject: "subject1".to_string(),
                         data: Some(NatsStatsMetrics {
-                            average_processing_time: 0.1,
+                            average_processing_time: 100_000, // 0.1ms = 100,000 nanoseconds
                             last_error: "none".to_string(),
                             num_errors: 0,
                             num_requests: 10,
@@ -282,7 +282,7 @@ mod tests {
                         name: "endpoint2-bar".to_string(),
                         subject: "subject2".to_string(),
                         data: Some(NatsStatsMetrics {
-                            average_processing_time: 0.1,
+                            average_processing_time: 100_000, // 0.1ms = 100,000 nanoseconds
                             last_error: "none".to_string(),
                             num_errors: 0,
                             num_requests: 10,
@@ -307,6 +307,16 @@ mod tests {
 }
 
 /// Prometheus metrics for component service statistics (ordered to match NatsStatsMetrics)
+///
+/// ⚠️  IMPORTANT: These Prometheus Gauges are COPIES of NATS data, not live references!
+///
+/// How it works:
+/// 1. NATS provides source data via NatsStatsMetrics
+/// 2. Metrics callbacks read current NATS values and update these Prometheus Gauges
+/// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
+///
+/// Flow: NATS Service → NatsStatsMetrics (Counters) → Metrics Callback → Prometheus Gauge
+/// Note: These are snapshots updated when execute_metrics_callbacks() is called.
 #[derive(Debug, Clone)]
 pub struct ComponentNatsPrometheusMetrics {
     /// Average processing time in milliseconds (maps to: average_processing_time)

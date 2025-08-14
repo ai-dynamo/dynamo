@@ -148,7 +148,14 @@ impl SystemHealth {
 }
 
 /// Type alias for runtime callback functions to reduce complexity
-type RuntimeCallback = Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
+///
+/// This type represents an Arc-wrapped callback function that can be:
+/// - Shared efficiently across multiple threads and contexts
+/// - Cloned without duplicating the underlying closure
+/// - Used in generic contexts requiring 'static lifetime
+///
+/// The Arc wrapper is included in the type to make sharing explicit.
+type RuntimeCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
 
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
 pub struct MetricsRegistryEntry {
@@ -168,11 +175,8 @@ impl MetricsRegistryEntry {
     }
 
     /// Add a callback function that receives a reference to any MetricsRegistry
-    pub fn add_callback<F>(&mut self, callback: F)
-    where
-        F: Fn() -> anyhow::Result<()> + Send + Sync + 'static,
-    {
-        self.runtime_callbacks.push(Box::new(callback));
+    pub fn add_callback(&mut self, callback: RuntimeCallback) {
+        self.runtime_callbacks.push(callback);
     }
 
     /// Execute all runtime callbacks and return their results
@@ -237,5 +241,6 @@ pub struct DistributedRuntime {
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
-    hierarchy_to_metricsregistry: Arc<std::sync::Mutex<HashMap<String, MetricsRegistryEntry>>>,
+    // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
+    hierarchy_to_metricsregistry: Arc<std::sync::RwLock<HashMap<String, MetricsRegistryEntry>>>,
 }

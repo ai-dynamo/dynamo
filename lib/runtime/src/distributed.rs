@@ -21,7 +21,7 @@ use crate::{
     metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
-    ErrorContext,
+    ErrorContext, RuntimeCallback,
 };
 
 use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
@@ -100,7 +100,7 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            hierarchy_to_metricsregistry: Arc::new(std::sync::Mutex::new(HashMap::<
+            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
                 String,
                 crate::MetricsRegistryEntry,
             >::new())),
@@ -114,13 +114,15 @@ impl DistributedRuntime {
         )?;
         let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
         drt_hierarchies.push(distributed_runtime.hierarchy());
-        distributed_runtime.register_metrics_callback(drt_hierarchies, {
+        // Register a callback to update NATS client metrics
+        let nats_metrics_callback = Arc::new({
             let sys_nats_metrics_clone = sys_nats_metrics.clone();
             move || {
                 sys_nats_metrics_clone.set_from_client_stats();
                 Ok(())
             }
         });
+        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_metrics_callback);
 
         // Start system status server if enabled
         if let Some(cancel_token) = cancel_token {
@@ -265,7 +267,7 @@ impl DistributedRuntime {
         metric_name: &str,
         prometheus_metric: Box<dyn prometheus::core::Collector>,
     ) -> anyhow::Result<()> {
-        let mut registries = self.hierarchy_to_metricsregistry.lock().unwrap();
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         let entry = registries.entry(hierarchy.to_string()).or_default();
 
         // If a metric with this name already exists for the hierarchy, warn and skip registration
@@ -295,36 +297,36 @@ impl DistributedRuntime {
     }
 
     /// Add a callback function to metrics registries for the given hierarchies
-    pub fn register_metrics_callback<F>(&self, hierarchies: Vec<String>, callback: F)
-    where
-        F: Fn() -> anyhow::Result<()> + Send + Sync + 'static,
-    {
-        use std::sync::Arc as StdArc;
-        let callback_arc: StdArc<F> = StdArc::new(callback);
-
-        let mut registries = self.hierarchy_to_metricsregistry.lock().unwrap();
+    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         for hierarchy in hierarchies {
-            let callback_clone = callback_arc.clone();
             registries
                 .entry(hierarchy)
                 .or_default()
-                .add_callback(move || (callback_clone)());
+                .add_callback(callback.clone());
         }
     }
 
     /// Execute all callbacks for a given hierarchy key and return their results
     pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
-        let registries = self.hierarchy_to_metricsregistry.lock().unwrap();
-        if let Some(entry) = registries.get(hierarchy) {
-            entry.execute_callbacks()
-        } else {
-            Vec::new()
+        // Clone callbacks while holding read lock (fast operation)
+        let callbacks = {
+            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
+            registries
+                .get(hierarchy)
+                .map(|entry| entry.runtime_callbacks.clone())
+        }; // Read lock released here
+
+        // Execute callbacks without holding the lock
+        match callbacks {
+            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
+            None => Vec::new(),
         }
     }
 
     /// Get all registered hierarchy keys. Private because it is only used for testing.
     fn get_registered_hierarchies(&self) -> Vec<String> {
-        let registries = self.hierarchy_to_metricsregistry.lock().unwrap();
+        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
         registries.keys().cloned().collect()
     }
 }

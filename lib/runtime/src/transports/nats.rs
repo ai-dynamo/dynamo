@@ -509,6 +509,16 @@ impl NatsQueue {
 
 /// Prometheus metrics that mirror the NATS client statistics (in primitive types)
 /// to be used for the System Status Server.
+///
+/// ⚠️  IMPORTANT: These Prometheus Gauges are COPIES of NATS client data, not live references!
+///
+/// How it works:
+/// 1. NATS client provides source data via client.statistics() and connection_state()
+/// 2. set_from_client_stats() reads current NATS values and updates these Prometheus Gauges
+/// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
+///
+/// Flow: NATS Client → Client Statistics → set_from_client_stats() → Prometheus Gauge
+/// Note: These are snapshots updated when set_from_client_stats() is called.
 #[derive(Debug, Clone)]
 pub struct DRTNatsPrometheusMetrics {
     nats_client: client::Client,
