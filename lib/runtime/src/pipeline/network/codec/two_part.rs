@@ -88,7 +88,13 @@ impl Decoder for TwoPartCodec {
         {
             // If the server sent a dummy checksum, skip it.
             if checksum != 0 {
-                let bytes_to_hash = header_len + body_len;
+                let bytes_to_hash =
+                    header_len
+                        .checked_add(body_len)
+                        .ok_or(TwoPartCodecError::InvalidMessage(
+                            "Message exceeds max allowed length.".to_string(),
+                        ))?;
+
                 let data_to_hash = &src[..bytes_to_hash];
 
                 let computed_checksum = xxh3_64(data_to_hash);
