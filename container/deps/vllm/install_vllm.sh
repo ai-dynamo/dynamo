@@ -113,10 +113,9 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 uv pip install pip cuda-python
 
 if [ "$ARCH" = "amd64" ]; then
-    # Build issues with LMCache installation on arm64:
+    # LMCache installation currently fails on arm64 due to CUDA dependency issues:
     # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
-    # TODO: Add it back once we have a working arm64 build.
-    # Install LMCache
+    # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
     uv pip install lmcache==0.3.3
 fi
 
