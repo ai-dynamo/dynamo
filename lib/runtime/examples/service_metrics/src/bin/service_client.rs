@@ -17,7 +17,7 @@ use futures::StreamExt;
 use service_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
-    logging, metrics::MetricsRegistry, pipeline::PushRouter, protocols::annotated::Annotated,
+    logging, pipeline::PushRouter, protocols::annotated::Annotated,
     utils::Duration, DistributedRuntime, Result, Runtime, Worker,
 };
 
@@ -32,8 +32,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
     let component = namespace
-        .component("backend")?
-        .add_labels(&[("model", "service_metrics_model")])?;
+        .component("backend")?;
 
     let client = component.endpoint("generate").client().await?;
 
