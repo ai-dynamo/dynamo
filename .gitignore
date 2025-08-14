@@ -79,6 +79,9 @@ __pycache__/
 *.so
 *.egg-info
 
+# Hatch build artifact
+_version.py
+
 ### Helm ###
 *.tgz
 Chart.lock

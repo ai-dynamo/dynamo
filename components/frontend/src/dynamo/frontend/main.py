@@ -24,6 +24,7 @@ import re
 
 import uvloop
 
+from dynamo.frontend import __version__
 from dynamo.llm import (
     EngineType,
     EntrypointArgs,
@@ -70,6 +71,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
     parser.add_argument(
         "-i", "--interactive", action="store_true", help="Interactive text chat"

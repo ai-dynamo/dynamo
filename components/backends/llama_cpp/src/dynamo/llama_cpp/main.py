@@ -11,6 +11,7 @@ from typing import Optional
 import uvloop
 from llama_cpp import Llama
 
+from dynamo.llama_cpp import __version__
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -82,6 +83,9 @@ class RequestHandler:
 def cmd_line_args():
     parser = argparse.ArgumentParser(
         description="llama.cpp server integrated with Dynamo LLM."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend llama.cpp {__version__}"
     )
     parser.add_argument(
         "--model-path",
