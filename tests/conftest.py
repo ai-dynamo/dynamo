@@ -143,11 +143,11 @@ def pytest_collection_modifyitems(config, items):
 
     # Tests marked with trtllm requires specific environment with tensorrtllm
     # installed. Hence, we skip them if the user did not explicitly ask for them.
-    if config.getoption("-m") and "trtllm" in config.getoption("-m"):
+    if config.getoption("-m") and "trtllm_marker" in config.getoption("-m"):
         return
-    skip_trtllm = pytest.mark.skip(reason="need -m trtllm to run")
+    skip_trtllm = pytest.mark.skip(reason="need -m trtllm_marker to run")
     for item in items:
-        if "trtllm" in item.keywords:
+        if "trtllm_marker" in item.keywords:
             item.add_marker(skip_trtllm)
 
         # Auto-inject predownload_models fixture for serve tests only (not router tests)
