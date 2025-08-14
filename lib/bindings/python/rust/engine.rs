@@ -21,6 +21,8 @@ use pythonize::{depythonize, pythonize};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
+use crate::async_stream;
+
 pub use dynamo_runtime::{
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
@@ -134,8 +136,8 @@ enum ResponseProcessingError {
     #[error("python exception: {0}")]
     PythonException(String),
 
-    #[error("python generator exit: {0}")]
-    PyGeneratorExit(String),
+    #[error("python asyncio cancelled: {0}")]
+    PythonAsyncioCancelled(String),
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
@@ -182,7 +184,7 @@ where
                 let py_request = pythonize(py, &request)?;
                 let gen = generator.call1(py, (py_request,))?;
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
+                async_stream::into_stream(locals, gen.into_bound(py))
             })
         })
         .await??;
@@ -228,7 +230,7 @@ where
                                 let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
                                 msg
                             }
-                            ResponseProcessingError::PyGeneratorExit(_) => {
+                            ResponseProcessingError::PythonAsyncioCancelled(_) => {
                                 "Stream ended before generation completed".to_string()
                             }
                             ResponseProcessingError::PythonException(e) => {
@@ -246,7 +248,7 @@ where
                 };
 
                 if tx.send(response).await.is_err() {
-                    tracing::trace!(
+                    tracing::debug!(
                         request_id,
                         "error forwarding annotated response to channel; channel is closed"
                     );
@@ -282,13 +284,14 @@ where
 {
     let item = item.map_err(|e| {
         println!();
-        let mut is_py_generator_exit = false;
+        let mut is_py_asyncio_cancelled = false;
         Python::with_gil(|py| {
             e.display(py);
-            is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
+            is_py_asyncio_cancelled =
+                e.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py);
         });
-        if is_py_generator_exit {
-            ResponseProcessingError::PyGeneratorExit(e.to_string())
+        if is_py_asyncio_cancelled {
+            ResponseProcessingError::PythonAsyncioCancelled(e.to_string())
         } else {
             ResponseProcessingError::PythonException(e.to_string())
         }
