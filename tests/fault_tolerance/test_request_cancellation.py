@@ -3,6 +3,7 @@
 
 import logging
 import os
+import re
 import shutil
 import time
 
@@ -260,6 +261,12 @@ def read_log_content(log_path: str | None) -> str:
         pytest.fail(f"Could not read log file {log_path}: {e}")
 
 
+def strip_ansi_codes(text: str) -> str:
+    """Remove ANSI color codes from text"""
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
+
+
 def verify_request_cancelled(
     worker_process: DynamoWorkerProcess,
     frontend_process: DynamoFrontendProcess,
@@ -275,20 +282,50 @@ def verify_request_cancelled(
     # Check worker log for cancellation pattern
     worker_log_content = read_log_content(worker_process._log_path)
     new_worker_content = worker_log_content[worker_log_offset:]
-    has_worker_cancellation = (
-        "finished processing python async generator stream" in new_worker_content
-    )
 
-    # Check frontend log for "issued control message Kill to sender" message
+    # Find request ID from "New Request ID: <id>" line
+    request_id = None
+    for line in new_worker_content.split("\n"):
+        # Strip ANSI codes and whitespace for pattern matching
+        clean_line = strip_ansi_codes(line).strip()
+        if "New Request ID: " in clean_line:
+            # Extract ID from the end of the line
+            parts = clean_line.split("New Request ID: ")
+            if len(parts) > 1:
+                request_id = parts[-1].strip()
+                break
+
+    # Check if the same request ID was cancelled
+    has_worker_cancellation = False
+    if request_id:
+        cancellation_pattern = f"Request ID {request_id} was cancelled"
+        for line in new_worker_content.split("\n"):
+            # Strip ANSI codes and whitespace for pattern matching
+            clean_line = strip_ansi_codes(line).strip()
+            if clean_line.endswith(cancellation_pattern):
+                has_worker_cancellation = True
+                break
+    else:
+        pytest.fail("Could not find 'New Request ID: <id>' pattern in worker log")
+    if not has_worker_cancellation:
+        pytest.fail(
+            f"Could not find 'Request ID {request_id} was cancelled' pattern in worker log"
+        )
+
+    # Check frontend log for cancellation issued pattern
     frontend_log_content = read_log_content(frontend_process._log_path)
     new_frontend_content = frontend_log_content[frontend_log_offset:]
-    has_kill_message = "issued control message Kill to sender" in new_frontend_content
 
-    logger.info(f"Kill message found in frontend log: {has_kill_message}")
-    logger.info(f"Worker cancellation pattern found: {has_worker_cancellation}")
-
-    if not (has_kill_message and has_worker_cancellation):
-        pytest.fail("Request cancellation was not detected in worker and frontend logs")
+    has_kill_message = False
+    kill_message = "issued control message Kill to sender"
+    for line in new_frontend_content.split("\n"):
+        # Strip ANSI codes and whitespace for pattern matching
+        clean_line = strip_ansi_codes(line).strip()
+        if clean_line.endswith(kill_message):
+            has_kill_message = True
+            break
+    if not has_kill_message:
+        pytest.fail("Could not find cancellation issued in frontend log")
 
     return len(worker_log_content), len(frontend_log_content)
 
