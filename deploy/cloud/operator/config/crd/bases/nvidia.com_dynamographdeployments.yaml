@@ -10298,10 +10298,12 @@ spec:
                                   type: string
                                 type: object
                               gpu:
+                                description: GPU is the number of GPUs to request per node.
                                 type: string
                               memory:
                                 type: string
                               nodes:
+                                description: Nodes is the number of nodes to request. Total number of GPUs will be GPU * Nodes.
                                 type: string
                             type: object
                           requests:
@@ -10313,10 +10315,12 @@ spec:
                                   type: string
                                 type: object
                               gpu:
+                                description: GPU is the number of GPUs to request per node.
                                 type: string
                               memory:
                                 type: string
                               nodes:
+                                description: Nodes is the number of nodes to request. Total number of GPUs will be GPU * Nodes.
                                 type: string
                             type: object
                         type: object
