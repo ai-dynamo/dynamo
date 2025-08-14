@@ -186,4 +186,7 @@ else
     uv pip install -v --no-build-isolation .
 fi
 
+# temporary fix for torch 2.8.0
+uv pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+
 echo "vllm installation completed successfully"
