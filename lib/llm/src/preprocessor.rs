@@ -98,9 +98,14 @@ pub struct OpenAIPreprocessor {
 
 impl OpenAIPreprocessor {
     pub async fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let mdcsum = mdc.mdcsum();
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
         let PromptFormatter::OAI(formatter) = formatter;
+        Self::new_with_formatter(mdc, formatter).await
+    }
+
+    pub async fn new_with_formatter(mdc: ModelDeploymentCard, formatter: Arc<dyn OAIPromptFormatter>) -> Result<Arc<Self>> {
+        let mdcsum = mdc.mdcsum();
+
         let tokenizer = match &mdc.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
             Some(TokenizerKind::GGUF(tokenizer)) => {
@@ -128,7 +133,6 @@ impl OpenAIPreprocessor {
             mdcsum,
         }))
     }
-
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
