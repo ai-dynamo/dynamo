@@ -19,7 +19,13 @@ import asyncio
 import pytest
 import torch
 
-from dynamo.llm import BlockManager
+# Attempt to import the optional module
+try:
+    from dynamo.llm import BlockManager
+except ImportError:
+    pytest.importorskip(
+        "optional_module", reason="block-manager feature is not enabled"
+    )
 
 pytestmark = pytest.mark.pre_merge
 

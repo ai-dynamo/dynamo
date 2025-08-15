@@ -107,8 +107,8 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # can be updated to later versions.
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NONE_BASE_IMAGE="ubuntu"
-NONE_BASE_IMAGE_TAG="24.04"
+NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
@@ -265,6 +265,9 @@ get_options() {
         --release-build)
             RELEASE_BUILD=true
             ;;
+        --enable-kvbm)
+            ENABLE_KVBM=true
+            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -369,6 +372,7 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
     exit 0
 }
@@ -397,7 +401,7 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
 elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
 elif [[ $FRAMEWORK == "NONE" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.none
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 fi
@@ -410,7 +414,6 @@ if [[ $TARGET == "local-dev" ]]; then
 fi
 
 # BUILD DEV IMAGE
-
 BUILD_ARGS+=" --build-arg BASE_IMAGE=$BASE_IMAGE --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG --build-arg FRAMEWORK=$FRAMEWORK --build-arg ${FRAMEWORK}_FRAMEWORK=1 --build-arg VERSION=$VERSION --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
 
 if [ -n "${GITHUB_TOKEN}" ]; then
@@ -514,6 +517,11 @@ fi
 if [  ! -z ${RELEASE_BUILD} ]; then
     echo "Performing a release build!"
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
+fi
+
+if [  ! -z ${ENABLE_KVBM} ]; then
+    echo "Enabling the KVBM in the ai-dynamo-runtime"
+    BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
