@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 
 import pytest
 import requests
@@ -88,7 +88,7 @@ class VLLMConfig:
     model: str
     timeout: int = 120
     delayed_start: int = 0
-    extra_args: List[str] = None
+    extra_args: Optional[List[str]] = None
 
 
 class VLLMProcess(ManagedProcess):
