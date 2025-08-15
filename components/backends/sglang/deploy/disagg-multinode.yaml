@@ -49,13 +49,13 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              python3 -m dynamo.sglang.decode_worker 
-              --model-path meta-llama/Llama-3.3-70B-Instruct 
-              --served-model-name meta-llama/Llama-3.3-70B-Instruct 
-              --tp-size 8 
-              --trust-remote-code 
-              --skip-tokenizer-init 
-              --disaggregation-mode decode 
+              python3 -m dynamo.sglang.decode_worker
+              --model-path meta-llama/Llama-3.3-70B-Instruct
+              --served-model-name meta-llama/Llama-3.3-70B-Instruct
+              --tp-size 8
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
               --mem-fraction-static 0.82
@@ -81,13 +81,13 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              python3 -m dynamo.sglang.worker 
-              --model-path meta-llama/Llama-3.3-70B-Instruct 
-              --served-model-name meta-llama/Llama-3.3-70B-Instruct 
-              --tp-size 8 
-              --trust-remote-code 
-              --skip-tokenizer-init 
-              --disaggregation-mode prefill 
+              python3 -m dynamo.sglang.worker
+              --model-path meta-llama/Llama-3.3-70B-Instruct
+              --served-model-name meta-llama/Llama-3.3-70B-Instruct
+              --tp-size 8
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode prefill
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
               --mem-fraction-static 0.82
