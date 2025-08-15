@@ -40,6 +40,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -525,12 +526,11 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "2",
-								},
 							},
 						},
 					},
@@ -553,146 +553,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 			wantErr: false,
 		},
 		{
-			name: "missing lws size annotation",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-missing-lws-size",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-missing-lws-size",
-								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									// "nvidia.com/lws-size" is missing
-								},
-							},
-						},
-					},
-					instanceID: ptr.To(0),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "invalid lws size annotation (non-integer)",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-non-int",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-invalid-lws-size-non-int",
-								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "abc",
-								},
-							},
-						},
-					},
-					instanceID: ptr.To(1),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "invalid lws size annotation (zero)",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-zero",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-invalid-lws-size-zero",
-								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "0",
-								},
-							},
-						},
-					},
-					instanceID: ptr.To(2),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "invalid lws size annotation (negative)",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-negative",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-invalid-lws-size-negative",
-								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "-1",
-								},
-							},
-						},
-					},
-					instanceID: ptr.To(3),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "lws size of 1 - lws should not be used",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-valid-lws-size-one",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-valid-lws-size-one",
-								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "1",
-								},
-							},
-						},
-					},
-					instanceID: ptr.To(4),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
 			name: "nil instanceID",
 			args: args{
 				ctx: context.Background(),
@@ -706,9 +566,8 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service-nil-instanceid",
 								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "2",
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
 								},
 							},
 						},
@@ -734,9 +593,8 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service-negative-instanceid",
 								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "2",
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
 								},
 							},
 						},
@@ -762,6 +620,9 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoComponentDeploymentReconciler.generateVolcanoPodGroup() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("Mismatch (-expected +actual):\n%s", diff)
 			}
 			g.Expect(got).To(gomega.Equal(tt.want))
 			g.Expect(got1).To(gomega.Equal(tt.want1))
@@ -832,11 +693,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Value: "test_value_from_dynamo_component_deployment_spec",
 									},
 								},
+								ComponentType:   string(commonconsts.ComponentTypeWorker),
 								ServiceName:     "test-lws-deploy-service",
 								DynamoNamespace: &[]string{"default"}[0],
-								Annotations: map[string]string{
-									"nvidia.com/deployment-type": "leader-worker",
-									"nvidia.com/lws-size":        "2",
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
 								},
 								Resources: &common.Resources{
 									Requests: &common.ResourceItem{
@@ -914,6 +775,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
 									"role":                               "leader",
 									"nvidia.com/label1":                  "label1",
+									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -929,7 +791,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeSource: corev1.VolumeSource{
 											EmptyDir: &corev1.EmptyDirVolumeSource{
 												Medium:    corev1.StorageMediumMemory,
-												SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI), // 512Mi default (calculated from memory limit)
+												SizeLimit: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5gi (calculated from memory limit / 4)
 											},
 										},
 									},
@@ -940,10 +802,10 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
-										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}, {Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
+										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
 										Ports: []corev1.ContainerPort{
 											{
-												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort,
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
 											},
 										},
 										VolumeMounts: []corev1.VolumeMount{
@@ -958,8 +820,46 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 												corev1.ResourceMemory: resource.MustParse("500Mi"),
 											},
 											Limits: corev1.ResourceList{
-												"nvidia.com/gpu": resource.MustParse("1"),
+												corev1.ResourceMemory: resource.MustParse("20Gi"),
+												corev1.ResourceCPU:    resource.MustParse("10"),
+												"nvidia.com/gpu":      resource.MustParse("1"),
 											},
+										},
+										LivenessProbe: &corev1.Probe{
+											ProbeHandler: corev1.ProbeHandler{
+												HTTPGet: &corev1.HTTPGetAction{
+													Path: "/live",
+													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+												},
+											},
+											TimeoutSeconds:   30,
+											PeriodSeconds:    5,
+											SuccessThreshold: 0,
+											FailureThreshold: 1,
+										},
+										ReadinessProbe: &corev1.Probe{
+											ProbeHandler: corev1.ProbeHandler{
+												HTTPGet: &corev1.HTTPGetAction{
+													Path: "/health",
+													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+												},
+											},
+											TimeoutSeconds:   30,
+											PeriodSeconds:    10,
+											SuccessThreshold: 0,
+											FailureThreshold: 60,
+										},
+										StartupProbe: &corev1.Probe{
+											ProbeHandler: corev1.ProbeHandler{
+												HTTPGet: &corev1.HTTPGetAction{
+													Path: "/live",
+													Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+												},
+											},
+											TimeoutSeconds:   5,
+											PeriodSeconds:    10,
+											SuccessThreshold: 0,
+											FailureThreshold: 60,
 										},
 									},
 								},
@@ -974,6 +874,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
 									"role":                               "worker",
 									"nvidia.com/label1":                  "label1",
+									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -989,7 +890,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeSource: corev1.VolumeSource{
 											EmptyDir: &corev1.EmptyDirVolumeSource{
 												Medium:    corev1.StorageMediumMemory,
-												SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI), // 512Mi default (calculated from memory limit)
+												SizeLimit: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5gi (calculated from memory limit / 4)
 											},
 										},
 									},
@@ -999,9 +900,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    "main",
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
-										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}, {Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
-										Ports:   []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort}},
+										Args:    []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
+										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
+										Ports: []corev1.ContainerPort{
+											{
+												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
+											},
+										},
 										VolumeMounts: []corev1.VolumeMount{
 											{
 												Name:      "shared-memory",
@@ -1009,7 +914,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											},
 										},
 										Resources: corev1.ResourceRequirements{
-											Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+											Limits: corev1.ResourceList{
+												corev1.ResourceMemory: resource.MustParse("20Gi"),
+												corev1.ResourceCPU:    resource.MustParse("10"),
+												"nvidia.com/gpu":      resource.MustParse("1"),
+											},
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("300m"),
 												corev1.ResourceMemory: resource.MustParse("500Mi"),
@@ -1036,10 +945,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				ctx: context.Background(),
 				opt: generateResourceOption{
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-nil-id", Namespace: "default", Annotations: map[string]string{KubeAnnotationLWSSize: "2"}},
+						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-nil-id", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								Resources: &common.Resources{
 									Limits: &common.ResourceItem{
 										GPU: "1",
@@ -1077,10 +989,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				ctx: context.Background(),
 				opt: generateResourceOption{
 					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-leader-err", Namespace: "default", Annotations: map[string]string{KubeAnnotationLWSSize: "2"}},
+						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-leader-err", Namespace: "default"},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								Resources: &common.Resources{
 									Limits: &common.ResourceItem{
 										GPU: "1",

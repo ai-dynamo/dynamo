@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestDynamoComponentDeployment_IsMainComponent(t *testing.T) {
+func TestDynamoComponentDeployment_IsFrontendComponent(t *testing.T) {
 	type fields struct {
 		TypeMeta   metav1.TypeMeta
 		ObjectMeta metav1.ObjectMeta
@@ -73,8 +73,8 @@ func TestDynamoComponentDeployment_IsMainComponent(t *testing.T) {
 				Spec:       tt.fields.Spec,
 				Status:     tt.fields.Status,
 			}
-			if got := s.IsMainComponent(); got != tt.want {
-				t.Errorf("DynamoComponentDeployment.IsMainComponent() = %v, want %v", got, tt.want)
+			if got := s.IsFrontendComponent(); got != tt.want {
+				t.Errorf("DynamoComponentDeployment.IsFrontendComponent() = %v, want %v", got, tt.want)
 			}
 		})
 	}

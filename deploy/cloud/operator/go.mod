@@ -23,7 +23,7 @@ require (
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/lws v0.6.1
-	volcano.sh/apis v1.11.0
+	volcano.sh/apis v1.12.2
 )
 
 require (

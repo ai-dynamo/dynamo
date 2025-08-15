@@ -22,7 +22,7 @@ backend: pytorch
 enable_chunked_prefill: true
 
 kv_cache_config:
-  free_gpu_memory_fraction: 0.95
+  free_gpu_memory_fraction: 0.85
 
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed

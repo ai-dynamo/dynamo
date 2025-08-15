@@ -185,7 +185,7 @@ trtllm_configs = {
         name="aggregated",
         directory="/workspace/components/backends/trtllm",
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
@@ -198,7 +198,7 @@ trtllm_configs = {
         name="disaggregated",
         directory="/workspace/components/backends/trtllm",
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
@@ -214,7 +214,7 @@ trtllm_configs = {
         name="aggregated_router",
         directory="/workspace/components/backends/trtllm",
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
@@ -227,7 +227,7 @@ trtllm_configs = {
         name="disaggregated_router",
         directory="/workspace/components/backends/trtllm",
         script_name="disagg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
