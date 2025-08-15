@@ -12,6 +12,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
@@ -213,6 +214,17 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publisher = kv_publisher
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        runtime_config = ModelRuntimeConfig()
+
+        # make a `collective_rpc` call to get runtime configuration values
+        logging.info(
+            "Getting engine runtime configuration metadata from vLLM engine..."
+        )
+        runtime_values = get_engine_cache_info(engine_client)
+        runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+        runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
+        runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+
         await register_llm(
             ModelType.Backend,
             generate_endpoint,
@@ -220,6 +232,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
             migration_limit=config.migration_limit,
+            runtime_config=runtime_config,
         )
 
     try:
@@ -235,6 +248,32 @@ async def init(runtime: DistributedRuntime, config: Config):
     finally:
         # Cleanup background tasks
         handler.cleanup()
+
+
+def get_engine_cache_info(engine: AsyncLLM):
+    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+
+    try:
+        # Get values directly from vllm_config instead of collective_rpc
+        cache_values = {
+            "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
+        }
+
+        scheduler_values = {
+            "max_num_seqs": engine.vllm_config.scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
+        }
+
+        logging.info(f"Cache config values: {cache_values}")
+        logging.info(f"Scheduler config values: {scheduler_values}")
+        return {
+            "num_gpu_blocks": cache_values["num_gpu_blocks"],
+            "max_num_seqs": scheduler_values["max_num_seqs"],
+            "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
+        }
+    except Exception as e:
+        logging.error(f"Failed to get configuration values from vLLM config: {e}")
+        raise
 
 
 def main():

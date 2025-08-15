@@ -323,6 +323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de45108900e1f9b9242f7f2e254aa3e2c029c921c258fe9e6b4217eeebd54288"
 dependencies = [
  "axum-core",
+ "axum-macros",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -368,6 +369,17 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "604fde5e028fea851ce1d8570bbdc034bec850d157f7569d10f347d06808c05c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -841,9 +853,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.16.6"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17200eb07e7d85a243aa1bf4569a7aa998385ba98d14833973a817a63cc86e92"
+checksum = "018e09f92e57618dbae5a3a0dcc2026547eed0e5b6a503a32c11ee1a94890830"
 dependencies = [
  "libloading",
 ]
@@ -1140,6 +1152,7 @@ dependencies = [
  "candle-core",
  "chrono",
  "cudarc",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dialoguer",
@@ -1177,6 +1190,7 @@ dependencies = [
  "tokio-util",
  "toktrie",
  "toktrie_hf_tokenizers",
+ "tower-http",
  "tracing",
  "unicode-segmentation",
  "url",
@@ -1252,6 +1266,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4888,6 +4903,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

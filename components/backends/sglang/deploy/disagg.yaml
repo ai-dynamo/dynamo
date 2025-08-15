@@ -8,26 +8,8 @@ metadata:
 spec:
   services:
     Frontend:
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 20
-        periodSeconds: 5
-        timeoutSeconds: 5
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       dynamoNamespace: sglang-disagg
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:
@@ -38,28 +20,13 @@ spec:
           memory: "40Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
             - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        exec:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       dynamoNamespace: sglang-disagg
       componentType: worker
       replicas: 1
@@ -72,58 +39,27 @@ spec:
           cpu: "32"
           memory: "80Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.sglang.decode_worker"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--page-size"
-            - "16"
-            - "--tp"
-            - "1"
-            - "--trust-remote-code"
-            - "--skip-tokenizer-init"
-            - "--disaggregation-mode"
-            - "decode"
-            - "--disaggregation-transfer-backend"
-            - "nixl"
+            - >-
+              python3 -m dynamo.sglang.decode_worker
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+
     SGLangPrefillWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        exec:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       dynamoNamespace: sglang-disagg
       componentType: worker
       replicas: 1
@@ -136,38 +72,21 @@ spec:
           cpu: "32"
           memory: "80Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0804
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.sglang.worker"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--page-size"
-            - "16"
-            - "--tp"
-            - "1"
-            - "--trust-remote-code"
-            - "--skip-tokenizer-init"
-            - "--disaggregation-mode"
-            - "prefill"
-            - "--disaggregation-transfer-backend"
-            - "nixl"
+            - >-
+              python3 -m dynamo.sglang.worker
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl

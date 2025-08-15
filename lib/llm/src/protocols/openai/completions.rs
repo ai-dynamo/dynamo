@@ -21,9 +21,11 @@ use validator::Validate;
 use crate::engines::ValidateRequest;
 
 use super::{
-    common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::{NvExt, NvExtProvider},
-    validate, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
+    validate, ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
+    OpenAIStopConditionsProvider,
 };
 
 mod aggregator;
@@ -36,6 +38,9 @@ pub use delta::DeltaGenerator;
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateCompletionRequest,
+
+    #[serde(flatten)]
+    pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -131,13 +136,56 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     }
 }
 
+impl CommonExtProvider for NvCreateCompletionRequest {
+    fn common_ext(&self) -> Option<&CommonExt> {
+        Some(&self.common)
+    }
+
+    /// Guided Decoding Options
+    fn get_guided_json(&self) -> Option<&serde_json::Value> {
+        self.common
+            .guided_json
+            .as_ref()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+    }
+
+    fn get_guided_regex(&self) -> Option<String> {
+        self.common
+            .guided_regex
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_regex.clone()))
+    }
+
+    fn get_guided_grammar(&self) -> Option<String> {
+        self.common
+            .guided_grammar
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_grammar.clone()))
+    }
+
+    fn get_guided_choice(&self) -> Option<Vec<String>> {
+        self.common
+            .guided_choice
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_choice.clone()))
+    }
+
+    fn get_guided_decoding_backend(&self) -> Option<String> {
+        self.common.guided_decoding_backend.clone().or_else(|| {
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_decoding_backend.clone())
+        })
+    }
+}
+
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_tokens
     }
 
     fn get_min_tokens(&self) -> Option<u32> {
-        None
+        self.common.min_tokens
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
@@ -146,6 +194,10 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
 
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    fn get_common_ignore_eos(&self) -> Option<bool> {
+        self.common.ignore_eos
     }
 }
 
@@ -228,6 +280,10 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
             .extract_sampling_options()
             .map_err(|e| anyhow::anyhow!("Failed to extract sampling options: {}", e))?;
 
+        let output_options = request
+            .extract_output_options()
+            .map_err(|e| anyhow::anyhow!("Failed to extract output options: {}", e))?;
+
         let prompt = common::PromptType::Completion(common::CompletionContext {
             prompt: prompt_to_string(&request.inner.prompt),
             system_prompt: None,
@@ -237,6 +293,7 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
             prompt,
             stop_conditions,
             sampling_options,
+            output_options,
             mdc_sum: None,
             annotations: None,
         })
@@ -275,6 +332,26 @@ impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choic
         };
 
         Ok(choice)
+    }
+}
+
+impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
+    fn get_logprobs(&self) -> Option<u32> {
+        self.inner.logprobs.map(|logprobs| logprobs as u32)
+    }
+
+    fn get_prompt_logprobs(&self) -> Option<u32> {
+        self.inner
+            .echo
+            .and_then(|echo| if echo { Some(1) } else { None })
+    }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_formatted_prompt(&self) -> Option<bool> {
+        None
     }
 }
 

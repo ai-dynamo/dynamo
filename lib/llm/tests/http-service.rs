@@ -270,7 +270,12 @@ fn inc_counter(
 #[allow(deprecated)]
 #[tokio::test]
 async fn test_http_service() {
-    let service = HttpService::builder().port(8989).build().unwrap();
+    let service = HttpService::builder()
+        .port(8989)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -572,7 +577,12 @@ async fn wait_for_service_ready(port: u16) {
 fn service_with_engines(
     #[default(8990)] port: u16,
 ) -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>) {
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(port)
+        .build()
+        .unwrap();
     let manager = service.model_manager();
 
     let counter = Arc::new(CounterEngine {});
@@ -765,6 +775,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -802,6 +813,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -840,6 +852,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -955,7 +968,12 @@ async fn test_generic_byot_client(
 #[rstest]
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
-    let service = HttpService::builder().port(8993).build().unwrap();
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(8993)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -1041,7 +1059,12 @@ async fn test_client_disconnect_cancellation_unary() {
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
-    let service = HttpService::builder().port(8994).build().unwrap();
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(8994)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -1134,7 +1157,12 @@ async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();
 
-    let service = HttpService::builder().port(8995).build().unwrap();
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(8995)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 

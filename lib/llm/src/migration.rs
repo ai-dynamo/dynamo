@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
@@ -23,7 +11,7 @@ use async_nats::client::{
 };
 
 use crate::{
-    model_card::model::ModelDeploymentCard,
+    model_card::ModelDeploymentCard,
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
 
@@ -178,7 +166,7 @@ impl RetryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::{SamplingOptions, StopConditions};
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::pipeline::AsyncEngine;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -187,6 +175,7 @@ mod tests {
     // Helper to create a mock preprocessed request
     fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
         PreprocessedRequest {
+            model: "mock".to_string(),
             token_ids: vec![1, 2, 3],
             batch_token_ids: None,
             stop_conditions: StopConditions {
@@ -194,6 +183,7 @@ mod tests {
                 ..Default::default()
             },
             sampling_options: SamplingOptions::default(),
+            output_options: OutputOptions::default(),
             eos_token_ids: vec![],
             mdc_sum: None,
             annotations: vec![],
@@ -209,6 +199,7 @@ mod tests {
             text: Some(format!("token_{}", token_id)),
             cum_log_probs: None,
             log_probs: None,
+            top_logprobs: None,
             finish_reason: None,
             index: None,
         })

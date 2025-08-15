@@ -18,26 +18,28 @@ use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::info_span;
+use tracing::Instrument;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
 pub struct WorkHandlerMetrics {
-    pub request_counter: Arc<IntCounter>,
-    pub request_duration: Arc<Histogram>,
-    pub concurrent_requests: Arc<IntGauge>,
-    pub request_bytes: Arc<IntCounter>,
-    pub response_bytes: Arc<IntCounter>,
-    pub error_counter: Arc<IntCounterVec>,
+    pub request_counter: IntCounter,
+    pub request_duration: Histogram,
+    pub concurrent_requests: IntGauge,
+    pub request_bytes: IntCounter,
+    pub response_bytes: IntCounter,
+    pub error_counter: IntCounterVec,
 }
 
 impl WorkHandlerMetrics {
     pub fn new(
-        request_counter: Arc<IntCounter>,
-        request_duration: Arc<Histogram>,
-        concurrent_requests: Arc<IntGauge>,
-        request_bytes: Arc<IntCounter>,
-        response_bytes: Arc<IntCounter>,
-        error_counter: Arc<IntCounterVec>,
+        request_counter: IntCounter,
+        request_duration: Histogram,
+        concurrent_requests: IntGauge,
+        request_bytes: IntCounter,
+        response_bytes: IntCounter,
+        error_counter: IntCounterVec,
     ) -> Self {
         Self {
             request_counter,

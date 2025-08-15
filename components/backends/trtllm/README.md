@@ -43,6 +43,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Client](#client)
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
+- [Performance Sweep](#performance-sweep)
 
 ## Feature Support Matrix
 
@@ -84,21 +85,21 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-./container/build.sh --framework tensorrtllm
+./container/build.sh --framework trtllm
 
 # On an ARM machine:
-./container/build.sh --framework tensorrtllm --platform linux/arm64
+./container/build.sh --framework trtllm --platform linux/arm64
 
 # Build the container with the default experimental TensorRT-LLM commit
 # WARNING: This is for experimental feature testing only.
 # The container should not be used in a production environment.
-./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit
+./container/build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit
 ```
 
 ### Run container
 
 ```bash
-./container/run.sh --framework tensorrtllm -it
+./container/run.sh --framework trtllm -it
 ```
 
 ## Single Node Examples
@@ -170,7 +171,7 @@ export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
 Notes:
 - MTP is only available within the container built with the experimental TensorRT-LLM commit. Please add --use-default-experimental-tensorrtllm-commit to the arguments of the build.sh script.
 
-  Example: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
+  Example: `./container/build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit`
 
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
 - MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
@@ -188,61 +189,18 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
-
-- `agg.yaml` - Aggregated serving
-- `agg_router.yaml` - Aggregated serving with KV routing
-- `disagg.yaml` - Disaggregated serving
-- `disagg_router.yaml` - Disaggregated serving with KV routing
-
-#### Prerequisites
-
-- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
-
-- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/trtllm-runtime`. If you don't have access, build and push your own image:
-  ```bash
-  ./container/build.sh --framework tensorrtllm
-  # Tag and push to your container registry
-  # Update the image references in the YAML files
-  ```
-
-- **Port Forwarding**: After deployment, forward the frontend service to access the API:
-  ```bash
-  kubectl port-forward deployment/trtllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
-  ```
-
-#### Deploy to Kubernetes
-
-Example with disagg:
-Export the NAMESPACE  you used in your Dynamo Cloud Installation.
-
-```bash
-cd dynamo
-cd components/backends/trtllm/deploy
-kubectl apply -f disagg.yaml -n $NAMESPACE
-```
-
-To change `DYN_LOG` level, edit the yaml file by adding
-
-```yaml
-...
-spec:
-  envs:
-    - name: DYN_LOG
-      value: "debug" # or other log levels
-  ...
-```
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](deploy/README.md).
 
 ### Client
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
 
-NOTE: To send a request to a multi-node deployment, target the node which is running `dynamo-run in=http`.
+NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ### Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
 
 ## Disaggregation Strategy
@@ -375,7 +333,7 @@ This is an experimental feature that requires using a specific TensorRT-LLM comm
 To enable it build the dynamo container with the `--tensorrtllm-commit` flag, followed by the commit hash:
 
 ```bash
-./container/build.sh --framework tensorrtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
+./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
 ```
 
 #### How to Use
@@ -420,3 +378,7 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 ### Supported Multimodal Models
 
 Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by dynamo.
+
+## Performance Sweep
+
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](./performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.

@@ -84,7 +84,7 @@ use std::net::SocketAddr;
 use std::time::Duration as StdDuration;
 
 use dynamo_llm::kv_router::protocols::{ForwardPassMetrics, LoadMetrics};
-use dynamo_llm::kv_router::scheduler::Endpoint;
+use dynamo_llm::kv_router::scoring::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
 use dynamo_runtime::{
@@ -145,6 +145,7 @@ impl MetricsMode {
 pub struct LLMWorkerLoadCapacityConfig {
     pub component_name: String,
     pub endpoint_name: String,
+    pub model_name: Option<String>,
 }
 
 /// Metrics collector for exposing metrics to prometheus/grafana

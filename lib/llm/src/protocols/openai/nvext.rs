@@ -61,6 +61,32 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
+
+    /// Guided Decoding Options
+    /// If specified, the output will be a JSON object. Can be a string, an object, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_json: Option<serde_json::Value>,
+
+    /// If specified, the output will follow the regex pattern. Can be a string or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_regex: Option<String>,
+
+    /// If specified, the output will follow the context-free grammar. Can be a string or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_grammar: Option<String>,
+
+    /// If specified, the output will be exactly one of the choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_choice: Option<Vec<String>>,
+
+    /// If specified, the backend to use for guided decoding, can be backends like xgrammar or custom guided decoding backend
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub guided_decoding_backend: Option<String>,
 }
 
 impl Default for NvExt {
@@ -114,6 +140,10 @@ mod tests {
         assert_eq!(nv_ext.top_k, None);
         assert_eq!(nv_ext.repetition_penalty, None);
         assert_eq!(nv_ext.greed_sampling, None);
+        assert_eq!(nv_ext.guided_json, None);
+        assert_eq!(nv_ext.guided_regex, None);
+        assert_eq!(nv_ext.guided_grammar, None);
+        assert_eq!(nv_ext.guided_choice, None);
     }
 
     // Test valid builder configurations
@@ -124,6 +154,11 @@ mod tests {
             .top_k(10)
             .repetition_penalty(1.5)
             .greed_sampling(true)
+            .guided_json(serde_json::json!({"type": "object"}))
+            .guided_regex("^[0-9]+$".to_string())
+            .guided_grammar("S -> 'a' S 'b' | 'c'".to_string())
+            .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
+            .guided_decoding_backend("xgrammar".to_string())
             .build()
             .unwrap();
 
@@ -131,7 +166,20 @@ mod tests {
         assert_eq!(nv_ext.top_k, Some(10));
         assert_eq!(nv_ext.repetition_penalty, Some(1.5));
         assert_eq!(nv_ext.greed_sampling, Some(true));
-
+        assert_eq!(
+            nv_ext.guided_json,
+            Some(serde_json::json!({"type": "object"}))
+        );
+        assert_eq!(nv_ext.guided_regex, Some("^[0-9]+$".to_string()));
+        assert_eq!(
+            nv_ext.guided_grammar,
+            Some("S -> 'a' S 'b' | 'c'".to_string())
+        );
+        assert_eq!(
+            nv_ext.guided_choice,
+            Some(vec!["choice1".to_string(), "choice2".to_string()])
+        );
+        assert_eq!(nv_ext.guided_decoding_backend, Some("xgrammar".to_string()));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
     }

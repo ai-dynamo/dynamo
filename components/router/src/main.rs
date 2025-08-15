@@ -20,6 +20,7 @@
 // 2. Update the backend component to produce a config in a standard location.
 // 3. Update the KvRouter to read the config from the backend component.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -29,7 +30,7 @@ use dynamo_llm::kv_router::{
     scheduler::{DefaultWorkerSelector, KvSchedulerError, SchedulingRequest},
     KvRouter, WorkerSelector,
 };
-use dynamo_runtime::component::Instance;
+use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::{
     logging, pipeline::network::Ingress, DistributedRuntime, Result, Runtime, Worker,
 };
@@ -66,7 +67,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let selector = Box::new(CustomWorkerSelector::default());
 
-    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true).await?;
+    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), None).await?;
     let router = Ingress::for_engine(Arc::new(router))?;
 
     component
@@ -86,7 +87,7 @@ pub struct CustomWorkerSelector(DefaultWorkerSelector);
 impl WorkerSelector for CustomWorkerSelector {
     fn select_worker(
         &self,
-        workers: &[Instance],
+        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {

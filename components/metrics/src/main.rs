@@ -60,6 +60,10 @@ struct Args {
     #[arg(long)]
     endpoint: String,
 
+    /// Model name for the target component (optional)
+    #[arg(long)]
+    model_name: Option<String>,
+
     /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
     #[arg(long, default_value = "1")]
     poll_interval: u64,
@@ -109,6 +113,7 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
     Ok(LLMWorkerLoadCapacityConfig {
         component_name: args.component.clone(),
         endpoint_name: args.endpoint.clone(),
+        model_name: args.model_name.clone(),
     })
 }
 
@@ -127,7 +132,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
         .expect("Unreachable because of DistributedRuntime::from_settings above")
-        .kv_create(key, serde_json::to_vec_pretty(&config)?, None)
+        .kv_create(&key, serde_json::to_vec_pretty(&config)?, None)
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 

@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::env::var;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,18 +12,59 @@ use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
+use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::transports::etcd;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
+#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     etcd_client: Option<etcd::Client>,
+    flags: StateFlags,
+}
+
+#[derive(Default, Debug)]
+struct StateFlags {
+    chat_endpoints_enabled: AtomicBool,
+    cmpl_endpoints_enabled: AtomicBool,
+    embeddings_endpoints_enabled: AtomicBool,
+    responses_endpoints_enabled: AtomicBool,
+}
+
+impl StateFlags {
+    pub fn get(&self, endpoint_type: &EndpointType) -> bool {
+        match endpoint_type {
+            EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn set(&self, endpoint_type: &EndpointType, enabled: bool) {
+        match endpoint_type {
+            EndpointType::Chat => self
+                .chat_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Completion => self
+                .cmpl_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Embedding => self
+                .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Responses => self
+                .responses_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+        }
+    }
 }
 
 impl State {
@@ -29,6 +73,12 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client: None,
+            flags: StateFlags {
+                chat_endpoints_enabled: AtomicBool::new(false),
+                cmpl_endpoints_enabled: AtomicBool::new(false),
+                embeddings_endpoints_enabled: AtomicBool::new(false),
+                responses_endpoints_enabled: AtomicBool::new(false),
+            },
         }
     }
 
@@ -37,9 +87,14 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client,
+            flags: StateFlags {
+                chat_endpoints_enabled: AtomicBool::new(false),
+                cmpl_endpoints_enabled: AtomicBool::new(false),
+                embeddings_endpoints_enabled: AtomicBool::new(false),
+                responses_endpoints_enabled: AtomicBool::new(false),
+            },
         }
     }
-
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
@@ -85,10 +140,10 @@ pub struct HttpServiceConfig {
 
     // #[builder(default)]
     // custom: Vec<axum::Router>
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_cmpl_endpoints: bool,
 
     #[builder(default = "true")]
@@ -149,6 +204,15 @@ impl HttpService {
     pub fn route_docs(&self) -> &[RouteDoc] {
         &self.route_docs
     }
+
+    pub async fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+        self.state.flags.set(&endpoint_type, enable);
+        tracing::info!(
+            "{} endpoints {}",
+            endpoint_type.as_str(),
+            if enable { "enabled" } else { "disabled" }
+        );
+    }
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -175,6 +239,19 @@ impl HttpServiceConfigBuilder {
         let model_manager = Arc::new(ModelManager::new());
         let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
 
+        state
+            .flags
+            .set(&EndpointType::Chat, config.enable_chat_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Completion, config.enable_cmpl_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Embedding, config.enable_embeddings_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Responses, config.enable_responses_endpoints);
+
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
@@ -190,45 +267,16 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
 
-        if config.enable_chat_endpoints {
-            routes.push(super::openai::chat_completions_router(
-                state.clone(),
-                config.request_template.clone(), // TODO clone()? reference?
-                var(HTTP_SVC_CHAT_PATH_ENV).ok(),
-            ));
-        }
-
-        if config.enable_cmpl_endpoints {
-            routes.push(super::openai::completions_router(
-                state.clone(),
-                var(HTTP_SVC_CMP_PATH_ENV).ok(),
-            ));
-        }
-
-        if config.enable_embeddings_endpoints {
-            routes.push(super::openai::embeddings_router(
-                state.clone(),
-                var(HTTP_SVC_EMB_PATH_ENV).ok(),
-            ));
-        }
-
-        if config.enable_responses_endpoints {
-            routes.push(super::openai::responses_router(
-                state.clone(),
-                config.request_template,
-                var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
-            ));
-        }
-
-        // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
-        //     router = router.merge(route);
-        //     all_docs.extend(route_docs);
-        // }
-
-        for (route_docs, route) in routes.into_iter() {
+        let endpoint_routes =
+            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
+        routes.extend(endpoint_routes);
+        for (route_docs, route) in routes {
             router = router.merge(route);
             all_docs.extend(route_docs);
         }
+
+        // Add span for tracing
+        router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
         Ok(HttpService {
             state,
@@ -247,5 +295,59 @@ impl HttpServiceConfigBuilder {
     pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
         self.etcd_client = Some(etcd_client);
         self
+    }
+
+    fn get_endpoints_router(
+        state: Arc<State>,
+        request_template: &Option<RequestTemplate>,
+    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+        let mut routes = Vec::new();
+        // Add chat completions route with conditional middleware
+        let (chat_docs, chat_route) = super::openai::chat_completions_router(
+            state.clone(),
+            request_template.clone(),
+            var(HTTP_SVC_CHAT_PATH_ENV).ok(),
+        );
+        let (cmpl_docs, cmpl_route) =
+            super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
+        let (embed_docs, embed_route) =
+            super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (responses_docs, responses_route) = super::openai::responses_router(
+            state.clone(),
+            request_template.clone(),
+            var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
+        );
+
+        let mut endpoint_routes = HashMap::new();
+        endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
+        endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
+        endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+
+        for endpoint_type in EndpointType::all() {
+            let state_route = state.clone();
+            if !endpoint_routes.contains_key(&endpoint_type) {
+                tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                continue;
+            }
+            let (docs, route) = endpoint_routes.get(&endpoint_type).cloned().unwrap();
+            let route = route.route_layer(axum::middleware::from_fn(
+                move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let state: Arc<State> = state_route.clone();
+                    async move {
+                        // Check if the endpoint is enabled
+                        let enabled = state.flags.get(&endpoint_type);
+                        if enabled {
+                            Ok(next.run(req).await)
+                        } else {
+                            tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                        }
+                    }
+                },
+            ));
+            routes.push((docs, route));
+        }
+        routes
     }
 }

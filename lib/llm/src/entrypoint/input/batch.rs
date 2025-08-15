@@ -222,7 +222,11 @@ async fn evaluate(
         )
         .temperature(template.as_ref().map_or(0.7, |t| t.temperature))
         .build()?;
-    let req = NvCreateChatCompletionRequest { inner, nvext: None };
+    let req = NvCreateChatCompletionRequest {
+        inner,
+        common: Default::default(),
+        nvext: None,
+    };
     let mut stream = engine.generate(Context::new(req)).await?;
     let mut output = String::new();
     while let Some(item) = stream.next().await {

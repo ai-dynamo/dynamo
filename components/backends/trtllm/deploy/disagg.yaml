@@ -9,26 +9,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: trtllm-disagg
-      componentType: main
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        periodSeconds: 5
-        timeoutSeconds: 3
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 3
-        failureThreshold: 10
+      componentType: frontend
       replicas: 1
       resources:
         requests:
@@ -51,20 +32,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 3
-        failureThreshold: 3
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 3
-        failureThreshold: 60
       resources:
         requests:
           cpu: "10"
@@ -76,46 +43,18 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.trtllm --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B --extra-engine-args engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy decode_first  2>&1 | tee /tmp/trtllm.log"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
+            - "python3 -m dynamo.trtllm --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B --extra-engine-args engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy decode_first"
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 3
-        failureThreshold: 3
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 3
-        failureThreshold: 60
       resources:
         requests:
           cpu: "10"
@@ -127,24 +66,10 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.trtllm --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B --extra-engine-args engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy decode_first 2>&1 | tee /tmp/trtllm.log"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
+            - "python3 -m dynamo.trtllm --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B --extra-engine-args engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy decode_first"

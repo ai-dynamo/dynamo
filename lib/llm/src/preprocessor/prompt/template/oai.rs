@@ -25,6 +25,10 @@ use tracing;
 use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
 
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
+    fn model(&self) -> String {
+        self.inner.model.clone()
+    }
+
     fn messages(&self) -> Value {
         Value::from_serialize(&self.inner.messages)
     }
@@ -62,6 +66,9 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 }
 
 impl OAIChatLikeRequest for NvCreateCompletionRequest {
+    fn model(&self) -> String {
+        self.inner.model.clone()
+    }
     fn messages(&self) -> minijinja::value::Value {
         let message = async_openai::types::ChatCompletionRequestMessage::User(
             async_openai::types::ChatCompletionRequestUserMessage {

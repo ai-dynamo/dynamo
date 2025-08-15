@@ -35,6 +35,8 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 
+from . import __version__
+
 
 def validate_static_endpoint(value):
     """Validate that static-endpoint is three words separated by dots."""
@@ -70,6 +72,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
     parser.add_argument(
         "-i", "--interactive", action="store_true", help="Interactive text chat"
@@ -113,6 +118,12 @@ def parse_args():
     )
     parser.set_defaults(use_kv_events=True)
     parser.add_argument(
+        "--router-replica-sync",
+        action="store_true",
+        default=False,
+        help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
+    )
+    parser.add_argument(
         "--static-endpoint",
         type=validate_static_endpoint,
         help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
@@ -127,6 +138,12 @@ def parse_args():
         type=validate_model_path,
         help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
     )
+    parser.add_argument(
+        "--metrics-prefix",
+        type=str,
+        default=None,
+        help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
+    )
 
     flags = parser.parse_args()
 
@@ -140,6 +157,12 @@ async def async_main():
     flags = parse_args()
     is_static = bool(flags.static_endpoint)  # true if the string has a value
 
+    # Configure Dynamo frontend HTTP service metrics prefix
+    if flags.metrics_prefix is not None:
+        prefix = flags.metrics_prefix.strip()
+        if prefix:
+            os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
+
     runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
 
     if flags.router_mode == "kv":
@@ -148,6 +171,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            router_replica_sync=flags.router_replica_sync,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

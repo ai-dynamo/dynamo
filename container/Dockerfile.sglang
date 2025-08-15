@@ -231,6 +231,20 @@ ARG CARGO_BUILD_JOBS
 # which might exceed the number of opened files limit.
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
+
 #######################################
 ########## Local Development ##########
 #######################################
@@ -323,6 +337,7 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
@@ -404,7 +419,8 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-ENV PATH=/usr/local/bin/etcd/:$PATH
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
@@ -415,6 +431,15 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
+COPY --from=base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=base /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\

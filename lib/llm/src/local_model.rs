@@ -10,18 +10,22 @@ use dynamo_runtime::protocols::Endpoint as EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
-    component::{Component, Endpoint},
+    component::Endpoint,
     storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
 };
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
+pub mod runtime_config;
+
+use runtime_config::ModelRuntimeConfig;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -48,6 +52,8 @@ pub struct LocalModelBuilder {
     http_port: u16,
     migration_limit: u32,
     is_mocker: bool,
+    extra_engine_args: Option<PathBuf>,
+    runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
 }
 
@@ -65,6 +71,8 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             is_mocker: Default::default(),
+            extra_engine_args: Default::default(),
+            runtime_config: Default::default(),
             user_data: Default::default(),
         }
     }
@@ -128,6 +136,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn extra_engine_args(&mut self, extra_engine_args: Option<PathBuf>) -> &mut Self {
+        self.extra_engine_args = extra_engine_args;
+        self
+    }
+
+    pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
+        self.runtime_config = runtime_config;
+        self
+    }
+
     pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
         self.user_data = user_data;
         self
@@ -170,6 +188,7 @@ impl LocalModelBuilder {
                 template,
                 http_port: self.http_port,
                 router_config: self.router_config.take().unwrap_or_default(),
+                runtime_config: self.runtime_config.clone(),
             });
         }
 
@@ -218,6 +237,20 @@ impl LocalModelBuilder {
             card.context_length = context_length;
         }
 
+        // Override runtime configs with mocker engine args
+        if self.is_mocker {
+            if let Some(path) = &self.extra_engine_args {
+                let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                    .expect("Failed to load mocker engine args for runtime config overriding.");
+                self.runtime_config.total_kv_blocks =
+                    Some(mocker_engine_args.num_gpu_blocks as u64);
+                self.runtime_config.max_num_seqs =
+                    mocker_engine_args.max_num_seqs.map(|v| v as u64);
+                self.runtime_config.max_num_batched_tokens =
+                    mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            }
+        }
+
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
 
@@ -228,6 +261,7 @@ impl LocalModelBuilder {
             template,
             http_port: self.http_port,
             router_config: self.router_config.take().unwrap_or_default(),
+            runtime_config: self.runtime_config.clone(),
         })
     }
 }
@@ -240,6 +274,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
     router_config: RouterConfig,
+    runtime_config: ModelRuntimeConfig,
 }
 
 impl LocalModel {
@@ -251,12 +286,15 @@ impl LocalModel {
         &self.full_path
     }
 
+    /// Human friendly model name. This is the correct name.
     pub fn display_name(&self) -> &str {
         &self.card.display_name
     }
 
+    /// The name under which we make this model available over HTTP.
+    /// A slugified version of the model's name, for use in NATS, etcd, etc.
     pub fn service_name(&self) -> &str {
-        &self.card.service_name
+        self.card.slug().as_ref()
     }
 
     pub fn request_template(&self) -> Option<RequestTemplate> {
@@ -269,6 +307,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn runtime_config(&self) -> &ModelRuntimeConfig {
+        &self.runtime_config
     }
 
     pub fn is_gguf(&self) -> bool {
@@ -299,8 +341,6 @@ impl LocalModel {
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
             anyhow::bail!("Cannot attach to static endpoint");
         };
-        self.ensure_unique(endpoint.component(), self.display_name())
-            .await?;
 
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
@@ -316,43 +356,21 @@ impl LocalModel {
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
         // (Why don't we put the model card directly under this key?)
-        let network_name = ModelNetworkName::from_local(endpoint, etcd_client.lease_id());
+        let network_name = ModelNetworkName::new();
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
+            runtime_config: Some(self.runtime_config.clone()),
         };
         etcd_client
             .kv_create(
-                network_name.to_string(),
+                &network_name,
                 serde_json::to_vec_pretty(&model_registration)?,
                 None, // use primary lease
             )
             .await
-    }
-
-    /// Ensure that each component serves only one model.
-    /// We can have multiple instances of the same model running using the same component name
-    /// (they get load balanced, and are differentiated in etcd by their lease_id).
-    /// We cannot have multiple models with the same component name.
-    ///
-    /// Returns an error if there is already a component by this name serving a different model.
-    async fn ensure_unique(&self, component: &Component, model_name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = component.drt().etcd_client() else {
-            // A static component is necessarily unique, it cannot register
-            return Ok(());
-        };
-        for endpoint_info in component.list_instances().await? {
-            let network_name: ModelNetworkName = (&endpoint_info).into();
-
-            if let Ok(entry) = network_name.load_entry(&etcd_client).await {
-                if entry.name != model_name {
-                    anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {network_name} running model {}.", entry.name);
-                }
-            }
-        }
-        Ok(())
     }
 }
 

@@ -21,7 +21,7 @@ const REPLACEMENT_CHAR: char = '_';
 
 /// URL and NATS friendly string.
 /// Only a-z, 0-9, - and _.
-#[derive(Serialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct Slug(String);
 
 impl Slug {

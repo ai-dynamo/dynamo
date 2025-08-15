@@ -55,7 +55,7 @@ cd $DYNAMO_ROOT
 export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
 
 # Build the container with a specific TensorRT-LLM commit
-docker build --platform linux/arm64 -f container/Dockerfile.tensorrt_llm_prebuilt . \
+docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   --build-arg ARCH=arm64 \
@@ -70,7 +70,7 @@ cd $DYNAMO_ROOT
 
 export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
 
-docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
+docker build -f container/Dockerfile.trtllm_prebuilt . \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   -t $DYNAMO_CONTAINER_IMAGE
@@ -82,6 +82,9 @@ docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
 
 ```bash
 export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
+export HF_TOKEN=<INSERT_TOKEN_HERE>
+
+pip install -U "huggingface_hub[cli]"
 
 huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "metal/*" --local-dir $MODEL_PATH
 ```
@@ -203,7 +206,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --disaggregation-mode decode \
   --disaggregation-strategy prefill_first \
   --max-num-tokens 16384 \
-  --max-batch-size 128 \
   --free-gpu-memory-fraction 0.9 \
   --tensor-parallel-size 4 \
   --expert-parallel-size 4

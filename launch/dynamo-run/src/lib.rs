@@ -35,6 +35,7 @@ pub async fn run(
                 .or(flags.model_path_flag.clone()),
         )
         .model_name(flags.model_name.clone())
+        .model_config(flags.model_config.clone())
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)

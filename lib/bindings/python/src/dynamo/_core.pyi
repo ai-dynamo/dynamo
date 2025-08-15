@@ -442,6 +442,12 @@ class ModelDeploymentCard:
 
     ...
 
+class ModelRuntimeConfig:
+    """
+    A model runtime configuration is a collection of runtime information
+    """
+    ...
+
 class OAIChatPreprocessor:
     """
     A preprocessor for OpenAI chat completions

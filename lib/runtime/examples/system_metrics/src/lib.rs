@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use dynamo_runtime::{
     metrics::MetricsRegistry,
@@ -28,6 +16,7 @@ use std::sync::Arc;
 pub const DEFAULT_NAMESPACE: &str = "dyn_example_namespace";
 pub const DEFAULT_COMPONENT: &str = "dyn_example_component";
 pub const DEFAULT_ENDPOINT: &str = "dyn_example_endpoint";
+pub const DEFAULT_MODEL_NAME: &str = "dyn_example_model";
 
 /// Stats structure returned by the endpoint's stats handler
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -39,13 +28,11 @@ pub struct MyStats {
 /// Custom metrics for system stats with data bytes tracking
 #[derive(Clone, Debug)]
 pub struct MySystemStatsMetrics {
-    pub data_bytes_processed: Arc<IntCounter>,
+    pub data_bytes_processed: IntCounter,
 }
 
 impl MySystemStatsMetrics {
-    pub fn from_endpoint(
-        endpoint: &dynamo_runtime::component::Endpoint,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_endpoint(endpoint: &dynamo_runtime::component::Endpoint) -> anyhow::Result<Self> {
         let data_bytes_processed = endpoint.create_intcounter(
             "my_custom_bytes_processed_total",
             "Example of a custom metric. Total number of data bytes processed by system handler",
@@ -60,7 +47,7 @@ impl MySystemStatsMetrics {
 
 #[derive(Clone)]
 pub struct RequestHandler {
-    metrics: Option<Arc<MySystemStatsMetrics>>,
+    metrics: Option<MySystemStatsMetrics>,
 }
 
 impl RequestHandler {
@@ -70,7 +57,7 @@ impl RequestHandler {
 
     pub fn with_metrics(metrics: MySystemStatsMetrics) -> Arc<Self> {
         Arc::new(Self {
-            metrics: Some(Arc::new(metrics)),
+            metrics: Some(metrics),
         })
     }
 }
@@ -96,7 +83,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
     }
 }
 
-/// Backend function that sets up the system server with metrics and ingress handler
+/// Backend function that sets up the system status server with metrics and ingress handler
 /// This function can be reused by integration tests to ensure they use the exact same setup
 pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Result<()> {
     let endpoint_name = endpoint_name.unwrap_or(DEFAULT_ENDPOINT);

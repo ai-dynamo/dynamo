@@ -62,7 +62,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         default=SLAPlannerDefaults.backend,
-        choices=["vllm"],
+        choices=["vllm", "sglang"],
         help="Backend type",
     )
     parser.add_argument(

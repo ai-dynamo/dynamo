@@ -45,7 +45,7 @@ To enable NIXL for KV cache transfer in disaggregated serving:
 
    **Build the container with NIXL support:**
    ```bash
-   ./container/build.sh --framework tensorrtllm \
+   ./container/build.sh --framework trtllm \
      --use-default-experimental-tensorrtllm-commit \
      --trtllm-use-nixl-kvcache-experimental
    ```
