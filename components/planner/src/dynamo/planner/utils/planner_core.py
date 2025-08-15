@@ -94,6 +94,7 @@ class Planner:
         self.prometheus_port = args.prometheus_port
 
         # Initialize Prometheus metrics
+        # TODO: use proper naming
         self.num_p_workers_gauge = Gauge("num_p_workers", "Number of prefill workers")
         self.num_d_workers_gauge = Gauge("num_d_workers", "Number of decode workers")
 
@@ -157,7 +158,7 @@ class Planner:
 
     async def observe_metrics(self):
         self.p_endpoints, self.d_endpoints = await self.get_workers_info()
-        logger.info(
+        logger.debug(
             f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
         )
 
