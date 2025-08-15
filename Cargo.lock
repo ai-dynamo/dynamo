@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1826,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "ahash",
  "akin",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -3776,7 +3776,7 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4088,7 +4088,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "axum 0.8.3",
  "clap 4.5.40",
@@ -5899,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.4.0"
+version = "0.4.0+post0"
 dependencies = [
  "clap 4.5.40",
  "dynamo-llm",
