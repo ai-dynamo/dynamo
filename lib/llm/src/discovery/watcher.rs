@@ -176,31 +176,26 @@ impl ModelWatcher {
             let mut update_tx = true;
             let mut model_type: ModelType = model_entry.model_type;
             if model_entry.model_type == ModelType::Chat
-                && self.manager.list_chat_completions_models().len() == 0
+                && self.manager.list_chat_completions_models().is_empty()
             {
-                //remove model entry from this instance
                 self.manager.remove_chat_completions_model(&model_name).ok();
                 model_type = ModelType::Chat;
             } else if model_entry.model_type == ModelType::Completion
-                && self.manager.list_completions_models().len() == 0
+                && self.manager.list_completions_models().is_empty()
             {
-                //remove model entry from this instance
                 self.manager.remove_completions_model(&model_name).ok();
                 model_type = ModelType::Completion;
             } else if model_entry.model_type == ModelType::Embedding
-                && self.manager.list_embeddings_models().len() == 0
+                && self.manager.list_embeddings_models().is_empty()
             {
-                //remove model entry from this instance
                 self.manager.remove_embeddings_model(&model_name).ok();
                 model_type = ModelType::Embedding;
             } else if model_entry.model_type == ModelType::Backend {
-                if self.manager.list_chat_completions_models().len() == 0 {
-                    //remove model entry from this instance
+                if self.manager.list_chat_completions_models().is_empty() {
                     self.manager.remove_chat_completions_model(&model_name).ok();
                     model_type = ModelType::Chat;
                 }
-                if self.manager.list_completions_models().len() == 0 {
-                    //remove model entry from this instance
+                if self.manager.list_completions_models().is_empty() {
                     self.manager.remove_completions_model(&model_name).ok();
                     if model_type == ModelType::Chat {
                         model_type = ModelType::Backend;
@@ -232,14 +227,14 @@ impl ModelWatcher {
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
 
-        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().len() == 0 {
+        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
             chat_model_removed = true;
         }
-        if completions_model_remove_err.is_ok() && self.manager.list_completions_models().len() == 0
+        if completions_model_remove_err.is_ok() && self.manager.list_completions_models().is_empty()
         {
             completions_model_removed = true;
         }
-        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().len() == 0 {
+        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
             embeddings_model_removed = true;
         }
 
