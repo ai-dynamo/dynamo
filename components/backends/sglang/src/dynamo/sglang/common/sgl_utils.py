@@ -22,7 +22,19 @@ from argparse import Namespace
 from sglang.srt.server_args import ServerArgs
 
 
+class SkipTokenizerInitError(RuntimeError):
+    def __str__(self):
+        return "--skip-tokenizer-init flag is required"
+
+
 def parse_sglang_args_inc(args: list[str]) -> ServerArgs:
+    # Currently we only support Dynamo doing the tokenization, so we must give
+    # sglang the skip-tokenizer-init flag. We don't default it because this is temporary.
+    # Allow the --version and --help flags through.
+    temp_need_tok = ["--skip-tokenizer-init", "--version", "--help"]
+    if not any(w in args for w in temp_need_tok):
+        raise SkipTokenizerInitError()
+
     parser = argparse.ArgumentParser()
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
