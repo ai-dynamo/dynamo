@@ -88,7 +88,7 @@ class VLLMConfig:
     model: str
     timeout: int = 120
     delayed_start: int = 0
-    extra_args: Optional[List[str]] = None
+    args: Optional[List[str]] = None
 
 
 class VLLMProcess(ManagedProcess):
@@ -104,8 +104,8 @@ class VLLMProcess(ManagedProcess):
             raise FileNotFoundError(f"vLLM script not found: {script_path}")
 
         command = ["bash", script_path]
-        if config.extra_args:
-            command.extend(config.extra_args)
+        if config.args:
+            command.extend(config.args)
 
         super().__init__(
             command=command,
@@ -271,7 +271,7 @@ vllm_configs = {
         ],
         model="llava-hf/llava-1.5-7b-hf",
         delayed_start=45,
-        extra_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        args=["--model", "llava-hf/llava-1.5-7b-hf"],
     ),
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
@@ -285,7 +285,7 @@ vllm_configs = {
     #     ],
     #     model="llava-hf/llava-1.5-7b-hf",
     #     delayed_start=45,
-    #     extra_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+    #     args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
 }
 
