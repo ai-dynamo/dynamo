@@ -113,7 +113,7 @@ pub struct ToolCallConfig {
 pub fn try_tool_call_parse(
     message: &str,
     config: &ToolCallConfig,
-) -> anyhow::Result<Option<ToolCallResponse>> {
+) -> anyhow::Result<Vec<ToolCallResponse>> {
     // Use match statement (Rust's switch statement) to call the appropriate parser
     match config.format {
         ToolCallParserType::Json => try_tool_call_parse_json(message, &config.json),
@@ -136,7 +136,7 @@ pub fn try_tool_call_parse(
 pub fn detect_and_parse_tool_call(
     message: &str,
     parser_str: Option<&str>,
-) -> anyhow::Result<Option<ToolCallResponse>> {
+) -> anyhow::Result<Vec<ToolCallResponse>> {
     let mut parser_map: std::collections::HashMap<&str, ToolCallConfig> =
         std::collections::HashMap::new();
     parser_map.insert("hermes", ToolCallConfig::hermes());
@@ -170,10 +170,10 @@ mod tests {
     #[test]
     fn parses_single_parameters_object() {
         let input = r#"{ "name": "hello", "parameters": { "x": 1, "y": 2 } }"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "hello");
         assert_eq!(args["x"], 1);
         assert_eq!(args["y"], 2);
@@ -182,33 +182,39 @@ mod tests {
     #[test]
     fn parses_single_arguments_object() {
         let input = r#"{ "name": "world", "arguments": { "a": "abc", "b": 42 } }"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "world");
         assert_eq!(args["a"], "abc");
         assert_eq!(args["b"], 42);
     }
 
     #[test]
-    fn parses_vec_of_parameters_and_takes_last() {
+    fn parses_vec_of_parameters() {
         let input = r#"[{ "name": "first", "parameters": { "a": 1 } }, { "name": "second", "parameters": { "b": 2 } }]"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "first");
+        assert_eq!(args["a"], 1);
+        let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "second");
         assert_eq!(args["b"], 2);
     }
 
     #[test]
-    fn parses_vec_of_arguments_and_takes_last() {
+    fn parses_vec_of_arguments() {
         let input = r#"[{ "name": "alpha", "arguments": { "a": "x" } }, { "name": "omega", "arguments": { "z": "y" } }]"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "alpha");
+        assert_eq!(args["a"], "x");
+        let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "omega");
         assert_eq!(args["z"], "y");
     }
@@ -217,10 +223,10 @@ mod tests {
     fn parses_toolcall_wrapped_payload() {
         let input =
             r#"<TOOLCALL>[{ "name": "wrapped", "parameters": { "foo": "bar" } }]</TOOLCALL>"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "wrapped");
         assert_eq!(args["foo"], "bar");
     }
@@ -239,9 +245,10 @@ mod tests {
                 },
             },
         )
-        .unwrap()
         .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "pyfunc");
         assert_eq!(args["k"], "v");
     }
@@ -250,14 +257,14 @@ mod tests {
     fn returns_none_on_invalid_input() {
         let input = r#"not even json"#;
         let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
-        assert!(result.is_none());
+        assert!(result.is_empty());
     }
 
     #[test]
     fn returns_none_on_valid_json_wrong_shape() {
         let input = r#"{ "foo": "bar" }"#;
         let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
-        assert!(result.is_none());
+        assert!(result.is_empty());
     }
 
     // Tests for real model outputs - disabled by default
@@ -268,18 +275,16 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 </think>
 
 <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
-        let result = detect_and_parse_tool_call(input, Some("nemotron_deci"))
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, Some("nemotron_deci")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
     }
 
     #[test]
-    #[ignore]
-    // TODO : Implement extracting function arrays
     fn test_nvidia_llama3_nemotron_super_49b_with_function_array() {
         let input = r#"<think>
 Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me check the tools available.
@@ -287,8 +292,17 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 
 <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]</TOOLCALL>"#;
         let config = ToolCallConfig::nemotron_deci();
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        println!("{:?}", result);
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
     }
 
     #[test]
@@ -296,10 +310,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let result = detect_and_parse_tool_call(input, Some("hermes"))
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, Some("hermes")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -310,10 +324,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let result = detect_and_parse_tool_call(input, Some("hermes"))
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, Some("hermes")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -331,8 +345,17 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 </tool_call>
 "#;
         let config = ToolCallConfig::hermes();
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        println!("{:?}", result);
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
     }
 
     #[test]
@@ -348,8 +371,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 ..Default::default()
             },
         };
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -368,8 +393,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 ..Default::default()
             },
         };
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -378,10 +405,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_meta_llama_llama31_8b_instruct_simple() {
         let input = r#"{"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-        let result = detect_and_parse_tool_call(input, Some("llama3_json"))
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -390,10 +417,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_meta_llama_llama31_8b_instruct_with_python_tag() {
         let input = r#"<|python_tag|>{ "name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let result = detect_and_parse_tool_call(input, Some("llama3_json"))
-            .unwrap()
-            .unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -416,13 +443,13 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = "not a json";
         let result = detect_and_parse_tool_call(input, Some("hermes"));
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.unwrap().is_empty());
 
         // Known parser, but valid JSON with wrong shape should return Ok(None)
         let input = r#"{"foo": "bar"}"#;
         let result = detect_and_parse_tool_call(input, Some("hermes"));
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
@@ -434,7 +461,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 
 Remember, San Francisco weather can be quite unpredictable, particularly with its famous fog, which can significantly lower temperatures. Always check a local weather forecast for the most accurate and up-to-date information."#;
         let result = try_tool_call_parse(input, &ToolCallConfig::default()).unwrap();
-        assert!(result.is_none()); // This model doesn't produce tool calls
+        assert!(result.is_empty()); // This model doesn't produce tool calls
     }
 
     #[test]
@@ -452,8 +479,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 ..Default::default()
             },
         };
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -472,8 +501,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 ..Default::default()
             },
         };
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -482,8 +513,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[test]
     fn test_detect_and_parse_tool_call_default_parser_nemotron_deci() {
         let input = r#"<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
-        let result = detect_and_parse_tool_call(input, None).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, None).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -492,8 +525,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[test]
     fn test_detect_and_parse_tool_call_default_parser_llama3_json_with_python_tag() {
         let input = r#"<|python_tag|>{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let result = detect_and_parse_tool_call(input, None).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, None).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
@@ -502,8 +537,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[test]
     fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag() {
         let input = r#"{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let result = detect_and_parse_tool_call(input, None).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
+        let result = detect_and_parse_tool_call(input, None).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
