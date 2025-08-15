@@ -181,8 +181,8 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoComponentDeploymentSpec)
 }
 
-func (s *DynamoComponentDeployment) IsMainComponent() bool {
-	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName) || s.Spec.ComponentType == commonconsts.ComponentTypeMain
+func (s *DynamoComponentDeployment) IsFrontendComponent() bool {
+	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName) || s.Spec.ComponentType == commonconsts.ComponentTypeFrontend
 }
 
 func (s *DynamoComponentDeployment) GetDynamoDeploymentConfig() []byte {

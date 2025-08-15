@@ -16,26 +16,8 @@ spec:
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
-      componentType: main
+      componentType: frontend
       replicas: 1
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 20
-        periodSeconds: 5
-        timeoutSeconds: 5
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       resources:
         requests:
           cpu: "32"
@@ -99,9 +81,9 @@ spec:
             - --backend=vllm
             - --adjustment-interval=60
             - --profile-results-dir=/workspace/profiling_results
-    Prometheus:
+    Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
-      componentType: main
+      componentType: frontend
       replicas: 1
       envs:
         - name: PYTHONPATH
@@ -146,20 +128,6 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       resources:
         requests:
           cpu: "8"
@@ -169,13 +137,6 @@ spec:
           cpu: "8"
           memory: "16Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -190,26 +151,12 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       resources:
         requests:
           cpu: "8"
@@ -219,13 +166,6 @@ spec:
           cpu: "8"
           memory: "16Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -240,4 +180,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3 2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3

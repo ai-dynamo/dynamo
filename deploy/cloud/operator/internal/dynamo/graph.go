@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strconv"
@@ -191,7 +192,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			// finally set the service account name
 			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
-		if deployment.IsMainComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+		if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
 			deployment.Spec.Ingress = defaultIngressSpec
 		}
 		// merge the envs from the parent deployment with the envs from the service
@@ -219,7 +220,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
 // It updates the port for the given service (if it is the main component)
 func updateDynDeploymentConfig(dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment, newPort int) error {
-	if dynamoDeploymentComponent.IsMainComponent() {
+	if dynamoDeploymentComponent.IsFrontendComponent() {
 		dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
 		if dynamoDeploymentConfig != nil {
 			var config map[string]any
@@ -668,11 +669,6 @@ func isWorkerComponent(componentType string) bool {
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
 func addStandardEnvVars(container *corev1.Container, controllerConfig controller_common.Config) {
-	container.Env = append(container.Env, corev1.EnvVar{
-		Name:  commonconsts.EnvDynamoServicePort,
-		Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-	})
-
 	if controllerConfig.NatsAddress != "" {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "NATS_SERVER",
@@ -702,47 +698,60 @@ func GenerateBasePodSpec(
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
 ) (corev1.PodSpec, error) {
-	container := corev1.Container{
-		Name:           "main",
-		LivenessProbe:  component.LivenessProbe,
-		ReadinessProbe: component.ReadinessProbe,
-		Env:            component.Envs,
-		Ports: []corev1.ContainerPort{
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.DynamoContainerPortName,
-				ContainerPort: int32(commonconsts.DynamoServicePort),
-			},
-		},
+	// Start with base container generated per component type
+	componentDefaults := ComponentDefaultsFactory(component.ComponentType, numberOfNodes)
+	container, err := componentDefaults.GetBaseContainer(numberOfNodes)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
 	}
-	// Add system port for worker components
-	if component.ComponentType == commonconsts.ComponentTypeWorker {
-		container.Ports = append(container.Ports, corev1.ContainerPort{
-			Protocol:      corev1.ProtocolTCP,
-			Name:          commonconsts.DynamoSystemPortName,
-			ContainerPort: int32(commonconsts.DynamoSystemPort),
-		})
-	}
-	// First merge the mainContainer from extraPodSpec to get the base command and args
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
 		main := component.ExtraPodSpec.MainContainer.DeepCopy()
 		if main != nil {
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
-			err := mergo.Merge(&container, *main, mergo.WithOverride)
+			err = mergo.Merge(&container, *main, mergo.WithOverride)
 			if err != nil {
 				return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
+
+			// main container fields that require special handling
 			container.Env = MergeEnvs(component.Envs, container.Env)
+			// Note: startup probe does not have its own top level field so it must be passed in extraPodSpec.MainContainer
+			// We want to overwrite entirely if provided rather than merge
+			if main.StartupProbe != nil {
+				container.StartupProbe = main.StartupProbe
+			}
 		}
 	}
 
-	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
+	// Merge probes entirely if they are passed (no partial merge)
+	if component.LivenessProbe != nil {
+		container.LivenessProbe = component.LivenessProbe.DeepCopy()
+	}
+	if component.ReadinessProbe != nil {
+		container.ReadinessProbe = component.ReadinessProbe.DeepCopy()
+	}
+
+	overrideResources, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
 	}
-	if resourcesConfig != nil {
-		container.Resources = *resourcesConfig
+	// Requests
+	if overrideResources != nil && len(overrideResources.Requests) > 0 {
+		if container.Resources.Requests == nil {
+			container.Resources.Requests = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Requests, overrideResources.Requests)
 	}
+
+	// Limits
+	if overrideResources != nil && len(overrideResources.Limits) > 0 {
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Limits, overrideResources.Limits)
+	}
+
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
 		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
@@ -780,15 +789,26 @@ func GenerateBasePodSpec(
 	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(&container.Resources)
 	volumes = append(volumes, shmVolume)
 	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
+
 	// Apply backend-specific container modifications
 	backend := BackendFactory(backendFramework)
 	if backend == nil {
 		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
-	var podSpec corev1.PodSpec
+
+	// get base podspec from component
+	podSpec, err := componentDefaults.GetBasePodSpec(numberOfNodes)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to get base podspec: %w", err)
+	}
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
-		podSpec = *component.ExtraPodSpec.PodSpec.DeepCopy()
+		// merge extraPodSpec PodSpec with base podspec
+		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
+		if err != nil {
+			return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+		}
 	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)

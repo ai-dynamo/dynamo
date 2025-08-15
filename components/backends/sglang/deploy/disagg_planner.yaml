@@ -16,25 +16,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: dynamo
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 20
-        periodSeconds: 5
-        timeoutSeconds: 5
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:
@@ -97,9 +79,9 @@ spec:
             - --backend=sglang
             - --adjustment-interval=60
             - --profile-results-dir=/workspace/profiling_results
-    Prometheus:
+    Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: dynamo
-      componentType: main
+      componentType: frontend
       replicas: 1
       envs:
         - name: PYTHONPATH
@@ -142,20 +124,6 @@ spec:
     SGLangDecodeWorker:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       componentType: worker
       replicas: 2
       resources:
@@ -167,21 +135,8 @@ spec:
           cpu: "32"
           memory: "80Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/backends/sglang
           args:
@@ -205,20 +160,6 @@ spec:
     SGLangPrefillWorker:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       componentType: worker
       replicas: 2
       resources:
@@ -230,21 +171,8 @@ spec:
           cpu: "32"
           memory: "80Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/backends/sglang
           args:
