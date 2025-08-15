@@ -228,7 +228,7 @@ COPY components/ /opt/dynamo/components/
 RUN uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
-    maturin build --release --features block-manager --out /opt/dynamo/dist && \
+    maturin build --release --out /opt/dynamo/dist && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         # do not enable KVBM feature, ensure compatibility with lower glibc
         uv run --python 3.11 maturin build --release --out /opt/dynamo/dist && \
