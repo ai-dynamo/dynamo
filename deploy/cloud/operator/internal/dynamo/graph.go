@@ -667,6 +667,7 @@ func GenerateBasePodSpec(
 	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
 	backendFramework BackendFramework,
 	secretsRetriever SecretsRetriever,
+	parentGraphDeploymentName string,
 	namespace string,
 	role Role,
 	numberOfNodes int32,
@@ -676,7 +677,7 @@ func GenerateBasePodSpec(
 ) (corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType, numberOfNodes)
-	container, err := componentDefaults.GetBaseContainer(numberOfNodes)
+	container, err := componentDefaults.GetBaseContainer(numberOfNodes, parentGraphDeploymentName, namespace)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
 	}
@@ -823,7 +824,7 @@ func GeneratePodSpecForComponent(
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
 	if err != nil {
 		return corev1.PodSpec{}, err
 	}
@@ -1129,6 +1130,7 @@ func GenerateBasePodSpecForController(
 		componentSpec,
 		backendFramework,
 		secretsRetriever,
+		dynComponent.GetParentGraphDeploymentName(),
 		dynComponent.Namespace,
 		role,
 		numberOfNodes,

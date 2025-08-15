@@ -14,7 +14,7 @@ import (
 type ComponentDefaults interface {
 	// GetBaseContainer returns the base container configuration for this component type
 	// The numberOfNodes parameter indicates the total number of nodes in the deployment
-	GetBaseContainer(numberOfNodes int32) (corev1.Container, error)
+	GetBaseContainer(numberOfNodes int32, parentGraphDeploymentName, parentGraphDeploymentNamespace string) (corev1.Container, error)
 
 	// GetBasePodSpec returns the base pod spec configuration for this component type
 	// The numberOfNodes parameter indicates the total number of nodes in the deployment
@@ -38,7 +38,7 @@ func ComponentDefaultsFactory(componentType string, numberOfNodes int32) Compone
 // BaseComponentDefaults provides common defaults shared by all components
 type BaseComponentDefaults struct{}
 
-func (b *BaseComponentDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
+func (b *BaseComponentDefaults) GetBaseContainer(numberOfNodes int32, parentGraphDeploymentName, parentGraphDeploymentNamespace string) (corev1.Container, error) {
 	return b.getCommonContainer(), nil
 }
 

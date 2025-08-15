@@ -4126,6 +4126,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				tt.component,
 				BackendFrameworkSGLang,
 				secretsRetriever,
+				"test-deployment",
 				"default",
 				RoleMain,
 				1,

@@ -20,7 +20,7 @@ func NewPlannerDefaults() *PlannerDefaults {
 	return &PlannerDefaults{&BaseComponentDefaults{}}
 }
 
-func (p *PlannerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
+func (p *PlannerDefaults) GetBaseContainer(numberOfNodes int32, parentGraphDeploymentName, parentGraphDeploymentNamespace string) (corev1.Container, error) {
 	container := p.getCommonContainer()
 
 	// Add planner-specific defaults
@@ -32,6 +32,17 @@ func (p *PlannerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Containe
 		Limits: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("2"),
 			corev1.ResourceMemory: resource.MustParse("2Gi"),
+		},
+	}
+
+	container.Env = []corev1.EnvVar{
+		{
+			Name:  "K8S_PARENT_NAME",
+			Value: parentGraphDeploymentName,
+		},
+		{
+			Name:  "K8S_PARENT_NAMESPACE",
+			Value: parentGraphDeploymentNamespace,
 		},
 	}
 

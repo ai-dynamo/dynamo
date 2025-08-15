@@ -23,7 +23,7 @@ func NewWorkerDefaults() *WorkerDefaults {
 	return &WorkerDefaults{&BaseComponentDefaults{}}
 }
 
-func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
+func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32, parentGraphDeploymentName, parentGraphDeploymentNamespace string) (corev1.Container, error) {
 	container := w.getCommonContainer()
 
 	// Add system port
