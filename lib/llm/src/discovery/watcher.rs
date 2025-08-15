@@ -113,6 +113,12 @@ impl ModelWatcher {
                     };
                     self.manager.save_model_entry(key, model_entry.clone());
 
+                    if let Some(tx) = &self.model_update_tx {
+                        tx.send(ModelUpdate::Added(model_entry.model_type))
+                            .await
+                            .ok();
+                    }
+
                     if self.manager.has_model_any(&model_entry.name) {
                         tracing::trace!(name = model_entry.name, "New endpoint for existing model");
                         self.notify_on_model.notify_waiters();
@@ -122,11 +128,6 @@ impl ModelWatcher {
                     match self.handle_put(&model_entry).await {
                         Ok(()) => {
                             tracing::info!(model_name = model_entry.name, "added model");
-                            if let Some(tx) = &self.model_update_tx {
-                                tx.send(ModelUpdate::Added(model_entry.model_type))
-                                    .await
-                                    .ok();
-                            }
                             self.notify_on_model.notify_waiters();
                         }
                         Err(err) => {
@@ -171,15 +172,50 @@ impl ModelWatcher {
         if !active_instances.is_empty() {
             return Ok(None);
         }
-        if let Some(tx) = &self.model_update_tx {
-            tx.send(ModelUpdate::Removed(model_entry.model_type))
-                .await
-                .ok();
-        }
+
         // Ignore the errors because model could be either type
-        let _ = self.manager.remove_chat_completions_model(&model_name);
-        let _ = self.manager.remove_completions_model(&model_name);
-        let _ = self.manager.remove_embeddings_model(&model_name);
+        let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
+        let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
+        let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
+
+        let mut chat_model_removed = false;
+        let mut completions_model_removed = false;
+        let mut embeddings_model_removed = false;
+
+        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().len() == 0 {
+            chat_model_removed = true;
+        }
+        if completions_model_remove_err.is_ok() && self.manager.list_completions_models().len() == 0
+        {
+            completions_model_removed = true;
+        }
+        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().len() == 0 {
+            embeddings_model_removed = true;
+        }
+
+        if !chat_model_removed && !completions_model_removed && !embeddings_model_removed {
+            tracing::debug!(
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}",
+                model_name,
+                chat_model_removed,
+                completions_model_removed,
+                embeddings_model_removed
+            );
+        } else {
+            let mut model_type = model_entry.model_type;
+            if chat_model_removed && completions_model_removed {
+                model_type = ModelType::Backend;
+            } else if chat_model_removed {
+                model_type = ModelType::Chat;
+            } else if completions_model_removed {
+                model_type = ModelType::Completion;
+            } else if embeddings_model_removed {
+                model_type = ModelType::Embedding;
+            }
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Removed(model_type)).await.ok();
+            }
+        }
 
         Ok(Some(model_name))
     }
