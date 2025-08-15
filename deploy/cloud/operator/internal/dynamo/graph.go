@@ -689,14 +689,7 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := ComponentContext{
-		numberOfNodes:                  numberOfNodes,
-		ParentGraphDeploymentName:      parentGraphDeploymentName,
-		ParentGraphDeploymentNamespace: namespace,
-	}
-	if component.DynamoNamespace != nil {
-		componentContext.DynamoNamespace = *component.DynamoNamespace
-	}
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -828,6 +821,18 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	}
 	// Any other value (including empty) enables metrics
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+}
+
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+	componentContext := ComponentContext{
+		numberOfNodes:                  numberOfNodes,
+		ParentGraphDeploymentName:      parentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: namespace,
+	}
+	if component.DynamoNamespace != nil {
+		componentContext.DynamoNamespace = *component.DynamoNamespace
+	}
+	return componentContext
 }
 
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
