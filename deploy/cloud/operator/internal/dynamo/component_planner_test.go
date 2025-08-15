@@ -21,6 +21,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 		numberOfNodes                  int32
 		parentGraphDeploymentName      string
 		parentGraphDeploymentNamespace string
+		dynamoNamespace                string
 	}
 	tests := []struct {
 		name    string
@@ -38,6 +39,7 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 				numberOfNodes:                  1,
 				parentGraphDeploymentName:      "name",
 				parentGraphDeploymentNamespace: "namespace",
+				dynamoNamespace:                "dynamo-namespace",
 			},
 			want: corev1.Container{
 				Name: "main",
@@ -56,8 +58,9 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					},
 				},
 				Env: []corev1.EnvVar{
-					{Name: "K8S_PARENT_NAME", Value: "name"},
-					{Name: "K8S_PARENT_NAMESPACE", Value: "namespace"},
+					{Name: "DYN_NAMESPACE", Value: "dynamo-namespace"},
+					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},
+					{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "namespace"},
 				},
 			},
 		},
@@ -67,7 +70,12 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 			p := &PlannerDefaults{
 				BaseComponentDefaults: tt.fields.BaseComponentDefaults,
 			}
-			got, err := p.GetBaseContainer(tt.args.numberOfNodes, tt.args.parentGraphDeploymentName, tt.args.parentGraphDeploymentNamespace)
+			got, err := p.GetBaseContainer(ComponentContext{
+				numberOfNodes:                  tt.args.numberOfNodes,
+				ParentGraphDeploymentName:      tt.args.parentGraphDeploymentName,
+				ParentGraphDeploymentNamespace: tt.args.parentGraphDeploymentNamespace,
+				DynamoNamespace:                tt.args.dynamoNamespace,
+			})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("PlannerDefaults.GetBaseContainer() error = %v, wantErr %v", err, tt.wantErr)
 				return
