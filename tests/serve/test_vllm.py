@@ -273,19 +273,20 @@ vllm_configs = {
         delayed_start=45,
         extra_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     ),
-    "multimodal_disagg": VLLMConfig(
-        name="multimodal_disagg",
-        directory="/workspace/examples/multimodal_v1",
-        script_name="disagg.sh",
-        marks=[pytest.mark.gpu_4, pytest.mark.vllm],
-        endpoints=["v1/chat/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-        ],
-        model="llava-hf/llava-1.5-7b-hf",
-        delayed_start=45,
-        extra_args=["--model", "llava-hf/llava-1.5-7b-hf"],
-    ),
+    # TODO: Enable this test case when we have 4 GPUs runners.
+    # "multimodal_disagg": VLLMConfig(
+    #     name="multimodal_disagg",
+    #     directory="/workspace/examples/multimodal_v1",
+    #     script_name="disagg.sh",
+    #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
+    #     endpoints=["v1/chat/completions"],
+    #     response_handlers=[
+    #         chat_completions_response_handler,
+    #     ],
+    #     model="llava-hf/llava-1.5-7b-hf",
+    #     delayed_start=45,
+    #     extra_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+    # ),
 }
 
 
