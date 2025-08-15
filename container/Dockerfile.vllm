@@ -372,9 +372,9 @@ RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
-        maturin build --release --features block-manager --out /opt/dynamo/dist;\
+        maturin build --release --features block-manager --out /workspace/dist; \
     else \
-        maturin build --release --out /opt/dynamo/dist; \
+        maturin build --release --out /workspace/dist; \
     fi && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         # do not enable KVBM feature, ensure compatibility with lower glibc
