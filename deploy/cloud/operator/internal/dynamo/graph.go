@@ -316,7 +316,11 @@ func applyCliqueStartupDependencies(
 	backendFramework BackendFramework,
 	numberOfNodes int32,
 ) {
-	if numberOfNodes <= 1 {
+	// deactivated for now.
+	// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+	deactivated := true
+
+	if deactivated || numberOfNodes <= 1 {
 		return // No dependencies for single-node deployments
 	}
 

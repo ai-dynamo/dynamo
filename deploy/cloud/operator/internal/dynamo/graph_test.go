@@ -1669,7 +1669,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Replicas: ptr.To(int32(5)),
 							},
 						},
-						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
+						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -1819,9 +1819,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName:    "worker-wkr",
-									Replicas:    2,
-									StartsAfter: []string{"worker-ldr"},
+									RoleName: "worker-wkr",
+									Replicas: 2,
+									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -2382,7 +2382,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Replicas: ptr.To(int32(5)),
 							},
 						},
-						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
+						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -2520,9 +2520,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName:    "worker-wkr",
-									Replicas:    2,
-									StartsAfter: []string{"worker-ldr"},
+									RoleName: "worker-wkr",
+									Replicas: 2,
+									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -3734,7 +3734,9 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 	}
 }
 
-func TestApplyCliqueStartupDependencies(t *testing.T) {
+// deactivated for now.
+// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+func XTestApplyCliqueStartupDependencies(t *testing.T) {
 	tests := []struct {
 		name              string
 		roles             []ServiceRole
@@ -3866,7 +3868,9 @@ func TestApplyCliqueStartupDependencies(t *testing.T) {
 	}
 }
 
-func TestGetCliqueStartupDependencies(t *testing.T) {
+// deactivated for now.
+// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+func XTestGetCliqueStartupDependencies(t *testing.T) {
 	tests := []struct {
 		name              string
 		role              Role
@@ -3973,7 +3977,9 @@ func TestGetCliqueStartupDependencies(t *testing.T) {
 	}
 }
 
-func TestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
+// deactivated for now.
+// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+func XTestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 
 	tests := []struct {
