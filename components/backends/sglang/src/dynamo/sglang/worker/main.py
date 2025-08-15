@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import random
 import signal
@@ -15,9 +16,11 @@ import zmq
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip, get_zmq_socket
 
+from dynamo._core import Endpoint
 from dynamo.llm import (
     ForwardPassMetrics,
     KvStats,
+    ModelRuntimeConfig,
     ModelType,
     WorkerMetricsPublisher,
     WorkerStats,
@@ -333,13 +336,8 @@ async def init(
     await component.create_service()
 
     endpoint = component.endpoint("generate")
-    await register_llm(
-        ModelType.Backend,
-        endpoint,
-        server_args.model_path,
-        server_args.served_model_name,
-        kv_cache_block_size=server_args.page_size,
-        migration_limit=migration_limit,
+    await register_llm_with_runtime_config(
+        engine, endpoint, server_args, migration_limit
     )
 
     if server_args.disaggregation_mode != "null":
@@ -357,17 +355,87 @@ async def init(
     handler.setup_metrics()
 
     # Set up ZMQ kv event publisher
-    zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=endpoint.lease_id(),
-        kv_block_size=server_args.page_size,
-    )
-    _ = ZmqKvEventPublisher(component=component, config=zmq_config)
+    if server_args.kv_events_config:
+        kv_events = json.loads(server_args.kv_events_config)
+        ep = kv_events.get("endpoint")
+        zmq_ep = ep.replace("*", get_ip()) if ep else None
+
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=endpoint.lease_id(),
+            kv_block_size=server_args.page_size,
+            zmq_endpoint=zmq_ep,
+        )
+        logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
+        _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     tasks = [endpoint.serve_endpoint(handler.generate)]
-
     tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
+
+
+async def register_llm_with_runtime_config(
+    engine: sgl.Engine,
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    migration_limit: int,
+):
+    """Register LLM with runtime config"""
+    runtime_config = await _get_runtime_config(engine)
+    try:
+        await register_llm(
+            ModelType.Backend,
+            endpoint,
+            server_args.model_path,
+            server_args.served_model_name,
+            kv_cache_block_size=server_args.page_size,
+            migration_limit=migration_limit,
+            runtime_config=runtime_config,
+        )
+    except Exception as e:
+        logging.error(f"Failed to register with runtime config: {e}")
+        return None
+
+
+async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
+    """Get runtime config from SGLang engine"""
+    try:
+        # Try to check if the engine has a scheduler attribute with the computed values
+        if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
+            runtime_config = ModelRuntimeConfig()
+
+            # Get max_total_num_tokens from scheduler_info
+            if "max_total_num_tokens" in engine.scheduler_info:
+                max_total_tokens = engine.scheduler_info["max_total_num_tokens"]
+                if max_total_tokens and hasattr(
+                    engine.tokenizer_manager, "server_args"
+                ):
+                    page_size = engine.tokenizer_manager.server_args.page_size
+                    if page_size:
+                        runtime_config.total_kv_blocks = (
+                            max_total_tokens + page_size - 1
+                        ) // page_size
+                        logging.info(
+                            f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
+                            f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
+                        )
+
+            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info
+            # TODO: figure out where they are
+
+            return runtime_config
+
+        # If scheduler approach doesn't work, log and return None to indicate we'll skip runtime config
+        logging.warning(
+            "Could not access runtime config from SGLang engine. "
+            "The engine may compute these values internally after initialization. "
+            "Proceeding without runtime config - SGLang will use its internal defaults."
+        )
+        return None
+
+    except Exception as e:
+        logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
+        return None
 
 
 def main():

@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 
 import pytest
 import requests
@@ -24,28 +24,55 @@ text_prompt = "Tell me a short joke about AI."
 
 def create_payload_for_config(config: "VLLMConfig") -> Payload:
     """Create a payload using the model from the vLLM config"""
-    return Payload(
-        payload_chat={
-            "model": config.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": text_prompt,
-                }
-            ],
-            "max_tokens": 150,
-            "temperature": 0.1,
-        },
-        payload_completions={
-            "model": config.model,
-            "prompt": text_prompt,
-            "max_tokens": 150,
-            "temperature": 0.1,
-        },
-        repeat_count=1,
-        expected_log=[],
-        expected_response=["AI"],
-    )
+    if "multimodal" in config.name:
+        return Payload(
+            payload_chat={
+                "model": config.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "What is in this image?"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 300,
+                "temperature": 0.0,
+                "stream": False,
+            },
+            repeat_count=1,
+            expected_log=[],
+            expected_response=["bus"],
+        )
+    else:
+        return Payload(
+            payload_chat={
+                "model": config.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": text_prompt,
+                    }
+                ],
+                "max_tokens": 150,
+                "temperature": 0.1,
+            },
+            payload_completions={
+                "model": config.model,
+                "prompt": text_prompt,
+                "max_tokens": 150,
+                "temperature": 0.1,
+            },
+            repeat_count=1,
+            expected_log=[],
+            expected_response=["AI"],
+        )
 
 
 @dataclass
@@ -61,6 +88,7 @@ class VLLMConfig:
     model: str
     timeout: int = 120
     delayed_start: int = 0
+    args: Optional[List[str]] = None
 
 
 class VLLMProcess(ManagedProcess):
@@ -76,6 +104,8 @@ class VLLMProcess(ManagedProcess):
             raise FileNotFoundError(f"vLLM script not found: {script_path}")
 
         command = ["bash", script_path]
+        if config.args:
+            command.extend(config.args)
 
         super().__init__(
             command=command,
@@ -146,6 +176,13 @@ class VLLMProcess(ManagedProcess):
                 error = response.json().get("error", "")
                 if "no instances" in error:
                     logger.warning("Retrying due to no instances available")
+                    time.sleep(retry_delay)
+                    continue
+                elif (
+                    "multimodal" in self.config.name
+                    and "Failed to fold chat completions stream" in error
+                ):
+                    logger.warning("Retrying due to endpoint not ready for multimodal")
                     time.sleep(retry_delay)
                     continue
             if response.status_code == 404:
@@ -223,6 +260,33 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
     ),
+    "multimodal_agg": VLLMConfig(
+        name="multimodal_agg",
+        directory="/workspace/examples/multimodal_v1",
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
+        endpoints=["v1/chat/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+        ],
+        model="llava-hf/llava-1.5-7b-hf",
+        delayed_start=45,
+        args=["--model", "llava-hf/llava-1.5-7b-hf"],
+    ),
+    # TODO: Enable this test case when we have 4 GPUs runners.
+    # "multimodal_disagg": VLLMConfig(
+    #     name="multimodal_disagg",
+    #     directory="/workspace/examples/multimodal_v1",
+    #     script_name="disagg.sh",
+    #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
+    #     endpoints=["v1/chat/completions"],
+    #     response_handlers=[
+    #         chat_completions_response_handler,
+    #     ],
+    #     model="llava-hf/llava-1.5-7b-hf",
+    #     delayed_start=45,
+    #     args=["--model", "llava-hf/llava-1.5-7b-hf"],
+    # ),
 }
 
 

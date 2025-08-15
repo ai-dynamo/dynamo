@@ -35,6 +35,8 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 
+from . import __version__
+
 
 def validate_static_endpoint(value):
     """Validate that static-endpoint is three words separated by dots."""
@@ -70,6 +72,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
     parser.add_argument(
         "-i", "--interactive", action="store_true", help="Interactive text chat"
@@ -133,6 +138,12 @@ def parse_args():
         type=validate_model_path,
         help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
     )
+    parser.add_argument(
+        "--metrics-prefix",
+        type=str,
+        default=None,
+        help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
+    )
 
     flags = parser.parse_args()
 
@@ -145,6 +156,12 @@ def parse_args():
 async def async_main():
     flags = parse_args()
     is_static = bool(flags.static_endpoint)  # true if the string has a value
+
+    # Configure Dynamo frontend HTTP service metrics prefix
+    if flags.metrics_prefix is not None:
+        prefix = flags.metrics_prefix.strip()
+        if prefix:
+            os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
 

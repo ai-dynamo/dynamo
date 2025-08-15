@@ -16,12 +16,16 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
+pub mod runtime_config;
+
+use runtime_config::ModelRuntimeConfig;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -48,6 +52,8 @@ pub struct LocalModelBuilder {
     http_port: u16,
     migration_limit: u32,
     is_mocker: bool,
+    extra_engine_args: Option<PathBuf>,
+    runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
 }
 
@@ -65,6 +71,8 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             is_mocker: Default::default(),
+            extra_engine_args: Default::default(),
+            runtime_config: Default::default(),
             user_data: Default::default(),
         }
     }
@@ -128,6 +136,16 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn extra_engine_args(&mut self, extra_engine_args: Option<PathBuf>) -> &mut Self {
+        self.extra_engine_args = extra_engine_args;
+        self
+    }
+
+    pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
+        self.runtime_config = runtime_config;
+        self
+    }
+
     pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
         self.user_data = user_data;
         self
@@ -170,6 +188,7 @@ impl LocalModelBuilder {
                 template,
                 http_port: self.http_port,
                 router_config: self.router_config.take().unwrap_or_default(),
+                runtime_config: self.runtime_config.clone(),
             });
         }
 
@@ -218,6 +237,20 @@ impl LocalModelBuilder {
             card.context_length = context_length;
         }
 
+        // Override runtime configs with mocker engine args
+        if self.is_mocker {
+            if let Some(path) = &self.extra_engine_args {
+                let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                    .expect("Failed to load mocker engine args for runtime config overriding.");
+                self.runtime_config.total_kv_blocks =
+                    Some(mocker_engine_args.num_gpu_blocks as u64);
+                self.runtime_config.max_num_seqs =
+                    mocker_engine_args.max_num_seqs.map(|v| v as u64);
+                self.runtime_config.max_num_batched_tokens =
+                    mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            }
+        }
+
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
 
@@ -228,6 +261,7 @@ impl LocalModelBuilder {
             template,
             http_port: self.http_port,
             router_config: self.router_config.take().unwrap_or_default(),
+            runtime_config: self.runtime_config.clone(),
         })
     }
 }
@@ -240,6 +274,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
     router_config: RouterConfig,
+    runtime_config: ModelRuntimeConfig,
 }
 
 impl LocalModel {
@@ -272,6 +307,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn runtime_config(&self) -> &ModelRuntimeConfig {
+        &self.runtime_config
     }
 
     pub fn is_gguf(&self) -> bool {
@@ -323,6 +362,7 @@ impl LocalModel {
             name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
+            runtime_config: Some(self.runtime_config.clone()),
         };
         etcd_client
             .kv_create(

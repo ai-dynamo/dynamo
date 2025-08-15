@@ -105,7 +105,7 @@ jobs:
         fi
 
         if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
-          ci_variables["RUN_TENSORRTLLM"]="true"
+          ci_variables["RUN_TRTLLM"]="true"
         fi
 
         if [ "${{ steps.src_changes.outputs.sglang }}" == "true" ]; then

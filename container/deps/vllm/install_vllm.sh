@@ -112,8 +112,12 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 # Install common dependencies
 uv pip install pip cuda-python
 
-# Install LMCache
-uv pip install lmcache
+if [ "$ARCH" = "amd64" ]; then
+    # LMCache installation currently fails on arm64 due to CUDA dependency issues:
+    # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
+    # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
+    uv pip install lmcache==0.3.3
+fi
 
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
@@ -127,7 +131,7 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+    if ! uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl; then
         echo "Pinned versions failed"
         exit 1
         # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128

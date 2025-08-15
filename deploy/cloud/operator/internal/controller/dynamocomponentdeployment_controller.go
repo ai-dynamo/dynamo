@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -72,10 +71,7 @@ const (
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
 	KubernetesDeploymentStrategy                         = "kubernetes"
 
-	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
-	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
 	DeploymentTypeStandard       = "standard"
-	DeploymentTypeLeaderWorker   = "leader-worker"
 	DeploymentTypeMultinodeGrove = "multinode-grove"
 	ComponentTypePlanner         = "Planner"
 )
@@ -200,15 +196,10 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	// Determine deployment type
-	deploymentType := GetDeploymentType(dynamoComponentDeployment)
-
-	logs.Info("Using deployment type", "type", deploymentType)
-
 	// Create the appropriate workload resource based on deployment type
 	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
 	var deployment *appsv1.Deployment
-	if r.Config.EnableLWS && deploymentType == DeploymentTypeLeaderWorker {
+	if r.Config.EnableLWS && dynamoComponentDeployment.IsMultinode() {
 		desiredReplicas := int32(1)
 		if dynamoComponentDeployment.Spec.Replicas != nil {
 			desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
@@ -363,7 +354,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	logs.Info("Finished reconciling.")
 	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
 
-	if deploymentType == DeploymentTypeLeaderWorker {
+	if dynamoComponentDeployment.IsMultinode() {
 		err = r.computeAvailableStatusConditionForLeaderWorkerSets(ctx, req, leaderWorkerSets)
 	} else {
 		err = r.computeAvailableStatusCondition(ctx, req, deployment)
@@ -407,17 +398,6 @@ func (r *DynamoComponentDeploymentReconciler) computeAvailableStatusConditionFor
 		)
 		return err
 	}
-}
-
-// GetDeploymentType returns the deployment type from the annotations
-// If not set, it returns the default DeploymentTypeStandard
-func GetDeploymentType(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) string {
-	resourceAnnotations := getResourceAnnotations(dynamoComponentDeployment)
-	deploymentType := resourceAnnotations[KubeAnnotationDeploymentType]
-	if deploymentType == "" {
-		deploymentType = DeploymentTypeStandard
-	}
-	return deploymentType
 }
 
 // IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
@@ -473,21 +453,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 	labels := make(map[string]string)
 	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 
-	lwsSizeStr, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
-	if !ok {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: missing required annotation %s", KubeAnnotationLWSSize)
-	}
-	lwsSize, err := strconv.ParseInt(lwsSizeStr, 10, 32)
-	if err != nil {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: invalid value for annotation %s: %v", KubeAnnotationLWSSize, err)
-	}
-	if lwsSize <= 0 {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: LWS size must be greater than 0, got %d", lwsSize)
-	}
-	if lwsSize == 1 {
-		return nil, false, errors.New("generateVolcanoPodGroup: LWS size of 1 means that the LWS is not needed, change 'nvidia.com/deployment-type' to 'standard'/disable whatever flag you used to enable LWS")
-	}
-	minMember := int32(lwsSize)
+	minMember := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	podGroup := &volcanov1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -504,7 +470,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
-	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleLeader)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
@@ -522,31 +488,18 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
 
 	if leaderPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for Ray leader pod")
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for LWS leader pod")
 	}
 
 	if len(leaderPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for Ray leader pod")
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for LWS leader pod")
 	}
-
-	currentArgs := leaderPodTemplateSpec.Spec.Containers[0].Args[0]
-	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
-		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
-	}
-
-	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
-	// until we implement proper probe configuration that can differentiate between
-	// leader and worker pods.
-	leaderPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
-	leaderPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
-
-	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
 
 	return leaderPodTemplateSpec, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
-	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleWorker)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
@@ -564,24 +517,16 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
 	if workerPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for Ray worker pod")
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for LWS worker pod")
 	}
 
 	if len(workerPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for Ray worker pod")
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for LWS worker pod")
 	}
 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
-		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
+		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for LWS worker pod")
 	}
-
-	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
-	// until we implement proper probe configuration that can differentiate between
-	// leader and worker pods.
-	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
-	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
-
-	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
 
 	return workerPodTemplateSpec, nil
 }
@@ -639,18 +584,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 
 	// Each individual LeaderWorkerSet always has exactly 1 replica
 	singleReplica := int32(1)
-	size, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
-	if !ok {
-		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size annotation '%s' is required", KubeAnnotationLWSSize)
-	}
-	sizeInt, err := strconv.ParseInt(size, 10, 32)
-	if err != nil {
-		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: LWS size annotation value must be an integer")
-	}
-	if sizeInt < 1 {
-		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size must be greater than 0, got %d", sizeInt)
-	}
-	groupSize := int32(sizeInt)
+	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
 		Replicas:      &singleReplica,
@@ -1053,7 +987,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	}
 
 	// nolint: gosimple
-	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleMain)
 	if err != nil {
 		return
 	}
@@ -1192,7 +1126,7 @@ func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOp
 }
 
 //nolint:gocyclo,nakedret
-func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
+func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1229,7 +1163,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, dynamo.RoleMain, consts.MultinodeDeploymentTypeLWS)
+	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
@@ -1341,7 +1275,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.IsMainComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
+	if !opt.dynamoComponentDeployment.IsFrontendComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
 		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
@@ -1354,11 +1288,8 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		selector[k] = v
 	}
 
-	// Check if we're using LeaderWorkerSet
-	deploymentType := GetDeploymentType(opt.dynamoComponentDeployment)
-
 	// If using LeaderWorkerSet, modify selector to only target leaders
-	if deploymentType == DeploymentTypeLeaderWorker {
+	if opt.dynamoComponentDeployment.IsMultinode() {
 		selector["role"] = "leader"
 	}
 

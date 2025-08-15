@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -21,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from dynamo.planner import KubernetesConnector
+from dynamo.planner import KubernetesConnector, __version__
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -346,6 +334,9 @@ async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespac
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Common planner arguments
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Planner {__version__}"
+    )
     parser.add_argument(
         "--environment",
         type=str,

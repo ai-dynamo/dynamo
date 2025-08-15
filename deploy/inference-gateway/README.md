@@ -70,7 +70,17 @@ kubectl get gateway inference-gateway -n my-model
 # inference-gateway   kgateway   x.x.x.x   True         1m
 ```
 
-3. **Install dynamo model and dynamo gaie helm chart**
+3. **Deploy model**
+
+Follow the steps in [model deployment](../../components/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+
+Sample commands to deploy model:
+```bash
+cd <dynamo-source-root>/components/backends/vllm/deploy
+kubectl apply -f agg.yaml -n my-model
+```
+
+4. **Install Dynamo GAIE helm chart**
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 

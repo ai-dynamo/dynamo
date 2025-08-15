@@ -824,7 +824,7 @@ dependencies = [
  "byteorder",
  "candle-kernels",
  "candle-metal-kernels",
- "cudarc",
+ "cudarc 0.16.6",
  "float8",
  "gemm 0.17.1",
  "half 2.6.0",
@@ -1110,7 +1110,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8030735ecb0d128428b64cd379809817e620a40e5001c54465b99ec5feec2857"
 dependencies = [
  "futures-core",
- "prost 0.13.5",
+ "prost",
  "prost-types",
  "tonic 0.12.3",
  "tracing-core",
@@ -1129,7 +1129,7 @@ dependencies = [
  "hdrhistogram",
  "humantime",
  "hyper-util",
- "prost 0.13.5",
+ "prost",
  "prost-types",
  "serde",
  "serde_json",
@@ -1393,6 +1393,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17200eb07e7d85a243aa1bf4569a7aa998385ba98d14833973a817a63cc86e92"
 dependencies = [
  "half 2.6.0",
+ "libloading",
+]
+
+[[package]]
+name = "cudarc"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "018e09f92e57618dbae5a3a0dcc2026547eed0e5b6a503a32c11ee1a94890830"
+dependencies = [
  "libloading",
 ]
 
@@ -1856,7 +1865,7 @@ dependencies = [
  "candle-core 0.9.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "chrono",
  "criterion",
- "cudarc",
+ "cudarc 0.17.1",
  "dashmap",
  "derive-getters",
  "derive_builder",
@@ -1890,9 +1899,9 @@ dependencies = [
  "rmp-serde",
  "rstest 0.18.2",
  "rstest_reuse",
- "sentencepiece",
  "serde",
  "serde_json",
+ "serial_test",
  "strum",
  "tempfile",
  "thiserror 2.0.12",
@@ -2215,7 +2224,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88365f1a5671eb2f7fc240adb216786bc6494b38ce15f1d26ad6eaa303d5e822"
 dependencies = [
  "http 1.3.1",
- "prost 0.13.5",
+ "prost",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
@@ -2346,7 +2355,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f498aec3b227cd892ce18967f4033d9d397d28a80a7ab67e9f6b0176a79654e"
 dependencies = [
- "cudarc",
+ "cudarc 0.16.6",
  "half 2.6.0",
  "num-traits",
 ]
@@ -4683,17 +4692,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
 
 [[package]]
-name = "num-derive"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.100",
-]
-
-[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5314,22 +5312,12 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.11.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b82eaa1d779e9a4bc1c3217db8ffbeabaae1dca241bf70183242128d48681cd"
-dependencies = [
- "bytes",
- "prost-derive 0.11.9",
-]
-
-[[package]]
-name = "prost"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
 dependencies = [
  "bytes",
- "prost-derive 0.13.5",
+ "prost-derive",
 ]
 
 [[package]]
@@ -5345,24 +5333,11 @@ dependencies = [
  "once_cell",
  "petgraph",
  "prettyplease",
- "prost 0.13.5",
+ "prost",
  "prost-types",
  "regex",
  "syn 2.0.100",
  "tempfile",
-]
-
-[[package]]
-name = "prost-derive"
-version = "0.11.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5d2d8d10f3c6ded6da8b05b5fb3b8a5082514344d56c9f871412d29b4e075b4"
-dependencies = [
- "anyhow",
- "itertools 0.10.5",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -5384,7 +5359,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
- "prost 0.13.5",
+ "prost",
 ]
 
 [[package]]
@@ -6247,6 +6222,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scc"
+version = "2.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22b2d775fb28f245817589471dd49c5edf64237f4a19d10ce9a92ff4651a27f4"
+dependencies = [
+ "sdd",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6299,6 +6283,12 @@ dependencies = [
  "selectors",
  "tendril",
 ]
+
+[[package]]
+name = "sdd"
+version = "3.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490dcfcbfef26be6800d11870ff2df8774fa6e86d047e3e8c8a76b25655e41ca"
 
 [[package]]
 name = "secrecy"
@@ -6376,32 +6366,6 @@ name = "semver"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
-
-[[package]]
-name = "sentencepiece"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "286451da14703923eeb9d5e9d7717a15cbf236c037923fb7a6ff911ca45f4124"
-dependencies = [
- "libc",
- "num-derive",
- "num-traits",
- "prost 0.11.9",
- "prost-derive 0.11.9",
- "sentencepiece-sys",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "sentencepiece-sys"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a721500103a50c284cd3908cca6c435fcc6a260a1cead830a040f904a89234fb"
-dependencies = [
- "cc",
- "cmake",
- "pkg-config",
-]
 
 [[package]]
 name = "seq-macro"
@@ -6543,6 +6507,31 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "serial_test"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b258109f244e1d6891bf1053a55d63a5cd4f8f4c30cf9a1280989f80e7a1fa9"
+dependencies = [
+ "futures",
+ "log",
+ "once_cell",
+ "parking_lot",
+ "scc",
+ "serial_test_derive",
+]
+
+[[package]]
+name = "serial_test_derive"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d69265a08751de7844521fd15003ae0a888e035773ba05695c5c759a6f89eef"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -7591,7 +7580,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "prost 0.13.5",
+ "prost",
  "socket2",
  "tokio",
  "tokio-stream",
@@ -7620,7 +7609,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "prost 0.13.5",
+ "prost",
  "socket2",
  "tokio",
  "tokio-rustls",
@@ -7892,7 +7881,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14053653d0b7fa7b21015aa9a62edc8af2f60aa6f9c54e66386ecce55f22ed29"
 dependencies = [
- "cudarc",
+ "cudarc 0.16.6",
  "half 2.6.0",
  "serde",
  "thiserror 1.0.69",

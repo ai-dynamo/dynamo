@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::{Component, Instance};
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 
 use super::indexer::OverlapScores;
 use super::protocols::WorkerSelectionResult;
@@ -77,12 +79,15 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        mut instances_rx: tokio::sync::watch::Receiver<Vec<Instance>>, // Changed from ProcessedEndpoints
+        mut instances_rx: watch::Receiver<Vec<Instance>>,
+        mut runtime_configs_rx: watch::Receiver<HashMap<i64, ModelRuntimeConfig>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let mut instances: Vec<Instance> = instances_rx.borrow_and_update().clone();
+        let mut runtime_configs: HashMap<i64, ModelRuntimeConfig> =
+            runtime_configs_rx.borrow_and_update().clone();
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
         let ns_clone = component.namespace().clone();
@@ -112,10 +117,15 @@ impl KvScheduler {
         tokio::spawn(async move {
             let mut request_rx = request_rx;
             tracing::trace!("scheduler background task started");
+            let mut workers_with_configs: HashMap<i64, Option<ModelRuntimeConfig>> = HashMap::new();
+            let mut needs_rebuild = true;
 
             loop {
-                // First, check for instance updates (non-blocking)
-                match instances_rx.has_changed() {
+                // Check for instance updates (non-blocking)
+                let instances_changed = instances_rx.has_changed();
+                let configs_changed = runtime_configs_rx.has_changed();
+
+                match instances_changed {
                     Ok(true) => {
                         instances = instances_rx.borrow_and_update().clone();
                         let worker_ids: Vec<i64> = instances
@@ -123,17 +133,42 @@ impl KvScheduler {
                             .map(|instance| instance.instance_id)
                             .collect();
                         slots_clone.update_workers(worker_ids);
+                        needs_rebuild = true;
                     }
-                    Ok(false) => {
-                        // No changes, continue. This is the happy path.
-                    }
+                    Ok(false) => {}
                     Err(_) => {
                         tracing::warn!("endpoint watch sender shutdown");
                         break;
                     }
                 }
 
-                // Then, wait for a new request
+                // Check for runtime config updates
+                match configs_changed {
+                    Ok(true) => {
+                        runtime_configs = runtime_configs_rx.borrow_and_update().clone();
+                        needs_rebuild = true;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        tracing::warn!("runtime configs watch sender shutdown");
+                    }
+                }
+
+                // Rebuild workers hashmap only when needed
+                if needs_rebuild {
+                    workers_with_configs.clear();
+                    for instance in &instances {
+                        let worker_id = instance.instance_id;
+                        let config = runtime_configs.get(&worker_id).cloned();
+                        if config.is_none() {
+                            tracing::warn!("Runtime config not found for worker_id: {}", worker_id);
+                        }
+                        workers_with_configs.insert(worker_id, config);
+                    }
+                    needs_rebuild = false;
+                }
+
+                // Wait for a new request
                 let Some(mut request) = request_rx.recv().await else {
                     tracing::warn!("scheduler shutdown");
                     break;
@@ -150,7 +185,7 @@ impl KvScheduler {
                 request.decode_blocks = decode_blocks;
                 request.prefill_tokens = prefill_tokens;
 
-                match selector.select_worker(&instances, &request, block_size) {
+                match selector.select_worker(&workers_with_configs, &request, block_size) {
                     Ok(selection) => {
                         if let Err(e) = event_tx.send(KVHitRateEvent {
                             worker_id: selection.worker_id,
@@ -333,7 +368,7 @@ impl DefaultWorkerSelector {
 impl WorkerSelector for DefaultWorkerSelector {
     fn select_worker(
         &self,
-        workers: &[Instance],
+        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
@@ -354,17 +389,16 @@ impl WorkerSelector for DefaultWorkerSelector {
         let mut max_logit = f64::NEG_INFINITY;
 
         // Calculate logits for each worker
-        for instance in workers.iter() {
-            let worker_id = instance.instance_id;
-            let overlap = *overlaps.get(&worker_id).unwrap_or(&0);
+        for worker_id in workers.keys() {
+            let overlap = *overlaps.get(worker_id).unwrap_or(&0);
 
             // this is the number of prefill tokens the worker would have if the request were scheduled there
-            let prefill_token = *prefill_tokens.get(&worker_id).unwrap_or(&isl);
+            let prefill_token = *prefill_tokens.get(worker_id).unwrap_or(&isl);
             let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
 
             // this is the number of decode blocks the worker would have if the request were scheduled there
             let decode_block = *decode_blocks
-                .get(&worker_id)
+                .get(worker_id)
                 .unwrap_or(&(potential_prefill_block.floor() as usize))
                 as f64;
 
@@ -373,7 +407,7 @@ impl WorkerSelector for DefaultWorkerSelector {
                 self.kv_router_config.overlap_score_weight * potential_prefill_block + decode_block;
             max_logit = max_logit.max(logit);
 
-            worker_logits.insert(worker_id, logit);
+            worker_logits.insert(*worker_id, logit);
 
             let overlap_weight = self.kv_router_config.overlap_score_weight;
             tracing::info!(
@@ -388,10 +422,20 @@ impl WorkerSelector for DefaultWorkerSelector {
         let best_worker_id = softmax_sample(&worker_logits, temperature);
         let best_logit = worker_logits[&best_worker_id];
 
+        let best_overlap = *overlaps.get(&best_worker_id).unwrap_or(&0);
+        let total_blocks_info = workers
+            .get(&best_worker_id)
+            .and_then(|cfg| cfg.as_ref())
+            .and_then(|cfg| cfg.total_kv_blocks)
+            .map(|blocks| format!(", total blocks: {}", blocks))
+            .unwrap_or_default();
+
         tracing::info!(
-            "Selected worker: {}, logit: {:.3}",
+            "Selected worker: {}, logit: {:.3}, cached blocks: {}{}",
             best_worker_id,
-            best_logit
+            best_logit,
+            best_overlap,
+            total_blocks_info
         );
 
         Ok(WorkerSelectionResult {

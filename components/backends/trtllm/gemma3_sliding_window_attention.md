@@ -23,7 +23,7 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 ## Notes
 * To run Gemma 3 with VSWA and KV Routing with KV block reuse, ensure that the container is built using commit ID `c9eebcb4541d961ab390f0bd0a22e2c89f1bcc78` from Tensorrt-LLM.
 ```bash
-./container/build.sh --framework TENSORRTLLM --tensorrtllm-commit c9eebcb4541d961ab390f0bd0a22e2c89f1bcc78
+./container/build.sh --framework trtllm --tensorrtllm-commit c9eebcb4541d961ab390f0bd0a22e2c89f1bcc78
 ```
 * The 1.0.0rc4 release version of TensorRT-LLM can also run Gemma 3 with VSWA, but KV block reuse cannot be turned on in that version.
 

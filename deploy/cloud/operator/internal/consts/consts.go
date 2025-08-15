@@ -38,8 +38,9 @@ const (
 	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 
 	ComponentTypePlanner      = "planner"
-	ComponentTypeMain         = "main"
+	ComponentTypeFrontend     = "frontend"
 	ComponentTypeWorker       = "worker"
+	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
 
 	DefaultIngressSuffix = "local"
