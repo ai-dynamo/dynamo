@@ -15,7 +15,7 @@ import (
 
 type TRTLLMBackend struct{}
 
-func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return
@@ -53,13 +53,13 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Update container command based on role
 	switch role {
 	case RoleLeader:
-		b.setupLeaderContainer(container, numberOfNodes, multinodeDeploymentType, serviceName, component)
+		b.setupLeaderContainer(container, numberOfNodes, serviceName, component, multinodeDeployer)
 	case RoleWorker:
 		b.setupWorkerContainer(container)
 	}
 }
 
-func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
@@ -86,9 +86,9 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
-func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string, component *v1alpha1.DynamoComponentDeploymentOverridesSpec) {
+func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeployer MultinodeDeployer) {
 	// Generate the list of worker hostnames
-	workerHosts := b.generateWorkerHostnames(numberOfNodes, multinodeDeploymentType, serviceName)
+	workerHosts := b.generateWorkerHostnames(numberOfNodes, serviceName, multinodeDeployer)
 
 	// Store original command/args for later use
 	var originalCommand string
@@ -166,29 +166,8 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 }
 
 // generateWorkerHostnames creates a comma-separated list of worker hostnames
-func (b *TRTLLMBackend) generateWorkerHostnames(numberOfNodes int32, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) string {
-	var hostnames []string
-
-	// Add leader hostname first
-	if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
-		leaderHostname := generateGroveLeaderHostname(serviceName)
-		hostnames = append(hostnames, leaderHostname)
-
-		// Add worker hostnames
-		for i := int32(0); i < numberOfNodes-1; i++ {
-			workerHostname := fmt.Sprintf("${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-%s-%s-%d.${GROVE_HEADLESS_SERVICE}",
-				serviceName, commonconsts.GroveRoleSuffixWorker, i)
-			hostnames = append(hostnames, workerHostname)
-		}
-	} else {
-		// For LWS deployment type - using environment variables
-		hostnames = append(hostnames, "${LWS_LEADER_ADDRESS}")
-		for i := int32(1); i < numberOfNodes; i++ {
-			hostnames = append(hostnames, fmt.Sprintf("${LWS_WORKER_%d_ADDRESS}", i))
-		}
-	}
-
-	return strings.Join(hostnames, ",")
+func (b *TRTLLMBackend) generateWorkerHostnames(numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer) string {
+	return strings.Join(multinodeDeployer.GetHostNames(serviceName, numberOfNodes), ",")
 }
 
 // getGPUsPerNode extracts the number of GPUs per node from resources

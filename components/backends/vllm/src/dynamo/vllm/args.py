@@ -12,6 +12,7 @@ from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+from . import __version__
 from .ports import (
     DEFAULT_DYNAMO_PORT_MAX,
     DEFAULT_DYNAMO_PORT_MIN,
@@ -57,6 +58,9 @@ class Config:
 def parse_args() -> Config:
     parser = FlexibleArgumentParser(
         description="vLLM server integrated with Dynamo LLM."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend VLLM {__version__}"
     )
     parser.add_argument(
         "--endpoint",

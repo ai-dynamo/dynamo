@@ -210,3 +210,54 @@ func TestDynamoComponentDeployment_SetDynamoDeploymentConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestDynamoComponentDeployment_GetParentGraphDeploymentName(t *testing.T) {
+	type fields struct {
+		TypeMeta   metav1.TypeMeta
+		ObjectMeta metav1.ObjectMeta
+		Spec       DynamoComponentDeploymentSpec
+		Status     DynamoComponentDeploymentStatus
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   string
+	}{
+		{
+			name: "test",
+			fields: fields{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: "DynamoGraphDeployment",
+							Name: "name",
+						},
+					},
+				},
+			},
+			want: "name",
+		},
+		{
+			name: "no owner reference",
+			fields: fields{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{},
+				},
+			},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &DynamoComponentDeployment{
+				TypeMeta:   tt.fields.TypeMeta,
+				ObjectMeta: tt.fields.ObjectMeta,
+				Spec:       tt.fields.Spec,
+				Status:     tt.fields.Status,
+			}
+			if got := s.GetParentGraphDeploymentName(); got != tt.want {
+				t.Errorf("DynamoComponentDeployment.GetParentGraphDeploymentName() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

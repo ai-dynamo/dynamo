@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.05-py3"
@@ -69,6 +57,8 @@ RUN apt update -y && \
     meson \
     ninja-build \
     pybind11-dev \
+    ## support UCX to establish connections with zmq
+    libzmq3-dev \
     # These headers are missing with the hpcx installer, required
     # by UCX to find RDMA devices
     libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
@@ -285,6 +275,7 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
@@ -384,6 +375,8 @@ RUN apt-get update && \
         curl \
         # For debugging
         vim \
+        # support UCX to establish connections with zmq
+        libzmq3-dev \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
         libnuma1 librdmacm1 ibverbs-providers \

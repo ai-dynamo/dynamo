@@ -97,7 +97,9 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	cp config/crd/bases/*.yaml ../helm/crds/templates/
+	if [ -d "../helm/crds/templates/" ]; then \
+		cp config/crd/bases/*.yaml ../helm/crds/templates/; \
+	fi
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
