@@ -111,7 +111,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 }
 
 type MultinodeSpec struct {
-	// +kubebuilder:default=1
+	// +kubebuilder:default=2
 	// Indicates the number of nodes to deploy for multinode components.
 	// Total number of GPUs is NumberOfNodes * GPU limit.
 	// Must be greater than 1.

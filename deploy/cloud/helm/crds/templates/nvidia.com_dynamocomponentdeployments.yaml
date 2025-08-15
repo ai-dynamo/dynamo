@@ -10013,7 +10013,7 @@ spec:
                   description: Multinode is the configuration for multinode components.
                   properties:
                     nodeCount:
-                      default: 1
+                      default: 2
                       description: |-
                         Indicates the number of nodes to deploy for multinode components.
                         Total number of GPUs is NumberOfNodes * GPU limit.
