@@ -17,7 +17,7 @@ nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 
 # Wait for NATS/etcd to startup
-sleep 3
+sleep 2
 
 # Start OpenAI Frontend which will dynamically discover workers when they startup
 # NOTE: This is a blocking call.
