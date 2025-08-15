@@ -43,8 +43,8 @@ impl Default for JsonParserConfig {
         Self {
             parallel_tool_calls_start_tokens: vec![],
             parallel_tool_calls_end_tokens: vec![],
-            tool_call_start_tokens: vec!["<TOOLCALL>[".to_string(), "<|python_tag|>".to_string()],
-            tool_call_end_tokens: vec!["]</TOOLCALL>".to_string(), "".to_string()],
+            tool_call_start_tokens: vec!["<TOOLCALL>".to_string(), "<|python_tag|>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
         }
@@ -80,8 +80,8 @@ impl ToolCallConfig {
         Self {
             format: ToolCallParserType::Json,
             json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<TOOLCALL>[".to_string()],
-                tool_call_end_tokens: vec!["]</TOOLCALL>".to_string()],
+                tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+                tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
                 ..Default::default()
             },
         }
