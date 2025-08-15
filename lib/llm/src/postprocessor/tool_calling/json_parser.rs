@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use regex::RegexBuilder;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -21,6 +22,33 @@ pub struct CalledFunctionParameters {
 pub struct CalledFunctionArguments {
     pub name: String,
     pub arguments: HashMap<String, Value>,
+}
+
+fn extract_tool_call_content<'a>(
+    input: &'a str,
+    start_token: &str,
+    end_token: &str,
+) -> Option<&'a str> {
+    let escaped_start = regex::escape(start_token);
+    let escaped_end = regex::escape(end_token);
+    let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
+
+    match RegexBuilder::new(&pattern)
+        .dot_matches_new_line(true)
+        .build()
+    {
+        Ok(regex) => {
+            // Get all matches and take the last one for now. TODO : Handle multiple tool calls
+            let matches: Vec<_> = regex
+                .captures_iter(input)
+                .filter_map(|captures| captures.get(1))
+                .map(|m| m.as_str().trim())
+                .collect();
+
+            matches.last().copied()
+        }
+        Err(_) => None,
+    }
 }
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
@@ -72,25 +100,29 @@ pub fn try_tool_call_parse_json(
     tracing::debug!("Using JSON parser config: {:?}", config);
     let trimmed = message.trim();
 
-    // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]
-    let json = if let Some(stripped) = trimmed.strip_prefix("<TOOLCALL>[") {
-        if let Some(stripped) = stripped.strip_suffix("]</TOOLCALL>") {
-            tracing::debug!("Stripping <TOOLCALL> wrapper from tool call payload");
-            stripped
-        } else {
-            trimmed
-        }
+    // Use config to get tool call start and end token vectors, then use the first element for now
+    let tool_call_start_tokens = &config.tool_call_start_tokens;
+    let tool_call_end_tokens = &config.tool_call_end_tokens;
+    let (start_token, end_token) = (
+        tool_call_start_tokens
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        tool_call_end_tokens
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    // Try to extract tool call content using regex
 
-    // Support custom/LLM-formatted `<|python_tag|>` preamble
-    } else if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
-        tracing::debug!("Stripping <|python_tag|> prefix from tool call payload");
-        stripped
-
-    // Otherwise, assume input is clean JSON
+    // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
+    let json = if !start_token.is_empty() && end_token.is_empty() {
+        trimmed.strip_prefix(start_token).unwrap_or(trimmed)
+    } else if let Some(content) = extract_tool_call_content(trimmed, start_token, end_token) {
+        content
     } else {
         trimmed
     };
-
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
         Ok(ToolCallResponse {
