@@ -103,26 +103,28 @@ pub fn try_tool_call_parse_json(
     // Use config to get tool call start and end token vectors, then use the first element for now
     let tool_call_start_tokens = &config.tool_call_start_tokens;
     let tool_call_end_tokens = &config.tool_call_end_tokens;
-    let (start_token, end_token) = (
-        tool_call_start_tokens
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or(""),
-        tool_call_end_tokens
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or(""),
-    );
-    // Try to extract tool call content using regex
 
-    // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
-    let json = if !start_token.is_empty() && end_token.is_empty() {
-        trimmed.strip_prefix(start_token).unwrap_or(trimmed)
-    } else if let Some(content) = extract_tool_call_content(trimmed, start_token, end_token) {
-        content
-    } else {
-        trimmed
-    };
+    assert!(
+        tool_call_start_tokens.len() == tool_call_end_tokens.len(),
+        "Tool call start and end tokens must have the same length"
+    );
+
+    // Iterate over all start and end tokens and try to extract the content between them
+    let mut json = trimmed;
+    for (start_token, end_token) in tool_call_start_tokens
+        .iter()
+        .zip(tool_call_end_tokens.iter())
+    {
+        // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
+        json = if !start_token.is_empty() && end_token.is_empty() {
+            json.strip_prefix(start_token).unwrap_or(json)
+        } else if let Some(content) = extract_tool_call_content(json, start_token, end_token) {
+            content
+        } else {
+            json
+        };
+    }
+
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
         Ok(ToolCallResponse {
