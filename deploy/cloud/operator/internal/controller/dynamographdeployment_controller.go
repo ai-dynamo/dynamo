@@ -179,7 +179,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	})
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
-		if component.ComponentType == consts.ComponentTypeMain {
+		if component.ComponentType == consts.ComponentTypeFrontend {
 			// generate the main component service
 			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace)
 			if err != nil {

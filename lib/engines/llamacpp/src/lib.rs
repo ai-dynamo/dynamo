@@ -268,6 +268,7 @@ fn run_request(
             //text: if output.text.is_empty() { None } else { Some(output.text) },
             cum_log_probs: None, // TODO output.cumulative_logprob.map(|v| v as f64),
             log_probs: None,     // TODO  output.logprobs
+            top_logprobs: None,
             finish_reason: None,
             index: None,
         };

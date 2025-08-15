@@ -27,7 +27,7 @@ spec:
         timeoutSeconds: 2
         failureThreshold: 3
       dynamoNamespace: hello-world
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:

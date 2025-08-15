@@ -58,7 +58,8 @@ ensure-yq:
 
 .PHONY: manifests
 manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=0 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
 		yq eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
@@ -96,6 +97,9 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
+	if [ -d "../helm/crds/templates/" ]; then \
+		cp config/crd/bases/*.yaml ../helm/crds/templates/; \
+	fi
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

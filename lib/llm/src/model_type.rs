@@ -41,4 +41,13 @@ impl ModelType {
     pub fn all() -> Vec<Self> {
         vec![Self::Chat, Self::Completion, Self::Embedding, Self::Backend]
     }
+
+    pub fn as_endpoint_type(&self) -> crate::endpoint_type::EndpointType {
+        match self {
+            Self::Chat => crate::endpoint_type::EndpointType::Chat,
+            Self::Completion => crate::endpoint_type::EndpointType::Completion,
+            Self::Embedding => crate::endpoint_type::EndpointType::Embedding,
+            Self::Backend => panic!("Backend model type does not map to an endpoint type"),
+        }
+    }
 }

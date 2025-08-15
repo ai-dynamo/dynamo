@@ -68,7 +68,7 @@ Markers help control which tests run under different conditions. Add these decor
 ### Component-specific markers
 - `@pytest.mark.vllm` - Framework tests
 - `@pytest.mark.sglang` - Framework tests
-- `@pytest.mark.tensorrtllm` - Framework tests
+- `@pytest.mark.trtllm_marker` - Framework tests
 - `@pytest.mark.planner` - Planner component tests
 - `@pytest.mark.kv_router` - KV Router component tests
 - etc.

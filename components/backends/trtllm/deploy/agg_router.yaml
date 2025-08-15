@@ -8,35 +8,9 @@ metadata:
 spec:
   services:
     Frontend:
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        periodSeconds: 5
-        timeoutSeconds: 3
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 3
-        failureThreshold: 5
       dynamoNamespace: trtllm-agg-router
-      componentType: main
+      componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "1"
-          memory: "2Gi"
-        limits:
-          cpu: "1"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
@@ -48,20 +22,6 @@ spec:
             - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
     TRTLLMWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 3
-        failureThreshold: 3
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 3
-        failureThreshold: 60
       dynamoNamespace: trtllm-agg-router
       componentType: worker
       replicas: 2
@@ -74,32 +34,17 @@ spec:
           cpu: "10"
           memory: "20Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.trtllm"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--extra-engine-args"
-            - "engine_configs/agg.yaml"
-            - "--publish-events-and-metrics"
+            - >-
+              python3 -m dynamo.trtllm
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --extra-engine-args engine_configs/agg.yaml
+              --publish-events-and-metrics

@@ -4,7 +4,7 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use super::{SamplingOptions, StopConditions};
+use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::TokenIdType;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
@@ -28,6 +28,10 @@ pub struct PreprocessedRequest {
     /// More documentation on how and on the order in which sampling options are applied
     /// are needed.
     pub sampling_options: SamplingOptions,
+
+    /// OutputOptions are options that control the output of the inference engine such as whether
+    /// to return log probabilities, or whether to skip special tokens in output.
+    pub output_options: OutputOptions,
 
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.

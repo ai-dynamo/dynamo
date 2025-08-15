@@ -13,40 +13,40 @@ import (
 
 func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 	tests := []struct {
-		name                    string
-		numberOfNodes           int32
-		role                    Role
-		multinodeDeploymentType commonconsts.MultinodeDeploymentType
-		component               *v1alpha1.DynamoComponentDeploymentOverridesSpec
-		expectedVolumeMounts    []corev1.VolumeMount
-		expectedCommand         []string
-		expectedArgs            []string
-		expectedEnv             []corev1.EnvVar
-		expectLivenessRemoved   bool
-		expectReadinessRemoved  bool
-		expectStartupRemoved    bool
-		expectedReadinessProbe  *corev1.Probe
+		name                   string
+		numberOfNodes          int32
+		role                   Role
+		multinodeDeployer      MultinodeDeployer
+		component              *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectedVolumeMounts   []corev1.VolumeMount
+		expectedCommand        []string
+		expectedArgs           []string
+		expectedEnv            []corev1.EnvVar
+		expectLivenessRemoved  bool
+		expectReadinessRemoved bool
+		expectStartupRemoved   bool
+		expectedReadinessProbe *corev1.Probe
 	}{
 		{
-			name:                    "Single node - no changes",
-			numberOfNodes:           1,
-			role:                    RoleMain,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
-			expectedVolumeMounts:    []corev1.VolumeMount{},
-			expectedCommand:         []string{},
-			expectedArgs:            []string{"python3", "--model", "test"},
-			expectedEnv:             []corev1.EnvVar{},
-			expectLivenessRemoved:   false,
-			expectReadinessRemoved:  false,
-			expectStartupRemoved:    false,
-			expectedReadinessProbe:  nil,
+			name:                   "Single node - no changes",
+			numberOfNodes:          1,
+			role:                   RoleMain,
+			multinodeDeployer:      &GroveMultinodeDeployer{},
+			component:              &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			expectedVolumeMounts:   []corev1.VolumeMount{},
+			expectedCommand:        []string{},
+			expectedArgs:           []string{"python3", "--model", "test"},
+			expectedEnv:            []corev1.EnvVar{},
+			expectLivenessRemoved:  false,
+			expectReadinessRemoved: false,
+			expectStartupRemoved:   false,
+			expectedReadinessProbe: nil,
 		},
 		{
-			name:                    "Multinode leader with GPU resources",
-			numberOfNodes:           3,
-			role:                    RoleLeader,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			name:              "Multinode leader with GPU resources",
+			numberOfNodes:     3,
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					Resources: &common.Resources{
@@ -70,11 +70,11 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectedReadinessProbe: nil,
 		},
 		{
-			name:                    "Multinode worker",
-			numberOfNodes:           3,
-			role:                    RoleWorker,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			name:              "Multinode worker",
+			numberOfNodes:     3,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			expectedVolumeMounts: []corev1.VolumeMount{
 				{Name: commonconsts.MpiRunSshSecretName, MountPath: "/ssh-pk", ReadOnly: true},
 			},
@@ -99,10 +99,10 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			},
 		},
 		{
-			name:                    "Multinode leader with LWS deployment",
-			numberOfNodes:           2,
-			role:                    RoleLeader,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeLWS,
+			name:              "Multinode leader with LWS deployment",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					Resources: &common.Resources{
@@ -138,7 +138,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			}
 
 			// Call UpdateContainer
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, tt.multinodeDeploymentType, "test-service")
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
 
 			// Use helper functions to validate results
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
@@ -284,46 +284,46 @@ func validateProbeDetails(t *testing.T, actual, expected *corev1.Probe) {
 
 func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 	tests := []struct {
-		name                    string
-		numberOfNodes           int32
-		role                    Role
-		multinodeDeploymentType commonconsts.MultinodeDeploymentType
-		initialVolumes          []corev1.Volume
-		expectedVolumeCount     int
-		shouldHaveSSHVolume     bool
+		name                string
+		numberOfNodes       int32
+		role                Role
+		multinodeDeployer   MultinodeDeployer
+		initialVolumes      []corev1.Volume
+		expectedVolumeCount int
+		shouldHaveSSHVolume bool
 	}{
 		{
-			name:                    "Single node - no SSH volume added",
-			numberOfNodes:           1,
-			role:                    RoleMain,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			initialVolumes:          []corev1.Volume{},
-			expectedVolumeCount:     0,
-			shouldHaveSSHVolume:     false,
+			name:                "Single node - no SSH volume added",
+			numberOfNodes:       1,
+			role:                RoleMain,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialVolumes:      []corev1.Volume{},
+			expectedVolumeCount: 0,
+			shouldHaveSSHVolume: false,
 		},
 		{
-			name:                    "Multinode leader - SSH volume added",
-			numberOfNodes:           3,
-			role:                    RoleLeader,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			initialVolumes:          []corev1.Volume{},
-			expectedVolumeCount:     1,
-			shouldHaveSSHVolume:     true,
+			name:                "Multinode leader - SSH volume added",
+			numberOfNodes:       3,
+			role:                RoleLeader,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialVolumes:      []corev1.Volume{},
+			expectedVolumeCount: 1,
+			shouldHaveSSHVolume: true,
 		},
 		{
-			name:                    "Multinode worker - SSH volume added",
-			numberOfNodes:           2,
-			role:                    RoleWorker,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeLWS,
-			initialVolumes:          []corev1.Volume{},
-			expectedVolumeCount:     1,
-			shouldHaveSSHVolume:     true,
+			name:                "Multinode worker - SSH volume added",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &LWSMultinodeDeployer{},
+			initialVolumes:      []corev1.Volume{},
+			expectedVolumeCount: 1,
+			shouldHaveSSHVolume: true,
 		},
 		{
-			name:                    "Multinode with existing volumes",
-			numberOfNodes:           2,
-			role:                    RoleLeader,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			name:              "Multinode with existing volumes",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialVolumes: []corev1.Volume{
 				{Name: "existing-volume"},
 			},
@@ -347,7 +347,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentOverridesSpec{}
 
 			// Call UpdatePodSpec
-			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, component, tt.multinodeDeploymentType, "test-service")
+			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, component, "test-service")
 
 			// Check volume count
 			if len(podSpec.Volumes) != tt.expectedVolumeCount {
@@ -388,18 +388,18 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 
 func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 	tests := []struct {
-		name                    string
-		numberOfNodes           int32
-		multinodeDeploymentType commonconsts.MultinodeDeploymentType
-		serviceName             string
-		expectedContains        []string
-		expectedNodeCount       int32
+		name              string
+		numberOfNodes     int32
+		multinodeDeployer MultinodeDeployer
+		serviceName       string
+		expectedContains  []string
+		expectedNodeCount int32
 	}{
 		{
-			name:                    "Grove deployment with 3 nodes",
-			numberOfNodes:           3,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			serviceName:             "test-service",
+			name:              "Grove deployment with 3 nodes",
+			numberOfNodes:     3,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test-service",
 			expectedContains: []string{
 				"test-service-ldr-0",
 				"test-service-wkr-0",
@@ -410,10 +410,10 @@ func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 			expectedNodeCount: 3,
 		},
 		{
-			name:                    "LWS deployment with 2 nodes",
-			numberOfNodes:           2,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeLWS,
-			serviceName:             "test-service",
+			name:              "LWS deployment with 2 nodes",
+			numberOfNodes:     2,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			serviceName:       "test-service",
 			expectedContains: []string{
 				"${LWS_LEADER_ADDRESS}",
 				"${LWS_WORKER_1_ADDRESS}",
@@ -421,10 +421,10 @@ func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 			expectedNodeCount: 2,
 		},
 		{
-			name:                    "Grove deployment with 5 nodes",
-			numberOfNodes:           5,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			serviceName:             "worker",
+			name:              "Grove deployment with 5 nodes",
+			numberOfNodes:     5,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "worker",
 			expectedContains: []string{
 				"worker-ldr-0",
 				"worker-wkr-0",
@@ -435,10 +435,10 @@ func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 			expectedNodeCount: 5,
 		},
 		{
-			name:                    "LWS deployment with 4 nodes",
-			numberOfNodes:           4,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeLWS,
-			serviceName:             "worker",
+			name:              "LWS deployment with 4 nodes",
+			numberOfNodes:     4,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			serviceName:       "worker",
 			expectedContains: []string{
 				"${LWS_LEADER_ADDRESS}",
 				"${LWS_WORKER_1_ADDRESS}",
@@ -452,7 +452,7 @@ func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &TRTLLMBackend{}
-			result := backend.generateWorkerHostnames(tt.numberOfNodes, tt.multinodeDeploymentType, tt.serviceName)
+			result := backend.generateWorkerHostnames(tt.numberOfNodes, tt.serviceName, tt.multinodeDeployer)
 
 			for _, expected := range tt.expectedContains {
 				if !strings.Contains(result, expected) {
@@ -538,20 +538,20 @@ func TestTRTLLMBackend_addSSHVolumeMount(t *testing.T) {
 
 func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 	tests := []struct {
-		name                    string
-		numberOfNodes           int32
-		multinodeDeploymentType commonconsts.MultinodeDeploymentType
-		serviceName             string
-		component               *v1alpha1.DynamoComponentDeploymentOverridesSpec
-		initialArgs             []string
-		initialCommand          []string
-		expected                string
+		name              string
+		numberOfNodes     int32
+		multinodeDeployer MultinodeDeployer
+		serviceName       string
+		component         *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		initialArgs       []string
+		initialCommand    []string
+		expected          string
 	}{
 		{
-			name:                    "Leader with args and GPU resources",
-			numberOfNodes:           3,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			serviceName:             "test-service",
+			name:              "Leader with args and GPU resources",
+			numberOfNodes:     3,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test-service",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					Resources: &common.Resources{
@@ -566,20 +566,20 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 6 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-1.${GROVE_HEADLESS_SERVICE} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python3 --model test'",
 		},
 		{
-			name:                    "Leader with command and no GPU resources",
-			numberOfNodes:           2,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeLWS,
-			serviceName:             "worker",
-			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
-			initialArgs:             []string{},
-			initialCommand:          []string{"python", "-m", "worker"},
-			expected:                "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 0 -H ${LWS_LEADER_ADDRESS},${LWS_WORKER_1_ADDRESS} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python -m worker'",
+			name:              "Leader with command and no GPU resources",
+			numberOfNodes:     2,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			serviceName:       "worker",
+			component:         &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
+			initialArgs:       []string{},
+			initialCommand:    []string{"python", "-m", "worker"},
+			expected:          "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 0 -H ${LWS_LEADER_ADDRESS},${LWS_WORKER_1_ADDRESS} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python -m worker'",
 		},
 		{
-			name:                    "Leader with both command and args (args take precedence)",
-			numberOfNodes:           2,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			serviceName:             "test",
+			name:              "Leader with both command and args (args take precedence)",
+			numberOfNodes:     2,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					Resources: &common.Resources{
@@ -594,10 +594,10 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch launch --config test.yaml'",
 		},
 		{
-			name:                    "Leader with all environment variables forwarded",
-			numberOfNodes:           2,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			serviceName:             "test",
+			name:              "Leader with all environment variables forwarded",
+			numberOfNodes:     2,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					Resources: &common.Resources{
@@ -612,10 +612,10 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch serve --model test'",
 		},
 		{
-			name:                    "Leader with overlapping environment variables (deduplication test)",
-			numberOfNodes:           2,
-			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
-			serviceName:             "test",
+			name:              "Leader with overlapping environment variables (deduplication test)",
+			numberOfNodes:     2,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					Resources: &common.Resources{
@@ -648,7 +648,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				}
 			}
 
-			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.multinodeDeploymentType, tt.serviceName, tt.component)
+			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.serviceName, tt.component, tt.multinodeDeployer)
 
 			// Check that command is set correctly
 			expectedCommand := []string{"/bin/sh", "-c"}

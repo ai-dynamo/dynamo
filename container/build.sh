@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -57,8 +57,8 @@ DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TENSORRTLLM_BASE_IMAGE_TAG=25.05-py3
+TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
+TRTLLM_BASE_IMAGE_TAG=25.05-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -96,7 +96,7 @@ TRTLLM_GIT_URL=""
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
-# Need to update the Dockerfile.tensorrt_llm to use the ai-dynamo[trtllm] package.
+# Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc4"
 TENSORRTLLM_PIP_WHEEL=""
 
@@ -349,7 +349,7 @@ show_image_options() {
     echo ""
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
-    if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+    if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo "   Tensorrtllm_Pip_Wheel: '${TENSORRTLLM_PIP_WHEEL}'"
     fi
     echo "   Build Context: '${BUILD_CONTEXT}'"
@@ -404,8 +404,8 @@ fi
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
-elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
+elif [[ $FRAMEWORK == "TRTLLM" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
@@ -471,7 +471,7 @@ check_wheel_file() {
     fi
 }
 
-if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
         if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
             echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."

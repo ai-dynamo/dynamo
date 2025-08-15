@@ -231,6 +231,7 @@ impl
                     text: data.text,
                     cum_log_probs: data.cum_log_probs,
                     log_probs: data.log_probs,
+                    top_logprobs: data.top_logprobs,
                     finish_reason: data.finish_reason,
                     //mdcsum: mdcsum.clone(),
                     index: data.index,

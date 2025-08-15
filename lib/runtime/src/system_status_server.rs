@@ -209,6 +209,7 @@ pub async fn spawn_system_status_server(
             tracing::error!("System status server error: {}", e);
         }
     });
+
     Ok((actual_address, handle))
 }
 
@@ -254,7 +255,18 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
-    // Get metrics from the registry
+    // Execute all the callbacks starting at the DistributedRuntime level
+    assert!(state.drt().basename() == "");
+    let callback_results = state
+        .drt()
+        .execute_metrics_callbacks(&state.drt().hierarchy());
+    for result in callback_results {
+        if let Err(e) = result {
+            tracing::error!("Error executing metrics callback: {}", e);
+        }
+    }
+
+    // Get all metrics from DistributedRuntime (top-level)
     match state.drt().prometheus_metrics_fmt() {
         Ok(response) => (StatusCode::OK, response),
         Err(e) => {
@@ -341,12 +353,20 @@ mod tests {
         let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
         println!("Full metrics response:\n{}", response);
 
+        // Filter out NATS client metrics for comparison
+        use crate::metrics::prometheus_names::nats as nats_metrics;
+
+        let filtered_response: String = response
+            .lines()
+            .filter(|line| !line.contains(nats_metrics::PREFIX))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let expected = "\
 # HELP dynamo_component_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
 # TYPE dynamo_component_dynamo_uptime_seconds gauge
-dynamo_component_dynamo_uptime_seconds 42
-";
-        assert_eq!(response, expected);
+dynamo_component_dynamo_uptime_seconds 42";
+        assert_eq!(filtered_response, expected);
     }
 
     #[cfg(feature = "integration")]

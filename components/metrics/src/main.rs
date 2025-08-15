@@ -60,6 +60,10 @@ struct Args {
     #[arg(long)]
     endpoint: String,
 
+    /// Model name for the target component (optional)
+    #[arg(long)]
+    model_name: Option<String>,
+
     /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
     #[arg(long, default_value = "1")]
     poll_interval: u64,
@@ -109,6 +113,7 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
     Ok(LLMWorkerLoadCapacityConfig {
         component_name: args.component.clone(),
         endpoint_name: args.endpoint.clone(),
+        model_name: args.model_name.clone(),
     })
 }
 

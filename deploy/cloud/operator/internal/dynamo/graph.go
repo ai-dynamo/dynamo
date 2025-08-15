@@ -21,9 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	istioNetworking "istio.io/api/networking/v1beta1"
@@ -96,7 +96,6 @@ type DynDeploymentServiceConfig struct {
 type ServiceArgs struct {
 	Workers   *int32     `json:"workers,omitempty"`
 	Resources *Resources `json:"resources,omitempty"`
-	TotalGpus *int32     `json:"total_gpus,omitempty"`
 }
 
 func (s ServiceConfig) GetNamespace() *string {
@@ -114,31 +113,6 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 	var config DynDeploymentConfig
 	err := json.Unmarshal(jsonContent, &config)
 	return config, err
-}
-
-func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComponentDeployment) error {
-	if serviceArgs.Resources != nil &&
-		serviceArgs.Resources.GPU != nil && *serviceArgs.Resources.GPU != "" && *serviceArgs.Resources.GPU != "0" &&
-		serviceArgs.TotalGpus != nil && *serviceArgs.TotalGpus > 0 {
-
-		gpusPerNodeStr := *serviceArgs.Resources.GPU
-		gpusPerNode, errGpusPerNode := strconv.Atoi(gpusPerNodeStr)
-
-		if errGpusPerNode != nil {
-			return fmt.Errorf("failed to parse GPUs per node value '%s' for service %s: %w", gpusPerNodeStr, deployment.Spec.ServiceName, errGpusPerNode)
-		}
-
-		// Calculate lwsSize using ceiling division to ensure enough nodes for all GPUs
-		lwsSize := (int(*serviceArgs.TotalGpus) + gpusPerNode - 1) / gpusPerNode
-		if lwsSize > 1 {
-			if deployment.Spec.Annotations == nil {
-				deployment.Spec.Annotations = make(map[string]string)
-			}
-			deployment.Spec.Annotations["nvidia.com/lws-size"] = strconv.Itoa(lwsSize)
-			deployment.Spec.Annotations["nvidia.com/deployment-type"] = "leader-worker"
-		}
-	}
-	return nil
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
@@ -191,7 +165,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			// finally set the service account name
 			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
-		if deployment.IsMainComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+		if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
 			deployment.Spec.Ingress = defaultIngressSpec
 		}
 		// merge the envs from the parent deployment with the envs from the service
@@ -219,7 +193,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
 // It updates the port for the given service (if it is the main component)
 func updateDynDeploymentConfig(dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment, newPort int) error {
-	if dynamoDeploymentComponent.IsMainComponent() {
+	if dynamoDeploymentComponent.IsFrontendComponent() {
 		dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
 		if dynamoDeploymentConfig != nil {
 			var config map[string]any
@@ -291,9 +265,6 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 				requests.Custom = componentDynConfig.ServiceArgs.Resources.Custom
 				limits.Custom = componentDynConfig.ServiceArgs.Resources.Custom
 			}
-			if err := SetLwsAnnotations(componentDynConfig.ServiceArgs, dynamoDeploymentComponent); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -331,21 +302,6 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-// getNumberOfNodes extracts the numberOfNodes from resources.nodes
-func getNumberOfNodes(resources *common.Resources) int32 {
-	if resources != nil && resources.Requests != nil && resources.Requests.Nodes != "" {
-		if nodes, err := strconv.ParseInt(resources.Requests.Nodes, 10, 32); err == nil {
-			return int32(nodes)
-		}
-	}
-	if resources != nil && resources.Limits != nil && resources.Limits.Nodes != "" {
-		if nodes, err := strconv.ParseInt(resources.Limits.Nodes, 10, 32); err == nil {
-			return int32(nodes)
-		}
-	}
-	return 1 // Default to single node
-}
-
 // applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodGangSet
 // based on the backend framework and multinode deployment patterns.
 //
@@ -360,7 +316,11 @@ func applyCliqueStartupDependencies(
 	backendFramework BackendFramework,
 	numberOfNodes int32,
 ) {
-	if numberOfNodes <= 1 {
+	// deactivated for now.
+	// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+	deactivated := true
+
+	if deactivated || numberOfNodes <= 1 {
 		return // No dependencies for single-node deployments
 	}
 
@@ -630,19 +590,25 @@ const (
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string)
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+}
+
+type MultinodeDeployer interface {
+	GetLeaderHostname(serviceName string) string
+	GetHostNames(serviceName string, numberOfNodes int32) []string
+	GetNodeRank() string
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -661,6 +627,17 @@ func BackendFactory(backendFramework BackendFramework) Backend {
 	}
 }
 
+func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDeploymentType) MultinodeDeployer {
+	switch multinodeDeploymentType {
+	case commonconsts.MultinodeDeploymentTypeGrove:
+		return &GroveMultinodeDeployer{}
+	case commonconsts.MultinodeDeploymentTypeLWS:
+		return &LWSMultinodeDeployer{}
+	default:
+		return nil
+	}
+}
+
 // isWorkerComponent checks if a component is a worker that needs backend framework detection
 func isWorkerComponent(componentType string) bool {
 	return componentType == commonconsts.ComponentTypeWorker
@@ -668,11 +645,6 @@ func isWorkerComponent(componentType string) bool {
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
 func addStandardEnvVars(container *corev1.Container, controllerConfig controller_common.Config) {
-	container.Env = append(container.Env, corev1.EnvVar{
-		Name:  commonconsts.EnvDynamoServicePort,
-		Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-	})
-
 	if controllerConfig.NatsAddress != "" {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "NATS_SERVER",
@@ -702,47 +674,60 @@ func GenerateBasePodSpec(
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
 ) (corev1.PodSpec, error) {
-	container := corev1.Container{
-		Name:           "main",
-		LivenessProbe:  component.LivenessProbe,
-		ReadinessProbe: component.ReadinessProbe,
-		Env:            component.Envs,
-		Ports: []corev1.ContainerPort{
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.DynamoContainerPortName,
-				ContainerPort: int32(commonconsts.DynamoServicePort),
-			},
-		},
+	// Start with base container generated per component type
+	componentDefaults := ComponentDefaultsFactory(component.ComponentType, numberOfNodes)
+	container, err := componentDefaults.GetBaseContainer(numberOfNodes)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
 	}
-	// Add system port for worker components
-	if component.ComponentType == commonconsts.ComponentTypeWorker {
-		container.Ports = append(container.Ports, corev1.ContainerPort{
-			Protocol:      corev1.ProtocolTCP,
-			Name:          commonconsts.DynamoSystemPortName,
-			ContainerPort: int32(commonconsts.DynamoSystemPort),
-		})
-	}
-	// First merge the mainContainer from extraPodSpec to get the base command and args
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
 		main := component.ExtraPodSpec.MainContainer.DeepCopy()
 		if main != nil {
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
-			err := mergo.Merge(&container, *main, mergo.WithOverride)
+			err = mergo.Merge(&container, *main, mergo.WithOverride)
 			if err != nil {
 				return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
+
+			// main container fields that require special handling
 			container.Env = MergeEnvs(component.Envs, container.Env)
+			// Note: startup probe does not have its own top level field so it must be passed in extraPodSpec.MainContainer
+			// We want to overwrite entirely if provided rather than merge
+			if main.StartupProbe != nil {
+				container.StartupProbe = main.StartupProbe
+			}
 		}
 	}
 
-	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
+	// Merge probes entirely if they are passed (no partial merge)
+	if component.LivenessProbe != nil {
+		container.LivenessProbe = component.LivenessProbe.DeepCopy()
+	}
+	if component.ReadinessProbe != nil {
+		container.ReadinessProbe = component.ReadinessProbe.DeepCopy()
+	}
+
+	overrideResources, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
 	}
-	if resourcesConfig != nil {
-		container.Resources = *resourcesConfig
+	// Requests
+	if overrideResources != nil && len(overrideResources.Requests) > 0 {
+		if container.Resources.Requests == nil {
+			container.Resources.Requests = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Requests, overrideResources.Requests)
 	}
+
+	// Limits
+	if overrideResources != nil && len(overrideResources.Limits) > 0 {
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = corev1.ResourceList{}
+		}
+		maps.Copy(container.Resources.Limits, overrideResources.Limits)
+	}
+
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
 		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
@@ -780,20 +765,35 @@ func GenerateBasePodSpec(
 	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(&container.Resources)
 	volumes = append(volumes, shmVolume)
 	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
+
 	// Apply backend-specific container modifications
+	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
+	if multinodeDeployer == nil {
+		return corev1.PodSpec{}, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
+	}
 	backend := BackendFactory(backendFramework)
 	if backend == nil {
 		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
-	var podSpec corev1.PodSpec
+	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
+
+	// get base podspec from component
+	podSpec, err := componentDefaults.GetBasePodSpec(numberOfNodes)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to get base podspec: %w", err)
+	}
+
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
-		podSpec = *component.ExtraPodSpec.PodSpec.DeepCopy()
+		// merge extraPodSpec PodSpec with base podspec
+		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
+		if err != nil {
+			return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+		}
 	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
-	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
+	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 	return podSpec, nil
 }
 
@@ -856,7 +856,7 @@ func GenerateGrovePodGangSet(
 			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
 		}
 
-		numberOfNodes := getNumberOfNodes(component.Resources)
+		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
 		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
 		var cliqueNames []string
@@ -1114,7 +1114,7 @@ func GenerateBasePodSpecForController(
 	// Convert to our interface
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
 
-	numberOfNodes := getNumberOfNodes(dynComponent.Spec.DynamoComponentDeploymentSharedSpec.Resources)
+	numberOfNodes := componentSpec.GetNumberOfNodes()
 
 	// Determine backend framework using hybrid approach
 	backendFramework, err := getBackendFrameworkFromDynamoComponent(dynComponent)

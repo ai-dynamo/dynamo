@@ -30,7 +30,10 @@
 //! TODO: Top-level Overview of Endpoints/Functions
 
 use crate::{
-    config::HealthStatus, discovery::Lease, metrics::MetricsRegistry, service::ServiceSet,
+    config::HealthStatus,
+    discovery::Lease,
+    metrics::{prometheus_names, MetricsRegistry},
+    service::ServiceSet,
     transports::etcd::EtcdPath,
 };
 
@@ -45,6 +48,7 @@ use super::{
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
 use crate::protocols::Endpoint as EndpointId;
+use crate::service::ComponentNatsPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -124,6 +128,10 @@ pub struct Component {
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
@@ -220,6 +228,7 @@ impl Component {
             component: self.clone(),
             name: endpoint.into(),
             is_static: self.is_static,
+            labels: Vec::new(),
         }
     }
 
@@ -247,12 +256,86 @@ impl Component {
         Ok(out)
     }
 
+    /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
+    /// embedded in data field of ServiceInfo.
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
         let service_name = self.service_name();
         let service_client = self.drt().service_client();
         service_client
             .collect_services(&service_name, timeout)
             .await
+    }
+
+    /// Add Prometheus metrics for this component's service stats.
+    ///
+    /// Uses a channel to synchronize with the spawned async task, ensuring
+    /// metrics are updated before the callback returns.
+    pub fn add_metrics_callback(&self) -> Result<()> {
+        let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
+
+        let component_clone = self.clone();
+        let mut hierarchies = self.parent_hierarchy();
+        hierarchies.push(self.hierarchy());
+        debug_assert_eq!(
+            hierarchies.last().cloned().unwrap_or_default(),
+            self.service_name()
+        ); // it happens that in component, hierarchy and service name are the same
+
+        // Register a metrics callback that scrapes component statistics
+        let metrics_callback = Arc::new(move || {
+            // Timeout for scraping metrics from components (in milliseconds)
+            // This value is also used by KV Router metrics aggregator (300ms) and other components
+            const METRICS_SCRAPE_TIMEOUT_MS: u64 = 300;
+
+            // Get the current Tokio runtime handle
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|err| anyhow::anyhow!("No Tokio runtime handle available: {}", err))?;
+
+            let m = component_metrics.clone();
+            let c = component_clone.clone();
+
+            // Create a channel to synchronize with the spawned task
+            let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+
+            let timeout = std::time::Duration::from_millis(METRICS_SCRAPE_TIMEOUT_MS);
+            handle.spawn(async move {
+                let result = match c.scrape_stats(timeout).await {
+                    Ok(service_set) => {
+                        m.update_from_service_set(&service_set);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        // Reset metrics on failure
+                        m.reset_to_zeros();
+                        Err(anyhow::anyhow!("Failed to scrape stats: {}", err))
+                    }
+                };
+
+                // Send the result back to the waiting thread
+                // If send fails, the receiver has already given up waiting
+                let _ = tx.send(result);
+            });
+
+            // Wait for the spawned task to complete (with a timeout to prevent hanging)
+            // Add 100ms buffer to the scrape timeout to account for processing overhead
+            let recv_timeout = std::time::Duration::from_millis(METRICS_SCRAPE_TIMEOUT_MS + 100);
+            match rx.recv_timeout(recv_timeout) {
+                Ok(result) => result, // Return the actual result from scraping
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    component_metrics.reset_to_zeros();
+                    Err(anyhow::anyhow!("Metrics collection timed out"))
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    component_metrics.reset_to_zeros();
+                    Err(anyhow::anyhow!("Metrics collection task failed"))
+                }
+            }
+        });
+
+        self.drt()
+            .register_metrics_callback(hierarchies, metrics_callback);
+
+        Ok(())
     }
 
     /// TODO
@@ -285,6 +368,9 @@ pub struct Endpoint {
     name: String,
 
     is_static: bool,
+
+    /// Additional labels for metrics
+    labels: Vec<(String, String)>,
 }
 
 impl Hash for Endpoint {
@@ -447,6 +533,10 @@ pub struct Namespace {
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -488,11 +578,24 @@ impl Namespace {
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
-        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
+        let component = ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
             .is_static(self.is_static)
-            .build()?)
+            .build()?;
+
+        // Register the metrics callback for this component.
+        // If registration fails, log a warning but do not propagate the error,
+        // as metrics are not mission critical and should not block component creation.
+        if let Err(err) = component.add_metrics_callback() {
+            tracing::warn!(
+                "Failed to add metrics callback for component '{}': {}",
+                component.service_name(),
+                err
+            );
+        }
+
+        Ok(component)
     }
 
     /// Create a [`Namespace`] in the parent namespace
