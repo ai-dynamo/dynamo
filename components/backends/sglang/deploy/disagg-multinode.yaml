@@ -28,7 +28,8 @@ spec:
           args:
             - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg-multinode && python3 -m dynamo.frontend --http-port=8000"
     decode:
-      numberOfNodes: 2
+      multinode:
+        nodeCount: 2
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg-multinode
       componentType: worker
@@ -67,7 +68,8 @@ spec:
             - "--mem-fraction-static"
             - "0.82"
     prefill:
-      numberOfNodes: 2
+      multinode:
+        nodeCount: 2
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
       componentType: worker

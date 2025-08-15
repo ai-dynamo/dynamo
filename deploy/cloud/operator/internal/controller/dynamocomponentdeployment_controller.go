@@ -453,14 +453,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 	labels := make(map[string]string)
 	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 
-	lwsSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
-	if lwsSize <= 0 {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: LWS size must be greater than 0, got %d", lwsSize)
-	}
-	if lwsSize == 1 {
-		return nil, false, errors.New("generateVolcanoPodGroup: LWS size of 1 means that the LWS is not needed, change the requested number of nodes to be greater than 1")
-	}
-	minMember := lwsSize
+	minMember := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	podGroup := &volcanov1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{

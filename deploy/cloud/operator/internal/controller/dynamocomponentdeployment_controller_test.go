@@ -526,7 +526,9 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								NumberOfNodes:   &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
 							},
@@ -551,81 +553,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 			wantErr: false,
 		},
 		{
-			name: "invalid number of nodes (zero)",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-zero",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								NumberOfNodes:   &[]int32{0}[0],
-								ServiceName:     "service-invalid-lws-size-zero",
-								DynamoNamespace: &[]string{"default"}[0],
-							},
-						},
-					},
-					instanceID: ptr.To(2),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "invalid lws size annotation (negative)",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-negative",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-invalid-lws-size-negative",
-								DynamoNamespace: &[]string{"default"}[0],
-								NumberOfNodes:   &[]int32{-1}[0],
-							},
-						},
-					},
-					instanceID: ptr.To(3),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
-			name: "lws size of 1 - lws should not be used",
-			args: args{
-				ctx: context.Background(),
-				opt: generateResourceOption{
-					dynamoComponentDeployment: &v1alpha1.DynamoComponentDeployment{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-valid-lws-size-one",
-							Namespace: "default",
-						},
-						Spec: v1alpha1.DynamoComponentDeploymentSpec{
-							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								ServiceName:     "service-valid-lws-size-one",
-								DynamoNamespace: &[]string{"default"}[0],
-								NumberOfNodes:   &[]int32{1}[0],
-							},
-						},
-					},
-					instanceID: ptr.To(4),
-				},
-			},
-			want:    nil,
-			want1:   false,
-			wantErr: true,
-		},
-		{
 			name: "nil instanceID",
 			args: args{
 				ctx: context.Background(),
@@ -639,7 +566,9 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service-nil-instanceid",
 								DynamoNamespace: &[]string{"default"}[0],
-								NumberOfNodes:   &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 							},
 						},
 					},
@@ -664,7 +593,9 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service-negative-instanceid",
 								DynamoNamespace: &[]string{"default"}[0],
-								NumberOfNodes:   &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 							},
 						},
 					},
@@ -765,7 +696,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								ComponentType:   string(commonconsts.ComponentTypeWorker),
 								ServiceName:     "test-lws-deploy-service",
 								DynamoNamespace: &[]string{"default"}[0],
-								NumberOfNodes:   &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								Resources: &common.Resources{
 									Requests: &common.ResourceItem{
 										CPU:    "300m",
@@ -1016,7 +949,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								NumberOfNodes: &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								Resources: &common.Resources{
 									Limits: &common.ResourceItem{
 										GPU: "1",
@@ -1058,7 +993,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponent: "test-comp", DynamoTag: "test",
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								NumberOfNodes: &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								Resources: &common.Resources{
 									Limits: &common.ResourceItem{
 										GPU: "1",

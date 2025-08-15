@@ -1540,7 +1540,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"worker": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									NumberOfNodes: &[]int32{3}[0],
+									Multinode: &v1alpha1.MultinodeSpec{
+										NodeCount: 3,
+									},
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
 											"nvidia.com/annotation1": "annotation1",
@@ -2227,7 +2229,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"worker": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									NumberOfNodes: &[]int32{3}[0],
+									Multinode: &v1alpha1.MultinodeSpec{
+										NodeCount: 3,
+									},
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
 											"nvidia.com/annotation1": "annotation1",
@@ -4015,7 +4019,9 @@ func TestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 						"main": {
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-								NumberOfNodes: &[]int32{2}[0],
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								ComponentType: "worker", // Must be worker to trigger backend detection
 								Replicas:      ptr.To(int32(1)),
 								Resources: &common.Resources{

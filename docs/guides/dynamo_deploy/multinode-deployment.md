@@ -4,7 +4,7 @@ This guide explains how to deploy Dynamo workloads across multiple nodes. Multin
 
 ## Overview
 
-Dynamo supports multinode deployments through the `numberOfNodes` field in resource specifications. This field allows you to:
+Dynamo supports multinode deployments through the `multinode` section in resource specifications. This allows you to:
 
 - Distribute workloads across multiple physical nodes
 - Scale GPU resources beyond a single machine
@@ -58,12 +58,13 @@ Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It
 
 ## Core Concepts
 
-### The `numberOfNodes` Field
+### The `multinode` Section
 
-The `numberOfNodes` field in a resource specification defines how many physical nodes the workload should span:
+The `multinode` section in a resource specification defines how many physical nodes the workload should span:
 
 ```yaml
-numberOfNodes: 2
+multinode:
+  nodeCount: 2
 resources:
   requests:
     cpu: "10"
@@ -76,23 +77,24 @@ resources:
 
 ### GPU Distribution
 
-The relationship between `numberOfNodes` and `gpu` is multiplicative:
+The relationship between `multinode.nodeCount` and `gpu` is multiplicative:
 
-- **`numberOfNodes`**: Number of physical nodes
+- **`multinode.nodeCount`**: Number of physical nodes
 - **`gpu`**: Number of GPUs per node
-- **Total GPUs**: `numberOfNodes × gpu`
+- **Total GPUs**: `multinode.nodeCount × gpu`
 
 **Example:**
-- `numberOfNodes: "2"` + `gpu: "4"` = 8 total GPUs (4 GPUs per node across 2 nodes)
-- `numberOfNodes: "4"` + `gpu: "8"` = 32 total GPUs (8 GPUs per node across 4 nodes)
+- `multinode.nodeCount: "2"` + `gpu: "4"` = 8 total GPUs (4 GPUs per node across 2 nodes)
+- `multinode.nodeCount: "4"` + `gpu: "8"` = 32 total GPUs (8 GPUs per node across 4 nodes)
 
 ### Tensor Parallelism Alignment
 
 The tensor parallelism (`tp-size` or `--tp`) in your command/args must match the total number of GPUs:
 
 ```yaml
-# Example: 2 numberOfNodes × 4 GPUs = 8 total GPUs
-numberOfNodes: 2
+# Example: 2 multinode.nodeCount × 4 GPUs = 8 total GPUs
+multinode:
+  nodeCount: 2
 resources:
   limits:
     gpu: "4"
@@ -100,7 +102,7 @@ resources:
 # Command args must use tp-size=8
 args:
   - "--tp-size"
-  - "8"  # Must equal numberOfNodes × gpu
+  - "8"  # Must equal multinode.nodeCount × gpu
 ```
 
 
@@ -112,4 +114,4 @@ For additional support and examples, see the working multinode configurations in
 - **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../components/backends/trtllm/deploy/)
 - **vLLM**: [components/backends/vllm/deploy/](../../components/backends/vllm/deploy/)
 
-These examples demonstrate proper usage of the `numberOfNodes` field with corresponding `gpu` limits and correct `tp-size` configuration.
+These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

@@ -10108,13 +10108,21 @@ spec:
                             format: int32
                             type: integer
                         type: object
-                      numberOfNodes:
-                        default: 1
-                        description: |-
-                          Indicates the number of nodes to deploy for multinode components.
-                          Total number of GPUs is NumberOfNodes * GPU limit.
-                        format: int32
-                        type: integer
+                      multinode:
+                        description: Multinode is the configuration for multinode components.
+                        properties:
+                          nodeCount:
+                            default: 1
+                            description: |-
+                              Indicates the number of nodes to deploy for multinode components.
+                              Total number of GPUs is NumberOfNodes * GPU limit.
+                              Must be greater than 1.
+                            format: int32
+                            minimum: 2
+                            type: integer
+                        required:
+                          - nodeCount
+                        type: object
                       pvc:
                         description: PVC config describing volumes to be mounted by the component.
                         properties:
