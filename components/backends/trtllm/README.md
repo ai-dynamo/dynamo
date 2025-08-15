@@ -85,21 +85,21 @@ docker compose -f deploy/docker-compose.yml up -d
 apt-get update && apt-get -y install git git-lfs
 
 # On an x86 machine:
-./container/build.sh --framework tensorrtllm
+./container/build.sh --framework trtllm
 
 # On an ARM machine:
-./container/build.sh --framework tensorrtllm --platform linux/arm64
+./container/build.sh --framework trtllm --platform linux/arm64
 
 # Build the container with the default experimental TensorRT-LLM commit
 # WARNING: This is for experimental feature testing only.
 # The container should not be used in a production environment.
-./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit
+./container/build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit
 ```
 
 ### Run container
 
 ```bash
-./container/run.sh --framework tensorrtllm -it
+./container/run.sh --framework trtllm -it
 ```
 
 ## Single Node Examples
@@ -171,7 +171,7 @@ export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
 Notes:
 - MTP is only available within the container built with the experimental TensorRT-LLM commit. Please add --use-default-experimental-tensorrtllm-commit to the arguments of the build.sh script.
 
-  Example: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
+  Example: `./container/build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit`
 
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
 - MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
@@ -189,7 +189,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](deploy/README.md).
 
 ### Client
 
@@ -333,7 +333,7 @@ This is an experimental feature that requires using a specific TensorRT-LLM comm
 To enable it build the dynamo container with the `--tensorrtllm-commit` flag, followed by the commit hash:
 
 ```bash
-./container/build.sh --framework tensorrtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
+./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
 ```
 
 #### How to Use

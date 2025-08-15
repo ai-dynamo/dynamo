@@ -91,7 +91,6 @@ pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Re
     let endpoint = drt
         .namespace(DEFAULT_NAMESPACE)?
         .component(DEFAULT_COMPONENT)?
-        .add_labels(&[("model", DEFAULT_MODEL_NAME)])?
         .service_builder()
         .create()
         .await?

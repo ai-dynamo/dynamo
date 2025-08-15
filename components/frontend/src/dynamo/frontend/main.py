@@ -35,6 +35,8 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 
+from . import __version__
+
 
 def validate_static_endpoint(value):
     """Validate that static-endpoint is three words separated by dots."""
@@ -70,6 +72,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
     parser.add_argument(
         "-i", "--interactive", action="store_true", help="Interactive text chat"

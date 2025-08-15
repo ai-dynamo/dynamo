@@ -4,61 +4,64 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-disagg
+  name: sglang-disagg-multinode
 spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: hf-token-secret
+        key: HF_TOKEN
+  - name: GLOO_SOCKET_IFNAME
+    value: "eth0"
+  backendFramework: sglang
   services:
     Frontend:
-      dynamoNamespace: sglang-disagg
-      componentType: frontend
+      dynamoNamespace: sglang-disagg-multinode
+      componentType: main
       replicas: 1
-      resources:
-        requests:
-          cpu: "10"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "40Gi"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
-    SGLangDecodeWorker:
+            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg-multinode && python3 -m dynamo.frontend --http-port=8000"
+    decode:
+      multinode:
+        nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
       replicas: 1
       resources:
         requests:
           cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          memory: "40Gi"
         limits:
-          cpu: "32"
-          memory: "80Gi"
-          gpu: "1"
+          cpu: "10"
+          memory: "40Gi"
+          gpu: "4"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
-          command:
-            - /bin/sh
-            - -c
+          command: ["sh", "-c"]
           args:
             - >-
               python3 -m dynamo.sglang.decode_worker
-              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-              --page-size 16
-              --tp 1
+              --model-path meta-llama/Llama-3.3-70B-Instruct
+              --served-model-name meta-llama/Llama-3.3-70B-Instruct
+              --tp-size 8
               --trust-remote-code
               --skip-tokenizer-init
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
-
-    SGLangPrefillWorker:
+              --disaggregation-bootstrap-port 30001
+              --mem-fraction-static 0.82
+    prefill:
+      multinode:
+        nodeCount: 2
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
       componentType: worker
@@ -66,27 +69,25 @@ spec:
       resources:
         requests:
           cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          memory: "40Gi"
         limits:
-          cpu: "32"
-          memory: "80Gi"
-          gpu: "1"
+          cpu: "10"
+          memory: "40Gi"
+          gpu: "4"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
-          command:
-            - /bin/sh
-            - -c
+          command: ["sh", "-c"]
           args:
             - >-
               python3 -m dynamo.sglang.worker
-              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-              --page-size 16
-              --tp 1
+              --model-path meta-llama/Llama-3.3-70B-Instruct
+              --served-model-name meta-llama/Llama-3.3-70B-Instruct
+              --tp-size 8
               --trust-remote-code
               --skip-tokenizer-init
               --disaggregation-mode prefill
               --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --mem-fraction-static 0.82

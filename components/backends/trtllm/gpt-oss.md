@@ -55,7 +55,7 @@ cd $DYNAMO_ROOT
 export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
 
 # Build the container with a specific TensorRT-LLM commit
-docker build --platform linux/arm64 -f container/Dockerfile.tensorrt_llm_prebuilt . \
+docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   --build-arg ARCH=arm64 \
@@ -70,7 +70,7 @@ cd $DYNAMO_ROOT
 
 export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
 
-docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
+docker build -f container/Dockerfile.trtllm_prebuilt . \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   -t $DYNAMO_CONTAINER_IMAGE

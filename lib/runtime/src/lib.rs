@@ -147,6 +147,70 @@ impl SystemHealth {
     }
 }
 
+/// Type alias for runtime callback functions to reduce complexity
+///
+/// This type represents an Arc-wrapped callback function that can be:
+/// - Shared efficiently across multiple threads and contexts
+/// - Cloned without duplicating the underlying closure
+/// - Used in generic contexts requiring 'static lifetime
+///
+/// The Arc wrapper is included in the type to make sharing explicit.
+type RuntimeCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+
+/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
+pub struct MetricsRegistryEntry {
+    /// The Prometheus registry for this prefix
+    pub prometheus_registry: prometheus::Registry,
+    /// List of function callbacks that receive a reference to any MetricsRegistry
+    pub runtime_callbacks: Vec<RuntimeCallback>,
+}
+
+impl MetricsRegistryEntry {
+    /// Create a new metrics registry entry with an empty registry and no callbacks
+    pub fn new() -> Self {
+        Self {
+            prometheus_registry: prometheus::Registry::new(),
+            runtime_callbacks: Vec::new(),
+        }
+    }
+
+    /// Add a callback function that receives a reference to any MetricsRegistry
+    pub fn add_callback(&mut self, callback: RuntimeCallback) {
+        self.runtime_callbacks.push(callback);
+    }
+
+    /// Execute all runtime callbacks and return their results
+    pub fn execute_callbacks(&self) -> Vec<anyhow::Result<()>> {
+        self.runtime_callbacks
+            .iter()
+            .map(|callback| callback())
+            .collect()
+    }
+
+    /// Returns true if a metric with the given name already exists in the Prometheus registry
+    pub fn has_metric_named(&self, metric_name: &str) -> bool {
+        self.prometheus_registry
+            .gather()
+            .iter()
+            .any(|mf| mf.name() == metric_name)
+    }
+}
+
+impl Default for MetricsRegistryEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for MetricsRegistryEntry {
+    fn clone(&self) -> Self {
+        Self {
+            prometheus_registry: self.prometheus_registry.clone(),
+            runtime_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+        }
+    }
+}
+
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
 #[derive(Clone)]
@@ -176,9 +240,7 @@ pub struct DistributedRuntime {
     // Health Status
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
-    // This map associates metric prefixes with their corresponding Prometheus registries.
-    prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
-
-    // Additional labels for metrics
-    labels: Vec<(String, String)>,
+    // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
+    // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
+    hierarchy_to_metricsregistry: Arc<std::sync::RwLock<HashMap<String, MetricsRegistryEntry>>>,
 }
