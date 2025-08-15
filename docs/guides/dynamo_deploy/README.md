@@ -18,6 +18,11 @@ limitations under the License.
 # Deploying Inference Graphs to Kubernetes
 
  We expect users to deploy their inference graphs using CRDs or helm charts.
+ We expect users to deploy their inference graphs using CRDs or helm charts.
+
+# 1. Install Dynamo Cloud.
+
+Prior to deploying an inference graph the user should deploy the Dynamo Cloud Platform. Reference the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud with Helm.
 
 # 1. Install Dynamo Cloud.
 

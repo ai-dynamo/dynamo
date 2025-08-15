@@ -1130,6 +1130,23 @@ class BlockManager:
         """
         ...
 
+class KvbmCacheManager:
+    """
+    A KV cache manager for VLLM
+    """
+
+    def __init__(self, block_manager: BlockManager) -> None:
+        ...
+
+
+class KvbmRequest:
+    """
+    A request for KV cache
+    """
+
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
+        ...
+
 class ZmqKvEventListener:
     """
     A ZMQ-based key-value cache event listener that operates independently

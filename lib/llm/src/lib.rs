@@ -40,6 +40,9 @@ pub mod types;
 #[cfg(feature = "block-manager")]
 pub mod block_manager;
 
+#[cfg(feature = "block-manager")]
+pub mod integrations;
+
 #[cfg(feature = "cuda")]
 pub mod cuda;
 

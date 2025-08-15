@@ -39,6 +39,7 @@ pub type CriticalTaskHandler<Fut> = dyn FnOnce(CancellationToken) -> Fut + Send 
 ///
 /// This is useful for ensuring that critical detached tasks either complete successfully
 /// or trigger appropriate shutdown procedures when they fail.
+#[derive(Debug)]
 pub struct CriticalTaskExecutionHandle {
     monitor_task: JoinHandle<()>,
     graceful_shutdown_token: CancellationToken,

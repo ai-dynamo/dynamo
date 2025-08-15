@@ -50,8 +50,8 @@ where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
 {
-    let src_data = sources.block_data(private::PrivateToken);
-    let dst_data = destinations.block_data_mut(private::PrivateToken);
+    let src_data = sources.block_data();
+    let dst_data = destinations.block_data_mut();
     let memcpy_fn = cuda_memcpy_fn_ptr(&strategy)?;
 
     #[cfg(debug_assertions)]
@@ -100,8 +100,8 @@ where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
 {
-    let src_data = sources.block_data(private::PrivateToken);
-    let dst_data = destinations.block_data_mut(private::PrivateToken);
+    let src_data = sources.block_data();
+    let dst_data = destinations.block_data_mut();
     let memcpy_fn = cuda_memcpy_fn_ptr(&strategy)?;
 
     #[cfg(debug_assertions)]
