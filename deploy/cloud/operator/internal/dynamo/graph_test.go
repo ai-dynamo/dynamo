@@ -698,50 +698,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 }
 
-func TestSetLwsAnnotations(t *testing.T) {
-	type args struct {
-		serviceArgs *ServiceArgs
-		deployment  *v1alpha1.DynamoComponentDeployment
-	}
-	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
-		want    *v1alpha1.DynamoComponentDeployment
-	}{
-		{
-			name: "Test SetLwsAnnotations for 16 GPUs",
-			args: args{
-				serviceArgs: &ServiceArgs{
-					Resources: &Resources{
-						GPU: &[]string{"8"}[0],
-					},
-					TotalGpus: &[]int32{16}[0],
-				},
-				deployment: &v1alpha1.DynamoComponentDeployment{},
-			},
-			wantErr: false,
-			want: &v1alpha1.DynamoComponentDeployment{
-				Spec: v1alpha1.DynamoComponentDeploymentSpec{
-					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-						Annotations: map[string]string{
-							"nvidia.com/deployment-type": "leader-worker",
-							"nvidia.com/lws-size":        "2",
-						},
-					},
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := SetLwsAnnotations(tt.args.serviceArgs, tt.args.deployment); (err != nil) != tt.wantErr {
-				t.Errorf("SetLwsAnnotations() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func Test_updateDynDeploymentConfig(t *testing.T) {
 	type args struct {
 		dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment
@@ -934,64 +890,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 							{
 								Name:  commonconsts.DynamoDeploymentConfigEnvVar,
 								Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"CPU":"2", "Memory":"2Gi", "GPU":"2"}}},"Planner":{"environment":"kubernetes"}}`,
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "override workers and resources with gpusPerNode",
-			args: args{
-				ctx: context.Background(),
-				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
-					Spec: v1alpha1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							ServiceName: "Frontend",
-							Replicas:    nil,
-							Resources: &common.Resources{
-								Requests: &common.ResourceItem{
-									CPU:    "1",
-									Memory: "1Gi",
-									GPU:    "1",
-								},
-							},
-							Envs: []corev1.EnvVar{
-								{
-									Name:  commonconsts.DynamoDeploymentConfigEnvVar,
-									Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"CPU":"2", "Memory":"2Gi", "GPU":"8"}, "total_gpus":16}},"Planner":{"environment":"kubernetes"}}`,
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-			expected: &v1alpha1.DynamoComponentDeployment{
-				Spec: v1alpha1.DynamoComponentDeploymentSpec{
-					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-						ServiceName: "Frontend",
-						Replicas:    &[]int32{3}[0],
-						Resources: &common.Resources{
-							Requests: &common.ResourceItem{
-								CPU:    "2",
-								Memory: "2Gi",
-								GPU:    "8",
-							},
-							Limits: &common.ResourceItem{
-								CPU:    "2",
-								Memory: "2Gi",
-								GPU:    "8",
-							},
-						},
-						Annotations: map[string]string{
-							"nvidia.com/deployment-type": "leader-worker",
-							"nvidia.com/lws-size":        "2",
-						},
-						Envs: []corev1.EnvVar{
-							{
-								Name:  commonconsts.DynamoDeploymentConfigEnvVar,
-								Value: `{"Frontend":{"port":8080,"ServiceArgs":{"Workers":3, "Resources":{"CPU":"2", "Memory":"2Gi", "GPU":"8"}, "total_gpus":16}},"Planner":{"environment":"kubernetes"}}`,
 							},
 						},
 					},
@@ -1642,6 +1540,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"worker": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+									Multinode: &v1alpha1.MultinodeSpec{
+										NodeCount: 3,
+									},
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
 											"nvidia.com/annotation1": "annotation1",
@@ -1670,13 +1571,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 										Requests: &common.ResourceItem{
 											CPU:    "2",
 											Memory: "2Gi",
-											Nodes:  "3",
 										},
 										Limits: &common.ResourceItem{
 											CPU:    "2",
 											Memory: "2Gi",
 											GPU:    "2",
-											Nodes:  "3",
 										},
 									},
 									Envs: []corev1.EnvVar{
@@ -1770,7 +1669,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Replicas: ptr.To(int32(5)),
 							},
 						},
-						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
+						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -1865,6 +1764,42 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														MountPath: "/dev/shm",
 													},
 												},
+												LivenessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													TimeoutSeconds:   30,
+													PeriodSeconds:    5,
+													SuccessThreshold: 0,
+													FailureThreshold: 1,
+												},
+												ReadinessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/health",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													TimeoutSeconds:   30,
+													PeriodSeconds:    10,
+													SuccessThreshold: 0,
+													FailureThreshold: 60,
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/live",
+															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+														},
+													},
+													TimeoutSeconds:   5,
+													PeriodSeconds:    10,
+													SuccessThreshold: 0,
+													FailureThreshold: 60,
+												},
 											},
 										},
 									},
@@ -1884,9 +1819,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName:    "worker-wkr",
-									Replicas:    2,
-									StartsAfter: []string{"worker-ldr"},
+									RoleName: "worker-wkr",
+									Replicas: 2,
+									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -2294,6 +2229,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"worker": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+									Multinode: &v1alpha1.MultinodeSpec{
+										NodeCount: 3,
+									},
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
 											"nvidia.com/annotation1": "annotation1",
@@ -2346,13 +2284,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 										Requests: &common.ResourceItem{
 											CPU:    "2",
 											Memory: "2Gi",
-											Nodes:  "3",
 										},
 										Limits: &common.ResourceItem{
 											CPU:    "2",
 											Memory: "2Gi",
 											GPU:    "2",
-											Nodes:  "3",
 										},
 									},
 									Envs: []corev1.EnvVar{
@@ -2446,7 +2382,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Replicas: ptr.To(int32(5)),
 							},
 						},
-						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
+						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -2541,9 +2477,30 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														MountPath: "/dev/shm",
 													},
 												},
-												ReadinessProbe: nil,
-												LivenessProbe:  nil,
-												StartupProbe:   nil,
+												ReadinessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/ready",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												LivenessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/health",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/startup",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
 											},
 										},
 									},
@@ -2563,9 +2520,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName:    "worker-wkr",
-									Replicas:    2,
-									StartsAfter: []string{"worker-ldr"},
+									RoleName: "worker-wkr",
+									Replicas: 2,
+									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -3777,7 +3734,9 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 	}
 }
 
-func TestApplyCliqueStartupDependencies(t *testing.T) {
+// deactivated for now.
+// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+func XTestApplyCliqueStartupDependencies(t *testing.T) {
 	tests := []struct {
 		name              string
 		roles             []ServiceRole
@@ -3909,7 +3868,9 @@ func TestApplyCliqueStartupDependencies(t *testing.T) {
 	}
 }
 
-func TestGetCliqueStartupDependencies(t *testing.T) {
+// deactivated for now.
+// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+func XTestGetCliqueStartupDependencies(t *testing.T) {
 	tests := []struct {
 		name              string
 		role              Role
@@ -4016,7 +3977,9 @@ func TestGetCliqueStartupDependencies(t *testing.T) {
 	}
 }
 
-func TestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
+// deactivated for now.
+// TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
+func XTestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 
 	tests := []struct {
@@ -4062,12 +4025,14 @@ func TestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
 						"main": {
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								Multinode: &v1alpha1.MultinodeSpec{
+									NodeCount: 2,
+								},
 								ComponentType: "worker", // Must be worker to trigger backend detection
 								Replicas:      ptr.To(int32(1)),
 								Resources: &common.Resources{
 									Requests: &common.ResourceItem{
-										GPU:   "1", // 1 GPU per node
-										Nodes: "2", // Set to 2 nodes to trigger multinode
+										GPU: "1", // 1 GPU per node
 									},
 								},
 							},

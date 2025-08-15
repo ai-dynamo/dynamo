@@ -25,10 +25,9 @@ import (
 type ResourceItem struct {
 	CPU    string `json:"cpu,omitempty"`
 	Memory string `json:"memory,omitempty"`
-	// GPU is the number of GPUs to request per node.
-	GPU string `json:"gpu,omitempty"`
-	// Nodes is the number of nodes to request. Total number of GPUs will be GPU * Nodes.
-	Nodes  string            `json:"nodes,omitempty"`
+	// Indicates the number of GPUs to request.
+	// total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+	GPU    string            `json:"gpu,omitempty"`
 	Custom map[string]string `json:"custom,omitempty"`
 }
 

@@ -106,6 +106,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	// Replicas is the desired number of Pods for this component when autoscaling is not used.
 	Replicas *int32 `json:"replicas,omitempty"`
+	// Multinode is the configuration for multinode components.
+	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+}
+
+type MultinodeSpec struct {
+	// +kubebuilder:default=2
+	// Indicates the number of nodes to deploy for multinode components.
+	// Total number of GPUs is NumberOfNodes * GPU limit.
+	// Must be greater than 1.
+	// +kubebuilder:validation:Minimum=2
+	NodeCount int32 `json:"nodeCount"`
 }
 
 type IngressTLSSpec struct {
@@ -233,4 +244,19 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 		Name:  commonconsts.DynamoDeploymentConfigEnvVar,
 		Value: string(config),
 	})
+}
+
+func (s *DynamoComponentDeployment) IsMultinode() bool {
+	return s.GetNumberOfNodes() > 1
+}
+
+func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
+	return s.Spec.GetNumberOfNodes()
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
+	if s.Multinode != nil {
+		return s.Multinode.NodeCount
+	}
+	return 1
 }

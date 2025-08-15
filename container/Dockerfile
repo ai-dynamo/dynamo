@@ -218,7 +218,7 @@ COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files first for better layer caching
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml /opt/dynamo/
+COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 
 # Copy source code
 COPY lib/ /opt/dynamo/lib/

@@ -71,14 +71,16 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/planner/src/dynamo/planner
+          command:
+            - /bin/sh
+            - -c
           args:
-            - python
-            - -m
-            - planner_sla
-            - --environment=kubernetes
-            - --backend=sglang
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
+            - >-
+              python3 -m planner_sla
+              --environment=kubernetes
+              --backend=sglang
+              --adjustment-interval=60
+              --profile-results-dir=/workspace/profiling_results
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: dynamo
       componentType: frontend
@@ -139,24 +141,20 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.sglang.decode_worker"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--page-size"
-            - "16"
-            - "--tp"
-            - "1"
-            - "--trust-remote-code"
-            - "--skip-tokenizer-init"
-            - "--disaggregation-mode"
-            - "decode"
-            - "--disaggregation-transfer-backend"
-            - "nixl"
+            - >-
+              python3 -m dynamo.sglang.decode_worker
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
     SGLangPrefillWorker:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
@@ -175,21 +173,17 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.sglang.worker"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--page-size"
-            - "16"
-            - "--tp"
-            - "1"
-            - "--trust-remote-code"
-            - "--skip-tokenizer-init"
-            - "--disaggregation-mode"
-            - "prefill"
-            - "--disaggregation-transfer-backend"
-            - "nixl"
+            - >-
+              python3 -m dynamo.sglang.worker
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl
