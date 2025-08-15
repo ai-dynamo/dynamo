@@ -274,6 +274,9 @@ get_options() {
         --release-build)
             RELEASE_BUILD=true
             ;;
+        --enable-kvbm)
+            ENABLE_KVBM=true
+            ;;
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
@@ -528,6 +531,11 @@ fi
 if [  ! -z ${RELEASE_BUILD} ]; then
     echo "Performing a release build!"
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
+fi
+
+if [  ! -z ${ENABLE_KVBM} ]; then
+    echo "Enabling the KVBM in the ai-dynamo-runtime"
+    BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
 fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
