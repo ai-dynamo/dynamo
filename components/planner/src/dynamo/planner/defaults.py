@@ -35,6 +35,7 @@ class BasePlannerDefaults:
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
+    prometheus_port = 0  # 0 means not reporting metrics using prometheus
 
 
 class LoadPlannerDefaults(BasePlannerDefaults):
