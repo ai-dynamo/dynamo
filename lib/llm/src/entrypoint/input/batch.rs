@@ -222,6 +222,7 @@ async fn evaluate(
         )
         .temperature(template.as_ref().map_or(0.7, |t| t.temperature))
         .build()?;
+    #[allow(deprecated)] // TODO: remove this once nvext is removed
     let req = NvCreateChatCompletionRequest {
         inner,
         common: Default::default(),

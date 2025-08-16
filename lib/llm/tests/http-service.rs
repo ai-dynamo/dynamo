@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(deprecated)] // TODO: remove this once nvext is removed
 use anyhow::Error;
 use async_openai::config::OpenAIConfig;
 use async_stream::stream;

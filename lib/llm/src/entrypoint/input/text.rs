@@ -115,7 +115,7 @@ async fn main_loop(
         //     // This makes the pre-processor ignore stop tokens
         //     req_builder.min_tokens(8192);
         // }
-
+        #[allow(deprecated)]
         let req = NvCreateChatCompletionRequest {
             inner,
             common: Default::default(),

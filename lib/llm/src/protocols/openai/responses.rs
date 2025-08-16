@@ -174,6 +174,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
         // The below should encompass all of the allowed configurable parameters
+        #[allow(deprecated)] // TODO: remove this once nvext is removed
         Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,

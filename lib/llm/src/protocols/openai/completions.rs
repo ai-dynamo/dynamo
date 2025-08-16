@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(deprecated)] // TODO: remove this once nvext is removed
+
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -42,6 +44,7 @@ pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub common: CommonExt,
 
+    #[deprecated(note = "The `nvext` field is deprecated and may be removed in a future release.")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 }
@@ -81,6 +84,7 @@ pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
     }
 }
 
+#[allow(deprecated)]
 impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
@@ -114,6 +118,7 @@ impl AnnotationsProvider for NvCreateCompletionRequest {
     }
 }
 
+#[allow(deprecated)]
 impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_temperature(&self) -> Option<f32> {
         self.inner.temperature
@@ -179,6 +184,7 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     }
 }
 
+#[allow(deprecated)]
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_tokens
@@ -379,5 +385,24 @@ impl ValidateRequest for NvCreateCompletionRequest {
         // none for seed
 
         Ok(())
+    }
+}
+
+#[test]
+fn test_deprecated_nvext_json_deserialization() {
+    let json_with_nvext = serde_json::json!({
+        "model": "test-model",
+        "prompt": "Hello",
+        "nvext": {
+            "ignore_eos": true
+        }
+    });
+
+    let request: NvCreateCompletionRequest = serde_json::from_value(json_with_nvext).unwrap();
+
+    #[allow(deprecated)]
+    {
+        assert!(request.nvext.is_some());
+        assert_eq!(request.nvext.as_ref().unwrap().ignore_eos, Some(true));
     }
 }

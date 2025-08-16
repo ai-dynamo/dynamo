@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(deprecated)] // TODO: remove this once nvext is removed
+
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -49,6 +51,7 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(flatten, default)]
     pub common: CommonExt,
 
+    #[deprecated(note = "The `nvext` field is deprecated and may be removed in a future release.")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
 }
@@ -79,6 +82,7 @@ pub struct NvCreateChatCompletionStreamResponse {
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
+#[allow(deprecated)]
 impl NvExtProvider for NvCreateChatCompletionRequest {
     /// Returns a reference to the optional `NvExt` extension, if available.
     fn nvext(&self) -> Option<&NvExt> {
@@ -119,6 +123,7 @@ impl AnnotationsProvider for NvCreateChatCompletionRequest {
 
 /// Implements `OpenAISamplingOptionsProvider` for `NvCreateChatCompletionRequest`,
 /// exposing OpenAI's sampling parameters for chat completion.
+#[allow(deprecated)]
 impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     /// Retrieves the temperature parameter for sampling, if set.
     fn get_temperature(&self) -> Option<f32> {
@@ -194,9 +199,9 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to stop conditions that control chat completion behavior.
+#[allow(deprecated)]
 impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// Retrieves the maximum number of tokens allowed in the response.
-    #[allow(deprecated)]
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_completion_tokens.or(self.inner.max_tokens)
     }
@@ -294,5 +299,25 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for functions
 
         Ok(())
+    }
+}
+
+#[test]
+fn test_deprecated_nvext_json_deserialization() {
+    let json_with_nvext = serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "nvext": {
+            "ignore_eos": true
+        }
+    });
+
+    // This should work but generate a deprecation warning when the field is accessed
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(json_with_nvext).unwrap();
+
+    #[allow(deprecated)]
+    {
+        assert!(request.nvext.is_some());
+        assert_eq!(request.nvext.as_ref().unwrap().ignore_eos, Some(true));
     }
 }
