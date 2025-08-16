@@ -141,7 +141,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         max_seq_len=config.max_seq_len,
     )
 
-    kv_cache_config = KvCacheConfig(
+    default_kv_cache_config = KvCacheConfig(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
 
@@ -164,7 +164,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "backend": "pytorch",
         "skip_tokenizer_init": True,
         "build_config": build_config,
-        "kv_cache_config": kv_cache_config,
+        "kv_cache_config": default_kv_cache_config,
         "gpus_per_node": gpus_per_node,
         "max_num_tokens": config.max_num_tokens,
         "max_seq_len": config.max_seq_len,
@@ -175,18 +175,15 @@ async def init(runtime: DistributedRuntime, config: Config):
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
+
     if config.publish_events_and_metrics:
+        kv_cache_config = arg_map["kv_cache_config"]
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        kv_cache_config = None
-        if "kv_cache_config" not in arg_map:
-            kv_cache_config = {}
-            kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-        else:
-            kv_cache_config = arg_map["kv_cache_config"]
-            if "event_buffer_max_size" not in kv_cache_config:
-                kv_cache_config[
-                    "event_buffer_max_size"
-                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+        if not kv_cache_config.event_buffer_max_size:
+            logging.info(
+                f"Setting default event buffer max size to {DEFAULT_KV_EVENT_BUFFER_MAX_SIZE} for kv cache events."
+            )
+            kv_cache_config.event_buffer_max_size = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         arg_map["kv_cache_config"] = kv_cache_config
 
         # Only pytorch backend is supported for now to publish events and metrics.
