@@ -55,17 +55,18 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component))]
+    #[pyo3(signature = (component, model = None))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
+        model: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
-                .create_endpoint(rs_component)
+                .create_endpoint(rs_component, model)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())

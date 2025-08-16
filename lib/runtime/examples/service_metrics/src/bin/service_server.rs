@@ -75,6 +75,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
         .create()
         .await?
         .endpoint("generate")
+        .add_labels(&[("model", "service_metrics_model")])?
         .endpoint_builder()
         .stats_handler(|stats| {
             println!("stats: {:?}", stats);

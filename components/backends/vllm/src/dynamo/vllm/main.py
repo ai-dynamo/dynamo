@@ -135,8 +135,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    generate_endpoint = component.endpoint(config.endpoint)
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    generate_endpoint = component.endpoint(config.endpoint).add_labels(
+        [("model", config.model)]
+    )
+    clear_endpoint = component.endpoint("clear_kv_blocks").add_labels(
+        [("model", config.model)]
+    )
 
     engine_client, _, default_sampling_params = setup_vllm_engine(config)
 
@@ -168,8 +172,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    generate_endpoint = component.endpoint(config.endpoint)
-    clear_endpoint = component.endpoint("clear_kv_blocks")
+    generate_endpoint = component.endpoint(config.endpoint).add_labels(
+        [("model", config.model)]
+    )
+    clear_endpoint = component.endpoint("clear_kv_blocks").add_labels(
+        [("model", config.model)]
+    )
 
     prefill_worker_client = (
         await runtime.namespace(config.namespace)
@@ -178,7 +186,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         .client()
     )
 
-    factory = StatLoggerFactory(component, config.engine_args.data_parallel_rank or 0)
+    factory = StatLoggerFactory(
+        component, config.engine_args.data_parallel_rank or 0, config.model
+    )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
     )

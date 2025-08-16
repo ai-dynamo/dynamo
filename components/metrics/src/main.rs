@@ -137,7 +137,14 @@ async fn app(runtime: Runtime) -> Result<()> {
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 
     let target_component = namespace.component(&config.component_name)?;
-    let target_endpoint = target_component.endpoint(&config.endpoint_name);
+    let target_endpoint = {
+        let e = target_component.endpoint(&config.endpoint_name);
+        if let Some(ref model) = config.model_name {
+            e.add_labels(&[("model", model.as_str())])?
+        } else {
+            e
+        }
+    };
 
     let service_path = target_endpoint.path();
     let service_subject = target_endpoint.subject();

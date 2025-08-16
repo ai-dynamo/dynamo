@@ -498,7 +498,7 @@ impl WorkerMetricsPublisher {
         self.tx.send(metrics)
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+    pub async fn create_endpoint(&self, component: Component, model: Option<String>) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
         let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
@@ -511,9 +511,14 @@ impl WorkerMetricsPublisher {
         //         tracing::warn!("Component is static, assuming worker_id of 0");
         //         0
         //     });
-
-        component
-            .endpoint(KV_METRICS_ENDPOINT)
+        let endpoint = {
+            let mut e = component.endpoint(KV_METRICS_ENDPOINT);
+            if let Some(model_name) = model {
+                e = e.add_labels(&[("model", model_name.as_str())])?;
+            }
+            e
+        };
+        endpoint
             .endpoint_builder()
             .stats_handler(move |_| {
                 let metrics = metrics_rx.borrow_and_update().clone();

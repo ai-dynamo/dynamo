@@ -536,6 +536,20 @@ impl Endpoint {
             .map(|l| l.id())
             .unwrap_or(0)
     }
+
+    /// Add constant labels to this Endpoint (for metrics). Returns a new Endpoint with labels.
+    /// labels: list of (key, value) tuples.
+    fn add_labels(&self, labels: Vec<(String, String)>) -> PyResult<Endpoint> {
+        let pairs: Vec<(&str, &str)> = labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let inner = self.inner.clone().add_labels(&pairs).map_err(to_pyerr)?;
+        Ok(Endpoint {
+            inner,
+            event_loop: self.event_loop.clone(),
+        })
+    }
 }
 
 #[pymethods]

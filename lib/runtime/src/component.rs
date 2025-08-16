@@ -418,6 +418,61 @@ impl MetricsRegistry for Endpoint {
 }
 
 impl Endpoint {
+    /// Get any stored labels for this registry
+    pub fn stored_labels(&self) -> Vec<(&str, &str)> {
+        self.labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    /// Get mutable access to the labels storage - implementors must provide this
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
+    }
+
+    /// Add labels to this Endpoint and return a new instance with the labels.
+    ///   This allows for method chaining like: runtime.namespace(...).add_labels(...)?
+    /// Fails if:
+    /// - Provided `labels` contains duplicate keys, or
+    /// - Any provided key already exists in the registry's stored labels.
+    pub fn add_labels(mut self, labels: &[(&str, &str)]) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        // 1) Validate for duplicate keys in the input
+        let mut seen_keys = std::collections::HashSet::new();
+        for (key, _) in labels {
+            if !seen_keys.insert(*key) {
+                return Err(anyhow::anyhow!(
+                    "Duplicate label key '{}' found in labels",
+                    key
+                ));
+            }
+        }
+
+        // 2) Validate no overlap with existing stored labels
+        let existing: std::collections::HashSet<&str> =
+            self.stored_labels().into_iter().map(|(k, _)| k).collect();
+        if let Some(conflict) = labels
+            .iter()
+            .map(|(k, _)| *k)
+            .find(|k| existing.contains(k))
+        {
+            return Err(anyhow::anyhow!(
+                "Label key '{}' already exists in registry; refusing to overwrite",
+                conflict
+            ));
+        }
+
+        // 3) Safe to append
+        let labels_storage = self.labels_mut();
+        for (key, value) in labels {
+            labels_storage.push((key.to_string(), value.to_string()));
+        }
+        Ok(self)
+    }
+
     pub fn id(&self) -> EndpointId {
         EndpointId {
             namespace: self.component.namespace().name().to_string(),

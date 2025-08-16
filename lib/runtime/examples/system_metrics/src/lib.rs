@@ -94,7 +94,8 @@ pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Re
         .service_builder()
         .create()
         .await?
-        .endpoint(endpoint_name);
+        .endpoint(endpoint_name)
+        .add_labels(&[("model", DEFAULT_MODEL_NAME)])?;
 
     // Create custom metrics for system stats
     let system_metrics =

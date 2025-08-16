@@ -55,42 +55,43 @@ impl WorkHandlerMetrics {
     pub fn from_endpoint(
         endpoint: &crate::component::Endpoint,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let labels: Vec<(&str, &str)> = endpoint.stored_labels();
         let request_counter = endpoint.create_intcounter(
             "requests_total",
             "Total number of requests processed by work handler",
-            &[],
+            &labels,
         )?;
 
         let request_duration = endpoint.create_histogram(
             "request_duration_seconds",
             "Time spent processing requests by work handler",
-            &[],
+            &labels,
             None,
         )?;
 
         let concurrent_requests = endpoint.create_intgauge(
             "concurrent_requests",
             "Number of requests currently being processed by work handler",
-            &[],
+            &labels,
         )?;
 
         let request_bytes = endpoint.create_intcounter(
             "request_bytes_total",
             "Total number of bytes received in requests by work handler",
-            &[],
+            &labels,
         )?;
 
         let response_bytes = endpoint.create_intcounter(
             "response_bytes_total",
             "Total number of bytes sent in responses by work handler",
-            &[],
+            &labels,
         )?;
 
         let error_counter = endpoint.create_intcountervec(
             "errors_total",
             "Total number of errors in work handler processing",
             &["error_type"],
-            &[],
+            &labels,
         )?;
 
         Ok(Self::new(

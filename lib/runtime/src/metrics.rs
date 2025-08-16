@@ -1305,6 +1305,49 @@ dynamo_component_nats_total_errors 5"#;
 
         println!("✓ All refactored filter functions work correctly!");
     }
+
+    #[test]
+    fn test_add_labels_to_endpoint() {
+        // Setup
+        let drt = super::test_helpers::create_test_drt();
+        let namespace = drt.namespace("ns_labels").unwrap();
+        let component = namespace.component("comp_labels").unwrap();
+        let endpoint = component
+            .endpoint("ep_labels")
+            .add_labels(&[("label1", "val1"), ("label2", "val2")])
+            .unwrap();
+
+        // Create a metric on the endpoint
+        let counter = endpoint
+            .create_counter(
+                "test_counter_with_labels",
+                "A test counter",
+                &endpoint.stored_labels(),
+            )
+            .unwrap();
+        counter.inc_by(10.0);
+
+        // Get Prometheus output
+        let output = endpoint.prometheus_metrics_fmt().unwrap();
+        let metrics = super::test_helpers::extract_metrics(&output);
+
+        // Verification
+        assert_eq!(metrics.len(), 1);
+        let (name, labels, value) =
+            super::test_helpers::parse_prometheus_metric(&metrics[0]).unwrap();
+
+        assert_eq!(name, "dynamo_component_test_counter_with_labels");
+        assert_eq!(value, 10.0);
+
+        // Check for auto-labels
+        assert_eq!(labels.get("dynamo_namespace").unwrap(), "ns_labels");
+        assert_eq!(labels.get("dynamo_component").unwrap(), "comp_labels");
+        assert_eq!(labels.get("dynamo_endpoint").unwrap(), "ep_labels");
+
+        // Check for custom labels
+        assert_eq!(labels.get("label1").unwrap(), "val1");
+        assert_eq!(labels.get("label2").unwrap(), "val2");
+    }
 }
 
 #[cfg(feature = "integration")]
