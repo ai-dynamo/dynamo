@@ -163,22 +163,25 @@ impl DeltaAggregator {
         // After aggregation, inspect each choice's text for tool call syntax
         for choice in aggregator.choices.values_mut() {
             if choice.tool_calls.is_none() {
-                if let Ok(Some(tool_call)) =
+                if let Ok(tool_calls) =
                     crate::postprocessor::tool_calling::tools::try_tool_call_parse_aggregate(
                         &choice.text,
                         None,
                     )
                 {
-                    tracing::debug!(
-                        tool_call_id = %tool_call.id,
-                        function_name = %tool_call.function.name,
-                        arguments = %tool_call.function.arguments,
-                        "Parsed structured tool call from aggregated content"
-                    );
-
-                    choice.tool_calls = Some(vec![tool_call]);
-                    choice.text.clear();
-                    choice.finish_reason = Some(async_openai::types::FinishReason::ToolCalls);
+                    if !tool_calls.is_empty() {
+                        for tool_call in &tool_calls {
+                            tracing::debug!(
+                                tool_call_id = %tool_call.id,
+                                function_name = %tool_call.function.name,
+                                arguments = %tool_call.function.arguments,
+                                "Parsed structured tool call from aggregated content"
+                            );
+                        }
+                        choice.tool_calls = Some(tool_calls);
+                        choice.text.clear();
+                        choice.finish_reason = Some(async_openai::types::FinishReason::ToolCalls);
+                    }
                 }
             }
         }
