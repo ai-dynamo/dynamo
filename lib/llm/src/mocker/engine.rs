@@ -647,6 +647,7 @@ mod integration_tests {
             mdc_sum: None,
             annotations: vec![format!("dp_rank:{dp_rank}")],
             estimated_prefix_hit_num_blocks: None,
+            backend_instance_id: None,
         };
 
         let requests = vec![
