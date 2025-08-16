@@ -1,7 +1,9 @@
 ## Inference Gateway Setup with Dynamo
 
-This Setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
-Currently, this setup is only kgateway based Inference Gateway.
+This guide demonstrates two setups.
+The EPP-unaware setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
+The EPP-aware setup first uses Dynamo Router to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker.
+Currently, these setups are only supported with the kGateway based Inference Gateway.
 
 ## Table of Contents
 
@@ -39,7 +41,7 @@ GATEWAY_API_VERSION=v1.3.0
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
 ```
 
-b. Install the Inference Extension CRDs (Inferenece Model and Inference Pool CRDs)
+b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs)
 ```bash
 INFERENCE_EXTENSION_VERSION=v0.5.1
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml -n  my-model
@@ -84,11 +86,37 @@ kubectl apply -f agg.yaml -n my-model
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 
-Deploy the Inference Gateway resources to your Kubernetes cluster:
+Deploy the Inference Gateway resources to your Kubernetes cluster by running one of the commands below.
+
+For the EPP-unaware black box integration run:
 
 ```bash
 cd deploy/inference-gateway
 helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
+```
+
+For the EPP-aware integration run:
+
+```bash
+cd deploy/inference-gateway
+
+helm install dynamo-gaie ./helm/dynamo-gaie \
+  -n my-model \
+  -f ./vllm_agg_qwen.yaml \
+  -f ./values-epp-aware.yaml
+```
+
+Or customize the EPP further using flags, i.e:
+
+```bash
+helm install dynamo-gaie ./helm/dynamo-gaie \
+  -n my-model \
+  -f ./vllm_agg_qwen.yaml \
+  --set eppAware.enabled=true \
+  --set eppAware.eppImage=docker.io/lambda108/epp-inference-extension-dynamo:1.0.0 \
+  --set imagePullSecrets='{docker-imagepullsecret}' \
+  --set-string epp.extraEnv[0].name=USE_STREAMING \
+  --set-string epp.extraEnv[0].value=true
 ```
 
 Key configurations include:
