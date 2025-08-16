@@ -3,6 +3,11 @@ name: Copyright Checks
 on:
   pull_request
 
+# Cancel any previous check runs for the same pull request to avoid redundant workflows.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || '' }}
+  cancel-in-progress: true
+
 jobs:
   copyright-checks:
       runs-on: ubuntu-24.04
