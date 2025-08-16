@@ -255,7 +255,13 @@ source $HOME/.cargo/env
 
 ## 3. Create a Python virtual env:
 
+Follow the instructions in [uv installation](https://docs.astral.sh/uv/#installation) guide to install uv.
+
 ```
+# Install uv
+url -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create a virtual environment
 uv venv dynamo
 source dynamo/bin/activate
 ```
