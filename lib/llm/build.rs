@@ -13,8 +13,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn main() {
+#[cfg(feature = "kserve")]
+use tonic_prost_build;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:warning=Building with CUDA KV off");
+    build_protos()
+}
+
+#[cfg(feature = "kserve")]
+fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
+    tonic_prost_build::compile_protos("src/grpc/protos/kserve.proto")?;
+    Ok(())
+}
+
+#[cfg(not(feature = "kserve"))]
+fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
 }
 
 // NOTE: Preserving this build.rs for reference. We may want to re-enable

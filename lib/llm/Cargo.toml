@@ -36,6 +36,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda          = ["dep:cudarc"]
 integration = []
+kserve = ["dep:tonic", "dep:prost", "dep:tonic-prost-build"]
 
 [[bench]]
 name = "tokenizer"
@@ -110,6 +111,10 @@ tower-http = {workspace = true}
 rustls = { version = "0.23" }
 
 
+# grpc-service
+tonic = { version = "0.14.0", optional = true }
+prost = { version = "0.14", optional = true }
+
 # tokenizers
 tokenizers = { version = "0.21.4", default-features = false, features = [
   "onig",
@@ -157,3 +162,6 @@ insta = { version = "1.41", features = [
 ] }
 aligned-vec = "0.6.4"
 lazy_static = "1.4"
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14.0", optional = true}
