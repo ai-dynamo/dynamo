@@ -39,8 +39,7 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 }
 
 func (p *PlannerDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, error) {
-	podSpec := corev1.PodSpec{
-		ServiceAccountName: commonconsts.PlannerServiceAccountName,
-	}
+	podSpec := p.getCommonPodSpec()
+	podSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 	return podSpec, nil
 }

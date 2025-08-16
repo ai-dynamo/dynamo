@@ -796,6 +796,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 									},
 								},
+								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
@@ -895,6 +896,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 									},
 								},
+								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
