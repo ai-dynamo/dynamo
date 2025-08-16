@@ -33,6 +33,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.common import (
     BaseWorkerHandler,
     DisaggPreprocessedRequest,
+    get_dynamo_namespace,
     graceful_shutdown,
     parse_sglang_args_inc,
     setup_native_endpoints,
@@ -332,7 +333,9 @@ async def init(
 
     engine = sgl.Engine(server_args=server_args)
 
-    component = runtime.namespace("dynamo").component("worker")
+    dynamo_namespace = get_dynamo_namespace()
+
+    component = runtime.namespace(dynamo_namespace).component("worker")
     await component.create_service()
 
     endpoint = component.endpoint("generate")
@@ -342,7 +345,7 @@ async def init(
 
     if server_args.disaggregation_mode != "null":
         decode_client = (
-            await runtime.namespace("dynamo")
+            await runtime.namespace(dynamo_namespace)
             .component("decode")
             .endpoint("generate")
             .client()
