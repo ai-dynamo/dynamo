@@ -50,6 +50,10 @@ pub struct PreprocessedRequest {
     /// Estimated number of prefix hit tokens (only used in kv aware routing)
     #[builder(default)]
     pub estimated_prefix_hit_num_blocks: Option<u32>,
+
+    /// Instance ID for external routing hint
+    #[builder(default)]
+    pub external_routing_hint: Option<i64>,
 }
 
 impl PreprocessedRequest {

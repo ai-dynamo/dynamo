@@ -255,6 +255,10 @@ impl OpenAIPreprocessor {
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
 
+        if let Some(nvext) = request.nvext() {
+            builder.external_routing_hint(nvext.external_routing_hint);
+        }
+
         Ok((builder.build()?, annotations))
     }
 

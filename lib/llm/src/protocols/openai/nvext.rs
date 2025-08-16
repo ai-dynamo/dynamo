@@ -87,6 +87,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guided_decoding_backend: Option<String>,
+
+    /// Instance ID for external routing hint
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub external_routing_hint: Option<i64>,
 }
 
 impl Default for NvExt {

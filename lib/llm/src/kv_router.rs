@@ -339,10 +339,28 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
-                let (instance_id, overlap_amount) = self
-                    .chooser
-                    .find_best_match(&context_id, &request.token_ids)
-                    .await?;
+
+                // for this hack, we need to have an nvext field to take the instance_id that we got from the "worker_instance_id" annotation
+                // we shoudl check that instance_id is still valid on the self.inner, but i'm not sure we expose the full client
+                // at this level, so we might just have to try it and see if it works
+                //
+                // if we have the nvext field, we skip the find_best_match call, directly use the instance_id
+                // and set the overlap_amount to 0
+                //
+                // we should debug_assert that "query_instance_id" is not set
+                let (instance_id, overlap_amount) =
+                    if let Some(instance_id) = request.external_routing_hint {
+                        (instance_id, 0)
+                    } else {
+                        self.chooser
+                            .find_best_match(&context_id, &request.token_ids)
+                            .await?
+                    };
+
+                // let (instance_id, overlap_amount) = self
+                //     .chooser
+                //     .find_best_match(&context_id, &request.token_ids)
+                //     .await?;
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();
