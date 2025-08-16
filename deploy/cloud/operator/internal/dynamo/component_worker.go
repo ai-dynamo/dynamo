@@ -42,9 +42,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			corev1.ResourceMemory: resource.MustParse("20Gi"),
 		},
 		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("10"),
-			corev1.ResourceMemory: resource.MustParse("20Gi"),
-			"nvidia.com/gpu":      resource.MustParse("1"),
+			"nvidia.com/gpu": resource.MustParse("1"),
 		},
 	}
 

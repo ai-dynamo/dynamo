@@ -52,10 +52,6 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 						corev1.ResourceCPU:    resource.MustParse("2"),
 						corev1.ResourceMemory: resource.MustParse("2Gi"),
 					},
-					Limits: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("2"),
-						corev1.ResourceMemory: resource.MustParse("2Gi"),
-					},
 				},
 				Env: []corev1.EnvVar{
 					{Name: "DYN_NAMESPACE", Value: "dynamo-namespace"},

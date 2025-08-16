@@ -29,10 +29,6 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 			corev1.ResourceCPU:    resource.MustParse("2"),
 			corev1.ResourceMemory: resource.MustParse("2Gi"),
 		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("2"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
 	}
 
 	return container, nil
