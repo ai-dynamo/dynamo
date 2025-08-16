@@ -90,7 +90,7 @@ impl ModelWatcher {
 
     /// Common watch logic with optional namespace filtering
     pub async fn watch(&self, mut events_rx: Receiver<WatchEvent>, target_namespace: Option<&str>) {
-        let global_namespace = target_namespace.map_or(true, is_global_namespace);
+        let global_namespace = target_namespace.is_none_or(is_global_namespace);
 
         while let Some(event) = events_rx.recv().await {
             match event {
