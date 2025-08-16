@@ -11,6 +11,7 @@ use crate::{
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
     model_type::ModelType,
+    namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -59,11 +60,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
+                    // Check if we should filter by namespace (based on the local model's namespace)
+                    let namespace = &engine_config.local_model().endpoint_id().namespace;
+                    let target_namespace = if is_global_namespace(namespace) {
+                        None
+                    } else {
+                        Some(namespace)
+                    };
                     run_watcher(
                         distributed_runtime,
                         http_service.state().manager_clone(),
                         etcd_client.clone(),
                         MODEL_ROOT_PATH,
+                        target_namespace.cloned(),
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         Arc::new(http_service.clone()),
@@ -186,13 +195,16 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     Ok(())
 }
 
-/// Spawns a task that watches for new models in etcd at network_prefix,
+/// Spawns a task that watches for new models in etcd
 /// and registers them with the ModelManager so that the HTTP service can use them.
+/// If target_namespace is empty or equals GLOBAL_NAMESPACE, discovers models from all namespaces.
+/// Otherwise, only discovers models from the specified target namespace.
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     etcd_client: etcd::Client,
     network_prefix: &str,
+    target_namespace: Option<String>,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     http_service: Arc<HttpService>,
@@ -217,7 +229,7 @@ async fn run_watcher(
 
     // Pass the sender to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver).await;
+        watch_obj.watch(receiver, target_namespace.as_deref()).await;
     });
 
     Ok(())
