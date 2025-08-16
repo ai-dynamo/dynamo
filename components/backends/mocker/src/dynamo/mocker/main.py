@@ -15,8 +15,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
 
-DYNAMO_NAMESPACE = os.environ.get("DYN_NAMESPACE", "global")
-DEFAULT_ENDPOINT = f"dyn://{DYNAMO_NAMESPACE}.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "global")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 
 configure_dynamo_logging()
 
