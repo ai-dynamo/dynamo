@@ -11,6 +11,7 @@ use crate::{
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
     model_type::ModelType,
+    namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -37,15 +38,23 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
-                    run_watcher(
-                        distributed_runtime,
-                        http_service.state().manager_clone(),
-                        etcd_client.clone(),
-                        MODEL_ROOT_PATH,
-                        router_config.router_mode,
-                        Some(router_config.kv_router_config),
-                        Arc::new(http_service.clone()),
-                    )
+                    // Check if we should filter by namespace (based on the local model's namespace)
+                    let namespace = &engine_config.local_model().endpoint_id().namespace;
+                    let target_namespace = if is_global_namespace(namespace) {
+                        None
+                    } else {
+                        Some(namespace)
+                    };
+                    run_watcher(WatcherConfig {
+                        runtime: distributed_runtime,
+                        model_manager: http_service.state().manager_clone(),
+                        etcd_client: etcd_client.clone(),
+                        network_prefix: MODEL_ROOT_PATH.to_string(),
+                        target_namespace: target_namespace.cloned(),
+                        router_mode: router_config.router_mode,
+                        kv_router_config: Some(router_config.kv_router_config),
+                        http_service: Arc::new(http_service.clone()),
+                    })
                     .await?;
                 }
                 None => {
@@ -164,20 +173,34 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     Ok(())
 }
 
-/// Spawns a task that watches for new models in etcd at network_prefix,
-/// and registers them with the ModelManager so that the HTTP service can use them.
-async fn run_watcher(
+/// Configuration for the model watcher
+struct WatcherConfig {
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     etcd_client: etcd::Client,
-    network_prefix: &str,
+    network_prefix: String,
+    target_namespace: Option<String>,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     http_service: Arc<HttpService>,
-) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
-    tracing::info!("Watching for remote model at {network_prefix}");
-    let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
+}
+
+/// Spawns a task that watches for new models in etcd
+/// and registers them with the ModelManager so that the HTTP service can use them.
+/// If target_namespace is empty or equals GLOBAL_NAMESPACE, discovers models from all namespaces.
+/// Otherwise, only discovers models from the specified target namespace.
+async fn run_watcher(config: WatcherConfig) -> anyhow::Result<()> {
+    let mut watch_obj = ModelWatcher::new(
+        config.runtime,
+        config.model_manager,
+        config.router_mode,
+        config.kv_router_config,
+    );
+    tracing::info!("Watching for remote model at {}", config.network_prefix);
+    let models_watcher = config
+        .etcd_client
+        .kv_get_and_watch_prefix(&config.network_prefix)
+        .await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 
     // Create a channel to receive model type updates
@@ -186,6 +209,7 @@ async fn run_watcher(
     watch_obj.set_notify_on_model_update(tx);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints
+    let http_service = config.http_service.clone();
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_type) = rx.recv().await {
             tracing::debug!("Received model type update: {:?}", model_type);
@@ -194,8 +218,9 @@ async fn run_watcher(
     });
 
     // Pass the sender to the watcher
+    let target_namespace = config.target_namespace;
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver).await;
+        watch_obj.watch(receiver, target_namespace.as_deref()).await;
     });
 
     Ok(())
