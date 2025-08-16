@@ -52,20 +52,19 @@
 
                 // Enhanced rust-analyzer configuration
                 "rust-analyzer.linkedProjects": [
-                    "dynamo/Cargo.toml",
-                    "dynamo/lib/runtime/Cargo.toml",
-                    "dynamo/lib/llm/Cargo.toml",
-                    "dynamo/lib/tokens/Cargo.toml",
-                    "dynamo/lib/bindings/python/Cargo.toml",
-                    "dynamo/launch/dynamo-run/Cargo.toml"
+                    "Cargo.toml",
+                    "lib/runtime/Cargo.toml",
+                    "lib/llm/Cargo.toml",
+                    "lib/tokens/Cargo.toml",
+                    "lib/bindings/python/Cargo.toml",
+                    "launch/dynamo-run/Cargo.toml"
                 ],
-
                 "files.trimTrailingWhitespace": true,
                 "files.insertFinalNewline": true
             }
         }
     },
-    "workspaceFolder": "/home/ubuntu",
+    "workspaceFolder": "/home/ubuntu/dynamo",
     "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
     "userEnvProbe": "interactiveShell",
     "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
@@ -73,15 +72,21 @@
         "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
         "HF_TOKEN": "${localEnv:HF_TOKEN}",
         "CARGO_HOME": "/home/ubuntu/dynamo/.build/.cargo",
-        "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup"
+        "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup",
+        "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target",
+        "DYNAMO_HOME": "/home/ubuntu/dynamo"
     },
     "mounts": [
         // Default mounts
         "source=/tmp/,target=/tmp/,type=bind",
         "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume", // For bash history
-        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume"  // For pre-commit cache
-
-        // Uncomment for additional functionality
-        // "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
+        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume",  // For pre-commit cache
+        "source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind",
+        // The following line is needed. Otherwise, you will get an very weirderror below:
+        // 2025-08-05 17:53:52.049 [info] Shutdown action is supported only for local exec servers or wsl
+        // 2025-08-05 17:53:52.049 [info] Installing remote server in container...
+        // 2025-08-05 17:53:52.049 [error] Failed to read .gitconfig: TypeError [ERR_INVALID_ARG_TYPE]: The "path" argument must be of type string. Received undefined
+        // 2025-08-05 17:53:52.050 [error] Error resolving dev container authority The "path" argument must be of type string. Received undefined
+        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind"
     ]
 }
