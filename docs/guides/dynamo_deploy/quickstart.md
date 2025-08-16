@@ -100,8 +100,10 @@ docker push <your-registry>/dynamo-base:latest-vllm
 You need to build and push the Dynamo Cloud Operator Image by running
 
 ```bash
-cd deploy/cloud/operator
-earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+export DOCKER_SERVER=<your-docker-server>
+export IMAGE_TAG=<TAG>
+
+make docker-build-operator docker-push-operator
 ```
 
 The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
