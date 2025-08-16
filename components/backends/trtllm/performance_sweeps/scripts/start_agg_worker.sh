@@ -100,9 +100,6 @@ if [ ${mtp} -gt 0 ]; then
 cat << EOF > ${extra_llm_api_file}
 tensor_parallel_size: ${tp_size}
 moe_expert_parallel_size: ${ep_size}
-max_batch_size: ${max_batch}
-max_num_tokens: ${max_num_tokens}
-max_seq_len: ${max_seq_len}
 trust_remote_code: true
 cuda_graph_config:
     enable_padding: true
@@ -119,15 +116,11 @@ speculative_config:
   num_nextn_predict_layers: ${mtp}
 moe_config:
     backend: ${moe_backend}
-    max_num_tokens: 37376
 EOF
 else
 cat << EOF > ${extra_llm_api_file}
 tensor_parallel_size: ${tp_size}
 moe_expert_parallel_size: ${ep_size}
-max_batch_size: ${max_batch}
-max_num_tokens: ${max_num_tokens}
-max_seq_len: ${max_seq_len}
 trust_remote_code: true
 cuda_graph_config:
     enable_padding: true
@@ -141,7 +134,6 @@ kv_cache_config:
 stream_interval: 10
 moe_config:
     backend: ${moe_backend}
-    max_num_tokens: 37376
 EOF
 fi
 
@@ -154,5 +146,12 @@ echo "TRT_LLM_VERSION: $TRT_LLM_VERSION"
 echo "TRT_LLM_GIT_COMMIT: $TRT_LLM_GIT_COMMIT"
 
 # start the server
-trtllm-llmapi-launch python3 -m dynamo.trtllm --model-path $model_path --served-model-name $model_name --extra-engine-args ${extra_llm_api_file}
+trtllm-llmapi-launch python3 -m dynamo.trtllm \
+    --model-path $model_path \
+    --served-model-name $model_name \
+    --max-num-tokens ${max_num_tokens} \
+    --max-batch-size ${max_batch} \
+    --max-seq-len ${max_seq_len} \
+    --extra-engine-args ${extra_llm_api_file}
+
 

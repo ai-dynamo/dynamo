@@ -117,7 +117,4 @@ srun -l --container-name=${CONTAINER_NAME} \
 	-w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} 1 "${concurrency_list}" ${STREAMING} ${full_logdir} ${tp_size} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
-# Wait for all background processes to complete
-wait
-
 # Cleanup will be handled by the EXIT trap
