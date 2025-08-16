@@ -25,7 +25,7 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+default = ["kserve"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
@@ -36,7 +36,7 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda          = ["dep:cudarc"]
 integration = []
-kserve = ["dep:tonic", "dep:prost", "dep:tonic-prost-build"]
+kserve = ["dep:tonic", "dep:prost", "dep:tonic-prost", "dep:tonic-prost-build"]
 
 [[bench]]
 name = "tokenizer"
@@ -114,6 +114,7 @@ rustls = { version = "0.23" }
 # grpc-service
 tonic = { version = "0.14.0", optional = true }
 prost = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14.0", optional = true }
 
 # tokenizers
 tokenizers = { version = "0.21.4", default-features = false, features = [
