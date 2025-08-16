@@ -10,6 +10,8 @@ use dynamo_llm::block_manager::{
 
 pub mod leader;
 pub mod worker;
+pub mod trtllm_leader;
+pub mod trtllm_worker;
 
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};

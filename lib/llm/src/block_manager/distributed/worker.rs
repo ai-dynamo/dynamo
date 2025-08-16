@@ -35,6 +35,7 @@ use dynamo_runtime::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvbmWorkerData {
     pub num_device_blocks: usize,
+    pub bytes_per_block: usize,
 }
 
 pub fn load_and_validate_tensors(
@@ -101,8 +102,11 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "2")]
     dtype_width_bytes: usize,
 
+    #[builder(default = false)]
+    is_fully_contiguous_layout: bool,
+
     #[builder(default = "String::from(\"kvbm\")")]
-    barrier_id: String,
+    barrier_id_prefix: String,
 
     #[builder(default = "None")]
     scheduler_client: Option<TransferSchedulerClient>,
@@ -153,36 +157,56 @@ impl KvbmWorker {
             )));
         }
 
-        let (outer_contiguous, outer_dim) = if shape[0] >= config.num_device_blocks {
-            (false, shape[1])
-        } else if shape[1] >= config.num_device_blocks {
-            (true, shape[0])
+        let layout_type: LayoutType;
+        let mut outer_dim= 1;
+        let num_layers;
+        let inner_dim;
+        if !config.is_fully_contiguous_layout {
+            let (outer_contiguous, outer_dim) = if shape[0] >= config.num_device_blocks {
+                (false, shape[1])
+            } else if shape[1] >= config.num_device_blocks {
+                (true, shape[0])
+            } else {
+                return Err(anyhow::anyhow!(format!(
+                    "Unsupported kv cache layout. Got shape: {:?}",
+                    shape
+                )));
+            };
+            layout_type = LayoutType::LayerSeparate { outer_contiguous };
+            num_layers = device_tensors.len();
+            inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
+
+            tracing::info!(
+                "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
+                device_tensors.len(),
+                outer_dim,
+                config.page_size,
+                inner_dim
+            );
         } else {
-            return Err(anyhow::anyhow!(format!(
-                "Unsupported kv cache layout. Got shape: {:?}",
-                shape
-            )));
-        };
+            layout_type = LayoutType::FullyContiguous;
+            num_layers = shape[1];
+            outer_dim = shape[2];
+            inner_dim = shape[3..].iter().product::<usize>() / config.page_size;
+            tracing::info!(
+                "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
+                num_layers,
+                outer_dim,
+                config.page_size,
+                inner_dim
+            );
+        }
 
-        let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
-
-        tracing::info!(
-            "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
-            device_tensors.len(),
-            outer_dim,
-            config.page_size,
-            inner_dim
-        );
+        let bytes_per_block = num_layers * outer_dim * config.page_size * inner_dim * config.dtype_width_bytes;
 
         let mut layout_builder_instance = LayoutConfigBuilder::default();
         let layout_builder = layout_builder_instance
-            .num_layers(device_tensors.len())
+            .num_layers(num_layers)
             .outer_dim(outer_dim)
             .page_size(config.page_size)
             .inner_dim(inner_dim)
             .dtype_width_bytes(config.dtype_width_bytes);
 
-        let layout_type = LayoutType::LayerSeparate { outer_contiguous };
 
         let device_layout = layout_builder
             .num_blocks(config.num_device_blocks)
@@ -210,6 +234,7 @@ impl KvbmWorker {
                     cancel_token,
                     handler_tx,
                     scheduler_client,
+                    bytes_per_block,
                 )
             },
             cancel_token.clone(),
@@ -256,6 +281,7 @@ impl KvbmWorker {
         cancel_token: CancellationToken,
         handler_tx: oneshot::Sender<BlockTransferHandler>,
         scheduler_client: Option<TransferSchedulerClient>,
+        bytes_per_block: usize,
     ) -> anyhow::Result<()> {
         let drt = config.drt.clone();
 
@@ -266,30 +292,61 @@ impl KvbmWorker {
             ))?
             .id() as usize;
 
+        let barrier_id_worker_to_leader = format!("{}{}", config.barrier_id_prefix, "-worker-to-leader");
         tracing::info!(
             "Worker {} waiting on barrier {}",
             worker_id,
-            config.barrier_id
+            barrier_id_worker_to_leader
         );
 
-        let worker_barrier = WorkerBarrier::<KvbmLeaderData, KvbmWorkerData>::new(
-            config.barrier_id,
+        let worker_to_leader_barrier = WorkerBarrier::<KvbmLeaderData, KvbmWorkerData>::new(
+            barrier_id_worker_to_leader,
             worker_id.to_string(),
         );
 
         let worker_data = KvbmWorkerData {
             num_device_blocks: config.num_device_blocks,
+            bytes_per_block,
         };
+
+        // leader_data is not important in the worker to leader phase
+        let _leader_data = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Ok(())
+            }
+            _leader_data = worker_to_leader_barrier.sync(&drt, &worker_data) => {
+                _leader_data
+            }
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to sync worker to leader barrier: {:?}", e))?;
+
+        tracing::debug!(
+            "Worker {} received leader data: {:?} in worker to leader phase",
+            worker_id,
+            _leader_data
+        );
+
+        let barrier_id_leader_to_worker = format!("{}{}", config.barrier_id_prefix, "-leader-to-worker");
+        tracing::info!(
+            "Worker {} waiting on barrier {}",
+            worker_id,
+            barrier_id_leader_to_worker
+        );
+
+        let leader_to_worker_barrier = WorkerBarrier::<KvbmLeaderData, KvbmWorkerData>::new(
+            barrier_id_leader_to_worker,
+            worker_id.to_string(),
+        );
 
         let leader_data = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Ok(())
             }
-            leader_data = worker_barrier.sync(&drt, &worker_data) => {
+            leader_data = leader_to_worker_barrier.sync(&drt, &worker_data) => {
                 leader_data
             }
         }
-        .map_err(|e| anyhow::anyhow!("Failed to sync worker barrier: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to sync worker to leader barrier: {:?}", e))?;
 
         tracing::info!(
             "Worker {} received leader data: {:?}",
