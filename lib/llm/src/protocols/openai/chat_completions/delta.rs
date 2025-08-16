@@ -15,7 +15,10 @@
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
-    protocols::common::{self},
+    protocols::{
+        common::{self},
+        openai::chat_completions::{NvChatChoiceStream, NvChatCompletionStreamResponseDelta},
+    },
     types::TokenIdType,
 };
 
@@ -198,8 +201,8 @@ impl DeltaGenerator {
         text: Option<String>,
         finish_reason: Option<async_openai::types::FinishReason>,
         logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
-    ) -> async_openai::types::CreateChatCompletionStreamResponse {
-        let delta = async_openai::types::ChatCompletionStreamResponseDelta {
+    ) -> NvCreateChatCompletionStreamResponse {
+        let delta = NvChatCompletionStreamResponseDelta {
             content: text,
             function_call: None,
             tool_calls: None,
@@ -209,9 +212,10 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
+            reasoning_content: None,
         };
 
-        let choice = async_openai::types::ChatChoiceStream {
+        let choice = NvChatChoiceStream {
             index,
             delta,
             finish_reason,
@@ -225,7 +229,7 @@ impl DeltaGenerator {
             usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
         }
 
-        async_openai::types::CreateChatCompletionStreamResponse {
+        NvCreateChatCompletionStreamResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -296,11 +300,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
-
-        Ok(NvCreateChatCompletionStreamResponse {
-            inner: stream_response,
-        })
+        Ok(self.create_choice(index, delta.text, finish_reason, logprobs))
     }
 
     fn get_isl(&self) -> Option<u32> {
