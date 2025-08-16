@@ -17,6 +17,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.common import (
     BaseWorkerHandler,
+    get_dynamo_namespace,
     graceful_shutdown,
     parse_sglang_args_inc,
     setup_native_endpoints,
@@ -68,10 +69,9 @@ async def worker(runtime: DistributedRuntime):
 
 async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     """Initialize decode worker"""
-
     engine = sgl.Engine(server_args=server_args)
 
-    component = runtime.namespace("dynamo").component("decode")
+    component = runtime.namespace(get_dynamo_namespace()).component("decode")
     await component.create_service()
 
     handler = DecodeRequestHandler(engine, server_args, component)
