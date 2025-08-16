@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::traits::events::EventSubscriber;
 use crate::{
     component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
     pipeline::{
-        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+        error::{PipelineError, PipelineErrorExt},
+        AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
@@ -18,6 +20,7 @@ use async_trait::async_trait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     future::Future,
     marker::PhantomData,
     sync::{
@@ -25,7 +28,26 @@ use std::{
         Arc,
     },
 };
+use tokio::sync::{watch, RwLock};
 use tokio_stream::StreamExt;
+
+/// Worker load monitoring state
+#[derive(Clone, Debug)]
+struct WorkerLoadState {
+    kv_active_blocks: Option<u64>,
+    kv_total_blocks: Option<u64>,
+}
+
+impl WorkerLoadState {
+    fn is_busy(&self, threshold: f64) -> bool {
+        match (self.kv_active_blocks, self.kv_total_blocks) {
+            (Some(active), Some(total)) if total > 0 => {
+                (active as f64) > (threshold * total as f64)
+            }
+            _ => false,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct PushRouter<T, U>
@@ -51,6 +73,9 @@ where
     /// The next step in the chain. PushRouter (this object) picks an instances,
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
+
+    /// Worker load states for monitoring KV cache usage
+    worker_load_states: Arc<RwLock<HashMap<i64, WorkerLoadState>>>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -88,13 +113,23 @@ where
 {
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
-        Ok(PushRouter {
-            client,
+        let worker_load_states = Arc::new(RwLock::new(HashMap::new()));
+
+        let router = PushRouter {
+            client: client.clone(),
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
+            worker_load_states: worker_load_states.clone(),
             _phantom: PhantomData,
-        })
+        };
+
+        // Start background monitoring if in dynamic mode
+        if let InstanceSource::Dynamic(_) = client.instance_source.as_ref() {
+            router.start_worker_monitoring().await?;
+        }
+
+        Ok(router)
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -170,6 +205,19 @@ where
         instance_id: i64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
+        // Check if all workers are busy
+        let free_instances = self.client.instance_ids_free();
+        if free_instances.is_empty() {
+            // Check if we actually have any instances at all
+            let all_instances = self.client.instance_ids();
+            if !all_instances.is_empty() {
+                return Err(PipelineError::ServiceOverloaded(
+                    "All workers are busy, please retry later".to_string(),
+                )
+                .into());
+            }
+        }
+
         let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
@@ -198,6 +246,135 @@ where
                 Err(err)
             }
         }
+    }
+
+    /// Start background monitoring of worker KV cache usage
+    async fn start_worker_monitoring(&self) -> anyhow::Result<()> {
+        // Constants
+        const KV_METRICS_SUBJECT: &str = "kv_metrics";
+        const MODEL_ROOT_PATH: &str = "models";
+        const BUSY_THRESHOLD: f64 = 0.95;
+
+        #[derive(serde::Deserialize)]
+        struct LoadEvent {
+            worker_id: i64,
+            data: ForwardPassMetrics,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ForwardPassMetrics {
+            kv_stats: KvStats,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct KvStats {
+            kv_active_blocks: u64,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ModelEntry {
+            runtime_config: Option<RuntimeConfig>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct RuntimeConfig {
+            total_kv_blocks: Option<u64>,
+        }
+
+        let endpoint = &self.client.endpoint;
+        let component = endpoint.component();
+
+        let Some(etcd_client) = component.drt().etcd_client() else {
+            // Static mode, no monitoring needed
+            return Ok(());
+        };
+
+        // Use the generic etcd watcher to watch model runtime configs
+        use crate::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
+
+        let runtime_configs_watcher = watch_prefix_with_extraction(
+            etcd_client,
+            MODEL_ROOT_PATH,
+            key_extractors::lease_id,
+            |entry: ModelEntry| entry.runtime_config.and_then(|rc| rc.total_kv_blocks),
+            component.drt().child_token(),
+        )
+        .await?;
+        let mut config_events_rx = runtime_configs_watcher.receiver();
+
+        // Subscribe to KV metrics events
+        let mut kv_metrics_rx = component.subscribe(KV_METRICS_SUBJECT).await?;
+
+        let worker_load_states = self.worker_load_states.clone();
+        let client = self.client.clone();
+        let cancellation_token = component.drt().child_token();
+
+        // Spawn background monitoring task
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        tracing::debug!("Worker monitoring cancelled");
+                        break;
+                    }
+
+                    // Handle runtime config updates - now receives full HashMap
+                    _ = config_events_rx.changed() => {
+                        let runtime_configs = config_events_rx.borrow().clone();
+
+                        let mut states = worker_load_states.write().await;
+                        states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
+
+                        // Update worker load states with total blocks
+                        for (lease_id, total_blocks) in runtime_configs.iter() {
+                            let state = states.entry(*lease_id).or_insert(WorkerLoadState {
+                                kv_active_blocks: None,
+                                kv_total_blocks: None,
+                            });
+                            state.kv_total_blocks = Some(*total_blocks);
+                        }
+                    }
+
+                    // Handle KV metrics updates
+                    kv_event = kv_metrics_rx.next() => {
+                        let Some(event) = kv_event else {
+                            tracing::debug!("KV metrics stream closed");
+                            break;
+                        };
+
+                        if let Ok(load_event) = serde_json::from_slice::<LoadEvent>(&event.payload) {
+                            let worker_id = load_event.worker_id;
+                            let active_blocks = load_event.data.kv_stats.kv_active_blocks;
+
+                            // Update worker load state
+                            let mut states = worker_load_states.write().await;
+                            let state = states.entry(worker_id).or_insert(WorkerLoadState {
+                                kv_active_blocks: None,
+                                kv_total_blocks: None,
+                            });
+                            state.kv_active_blocks = Some(active_blocks);
+                            drop(states);
+
+                            // Recalculate all busy instances and update
+                            let states = worker_load_states.read().await;
+                            let busy_instances: Vec<i64> = states
+                                .iter()
+                                .filter_map(|(&id, state)| {
+                                    state.is_busy(BUSY_THRESHOLD).then_some(id)
+                                })
+                                .collect();
+                            drop(states);
+
+                            client.update_free_instances(&busy_instances);
+                        }
+                    }
+                }
+            }
+
+            tracing::info!("Worker monitoring task exiting");
+        });
+
+        Ok(())
     }
 }
 

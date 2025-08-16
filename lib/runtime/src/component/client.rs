@@ -44,6 +44,8 @@ pub struct Client {
     pub instance_source: Arc<InstanceSource>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<i64>>>,
+    // These are the instance source ids less those reported as busy (above threshold)
+    instance_free: Arc<ArcSwap<Vec<i64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +61,7 @@ impl Client {
             endpoint,
             instance_source: Arc::new(InstanceSource::Static),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         })
     }
 
@@ -76,8 +79,9 @@ impl Client {
 
         let client = Client {
             endpoint,
-            instance_source,
+            instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_free: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         };
         client.monitor_instance_source();
         Ok(client)
@@ -106,6 +110,10 @@ impl Client {
 
     pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
         self.instance_avail.load()
+    }
+
+    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+        self.instance_free.load()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -142,6 +150,16 @@ impl Client {
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
+    /// Update the set of free instances based on busy instance IDs
+    pub fn update_free_instances(&self, busy_instance_ids: &[i64]) {
+        let all_instance_ids = self.instance_ids();
+        let free_ids: Vec<i64> = all_instance_ids
+            .into_iter()
+            .filter(|id| !busy_instance_ids.contains(id))
+            .collect();
+        self.instance_free.store(Arc::new(free_ids));
+    }
+
     /// Monitor the ETCD instance source and update instance_avail.
     fn monitor_instance_source(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
@@ -160,7 +178,10 @@ impl Client {
                     .iter()
                     .map(|instance| instance.id())
                     .collect();
-                client.instance_avail.store(Arc::new(instance_ids));
+
+                // TODO: this resets both tracked available and free instances
+                client.instance_avail.store(Arc::new(instance_ids.clone()));
+                client.instance_free.store(Arc::new(instance_ids));
 
                 tracing::debug!("instance source updated");
 
