@@ -59,7 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
-pyo3 = { version = "0.23.4", default-features = false, features = [
+pyo3 = { version = "0.25.1", default-features = false, features = [
   "macros",
   "experimental-async",
   "experimental-inspect",
@@ -67,14 +67,14 @@ pyo3 = { version = "0.23.4", default-features = false, features = [
   "py-clone",
 ] }
 
-pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
+pyo3-async-runtimes = { version = "0.25.0", default-features = false, features = [
   "attributes",
   "testing",
   "tokio-runtime",
   "unstable-streams",
 ] }
 
-pythonize = "0.23"
+pythonize = "0.25"
 
-dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
+dlpark = { version = "0.6", features = ["pyo3", "half"], optional = true }
 
