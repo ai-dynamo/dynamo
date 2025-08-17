@@ -257,11 +257,13 @@ source $HOME/.cargo/env
 
 Follow the instructions in [uv installation](https://docs.astral.sh/uv/#installation) guide to install uv if you don't have `uv` installed. Once uv is installed, create a virtual environment and activate it.
 
+- Install uv
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
-# Install uv
-url -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create a virtual environment
+- Create a virtual environment
+```bash
 uv venv dynamo
 source dynamo/bin/activate
 ```
