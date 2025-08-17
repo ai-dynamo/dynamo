@@ -18,6 +18,7 @@
 import argparse
 import asyncio
 import logging
+import os
 
 from dynamo.runtime import DistributedRuntime, EtcdKvCache, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -39,6 +40,11 @@ async def clear_namespace(runtime: DistributedRuntime, namespace: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--namespace", type=str, required=True)
+    parser.add_argument("--namespace", type=str, required=False, default=None)
     args = parser.parse_args()
+    if not args.namespace:
+        args.namespace = os.environ.get("DYN_NAMESPACE")
+    assert (
+        args.namespace
+    ), "Missing namespace, either pass --namespace or set DYN_NAMESPACE"
     asyncio.run(clear_namespace(args.namespace))

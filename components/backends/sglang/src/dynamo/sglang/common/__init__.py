@@ -15,6 +15,7 @@ from .protocol import (
 
 # Utilities
 from .sgl_utils import (
+    get_dynamo_namespace,
     graceful_shutdown,
     parse_sglang_args_inc,
     reserve_free_port,
@@ -33,6 +34,7 @@ __all__ = [
     "reserve_free_port",
     "graceful_shutdown",
     "setup_native_endpoints",
+    "get_dynamo_namespace",
     # Base handlers
     "BaseWorkerHandler",
 ]
