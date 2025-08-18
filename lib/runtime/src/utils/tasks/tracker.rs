@@ -1553,8 +1553,6 @@ pub struct PrometheusTaskMetrics {
     prometheus_cancelled: prometheus::IntCounter,
     prometheus_failed: prometheus::IntCounter,
     prometheus_rejected: prometheus::IntCounter,
-    prometheus_active: prometheus::IntGauge,
-    prometheus_queued: prometheus::IntGauge,
 }
 
 impl PrometheusTaskMetrics {
@@ -1614,18 +1612,6 @@ impl PrometheusTaskMetrics {
             &[],
         )?;
 
-        let active_gauge = registry.create_intgauge(
-            &format!("{}_tasks_active", component_name),
-            "Current number of active tasks",
-            &[],
-        )?;
-
-        let queued_gauge = registry.create_intgauge(
-            &format!("{}_tasks_queued", component_name),
-            "Current number of tasks queued in scheduler",
-            &[],
-        )?;
-
         Ok(Self {
             prometheus_issued: issued_counter,
             prometheus_started: started_counter,
@@ -1633,8 +1619,6 @@ impl PrometheusTaskMetrics {
             prometheus_cancelled: cancelled_counter,
             prometheus_failed: failed_counter,
             prometheus_rejected: rejected_counter,
-            prometheus_active: active_gauge,
-            prometheus_queued: queued_gauge,
         })
     }
 }
