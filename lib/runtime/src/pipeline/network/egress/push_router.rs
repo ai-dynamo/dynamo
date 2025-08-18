@@ -303,7 +303,7 @@ where
         let mut config_events_rx = runtime_configs_watcher.receiver();
 
         // Subscribe to KV metrics events
-        let mut kv_metrics_rx = component.subscribe(KV_METRICS_SUBJECT).await?;
+        let mut kv_metrics_rx = component.namespace().subscribe(KV_METRICS_SUBJECT).await?;
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
