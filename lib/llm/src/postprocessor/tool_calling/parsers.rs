@@ -44,9 +44,59 @@ impl Default for JsonParserConfig {
             parallel_tool_calls_start_tokens: vec![],
             parallel_tool_calls_end_tokens: vec![],
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string(), "<|python_tag|>".to_string()],
-            tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
+        }
+    }
+}
+
+impl Default for ToolCallConfig {
+    fn default() -> Self {
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig::default(),
+        }
+    }
+}
+
+impl ToolCallConfig {
+    /// Default configuration for hermes tool calls
+    /// <tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}\n</tool_call>
+    pub fn hermes() -> Self {
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<tool_call>".to_string()],
+                tool_call_end_tokens: vec!["\n</tool_call>".to_string()],
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Default configuration for nemotron tool calls
+    /// <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>
+    pub fn nemotron_deci() -> Self {
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+                tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn llama3_json() -> Self {
+        // <|python_tag|>{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"} }
+        // or { "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"} }
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<|python_tag|>".to_string()],
+                tool_call_end_tokens: vec!["".to_string()],
+                ..Default::default()
+            },
         }
     }
 }
@@ -58,15 +108,6 @@ pub struct ToolCallConfig {
     pub format: ToolCallParserType,
     /// The config for the JSON parser
     pub json: JsonParserConfig,
-}
-
-impl Default for ToolCallConfig {
-    fn default() -> Self {
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig::default(),
-        }
-    }
 }
 
 pub fn try_tool_call_parse(
@@ -88,6 +129,30 @@ pub fn try_tool_call_parse(
         ToolCallParserType::Xml => {
             anyhow::bail!("Xml parser not implemented");
         }
+    }
+}
+
+// Base Detector to call for all tool parsing
+pub fn detect_and_parse_tool_call(
+    message: &str,
+    parser_str: Option<&str>,
+) -> anyhow::Result<Option<ToolCallResponse>> {
+    let mut parser_map: std::collections::HashMap<&str, ToolCallConfig> =
+        std::collections::HashMap::new();
+    parser_map.insert("hermes", ToolCallConfig::hermes());
+    parser_map.insert("nemotron_deci", ToolCallConfig::nemotron_deci());
+    parser_map.insert("llama3_json", ToolCallConfig::llama3_json());
+    parser_map.insert("default", ToolCallConfig::default()); // Add default key
+
+    // Handle None or empty string by defaulting to "default"
+    let parser_key = match parser_str {
+        Some(s) if !s.is_empty() => s,
+        _ => "default", // None or empty string
+    };
+
+    match parser_map.get(parser_key) {
+        Some(config) => try_tool_call_parse(message, config),
+        None => anyhow::bail!("Parser for the given config is not implemented"), // Original message
     }
 }
 
@@ -163,9 +228,19 @@ mod tests {
     #[test]
     fn parses_python_tag_prefixed_payload() {
         let input = r#"<|python_tag|>{ "name": "pyfunc", "arguments": { "k": "v" } }"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
-            .unwrap()
-            .unwrap();
+        let result = try_tool_call_parse(
+            input,
+            &ToolCallConfig {
+                format: ToolCallParserType::Json,
+                json: JsonParserConfig {
+                    tool_call_start_tokens: vec!["<|python_tag|>".to_string()],
+                    tool_call_end_tokens: vec!["".to_string()],
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap()
+        .unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "pyfunc");
         assert_eq!(args["k"], "v");
@@ -187,14 +262,13 @@ mod tests {
 
     // Tests for real model outputs - disabled by default
     #[test]
-    #[ignore]
     fn test_nvidia_llama3_nemotron_super_49b_simple() {
         let input = r#"<think>
 Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me check the tools available.
 </think>
 
 <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
-        let result = try_tool_call_parse(input, &ToolCallConfig::default())
+        let result = detect_and_parse_tool_call(input, Some("nemotron_deci"))
             .unwrap()
             .unwrap();
         let (name, args) = extract_name_and_args(result);
@@ -205,20 +279,40 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 
     #[test]
     #[ignore]
+    // TODO : Implement extracting function arrays
+    fn test_nvidia_llama3_nemotron_super_49b_with_function_array() {
+        let input = r#"<think>
+Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me check the tools available.
+</think>
+
+<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]</TOOLCALL>"#;
+        let config = ToolCallConfig::nemotron_deci();
+        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
+        println!("{:?}", result);
+    }
+
+    #[test]
     fn test_qwen_qwq_32b_simple() {
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let config = ToolCallConfig {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<tool_call>".to_string()],
-                tool_call_end_tokens: vec!["</tool_call>".to_string()],
-                arguments_keys: vec!["arguments".to_string()],
-                ..Default::default()
-            },
-        };
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
+        let result = detect_and_parse_tool_call(input, Some("hermes"))
+            .unwrap()
+            .unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_nousresearch_hermes3_llama31_8b_simple() {
+        let input = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</tool_call>"#;
+        let result = detect_and_parse_tool_call(input, Some("hermes"))
+            .unwrap()
+            .unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
@@ -227,24 +321,18 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 
     #[test]
     #[ignore]
-    fn test_nousresearch_hermes3_llama31_8b_simple() {
+    // TODO : Implement this
+    fn test_qwen_qwq_32b_multiple_tool_calls() {
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
-</tool_call>"#;
-        let config = ToolCallConfig {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<tool_call>".to_string()],
-                tool_call_end_tokens: vec!["</tool_call>".to_string()],
-                arguments_keys: vec!["arguments".to_string()],
-                ..Default::default()
-            },
-        };
+</tool_call>
+<tool_call>
+{"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}
+</tool_call>
+"#;
+        let config = ToolCallConfig::hermes();
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
-        let (name, args) = extract_name_and_args(result);
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "San Francisco, CA");
-        assert_eq!(args["unit"], "fahrenheit");
+        println!("{:?}", result);
     }
 
     #[test]
@@ -288,23 +376,53 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[test]
-    #[ignore]
     fn test_meta_llama_llama31_8b_instruct_simple() {
         let input = r#"{"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-        let config = ToolCallConfig {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec![],
-                tool_call_end_tokens: vec![],
-                arguments_keys: vec!["parameters".to_string()],
-                ..Default::default()
-            },
-        };
-        let result = try_tool_call_parse(input, &config).unwrap().unwrap();
+        let result = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .unwrap()
+            .unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_meta_llama_llama31_8b_instruct_with_python_tag() {
+        let input = r#"<|python_tag|>{ "name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
+        let result = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .unwrap()
+            .unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_detect_and_parse_tool_call_error_handling() {
+        // Unknown parser string should return an error
+        let input = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA"}}"#;
+        let result = detect_and_parse_tool_call(input, Some("unknown_parser"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("is not implemented"),
+            "Unexpected error message: {}",
+            err
+        );
+
+        // Known parser, but invalid input (not JSON) should return Ok(None)
+        let input = "not a json";
+        let result = detect_and_parse_tool_call(input, Some("hermes"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Known parser, but valid JSON with wrong shape should return Ok(None)
+        let input = r#"{"foo": "bar"}"#;
+        let result = detect_and_parse_tool_call(input, Some("hermes"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
@@ -355,6 +473,36 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             },
         };
         let result = try_tool_call_parse(input, &config).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_detect_and_parse_tool_call_default_parser_nemotron_deci() {
+        let input = r#"<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
+        let result = detect_and_parse_tool_call(input, None).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_with_python_tag() {
+        let input = r#"<|python_tag|>{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
+        let result = detect_and_parse_tool_call(input, None).unwrap().unwrap();
+        let (name, args) = extract_name_and_args(result);
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag() {
+        let input = r#"{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
+        let result = detect_and_parse_tool_call(input, None).unwrap().unwrap();
         let (name, args) = extract_name_and_args(result);
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");

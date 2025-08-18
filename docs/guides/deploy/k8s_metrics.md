@@ -93,7 +93,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-frontend-metrics
-  namespace: dynamo
+  namespace: $NAMESPACE
 spec:
   selector:
     matchLabels:
@@ -105,7 +105,7 @@ spec:
       interval: 2s
   namespaceSelector:
     matchNames:
-      - dynamo
+      - $NAMESPACE
 ```
 
 Then, create the worker PodMonitor:
@@ -115,7 +115,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: dynamo-worker-metrics
-  namespace: dynamo
+  namespace: $NAMESPACE
 spec:
   selector:
     matchLabels:
@@ -127,7 +127,28 @@ spec:
       interval: 2s
   namespaceSelector:
     matchNames:
-      - dynamo
+      - $NAMESPACE
+```
+
+If you are using planner, you can also create a PodMonitor for the planner:
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-planner-metrics
+  namespace: $NAMESPACE
+spec:
+  selector:
+    matchLabels:
+      nvidia.com/metrics-enabled: "true"
+      nvidia.com/dynamo-component-type: "planner"
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 2s
+  namespaceSelector:
+    matchNames:
+      - $NAMESPACE
 ```
 
 Apply the PodMonitors:
@@ -136,6 +157,7 @@ pushd deploy/metrics/k8s
 # envsubst replaces ${NAMESPACE} with the actual namespace value
 envsubst < frontend-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
 envsubst < worker-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
+envsubst < planner-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
 popd
 ```
 
@@ -146,7 +168,7 @@ This will cause Prometheus to be re-configured to scrape metrics from the pods o
 Apply the Dynamo dashboard configuration to populate Grafana with the Dynamo dashboard:
 ```bash
 pushd deploy/metrics/k8s
-kubectl apply -n monitoring -f resources/grafana-dynamo-dashboard-configmap.yaml
+kubectl apply -n monitoring -f grafana-dynamo-dashboard-configmap.yaml
 popd
 ```
 
@@ -162,7 +184,7 @@ The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_da
 
 ### In Prometheus
 ```bash
-kubectl port-forward svc/prometheus-operated 9090:9090
+kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring
 ```
 
 Visit http://localhost:9090 and try these example queries:
@@ -173,7 +195,7 @@ Visit http://localhost:9090 and try these example queries:
 
 ### In Grafana
 ```bash
-kubectl port-forward svc/grafana 3000:80
+kubectl port-forward svc/grafana 3000:80 -n monitoring
 ```
 
 Visit http://localhost:3000 and find the Dynamo dashboard under General.

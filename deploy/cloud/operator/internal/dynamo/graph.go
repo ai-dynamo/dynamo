@@ -105,7 +105,7 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func GetDefaultDynamoNamespace(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment) string {
+func GetDefaultDynamoNamespace(dynamoDeployment *v1alpha1.DynamoGraphDeployment) string {
 	return fmt.Sprintf("dynamo-%s", dynamoDeployment.Name)
 }
 
@@ -118,7 +118,10 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
-	graphDynamoNamespace := ""
+	graphDynamoNamespace, err := getDynamoNamespace(parentDynamoGraphDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
+	}
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = component.DynamoComponentDeploymentSharedSpec
@@ -126,22 +129,14 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
-		dynamoNamespace := GetDefaultDynamoNamespace(ctx, parentDynamoGraphDeployment)
-		if component.DynamoNamespace != nil && *component.DynamoNamespace != "" {
-			dynamoNamespace = *component.DynamoNamespace
-		}
-		if graphDynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
-			return nil, fmt.Errorf("namespace mismatch for component %s: graph uses namespace %s but component specifies %s", componentName, graphDynamoNamespace, dynamoNamespace)
-		}
-		graphDynamoNamespace = dynamoNamespace
-		deployment.Spec.DynamoNamespace = &dynamoNamespace
+		deployment.Spec.DynamoNamespace = &graphDynamoNamespace
 		labels := make(map[string]string)
 		// add the labels in the spec in order to label all sub-resources
 		deployment.Spec.Labels = labels
 		// and add the labels to the deployment itself
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
-		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+		labels[commonconsts.KubeLabelDynamoNamespace] = graphDynamoNamespace
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
@@ -188,6 +183,24 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployments[componentName] = deployment
 	}
 	return deployments, nil
+}
+
+func getDynamoNamespace(parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) (string, error) {
+	graphDynamoNamespace := ""
+	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
+		dynamoNamespace := ""
+		if component.DynamoNamespace != nil && *component.DynamoNamespace != "" {
+			dynamoNamespace = *component.DynamoNamespace
+		}
+		if graphDynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
+			return "", fmt.Errorf("namespace mismatch for component %s: graph uses namespace %s but component specifies %s", componentName, graphDynamoNamespace, dynamoNamespace)
+		}
+		graphDynamoNamespace = dynamoNamespace
+	}
+	if graphDynamoNamespace == "" {
+		graphDynamoNamespace = GetDefaultDynamoNamespace(parentDynamoGraphDeployment)
+	}
+	return graphDynamoNamespace, nil
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
@@ -667,6 +680,7 @@ func GenerateBasePodSpec(
 	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
 	backendFramework BackendFramework,
 	secretsRetriever SecretsRetriever,
+	parentGraphDeploymentName string,
 	namespace string,
 	role Role,
 	numberOfNodes int32,
@@ -675,8 +689,9 @@ func GenerateBasePodSpec(
 	serviceName string,
 ) (corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentDefaults := ComponentDefaultsFactory(component.ComponentType, numberOfNodes)
-	container, err := componentDefaults.GetBaseContainer(numberOfNodes)
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
+	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
+	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
 	}
@@ -778,7 +793,7 @@ func GenerateBasePodSpec(
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
 
 	// get base podspec from component
-	podSpec, err := componentDefaults.GetBasePodSpec(numberOfNodes)
+	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get base podspec: %w", err)
 	}
@@ -808,6 +823,18 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32) ComponentContext {
+	componentContext := ComponentContext{
+		numberOfNodes:                  numberOfNodes,
+		ParentGraphDeploymentName:      parentGraphDeploymentName,
+		ParentGraphDeploymentNamespace: namespace,
+	}
+	if component.DynamoNamespace != nil {
+		componentContext.DynamoNamespace = *component.DynamoNamespace
+	}
+	return componentContext
+}
+
 // GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
 func GeneratePodSpecForComponent(
 	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
@@ -823,7 +850,7 @@ func GeneratePodSpecForComponent(
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
 	if err != nil {
 		return corev1.PodSpec{}, err
 	}
@@ -847,9 +874,13 @@ func GenerateGrovePodGangSet(
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
-
+	dynamoNamespace, err := getDynamoNamespace(dynamoDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
+	}
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
+		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
@@ -1129,6 +1160,7 @@ func GenerateBasePodSpecForController(
 		componentSpec,
 		backendFramework,
 		secretsRetriever,
+		dynComponent.GetParentGraphDeploymentName(),
 		dynComponent.Namespace,
 		role,
 		numberOfNodes,

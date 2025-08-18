@@ -1303,6 +1303,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1417,6 +1429,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
+													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -1746,6 +1770,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1881,6 +1917,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1991,6 +2039,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
+													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -2106,6 +2166,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
+													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -2459,6 +2531,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2582,6 +2666,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
 													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2692,6 +2788,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
+													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -2807,6 +2915,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "ETCD_ENDPOINTS",
 														Value: "etcd-address",
+													},
+													{
+														Name:  "DYN_NAMESPACE",
+														Value: "dynamo-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAME",
+														Value: "test-dynamo-graph-deployment",
+													},
+													{
+														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+														Value: "test-namespace",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
@@ -4126,6 +4246,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				tt.component,
 				BackendFrameworkSGLang,
 				secretsRetriever,
+				"test-deployment",
 				"default",
 				RoleMain,
 				1,
