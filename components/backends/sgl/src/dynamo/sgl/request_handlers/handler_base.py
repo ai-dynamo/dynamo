@@ -1,6 +1,8 @@
 import sglang as sgl
+from dataclasses import dataclass
 
 from dynamo.sgl.args import Config
+
 
 @dataclass
 class RequestHandlerConfig:
@@ -11,4 +13,3 @@ class RequestHandlerConfig:
     component: object
     engine: sgl.Engine
     config: Config
-

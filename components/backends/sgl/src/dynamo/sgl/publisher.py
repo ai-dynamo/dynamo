@@ -7,8 +7,8 @@ from typing import Optional
 
 import sglang as sgl
 import zmq
-import zmq.asyncio 
-from sglang.srt.utils import get_zmq_socket 
+import zmq.asyncio
+from sglang.srt.utils import get_zmq_socket
 
 from dynamo.llm import (
     ForwardPassMetrics,
@@ -29,18 +29,18 @@ class DynamoWorkerStatPublisher:
     def __init__(self, engine: sgl.Engine) -> None:
         self.engine = engine
         self.inner = WorkerMetricsPublisher()
-        
+
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024
         self.dp_rank = 0
         self.num_gpu_block = 1024
-        
+
         # ZMQ setup for receiving scheduler metrics
         self._ctx = zmq.asyncio.Context()  # type: ignore
         self._sock = get_zmq_socket(
             self._ctx, zmq.PULL, self.engine.port_args.metrics_ipc_name, True  # type: ignore
         )
-        
+
     async def run(self) -> None:
         """Main loop to receive scheduler metrics and publish them"""
         while True:
@@ -57,7 +57,9 @@ class DynamoWorkerStatPublisher:
                     data_parallel_rank=kv_metrics.data_parallel_rank,
                 )
             except Exception:
-                logging.exception("Failed to receive or publish SGLang scheduler metrics")
+                logging.exception(
+                    "Failed to receive or publish SGLang scheduler metrics"
+                )
 
     async def create_endpoint(self, component: Component) -> None:
         await self.inner.create_endpoint(component)
@@ -111,7 +113,9 @@ class DynamoWorkerStatPublisher:
             request_active_slots=request_active_slots,
             request_total_slots=request_total_slots,
             num_requests_waiting=num_requests_waiting,
-            data_parallel_rank=data_parallel_rank if data_parallel_rank is not None else self.dp_rank,
+            data_parallel_rank=data_parallel_rank
+            if data_parallel_rank is not None
+            else self.dp_rank,
         )
         kv_stats = KvStats(
             kv_active_blocks=kv_active_blocks,
@@ -131,8 +135,8 @@ async def setup_sgl_metrics(
     """
     publisher = DynamoWorkerStatPublisher(engine)
     await publisher.create_endpoint(component)
-    
+
     publisher.init_publish()
-    
+
     task = asyncio.create_task(publisher.run())
     return publisher, task

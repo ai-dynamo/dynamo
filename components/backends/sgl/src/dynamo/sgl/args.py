@@ -3,12 +3,11 @@
 
 import argparse
 import contextlib
-import socket
 import logging
-from enum import Enum
+import socket
 from argparse import Namespace
+from enum import Enum
 
-import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -27,18 +26,22 @@ DYNAMO_ARGS = {
     },
 }
 
+
 class DynamoArgs:
     def __init__(self, endpoint: str, migration_limit: int) -> None:
         self.endpoint = endpoint
         self.migration_limit = migration_limit
 
+
 class DisaggregationMode(Enum):
     """
     Set this instead of string matching
     """
+
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
+
 
 # Configuration class to store SGL engine arguments and dynamo specific arguments
 class Config:
@@ -57,12 +60,13 @@ class Config:
         else:
             logging.error("Cannot ascertain serving strategy. This shouldn't happen")
 
+
 def parse_args(args: list[str] = None) -> Config:
     """
     Parse all arguments and return Config with server_args and dynamo_args
     """
     parser = argparse.ArgumentParser()
-    
+
     # Dynamo args
     for info in DYNAMO_ARGS.values():
         parser.add_argument(
@@ -71,28 +75,29 @@ def parse_args(args: list[str] = None) -> Config:
             default=info["default"],
             help=info["help"],
         )
-    
+
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
 
     parsed_args = parser.parse_args(args)
-    
+
     # Auto-set bootstrap port if not provided
     if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args):
         args_dict = vars(parsed_args)
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
-    
+
     # Create dynamo args from parsed values
     dynamo_args = DynamoArgs(
         endpoint=parsed_args.endpoint,
         migration_limit=parsed_args.migration_limit,
     )
     server_args = ServerArgs.from_cli_args(parsed_args)
-    
+
     # Create config
     return Config(server_args, dynamo_args)
+
 
 @contextlib.contextmanager
 def reserve_free_port(host: str = "localhost"):
@@ -116,5 +121,3 @@ def _reserve_disaggregation_bootstrap_port():
     """
     with reserve_free_port() as port:
         return port
-
-
