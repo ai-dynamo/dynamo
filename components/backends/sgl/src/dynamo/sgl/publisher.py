@@ -28,6 +28,7 @@ class DynamoSglangStatPublisher:
     def __init__(self, engine: sgl.Engine) -> None:
         self.engine = engine
         self.inner = WorkerMetricsPublisher()
+        self.inner.create_endpoint()
 
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024
@@ -59,9 +60,6 @@ class DynamoSglangStatPublisher:
                 logging.exception(
                     "Failed to receive or publish SGLang scheduler metrics"
                 )
-
-    async def create_endpoint(self, component: Component) -> None:
-        await self.inner.create_endpoint(component)
 
     def init_publish(self) -> None:
         worker_stats = WorkerStats(
@@ -134,8 +132,6 @@ async def setup_sgl_metrics(
     Convenience bootstrap: create endpoint, publish an initial update, and start the metrics loop.
     """
     publisher = DynamoSglangStatPublisher(engine)
-    await publisher.create_endpoint(component)
-
     publisher.init_publish()
 
     task = asyncio.create_task(publisher.run())
