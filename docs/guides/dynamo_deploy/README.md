@@ -54,7 +54,7 @@ You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your dep
 You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
 
 We provide a Custom Resource YAML file for many examples under the `deploy/` folder.
-Use [VLLM YAML](../../components/backends/vllm/deploy/agg.yaml) for an example.
+Use [VLLM YAML](../../../components/backends/vllm/deploy/agg.yaml) for an example.
 
 **Note 1** Example Image
 

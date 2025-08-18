@@ -1205,6 +1205,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder),
 						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
 							PublishNotReadyAddresses: true,
 						},
@@ -1224,8 +1225,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "frontend",
-									Replicas: 1,
+									RoleName:     "frontend",
+									Replicas:     1,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -1244,6 +1246,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												Name: "frontend-secret",
 											},
 										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1357,8 +1360,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "planner",
-									Replicas: 2,
+									RoleName:     "planner",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -1379,6 +1383,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1694,10 +1700,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"worker-ldr",
 									"worker-wkr",
 								},
-								Replicas: ptr.To(int32(5)),
+								Replicas:     ptr.To(int32(5)),
+								MinAvailable: ptr.To(int32(1)),
 							},
 						},
 						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
+						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -1713,9 +1721,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "worker-ldr",
-									Replicas: 1,
+									RoleName:     "worker-ldr",
+									Replicas:     1,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
+										RestartPolicy:                 corev1.RestartPolicyAlways,
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										Volumes: []corev1.Volume{
 											{
 												Name: "shared-memory",
@@ -1859,10 +1870,13 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "worker-wkr",
-									Replicas: 2,
+									RoleName:     "worker-wkr",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(1)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
+										RestartPolicy:                 corev1.RestartPolicyAlways,
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										Volumes: []corev1.Volume{
 											{
 												Name: "shared-memory",
@@ -1965,8 +1979,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "frontend",
-									Replicas: 1,
+									RoleName:     "frontend",
+									Replicas:     1,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -1985,6 +2000,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2098,9 +2114,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "planner",
-									Replicas: 2,
+									RoleName:     "planner",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
 												Name: "planner-pvc",
@@ -2448,6 +2467,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder),
 						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
 							PublishNotReadyAddresses: true,
 						},
@@ -2459,7 +2479,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"worker-ldr",
 									"worker-wkr",
 								},
-								Replicas: ptr.To(int32(5)),
+								Replicas:     ptr.To(int32(5)),
+								MinAvailable: ptr.To(int32(1)),
 							},
 						},
 						// StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
@@ -2478,8 +2499,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "worker-ldr",
-									Replicas: 1,
+									RoleName:     "worker-ldr",
+									Replicas:     1,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -2492,6 +2514,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2612,10 +2636,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "worker-wkr",
-									Replicas: 2,
+									RoleName:     "worker-wkr",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(1)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										Volumes: []corev1.Volume{
 											{
 												Name: "shared-memory",
@@ -2627,6 +2653,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2718,8 +2745,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "frontend",
-									Replicas: 1,
+									RoleName:     "frontend",
+									Replicas:     1,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -2738,6 +2766,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2851,9 +2880,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "planner",
-									Replicas: 2,
+									RoleName:     "planner",
+									Replicas:     2,
+									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
+										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										Volumes: []corev1.Volume{
 											{
 												Name: "planner-pvc",
@@ -2873,6 +2904,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",

@@ -38,7 +38,8 @@ const DEFAULT_NAME: &str = "dynamo";
 const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 
 /// We can't have it default to 0, so pick something
-const DEFAULT_HTTP_PORT: u16 = 8080;
+/// 'pub' because the bindings use it for consistency.
+pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
@@ -50,6 +51,8 @@ pub struct LocalModelBuilder {
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
     http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     migration_limit: u32,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
@@ -62,6 +65,8 @@ impl Default for LocalModelBuilder {
         LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
             http_port: DEFAULT_HTTP_PORT,
+            tls_cert_path: Default::default(),
+            tls_key_path: Default::default(),
             model_path: Default::default(),
             model_name: Default::default(),
             model_config: Default::default(),
@@ -110,9 +115,18 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Passing None resets it to default
-    pub fn http_port(&mut self, port: Option<u16>) -> &mut Self {
-        self.http_port = port.unwrap_or(DEFAULT_HTTP_PORT);
+    pub fn http_port(&mut self, port: u16) -> &mut Self {
+        self.http_port = port;
+        self
+    }
+
+    pub fn tls_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_cert_path = p;
+        self
+    }
+
+    pub fn tls_key_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_key_path = p;
         self
     }
 
@@ -187,6 +201,8 @@ impl LocalModelBuilder {
                 endpoint_id,
                 template,
                 http_port: self.http_port,
+                tls_cert_path: self.tls_cert_path.take(),
+                tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
             });
@@ -260,6 +276,8 @@ impl LocalModelBuilder {
             endpoint_id,
             template,
             http_port: self.http_port,
+            tls_cert_path: self.tls_cert_path.take(),
+            tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
         })
@@ -272,7 +290,9 @@ pub struct LocalModel {
     card: ModelDeploymentCard,
     endpoint_id: EndpointId,
     template: Option<RequestTemplate>,
-    http_port: u16, // Only used if input is HTTP server
+    http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
 }
@@ -303,6 +323,14 @@ impl LocalModel {
 
     pub fn http_port(&self) -> u16 {
         self.http_port
+    }
+
+    pub fn tls_cert_path(&self) -> Option<&Path> {
+        self.tls_cert_path.as_deref()
+    }
+
+    pub fn tls_key_path(&self) -> Option<&Path> {
+        self.tls_key_path.as_deref()
     }
 
     pub fn router_config(&self) -> &RouterConfig {

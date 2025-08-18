@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::env::var;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -15,9 +16,11 @@ use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
+use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::transports::etcd;
+use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -126,6 +129,9 @@ pub struct HttpService {
     router: axum::Router,
     port: u16,
     host: String,
+    enable_tls: bool,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
 }
 
@@ -137,6 +143,15 @@ pub struct HttpServiceConfig {
 
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     host: String,
+
+    #[builder(default = "false")]
+    enable_tls: bool,
+
+    #[builder(default = "None")]
+    tls_cert_path: Option<PathBuf>,
+
+    #[builder(default = "None")]
+    tls_key_path: Option<PathBuf>,
 
     // #[builder(default)]
     // custom: Vec<axum::Router>
@@ -183,19 +198,61 @@ impl HttpService {
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
-        tracing::info!(address, "Starting HTTP service on: {address}");
-
-        let listener = tokio::net::TcpListener::bind(address.as_str())
-            .await
-            .unwrap_or_else(|_| panic!("could not bind to address: {address}"));
+        let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
+        tracing::info!(protocol, address, "Starting HTTP(S) service");
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
-        axum::serve(listener, router)
-            .with_graceful_shutdown(observer.cancelled_owned())
-            .await
-            .inspect_err(|_| cancel_token.cancel())?;
+        let addr: SocketAddr = address
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
+
+        if self.enable_tls {
+            let cert_path = self
+                .tls_cert_path
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?;
+            let key_path = self
+                .tls_key_path
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
+
+            // aws_lc_rs is the default but other crates pull in `ring` also,
+            // so rustls doesn't know which one to use. Tell it.
+            if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+                tracing::debug!("TLS crypto provider already installed: {e:?}");
+            }
+
+            let config = RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create TLS config: {}", e))?;
+
+            let handle = axum_server::Handle::new();
+            let server = axum_server::bind_rustls(addr, config)
+                .handle(handle.clone())
+                .serve(router.into_make_service());
+
+            tokio::select! {
+                result = server => {
+                    result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                }
+                _ = observer.cancelled() => {
+                    tracing::info!("HTTPS server shutdown requested");
+                    handle.graceful_shutdown(Some(Duration::from_secs(5)));
+                    // TODO: Do we need to wait?
+                }
+            }
+        } else {
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .unwrap_or_else(|_| panic!("could not bind to address: {address}"));
+
+            axum::serve(listener, router)
+                .with_graceful_shutdown(observer.cancelled_owned())
+                .await
+                .inspect_err(|_| cancel_token.cancel())?;
+        }
 
         Ok(())
     }
@@ -283,6 +340,9 @@ impl HttpServiceConfigBuilder {
             router,
             port: config.port,
             host: config.host,
+            enable_tls: config.enable_tls,
+            tls_cert_path: config.tls_cert_path,
+            tls_key_path: config.tls_key_path,
             route_docs: all_docs,
         })
     }

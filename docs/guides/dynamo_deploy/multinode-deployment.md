@@ -24,7 +24,7 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 
 For sophisticated multinode deployments, Dynamo integrates with advanced Kubernetes orchestration systems:
 
-- **[Grove](https://github.com/NVIDIA/grove)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
+- **[Grove](https://github.com/NVIDIA/grove/blob/main/docs/getting-started.md)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
 - (optional) **[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)**: Kubernetes native scheduler optimized for AI workloads at scale
 
 These systems provide enhanced scheduling capabilities including topology-aware placement, gang scheduling, and coordinated auto-scaling across multiple nodes.
@@ -50,8 +50,8 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 
 LWS is a simple multinode deployment mechanism that allows you to deploy a workload across multiple nodes.
 
-- **LWS**: [LWS Installation](https://github.com/NVIDIA/LWS#installation)
-- **Volcano**: [Volcano Installation](https://volcano.sh/docs/installation/install-volcano/)
+- **LWS**: [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+- **Volcano**: [Volcano Installation](https://volcano.sh/en/docs/installation/)
 
 Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It is used in conjunction with LWS to provide gang scheduling support.
 
@@ -66,12 +66,7 @@ The `multinode` section in a resource specification defines how many physical no
 multinode:
   nodeCount: 2
 resources:
-  requests:
-    cpu: "10"
-    memory: "40Gi"
   limits:
-    cpu: "10"
-    memory: "40Gi"
     gpu: "2"            # 2 GPUs per node
 ```
 
@@ -110,8 +105,8 @@ args:
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [components/backends/sglang/deploy/](../../components/backends/sglang/deploy/)
-- **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../components/backends/trtllm/deploy/)
-- **vLLM**: [components/backends/vllm/deploy/](../../components/backends/vllm/deploy/)
+- **SGLang**: [components/backends/sglang/deploy/](../../../components/backends/sglang/deploy/)
+- **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../../components/backends/trtllm/deploy/)
+- **vLLM**: [components/backends/vllm/deploy/](../../../components/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

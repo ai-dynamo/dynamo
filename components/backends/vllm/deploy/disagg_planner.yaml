@@ -11,8 +11,6 @@ spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
-    - name: DYNAMO_PORT
-      value: "8000"
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"
   services:
@@ -20,13 +18,6 @@ spec:
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "32"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
@@ -54,13 +45,6 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       pvc:
         create: false
         name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
@@ -109,13 +93,6 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
@@ -131,13 +108,7 @@ spec:
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "8"
-          memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -160,13 +131,7 @@ spec:
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "8"
-          memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

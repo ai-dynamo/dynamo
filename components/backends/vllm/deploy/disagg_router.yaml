@@ -22,6 +22,9 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
+      resources:
+        limits:
+          gpu: "1"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
@@ -36,6 +39,9 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
+      resources:
+        limits:
+          gpu: "1"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17

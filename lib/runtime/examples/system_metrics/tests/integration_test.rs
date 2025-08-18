@@ -43,7 +43,7 @@ async fn test_backend_with_metrics() -> Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     // Get the System status server info to find the actual port
-    let system_status_info = distributed.system_status_info();
+    let system_status_info = distributed.system_status_server_info();
     let system_status_port = match system_status_info {
         Some(info) => {
             println!("System status server running on: {}", info.address());
