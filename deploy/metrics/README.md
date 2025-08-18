@@ -68,7 +68,7 @@ When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), th
 ### Required Files
 
 The following configuration files should be present in this directory:
-- [docker-compose.yml](./docker-compose.yml): Defines the Prometheus and Grafana services
+- [docker-compose.yml](../docker-compose.yml): Defines the Prometheus and Grafana services
 - [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
 - [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration

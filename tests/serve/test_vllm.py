@@ -262,7 +262,7 @@ vllm_configs = {
     ),
     "multimodal_agg": VLLMConfig(
         name="multimodal_agg",
-        directory="/workspace/examples/multimodal_v1",
+        directory="/workspace/examples/multimodal",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         endpoints=["v1/chat/completions"],
@@ -276,7 +276,7 @@ vllm_configs = {
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
-    #     directory="/workspace/examples/multimodal_v1",
+    #     directory="/workspace/examples/multimodal",
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
     #     endpoints=["v1/chat/completions"],

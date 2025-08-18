@@ -27,12 +27,60 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    - `Dynamo README <https://github.com/ai-dynamo/dynamo/blob/main/README.md>`_
    - `Architecture and features doc <https://github.com/ai-dynamo/dynamo/blob/main/docs/architecture/>`_
    - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/guides>`_
-   - `Dynamo examples repo <https://github.com/ai-dynamo/examples>`_
+   - `Dynamo examples repo <https://github.com/ai-dynamo/dynamo/tree/main/examples>`_
 
 
 Quick Start
 -----------------
-Follow the :doc:`Quick Guide to install Dynamo Platform <guides/dynamo_deploy/quickstart>`.
+
+Local Deployment
+~~~~~~~~~~~~~~~~
+
+Get started with Dynamo locally in just a few commands:
+
+**1. Install Dynamo**
+
+.. code-block:: bash
+
+   # Install uv (recommended Python package manager)
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # Create virtual environment and install Dynamo
+   uv venv venv
+   source venv/bin/activate
+   uv pip install "ai-dynamo[sglang]"  # or [vllm], [trtllm]
+
+**2. Start etcd/NATS**
+
+.. code-block:: bash
+
+   # Start etcd and NATS using Docker Compose
+   docker compose -f deploy/docker-compose.yml up -d
+
+**3. Run Dynamo**
+
+.. code-block:: bash
+
+   # Start the OpenAI compatible frontend
+   python -m dynamo.frontend
+
+   # In another terminal, start an SGLang worker
+   python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+
+**4. Test your deployment**
+
+.. code-block:: bash
+
+   curl localhost:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+          "messages": [{"role": "user", "content": "Hello!"}],
+          "max_tokens": 50}'
+
+Kubernetes Deployment
+~~~~~~~~~~~~~~~~~~~~~
+
+For deployments on Kubernetes, follow the :doc:`Dynamo Platform Quickstart Guide <guides/dynamo_deploy/quickstart>`.
 
 
 Dive in: Examples
@@ -92,16 +140,8 @@ The examples below assume you build the latest image yourself from source. If us
    :hidden:
    :caption: Using Dynamo
 
-   Running Inference Graphs Locally (dynamo-run) <guides/dynamo_run.md>
-   Deploying Inference Graphs <guides/dynamo_deploy/README.md>
-
-.. toctree::
-   :hidden:
-   :caption: Usage Guides
-
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
-   KV Cache Router Performance Tuning <guides/kv_router_perf_tuning.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
 
 .. toctree::
@@ -110,23 +150,9 @@ The examples below assume you build the latest image yourself from source. If us
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
-   Manual Helm Deployment <deploy/helm/README.md>
-   GKE Setup Guide <guides/dynamo_deploy/gke_setup.md>
+   Manual Helm Deployment <guides/dynamo_deploy/helm_install.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
-
-.. toctree::
-   :hidden:
-   :caption: Benchmarking
-
-   Planner Benchmark Example <guides/planner_benchmark/README.md>
-
-
-.. toctree::
-   :hidden:
-   :caption: API
-
-   NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:
@@ -134,7 +160,9 @@ The examples below assume you build the latest image yourself from source. If us
 
    Hello World <examples/runtime/hello_world/README.md>
    LLM Deployment Examples using VLLM <components/backends/vllm/README.md>
+   LLM Deployment Examples using SGLang <components/backends/sglang/README.md>
    Multinode Examples using SGLang <components/backends/sglang/docs/multinode-examples.md>
+   Planner Benchmark Example <guides/planner_benchmark/README.md>
    LLM Deployment Examples using TensorRT-LLM <components/backends/trtllm/README.md>
 
 .. toctree::
@@ -143,6 +171,7 @@ The examples below assume you build the latest image yourself from source. If us
 
 
    Glossary <dynamo_glossary.md>
+   NIXL Connect API <API/nixl_connect/README.md>
    KVBM Reading <architecture/kvbm_reading.md>
 
 

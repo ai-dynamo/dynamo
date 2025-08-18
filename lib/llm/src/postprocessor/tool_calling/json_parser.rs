@@ -95,7 +95,7 @@ fn extract_tool_call_content<'a>(
 pub fn try_tool_call_parse_json(
     message: &str,
     config: &JsonParserConfig,
-) -> anyhow::Result<Option<ToolCallResponse>> {
+) -> anyhow::Result<Vec<ToolCallResponse>> {
     // Log the config we are using
     tracing::debug!("Using JSON parser config: {:?}", config);
     let trimmed = message.trim();
@@ -147,19 +147,20 @@ pub fn try_tool_call_parse_json(
     //   }
     // }
     if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
-        return parse(single.name, single.parameters).map(Some);
+        return Ok(vec![parse(single.name, single.parameters)?]);
+        //parse(single.name, single.parameters).map(Some);
 
-    // CalledFunctionArguments: Single { name, arguments }
-    // Example:
-    // {
-    //   "name": "summarize",
-    //   "arguments": {
-    //     "text": "Rust is a systems programming language.",
-    //     "length": "short"
-    //   }
-    // }
+        // CalledFunctionArguments: Single { name, arguments }
+        // Example:
+        // {
+        //   "name": "summarize",
+        //   "arguments": {
+        //     "text": "Rust is a systems programming language.",
+        //     "length": "short"
+        //   }
+        // }
     } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(json) {
-        return parse(single.name, single.arguments).map(Some);
+        return Ok(vec![parse(single.name, single.arguments)?]);
 
     // Vec<CalledFunctionParameters>: List of { name, parameters }
     // Example:
@@ -168,10 +169,12 @@ pub fn try_tool_call_parse_json(
     //   { "name": "send_email", "parameters": { "to": "user@example.com", "subject": "Welcome!" } }
     // ]
     // We pop the last item in the list to use.
-    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
-        if let Some(item) = list.pop() {
-            return parse(item.name, item.parameters).map(Some);
+    } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
+        let mut results = Vec::new();
+        for item in list {
+            results.push(parse(item.name, item.parameters)?);
         }
+        return Ok(results);
 
     // Vec<CalledFunctionArguments>: List of { name, arguments }
     // Example:
@@ -185,11 +188,13 @@ pub fn try_tool_call_parse_json(
     //   }
     // ]
     // Again, we take the last item for processing.
-    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
-        if let Some(item) = list.pop() {
-            return parse(item.name, item.arguments).map(Some);
+    } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
+        let mut results = Vec::new();
+        for item in list {
+            results.push(parse(item.name, item.arguments)?);
         }
+        return Ok(results);
     }
 
-    Ok(None)
+    Ok(vec![])
 }

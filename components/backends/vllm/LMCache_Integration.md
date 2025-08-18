@@ -166,5 +166,5 @@ lmcache_config = {
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
-- [Configuration Reference](https://docs.lmcache.ai/api_reference/config.html) - Detailed configuration options
+- [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
 

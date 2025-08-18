@@ -163,20 +163,24 @@ impl DeltaAggregator {
         // After aggregation, inspect each choice's text for tool call syntax
         for choice in aggregator.choices.values_mut() {
             if choice.tool_calls.is_none() {
-                if let Ok(Some(tool_call)) =
+                if let Ok(tool_calls) =
                     crate::postprocessor::tool_calling::tools::try_tool_call_parse_aggregate(
                         &choice.text,
                         None,
                     )
                 {
-                    tracing::debug!(
-                        tool_call_id = %tool_call.id,
-                        function_name = %tool_call.function.name,
-                        arguments = %tool_call.function.arguments,
-                        "Parsed structured tool call from aggregated content"
-                    );
-
-                    choice.tool_calls = Some(vec![tool_call]);
+                    if tool_calls.is_empty() {
+                        continue;
+                    }
+                    for tool_call in &tool_calls {
+                        tracing::debug!(
+                            tool_call_id = %tool_call.id,
+                            function_name = %tool_call.function.name,
+                            arguments = %tool_call.function.arguments,
+                            "Parsed structured tool call from aggregated content"
+                        );
+                    }
+                    choice.tool_calls = Some(tool_calls);
                     choice.text.clear();
                     choice.finish_reason = Some(async_openai::types::FinishReason::ToolCalls);
                 }
@@ -487,5 +491,64 @@ mod tests {
             Some(async_openai::types::FinishReason::Stop)
         );
         assert_eq!(choice1.message.role, async_openai::types::Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_output() {
+        // Simulate a delta with a tool call in the content
+        let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+
+        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
+        let annotated_delta = create_test_delta(
+            0,
+            tool_call_json,
+            Some(async_openai::types::Role::Assistant),
+            Some(async_openai::types::FinishReason::ToolCalls),
+        );
+        let delta = annotated_delta.data.unwrap().inner;
+
+        let data = NvCreateChatCompletionStreamResponse { inner: delta };
+
+        // Wrap it in Annotated and create a stream
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        // Call DeltaAggregator::apply
+        let result = DeltaAggregator::apply(stream).await;
+
+        // Check the result
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // There should be one choice
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
+
+        // The tool_calls field should be present and parsed
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        let tool_call = &tool_calls[0];
+        assert_eq!(tool_call.function.name, "get_weather");
+        // The arguments should be a JSON string containing the expected keys
+        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+
+        // The content should be cleared (None) after tool call parsing
+        assert!(choice.message.content.is_none());
+
+        // The finish_reason should be ToolCalls
+        assert_eq!(
+            choice.finish_reason,
+            Some(async_openai::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(choice.message.role, async_openai::types::Role::Assistant);
     }
 }

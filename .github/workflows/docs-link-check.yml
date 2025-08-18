@@ -1,0 +1,61 @@
+name: Docs link check
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Cache lychee results (e.g. to avoid hitting rate limits)
+      # https://lychee.cli.rs/github_action_recipes/caching/
+      - name: Restore lychee cache
+        uses: actions/cache@v4
+        with:
+          path: .lycheecache
+          key: cache-lychee-${{ github.sha }}
+          restore-keys: cache-lychee-
+
+      # https://github.com/lycheeverse/lychee/issues/1487
+      - name: Install CA Certificates for lychee
+        run: |
+          sudo apt-get install ca-certificates
+
+      - name: Install lychee
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          cd "$RUNNER_TEMP"
+          # TODO: Lychee v0.19.1 doesn't support regex in --exclude-path, so use nightly
+          # release until there is a released version containing regex support.
+          curl -sSL -o lychee.tar.gz \
+            https://github.com/lycheeverse/lychee/releases/download/nightly/lychee-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf lychee.tar.gz
+          BIN_PATH=$(find . -maxdepth 2 -type f -name lychee | head -n1)
+          install -m 0755 "$BIN_PATH" "$HOME/.local/bin/lychee"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          lychee --version
+
+      - name: Check documentation links with lychee
+        env:
+          # Set GITHUB_TOKEN to avoid github rate limits on URL checks
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Run lychee against all files in repo
+          lychee \
+            --cache \
+            --no-progress \
+            --exclude-path "ATTRIBUTIONS.*" \
+            --accept "200..=299, 403, 429" \
+            --exclude-all-private --exclude 0.0.0.0 \
+            .

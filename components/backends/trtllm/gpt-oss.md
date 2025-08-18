@@ -345,7 +345,7 @@ flowchart TD
 
 ## Next Steps
 
-- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../examples/basics/multinode/README.md)
+- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
 - **Performance Benchmarking**: Use GenAI-Perf to measure and optimize your deployment performance
