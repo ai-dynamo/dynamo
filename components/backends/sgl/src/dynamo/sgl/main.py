@@ -1,14 +1,19 @@
 import asyncio
+import json
 import logging
 import signal
 
 import sglang as sgl
 import uvloop
+from sglang.srt.utils import get_ip
 
+from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sgl.args import Config, DisaggregationMode, parse_args
 from dynamo.sgl.publisher import setup_sgl_metrics
+from dynamo.sgl.register import register_llm_with_runtime_config
+from dynamo.sgl.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
 configure_dynamo_logging()
 
@@ -33,42 +38,92 @@ async def worker(runtime: DistributedRuntime):
 
 
 async def init(runtime: DistributedRuntime, config: Config):
-    # We use a request handler factory pattern here
-    # depending on the disaggregation mode and pass in
-    # the correct arguments all the way through
-
     server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    engine = sgl.Engine(server_args=server_args)
+
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
     await component.create_service()
 
-    engine = sgl.Engine(config.server_args)
-
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
     # TODO: think about implementing DisaggregationStrategy for P->D
+    # TODO: implement a `next` field in the config to dynamically set the next client
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client")
         prefill_client = (
-            await runtime.namespace(config.dynamo_args.namespace)
-            .component("prefill")  # todo naming? from "next field?"
+            await runtime.namespace(dynamo_args.namespace)
+            .component("prefill")
             .endpoint("generate")
             .client()
         )
 
-    publisher, task = setup_sgl_metrics(component, engine)
+    publisher, metrics_task = setup_sgl_metrics(component, engine)
 
-    # figure out that new register_llm_runtime piece
+    if server_args.kv_events_config:
+        kv_events = json.loads(server_args.kv_events_config)
+        ep = kv_events.get("endpoint")
+        zmq_ep = ep.replace("*", get_ip()) if ep else None
 
-    # asyncio gather
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=generate_endpoint.lease_id(),
+            kv_block_size=server_args.page_size,
+            zmq_endpoint=zmq_ep,
+        )
+        logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
+        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
 
-    pass
+    handler = DecodeWorkerHandler(
+        component, engine, config, publisher, kv_publisher, prefill_client
+    )
+
+    await register_llm_with_runtime_config(
+        engine, generate_endpoint, server_args, dynamo_args.migration_limit
+    )
+
+    try:
+        # TODO: add in native endpoints
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task succesfully cancelled")
+            pass
+        handler.cleanup()
 
 
 async def init_prefill(runtime: DistributedRuntime, config: Config):
-    # simple init
-    pass
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    engine = sgl.Engine(server_args=server_args)
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    handler = PrefillWorkerHandler(component, engine, config)
+
+    tasks = [generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True)]
+
+    try:
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
 
 
 async def graceful_shutdown(runtime):

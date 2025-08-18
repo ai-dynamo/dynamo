@@ -22,8 +22,7 @@ from dynamo.runtime import Component
 
 class DynamoSglangStatPublisher:
     """
-    Framework-agnostic wrapper around WorkerMetricsPublisher.
-    Handles ZMQ metrics reception and publishing.
+    Handles SGLang metrics reception and publishing.
     """
 
     def __init__(self, engine: sgl.Engine) -> None:
@@ -82,6 +81,7 @@ class DynamoSglangStatPublisher:
             kv_stats=kv_stats,
             spec_decode_stats=None,
         )
+        logging.info("Sending dummy metrics to initialize")
         self.inner.publish(metrics)
 
     def record(
@@ -139,4 +139,5 @@ async def setup_sgl_metrics(
     publisher.init_publish()
 
     task = asyncio.create_task(publisher.run())
+    logging.info("SGLang metrics loop started")
     return publisher, task

@@ -4,12 +4,12 @@
 import argparse
 import contextlib
 import logging
+import os
 import socket
+import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-import os
-import sys
 
 from sglang.srt.server_args import ServerArgs
 
@@ -36,10 +36,12 @@ class DynamoArgs:
     endpoint: str
     migration_limit: int
 
+
 class DisaggregationMode(Enum):
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
+
 
 class Config:
     def __init__(self, server_args: ServerArgs, dynamo_args: DynamoArgs) -> None:
@@ -92,7 +94,10 @@ def parse_args(args: list[str] = None) -> Config:
 
     endpoint = parsed_args.endpoint
     if endpoint is None:
-        if hasattr(parsed_args, "disaggregation_mode") and parsed_args.disaggregation_mode == "prefill":
+        if (
+            hasattr(parsed_args, "disaggregation_mode")
+            and parsed_args.disaggregation_mode == "prefill"
+        ):
             endpoint = f"dyn://{namespace}.prefill.generate"
         else:
             args.endpoint = f"dyn://{namespace}.backend.generate"
