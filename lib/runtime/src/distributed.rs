@@ -117,6 +117,13 @@ impl DistributedRuntime {
         });
         distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
 
+        // Initialize the uptime gauge in SystemHealth
+        distributed_runtime
+            .system_health
+            .lock()
+            .unwrap()
+            .initialize_uptime_gauge(&distributed_runtime)?;
+
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
@@ -153,20 +160,8 @@ impl DistributedRuntime {
                 }
             }
         } else {
-            // System server HTTP is disabled, but still create the state for metrics
-            // This ensures uptime_seconds metric is always registered
-            let system_status_state = crate::system_status_server::SystemStatusState::new(
-                Arc::new(distributed_runtime.clone()),
-            )?;
-
-            // Initialize the start time for uptime tracking
-            if let Err(e) = system_status_state.initialize_start_time() {
-                tracing::warn!("Failed to initialize system status start time: {}", e);
-            }
-
-            tracing::debug!(
-                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
-            );
+            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
+            tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
         }
 
         Ok(distributed_runtime)
