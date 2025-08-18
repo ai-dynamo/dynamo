@@ -50,7 +50,7 @@ trtllm-llmapi-launch python3 -m dynamo.trtllm \
     --model-path ${model_path} \
     --served-model-name ${model_name} \
     --max-num-tokens ${max_num_tokens} \
-    --max-batch-size ${max_batch} \
+    --max-batch-size ${max_batch_size} \
     --max-seq-len ${max_seq_len} \
     --disaggregation-mode ${disaggregation_mode} \
     --extra-engine-args ${config_file}
