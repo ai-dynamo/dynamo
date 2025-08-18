@@ -118,8 +118,9 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 - **Workers** – Set of pre-configured LLM serving engines.
 
 ```
-# Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router:
-python -m dynamo.frontend --http-port 8080
+# Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router.
+# Pass the TLS certificate and key paths to use HTTPS instead of HTTP.
+python -m dynamo.frontend --http-port 8080 [--tls-cert-path cert.pem] [--tls-key-path key.pem]
 
 # Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
 # both for the same model and for multiple models. The frontend node will discover them.

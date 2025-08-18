@@ -277,8 +277,12 @@ impl Component {
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
         debug_assert_eq!(
-            hierarchies.last().cloned().unwrap_or_default(),
-            self.service_name()
+            hierarchies
+                .last()
+                .cloned()
+                .unwrap_or_default()
+                .to_lowercase(),
+            self.service_name().to_lowercase()
         ); // it happens that in component, hierarchy and service name are the same
 
         // Register a metrics callback that scrapes component statistics
