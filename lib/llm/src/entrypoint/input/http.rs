@@ -37,7 +37,13 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 .tls_key_path(Some(tls_key_path.to_path_buf()))
                 .port(local_model.http_port())
         }
-        (_, _) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (_, _) => {
+            // CLI should prevent us ever getting here
+            anyhow::bail!(
+                "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"
+            );
+        }
     };
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());

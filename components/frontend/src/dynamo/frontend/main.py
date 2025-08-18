@@ -166,6 +166,8 @@ def parse_args():
 
     if flags.static_endpoint and (not flags.model_name or not flags.model_path):
         parser.error("--static-endpoint requires both --model-name and --model-path")
+    if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
+        parser.error("--tls-cert-path and --tls-key-path must be provided together")
 
     return flags
 

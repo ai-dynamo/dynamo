@@ -10,6 +10,7 @@ use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
+use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
@@ -128,6 +129,13 @@ impl EntrypointArgs {
             })?),
             None => None,
         };
+        if (tls_cert_path.is_some() && tls_key_path.is_none())
+            || (tls_cert_path.is_none() && tls_key_path.is_some())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tls_cert_path and tls_key_path must be provided together",
+            ));
+        }
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -138,7 +146,7 @@ impl EntrypointArgs {
             template_file,
             router_config,
             kv_cache_block_size,
-            http_port: http_port.unwrap_or(0),
+            http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             tls_cert_path,
             tls_key_path,
             extra_engine_args,

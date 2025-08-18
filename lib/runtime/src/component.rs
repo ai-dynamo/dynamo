@@ -276,14 +276,11 @@ impl Component {
         let component_clone = self.clone();
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
-        debug_assert_eq!(
-            hierarchies
-                .last()
-                .cloned()
-                .unwrap_or_default()
-                .to_lowercase(),
-            self.service_name().to_lowercase()
-        ); // it happens that in component, hierarchy and service name are the same
+        debug_assert!(hierarchies
+            .last()
+            .map(|x| x.as_str())
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(&self.service_name())); // it happens that in component, hierarchy and service name are the same
 
         // Register a metrics callback that scrapes component statistics
         let metrics_callback = Arc::new(move || {

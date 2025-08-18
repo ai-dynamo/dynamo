@@ -199,7 +199,7 @@ impl HttpService {
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
-        tracing::info!(address, "Starting {protocol} service on: {address}");
+        tracing::info!(protocol, address, "Starting HTTP(S) service");
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -220,19 +220,18 @@ impl HttpService {
 
             // aws_lc_rs is the default but other crates pull in `ring` also,
             // so rustls doesn't know which one to use. Tell it.
-            let rustls_out = rustls::crypto::aws_lc_rs::default_provider().install_default();
-            // The Err type is `Arc<Self>`. Very strange.
-            if rustls_out.is_err() {
-                anyhow::bail!(
-                    "Failed installing AWS-LC-RS as the TLS crypto provider. Cannot start web server."
-                );
+            if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
+                tracing::debug!("TLS crypto provider already installed: {e:?}");
             }
 
             let config = RustlsConfig::from_pem_file(cert_path, key_path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create TLS config: {}", e))?;
 
-            let server = axum_server::bind_rustls(addr, config).serve(router.into_make_service());
+            let handle = axum_server::Handle::new();
+            let server = axum_server::bind_rustls(addr, config)
+                .handle(handle.clone())
+                .serve(router.into_make_service());
 
             tokio::select! {
                 result = server => {
@@ -240,6 +239,8 @@ impl HttpService {
                 }
                 _ = observer.cancelled() => {
                     tracing::info!("HTTPS server shutdown requested");
+                    handle.graceful_shutdown(Some(Duration::from_secs(5)));
+                    // TODO: Do we need to wait?
                 }
             }
         } else {

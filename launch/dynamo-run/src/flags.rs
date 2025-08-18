@@ -50,11 +50,11 @@ pub struct Flags {
     pub http_port: u16,
 
     /// TLS certificate file
-    #[arg(long)]
+    #[arg(long, requires = "tls_key_path")]
     pub tls_cert_path: Option<PathBuf>,
 
     /// TLS certificate key file
-    #[arg(long)]
+    #[arg(long, requires = "tls_cert_path")]
     pub tls_key_path: Option<PathBuf>,
 
     /// The name of the model we are serving

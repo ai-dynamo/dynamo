@@ -38,7 +38,8 @@ const DEFAULT_NAME: &str = "dynamo";
 const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 
 /// We can't have it default to 0, so pick something
-const DEFAULT_HTTP_PORT: u16 = 8080;
+/// 'pub' because the bindings use it for consistency.
+pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
