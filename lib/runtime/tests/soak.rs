@@ -137,7 +137,7 @@ mod integration {
             .endpoint("generate")
             .endpoint_builder()
             .handler(ingress)
-            .start()
+            .start(None)
             .await?;
 
         Ok(handler)

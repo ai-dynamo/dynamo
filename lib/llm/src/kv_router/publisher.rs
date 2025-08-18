@@ -507,20 +507,15 @@ impl WorkerMetricsPublisher {
         let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
 
-        let endpoint = if let Some(labels) = labels {
-            component.endpoint(KV_METRICS_ENDPOINT).add_labels(labels)?
-        } else {
-            component.endpoint(KV_METRICS_ENDPOINT)
-        };
-
-        endpoint
+        component
+            .endpoint(KV_METRICS_ENDPOINT)
             .endpoint_builder()
             .stats_handler(move |_| {
                 let metrics = metrics_rx.borrow_and_update().clone();
                 serde_json::to_value(&*metrics).unwrap()
             })
             .handler(handler)
-            .start()
+            .start(labels)
             .await
     }
 

@@ -135,12 +135,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    generate_endpoint = component.endpoint(config.endpoint).add_labels(
-        [("model", config.model)]
-    )
-    clear_endpoint = component.endpoint("clear_kv_blocks").add_labels(
-        [("model", config.model)]
-    )
+    generate_endpoint = component.endpoint(config.endpoint)
+    clear_endpoint = component.endpoint("clear_kv_blocks")
 
     engine_client, _, default_sampling_params = setup_vllm_engine(config)
 
@@ -154,8 +150,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             #     (temp reason): we don't support re-routing prefill requests
             #     (long-term reason): prefill engine should pull from a global queue so there is
             #                         only a few in-flight requests that can be quickly finished
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True, labels=[("model", config.model)]),
+            clear_endpoint.serve_endpoint(handler.clear_kv_blocks, labels=[("model", config.model)]),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
@@ -172,12 +168,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    generate_endpoint = component.endpoint(config.endpoint).add_labels(
-        [("model", config.model)]
-    )
-    clear_endpoint = component.endpoint("clear_kv_blocks").add_labels(
-        [("model", config.model)]
-    )
+    generate_endpoint = component.endpoint(config.endpoint)
+    clear_endpoint = component.endpoint("clear_kv_blocks")
 
     prefill_worker_client = (
         await runtime.namespace(config.namespace)
@@ -249,8 +241,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         await asyncio.gather(
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False, labels=[("model", config.model)]),
+            clear_endpoint.serve_endpoint(handler.clear_kv_blocks, labels=[("model", config.model)]),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")

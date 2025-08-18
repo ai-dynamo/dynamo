@@ -58,7 +58,7 @@ impl EndpointConfigBuilder {
         self._stats_handler(Some(Box::new(handler)))
     }
 
-    pub async fn start(self) -> Result<()> {
+    pub async fn start(self, labels: Option<&[(&str, &str)]>) -> Result<()> {
         let (endpoint, lease, handler, stats_handler, graceful_shutdown) =
             self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
@@ -75,7 +75,7 @@ impl EndpointConfigBuilder {
         let registry = endpoint.drt().component_registry.inner.lock().await;
 
         // Add metrics to the handler. The endpoint provides additional information to the handler.
-        handler.add_metrics(&endpoint)?;
+        handler.add_metrics(&endpoint, labels)?;
 
         // get the group
         let group = registry

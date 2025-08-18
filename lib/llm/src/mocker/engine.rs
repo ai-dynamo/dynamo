@@ -589,7 +589,7 @@ mod integration_tests {
                     .endpoint("generate")
                     .endpoint_builder()
                     .handler(ingress)
-                    .start()
+                    .start(None)
                     .await
                 {
                     eprintln!("❌ Generate endpoint failed: {e}");

@@ -489,12 +489,13 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, labels = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
+        labels: Option<Vec<(String, String)>>, // Added labels parameter
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -504,9 +505,12 @@ impl Endpoint {
         let builder = self.inner.endpoint_builder().handler(ingress);
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let labels_ref: Option<Vec<(&str, &str)>> = labels.as_ref().map(|v| {
+                v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+            });
             builder
                 .graceful_shutdown(graceful_shutdown)
-                .start()
+                .start(labels_ref.as_deref())
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -535,20 +539,6 @@ impl Endpoint {
             .primary_lease()
             .map(|l| l.id())
             .unwrap_or(0)
-    }
-
-    /// Add constant labels to this Endpoint (for metrics). Returns a new Endpoint with labels.
-    /// labels: list of (key, value) tuples.
-    fn add_labels(&self, labels: Vec<(String, String)>) -> PyResult<Endpoint> {
-        let pairs: Vec<(&str, &str)> = labels
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let inner = self.inner.clone().add_labels(&pairs).map_err(to_pyerr)?;
-        Ok(Endpoint {
-            inner,
-            event_loop: self.event_loop.clone(),
-        })
     }
 }
 

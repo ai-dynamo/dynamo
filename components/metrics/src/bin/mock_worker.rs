@@ -168,6 +168,6 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
         // Dummy stats handler to demonstrate how to attach a custom stats handler
         .stats_handler(mock_stats_handler)
         .handler(ingress)
-        .start()
+        .start(None)
         .await
 }
