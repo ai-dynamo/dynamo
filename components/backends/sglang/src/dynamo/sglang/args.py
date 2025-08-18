@@ -10,13 +10,14 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Dict
 
 from sglang.srt.server_args import ServerArgs
 
 from dynamo.sglang import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
-DYNAMO_ARGS = {
+DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
     "endpoint": {
         "flags": ["--endpoint"],
         "type": str,
