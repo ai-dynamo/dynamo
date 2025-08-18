@@ -339,7 +339,7 @@ impl
             n_choices: 1,
             dry_params: det.dry_params,
         };
-        let request_id = self.mistralrs.next_request_id();
+        let request_id = ctx.id().to_string();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
             id: request_id,
             model_id: Some(self.display_name.clone()),
@@ -486,7 +486,7 @@ impl
         let (request, context) = request.transfer(());
         let ctx = context.context();
         let (tx, mut rx) = channel(10_000);
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(Some(ctx.id().to_string()));
 
         let messages = RequestMessage::Completion {
             text: prompt_to_string(&request.inner.prompt),
@@ -540,7 +540,7 @@ impl
             dry_params: det.dry_params,
         };
 
-        let request_id = self.mistralrs.next_request_id();
+        let request_id = ctx.id().to_string();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
             id: request_id,
             model_id: Some(self.display_name.clone()),
