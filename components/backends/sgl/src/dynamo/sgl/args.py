@@ -56,9 +56,6 @@ class Config:
             return DisaggregationMode.PREFILL
         elif self.server_args.disaggregation_mode == "decode":
             return DisaggregationMode.DECODE
-        else:
-            logging.error("Cannot ascertain serving strategy. This shouldn't happen")
-
 
 def parse_args(args: list[str] = None) -> Config:
     """
