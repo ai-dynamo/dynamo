@@ -174,9 +174,7 @@ pub fn try_tool_call_parse_json(
         for item in list {
             results.push(parse(item.name, item.parameters)?);
         }
-        if !results.is_empty() {
-            return Ok(results);
-        }
+        return Ok(results);
 
     // Vec<CalledFunctionArguments>: List of { name, arguments }
     // Example:
@@ -195,9 +193,7 @@ pub fn try_tool_call_parse_json(
         for item in list {
             results.push(parse(item.name, item.arguments)?);
         }
-        if !results.is_empty() {
-            return Ok(results);
-        }
+        return Ok(results);
     }
 
     Ok(vec![])

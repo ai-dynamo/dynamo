@@ -16,11 +16,13 @@ pub fn try_tool_call_parse_aggregate(
     parser_str: Option<&str>,
 ) -> anyhow::Result<Vec<async_openai::types::ChatCompletionMessageToolCall>> {
     let parsed = detect_and_parse_tool_call(message, parser_str)?;
-    if !parsed.is_empty() {
-        Ok(parsed
-            .into_iter()
-            .map(
-                |parsed| async_openai::types::ChatCompletionMessageToolCall {
+    if parsed.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(parsed
+        .into_iter()
+        .map(
+            |parsed| async_openai::types::ChatCompletionMessageToolCall {
                     id: parsed.id,
                     r#type: async_openai::types::ChatCompletionToolType::Function,
                     function: async_openai::types::FunctionCall {
@@ -30,9 +32,6 @@ pub fn try_tool_call_parse_aggregate(
                 },
             )
             .collect())
-    } else {
-        Ok(vec![])
-    }
 }
 
 /// Try parsing a string as a structured tool call, for streaming (delta) usage.
@@ -43,8 +42,10 @@ pub fn try_tool_call_parse_stream(
     parser_str: Option<&str>,
 ) -> anyhow::Result<Vec<async_openai::types::ChatCompletionMessageToolCallChunk>> {
     let parsed = detect_and_parse_tool_call(message, parser_str)?;
-    if !parsed.is_empty() {
-        Ok(parsed
+    if parsed.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(parsed
             .into_iter()
             .enumerate()
             .map(
@@ -58,9 +59,7 @@ pub fn try_tool_call_parse_stream(
                     }),
                     // Add other fields as needed if required by the struct definition
                 },
-            )
-            .collect())
-    } else {
-        Ok(vec![])
-    }
+        )
+        .collect(),
+    )
 }
