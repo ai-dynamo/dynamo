@@ -3,6 +3,7 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::traits::events::EventSubscriber;
+use crate::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
 use crate::{
     component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
@@ -289,9 +290,6 @@ where
             // Static mode, no monitoring needed
             return Ok(());
         };
-
-        // Use the generic etcd watcher to watch model runtime configs
-        use crate::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
 
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
