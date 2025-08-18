@@ -8,34 +8,16 @@ metadata:
 spec:
   services:
     Frontend:
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       dynamoNamespace: sglang-agg
-      componentType: main
+      componentType: frontend
       replicas: 1
       resources:
         requests:
-          cpu: "5"
+          cpu: "10"
           memory: "10Gi"
         limits:
-          cpu: "5"
-          memory: "10Gi"
+          cpu: "32"
+          memory: "40Gi"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
@@ -45,25 +27,6 @@ spec:
             - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-agg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       dynamoNamespace: sglang-agg
       componentType: worker
       replicas: 1
@@ -73,13 +36,16 @@ spec:
           memory: "20Gi"
           gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "32"
+          memory: "80Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3"
             - "-m"

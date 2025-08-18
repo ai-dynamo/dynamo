@@ -47,16 +47,34 @@ jobs:
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
-    - name: Cache Cargo Registry
-      uses: actions/cache@v3
+
+    - name: Free runner disk space
+      run: |
+        echo "Disk space before:"
+        df -h
+        rm -rf \
+          /host_usr/share/dotnet /host_usr/local/lib/android /opt/ghc \
+          /host_usr/local/share/powershell /host_usr/share/swift /host_usr/local/.ghcup \
+          /host_usr/lib/jvm /opt/hostedtoolcache
+        echo "Disk space after:"
+        df -h
+
+    # TODO: Caching target/ dir handles most of the build caching improvements
+    #       currently, so sccache artifacts are mostly duplicates wasting disk space.
+    #       Revisit this to see if sccache can improve current caching behavior.
+    # TODO: Consider single target/ directory for all subdirectories/crates instead.
+    - name: Cache cargo artifacts
+      uses: actions/cache@v4
       with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache Cargo Tools
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          ${{ matrix.dir }}/target/
+        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
+
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
       # See act usage: https://nektosact.com/introduction.html
@@ -68,10 +86,6 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt clippy
-    - name: Run Cargo Check
-      working-directory: ${{ matrix.dir }}
-      run: cargo check --locked
-      timeout-minutes: 5
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -83,6 +97,10 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+    # Have an explicit step to build tests first to separate time spent on build vs execution.
+    - name: Compile Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc

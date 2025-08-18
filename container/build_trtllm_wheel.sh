@@ -18,17 +18,19 @@
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
 
-while getopts "c:o:a:n:" opt; do
+while getopts "c:o:a:n:u:" opt; do
   case ${opt} in
     c) TRTLLM_COMMIT=$OPTARG ;;
     o) OUTPUT_DIR=$OPTARG ;;
     a) ARCH=$OPTARG ;;
     n) NIXL_COMMIT=$OPTARG ;;
-    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch] [-n nixl_commit]"
+    u) TRTLLM_GIT_URL=$OPTARG ;;
+    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch] [-n nixl_commit] [-u git_url]"
        echo "  -c: TensorRT-LLM commit to build"
        echo "  -o: Output directory for wheel files"
        echo "  -a: Architecture (amd64 or arm64)"
        echo "  -n: NIXL commit"
+       echo "  -u: TensorRT-LLM git URL"
        exit 1 ;;
   esac
 done
@@ -38,13 +40,18 @@ if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="/tmp/trtllm_wheel"
 fi
 
+# Set default TensorRT-LLM git URL if not specified
+if [ -z "$TRTLLM_GIT_URL" ]; then
+    TRTLLM_GIT_URL="https://github.com/NVIDIA/TensorRT-LLM.git"
+fi
+
 # Store directory where script is being launched from
 MAIN_DIR=$(dirname "$(readlink -f "$0")")
 
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
 if [ ! -d "TensorRT-LLM" ]; then
-  git clone https://github.com/NVIDIA/TensorRT-LLM.git
+  git clone "${TRTLLM_GIT_URL}"
 fi
 
 cd TensorRT-LLM
@@ -85,7 +92,7 @@ grep "__version__" "$VERSION_FILE"
 
 echo "Copying install_nixl.sh from $MAIN_DIR to ${PWD}/docker/common/"
 # Copy install_nixl.sh to docker/common/
-cp $MAIN_DIR/deps/tensorrt_llm/install_nixl.sh docker/common/install_nixl.sh
+cp $MAIN_DIR/deps/trtllm/install_nixl.sh docker/common/install_nixl.sh
 # Update NIXL_COMMIT in install_nixl.sh to use the parameter passed to this script
 sed -i "s/NIXL_COMMIT=\"[^\"]*\"/NIXL_COMMIT=\"${NIXL_COMMIT}\"/" docker/common/install_nixl.sh
 

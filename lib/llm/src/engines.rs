@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::env;
 use std::sync::Arc;
@@ -114,6 +102,7 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
         text: None,
         cum_log_probs: None,
         log_probs: None,
+        top_logprobs: None,
         finish_reason: None,
         index: None,
     };
@@ -254,11 +243,11 @@ impl
             let mut id = 1;
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop));
+            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
 
         };

@@ -23,6 +23,7 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
+    Static = 4,
 }
 
 #[pyclass]
@@ -34,13 +35,19 @@ pub struct KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true))]
-    fn new(overlap_score_weight: f64, router_temperature: f64, use_kv_events: bool) -> Self {
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false))]
+    fn new(
+        overlap_score_weight: f64,
+        router_temperature: f64,
+        use_kv_events: bool,
+        router_replica_sync: bool,
+    ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
                 overlap_score_weight,
                 router_temperature,
                 use_kv_events,
+                router_replica_sync,
                 ..Default::default()
             },
         }
@@ -157,7 +164,8 @@ pub fn make_engine<'p>(
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_port(args.http_port)
-        .is_mocker(matches!(args.engine_type, EngineType::Mocker));
+        .is_mocker(matches!(args.engine_type, EngineType::Mocker))
+        .extra_engine_args(args.extra_engine_args.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
@@ -178,9 +186,11 @@ async fn select_engine(
             RsEngineConfig::StaticFull {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_engine_full(),
+                is_static: false,
             }
         }
         EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
+        EngineType::Static => RsEngineConfig::StaticRemote(Box::new(local_model)),
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
@@ -209,6 +219,7 @@ async fn select_engine(
             RsEngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
+                is_static: false,
             }
         }
     };

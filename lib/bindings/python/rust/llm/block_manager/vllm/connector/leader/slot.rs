@@ -186,16 +186,17 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
 
         let mut xfer_engine = LocalTransferEngine::new(block_manager.clone(), leader, xfer_rx);
+        let primary_token = drt.primary_token();
+        let runtime_primary = drt.runtime().primary();
+        let drt_for_task = drt;
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
-            |cancellation_token| async move { xfer_engine.execute(cancellation_token).await },
-            drt.primary_token(),
+            |cancellation_token| async move { xfer_engine.execute(cancellation_token, drt_for_task).await },
+            primary_token,
             "LocalTransferEngine",
-            &drt.runtime().primary(),
+            &runtime_primary,
         )
         .unwrap();
-
-        tracing::info!("LocalTransferEngine task detached successfully");
 
         Self {
             slots: Mutex::new(HashMap::new()),
@@ -1018,7 +1019,55 @@ impl LocalTransferEngine {
     //
     // This should be a composable unit that we can layer on specialized types of critical tasks
     // with their own sets of custom metrics.
-    async fn execute(&mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
+    async fn execute(&mut self, cancellation_token: CancellationToken, drt: DistributedRuntime) -> anyhow::Result<()> {
+
+        let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel();
+        let (offload_tx, mut offload_rx) = mpsc::unbounded_channel();
+        let drt_clone = drt.clone();
+
+
+        // Clone resources needed for tasks
+        let block_manager_offload = self.block_manager.clone();
+        let leader_offload = Arc::clone(&self.leader);
+        let leader_onboard = Arc::clone(&self.leader);
+
+        let onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
+            |cancellation_token_onboard| async move {
+                while let Some(req) = onboard_rx.recv().await {
+                    if cancellation_token_onboard.is_cancelled() {
+                        tracing::debug!("LocalOnboardTask: received cancellation signal");
+                        break;
+                    }
+                    if let Err(e) = process_onboard_request(req, &leader_onboard).await {
+                        tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
+                    }
+                }
+                Ok(())
+            },
+            drt.primary_token(),
+            "LocalOnboardTask",
+            &drt.runtime().primary(),
+        )
+        .unwrap();
+        let offload_task = CriticalTaskExecutionHandle::new_with_runtime(
+            |cancellation_token_offload| async move {
+                while let Some(req) = offload_rx.recv().await {
+                    if cancellation_token_offload.is_cancelled() {
+                        tracing::debug!("LocalOffloadTask: received cancellation signal");
+                        break;
+                    }
+                    if let Err(e) = process_offload_request(req, &block_manager_offload, &leader_offload).await {
+                        tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
+                    }
+                }
+                Ok(())
+            },
+            drt_clone.primary_token(),
+            "LocalOffloadTask",
+            &drt_clone.runtime().primary(),
+        )
+        .unwrap();
+
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
@@ -1028,8 +1077,17 @@ impl LocalTransferEngine {
                 req = self.xfer_rx.recv() => {
                     match req {
                         Some(req) => {
-                            if let Err(e) = self.process_request(req).await {
-                                tracing::error!("LocalTransferEngine: error processing request: {:?}", e);
+                            match req {
+                                LocalTransferRequest::Offload(offload_req) => {
+                                    if let Err(e) = offload_tx.send(offload_req) {
+                                        tracing::error!("LocalTransferEngine: error sending offload request: {:?}", e);
+                                    }
+                                }
+                                LocalTransferRequest::Onboard(onboard_req) => {
+                                    if let Err(e) = onboard_tx.send(onboard_req) {
+                                        tracing::error!("LocalTransferEngine: error sending onboard request: {:?}", e);
+                                    }
+                                }
                             }
                         }
                         None => {
@@ -1042,156 +1100,167 @@ impl LocalTransferEngine {
         }
 
         tracing::debug!("LocalTransferEngine: shutting down");
+
+        // drop all tx channels
+        drop(onboard_tx);
+        drop(offload_tx);
+
+        onboard_task.cancel();
+        offload_task.cancel();
+
+        if let Err(e) = onboard_task.join().await {
+            tracing::error!("LocalOnboardTask failed: {:?}", e);
+        }
+        if let Err(e) = offload_task.join().await {
+            tracing::error!("LocalOffloadTask failed: {:?}", e);
+        }
+
+        tracing::debug!("LocalTransferEngine: shutdown complete");
         Ok(())
     }
+}
 
-    async fn process_request(&mut self, req: LocalTransferRequest) -> anyhow::Result<()> {
-        match req {
-            LocalTransferRequest::Offload(offload_req) => {
-                let request_id = &offload_req.request_id;
-                let operation_id = &offload_req.operation_id;
+pub async fn process_offload_request(offload_req: LocalOffloadRequest, block_manager: &VllmBlockManager, leader: &Arc<KvbmLeader>) -> anyhow::Result<()> {
+    let request_id = &offload_req.request_id;
+    let operation_id = &offload_req.operation_id;
 
-                tracing::debug!(
-                    "Processing offload request for {} blocks",
-                    offload_req.block_ids.len()
-                );
+    tracing::debug!(
+        "Processing offload request for {} blocks",
+        offload_req.block_ids.len()
+    );
 
-                // TODO: Implement actual offload logic
-                // 1. Acquire mutable host blocks
-                let host_blocks = self
-                    .block_manager
-                    .host()
-                    .unwrap()
-                    .allocate_blocks(offload_req.block_ids.len())
-                    .await?;
-                let token_blocks = offload_req.token_blocks;
+    // TODO: Implement actual offload logic
+    // 1. Acquire mutable host blocks
+    let host_blocks = block_manager
+        .host()
+        .unwrap()
+        .allocate_blocks(offload_req.block_ids.len())
+        .await?;
+    let token_blocks = offload_req.token_blocks;
 
-                let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
-                let block_pairs: Vec<(usize, usize)> = offload_req
-                    .block_ids
-                    .into_iter()
-                    .zip(host_block_ids.into_iter())
-                    .collect();
+    let host_block_ids: Vec<usize> = host_blocks.iter().map(|b| b.block_id()).collect();
+    let block_pairs: Vec<(usize, usize)> = offload_req
+        .block_ids
+        .into_iter()
+        .zip(host_block_ids.into_iter())
+        .collect();
 
-                tracing::debug!(
-                    request_id = request_id,
-                    operation_id = %operation_id,
-                    "offload - stage 1 complete"
-                );
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload - stage 1 complete"
+    );
 
-                // 2. Apply token blocks
+    // 2. Apply token blocks
 
-                // create an iterator over the mutable blocks zipped with the token blocks
-                let mut blocks_to_register = Vec::new();
-                let zipped_blocks = host_blocks.into_iter().zip(token_blocks.into_iter());
+    // create an iterator over the mutable blocks zipped with the token blocks
+    let mut blocks_to_register = Vec::new();
+    let zipped_blocks = host_blocks.into_iter().zip(token_blocks.into_iter());
 
-                // apply the token blocks to the mutable blocks
-                for (mut mutable_block, token_block) in zipped_blocks {
-                    mutable_block
-                        .apply_token_block(token_block.clone())
-                        .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
+    // apply the token blocks to the mutable blocks
+    for (mut mutable_block, token_block) in zipped_blocks {
+        mutable_block
+            .apply_token_block(token_block.clone())
+            .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
 
-                    blocks_to_register.push(mutable_block);
-                }
-                tracing::debug!(
-                    request_id = request_id,
-                    operation_id = %operation_id,
-                    "offload - stage 2 complete"
-                );
+        blocks_to_register.push(mutable_block);
+    }
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload - stage 2 complete"
+    );
 
-                // 3. Issue the offload request using `leader`
+    // 3. Issue the offload request using `leader`
 
-                let block_xfer_req = BlockTransferRequest {
-                    from_pool: BlockTransferPool::Device,
-                    to_pool: BlockTransferPool::Host,
-                    blocks: block_pairs,
-                    connector_req: Some(LeaderTransferRequest {
-                        request_id: offload_req.request_id.clone(),
-                        uuid: offload_req.operation_id,
-                        requirement: None,
-                        request_type: RequestType::Scheduled,
-                    }),
-                };
-                let notify_receiver = self.leader.transfer_blocks_request(block_xfer_req).await?;
-                tracing::debug!(
-                    request_id = request_id,
-                    operation_id = %operation_id,
-                    "offload - stage 3 complete"
-                );
+    let block_xfer_req = BlockTransferRequest {
+        from_pool: BlockTransferPool::Device,
+        to_pool: BlockTransferPool::Host,
+        blocks: block_pairs,
+        connector_req: Some(LeaderTransferRequest {
+            request_id: offload_req.request_id.clone(),
+            uuid: offload_req.operation_id,
+            requirement: None,
+            request_type: RequestType::Scheduled,
+        }),
+    };
+    let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload - stage 3 complete"
+    );
 
-                // 4. Wait for the offload request to complete
-                match notify_receiver.await {
-                    Ok(_) => {
-                        tracing::debug!("Transfer completed successfully");
-                    }
-                    Err(_) => {
-                        return Err(anyhow::anyhow!("Transfer completion notification failed"));
-                    }
-                }
-                tracing::debug!(
-                    request_id = request_id,
-                    operation_id = %operation_id,
-                    "offload - stage 4 complete"
-                );
-
-                // 5. Register the mutable blocks
-                let immutable_blocks = self
-                    .block_manager
-                    .host()
-                    .unwrap()
-                    .register_blocks(blocks_to_register)
-                    .await?;
-
-                tracing::debug!(
-                    request_id = request_id,
-                    operation_id = %operation_id,
-                    "registered {} blocks",
-                    immutable_blocks.len()
-                );
-                Ok(())
-            }
-            LocalTransferRequest::Onboard(onboard_req) => {
-                let request_id = &onboard_req.request_id;
-                let operation_id = &onboard_req.operation_id;
-
-                // extract source block ids
-                let src_block_ids = onboard_req.src_blocks.block_ids();
-
-                // create block pairs
-                let block_pairs = src_block_ids
-                    .iter()
-                    .zip(onboard_req.dst_block_ids.iter())
-                    .map(|(src, dst)| (*src, *dst))
-                    .collect::<Vec<_>>();
-
-                // create transfer request
-                let block_xfer_req = BlockTransferRequest {
-                    from_pool: onboard_req.src_blocks.storage_pool(),
-                    to_pool: BlockTransferPool::Device,
-                    blocks: block_pairs,
-                    connector_req: Some(LeaderTransferRequest {
-                        request_id: request_id.clone(),
-                        uuid: *operation_id,
-                        requirement: None,
-                        request_type: RequestType::Immediate,
-                    }),
-                };
-
-                let notify_receiver = self.leader.transfer_blocks_request(block_xfer_req).await?;
-
-                match notify_receiver.await {
-                    Ok(_) => {
-                        tracing::debug!("Transfer completed successfully");
-                    }
-                    Err(_) => {
-                        return Err(anyhow::anyhow!("Transfer completion notification failed"));
-                    }
-                }
-
-                Ok(())
-            }
+    // 4. Wait for the offload request to complete
+    match notify_receiver.await {
+        Ok(_) => {
+            tracing::debug!("Transfer completed successfully");
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!("Transfer completion notification failed"));
         }
     }
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload - stage 4 complete"
+    );
+
+    // 5. Register the mutable blocks
+    let immutable_blocks = block_manager
+        .host()
+        .unwrap()
+        .register_blocks(blocks_to_register)
+        .await?;
+
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "registered {} blocks",
+        immutable_blocks.len()
+    );
+    Ok(())
+}
+
+pub async fn process_onboard_request(onboard_req: LocalOnboardRequest, leader: &Arc<KvbmLeader>) -> anyhow::Result<()> {
+    let request_id = &onboard_req.request_id;
+    let operation_id = &onboard_req.operation_id;
+
+    // extract source block ids
+    let src_block_ids = onboard_req.src_blocks.block_ids();
+
+    // create block pairs
+    let block_pairs = src_block_ids
+        .iter()
+        .zip(onboard_req.dst_block_ids.iter())
+        .map(|(src, dst)| (*src, *dst))
+        .collect::<Vec<_>>();
+
+    // create transfer request
+    let block_xfer_req = BlockTransferRequest {
+        from_pool: onboard_req.src_blocks.storage_pool(),
+        to_pool: BlockTransferPool::Device,
+        blocks: block_pairs,
+        connector_req: Some(LeaderTransferRequest {
+            request_id: request_id.clone(),
+            uuid: *operation_id,
+            requirement: None,
+            request_type: RequestType::Immediate,
+        }),
+    };
+
+    let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+
+    match notify_receiver.await {
+        Ok(_) => {
+            tracing::debug!("Transfer completed successfully");
+        }
+        Err(_) => {
+            return Err(anyhow::anyhow!("Transfer completion notification failed"));
+        }
+    }
+
+    Ok(())
 }
 
 // todo move to core lib

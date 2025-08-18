@@ -84,13 +84,26 @@ impl Decoder for TwoPartCodec {
         // Advance the buffer past the lengths and checksum
         src.advance(24);
 
-        let bytes_to_hash = header_len + body_len;
-        let data_to_hash = &src[..bytes_to_hash];
-        let computed_checksum = xxh3_64(data_to_hash);
+        #[cfg(debug_assertions)]
+        {
+            // If the server sent a dummy checksum, skip it.
+            if checksum != 0 {
+                let bytes_to_hash =
+                    header_len
+                        .checked_add(body_len)
+                        .ok_or(TwoPartCodecError::InvalidMessage(
+                            "Message exceeds max allowed length.".to_string(),
+                        ))?;
 
-        // Compare checksums
-        if checksum != computed_checksum {
-            return Err(TwoPartCodecError::ChecksumMismatch);
+                let data_to_hash = &src[..bytes_to_hash];
+
+                let computed_checksum = xxh3_64(data_to_hash);
+
+                // Compare checksums
+                if checksum != computed_checksum {
+                    return Err(TwoPartCodecError::ChecksumMismatch);
+                }
+            }
         }
 
         // Read header and body data
@@ -117,16 +130,25 @@ impl Encoder<TwoPartMessage> for TwoPartCodec {
             }
         }
 
-        // Compute checksum of the data
-        let mut data_to_hash = BytesMut::with_capacity(header_len + body_len);
-        data_to_hash.extend_from_slice(&item.header);
-        data_to_hash.extend_from_slice(&item.data);
-        let checksum = xxh3_64(&data_to_hash);
-
-        // Write header and body sizes and checksum
         dst.put_u64(header_len as u64);
         dst.put_u64(body_len as u64);
-        dst.put_u64(checksum);
+
+        // Only compute the checksum in debug mode.
+        // If we're in release mode, put a dummy value.
+        #[cfg(debug_assertions)]
+        {
+            // Compute checksum of the data
+            let mut data_to_hash = BytesMut::with_capacity(header_len + body_len);
+            data_to_hash.extend_from_slice(&item.header);
+            data_to_hash.extend_from_slice(&item.data);
+            let checksum = xxh3_64(&data_to_hash);
+
+            dst.put_u64(checksum);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            dst.put_u64(0);
+        }
 
         // Write header and body
         dst.put_slice(&item.header);

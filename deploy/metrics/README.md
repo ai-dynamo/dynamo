@@ -32,7 +32,7 @@ graph TD
 
 The dcgm-exporter service in the Docker Compose network is configured to use port 9401 instead of the default port 9400. This adjustment is made to avoid port conflicts with other dcgm-exporter instances that may be running simultaneously. Such a configuration is typical in distributed systems like SLURM.
 
-As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM` or `--framework TENSORRTLLM`.
+As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM` or `--framework TRTLLM`.
 
 ### Available Metrics
 
@@ -55,7 +55,7 @@ Some components expose additional metrics specific to their functionality:
 
 #### Frontend Metrics
 
-When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
+When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
 
 - `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)

@@ -34,7 +34,7 @@ testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
 testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
-sentencepiece = ["dep:sentencepiece"]
+cuda          = ["dep:cudarc"]
 integration = []
 
 [[bench]]
@@ -82,18 +82,19 @@ xxhash-rust = { workspace = true }
 akin = "0.4.0"
 blake3 = "1"
 bytemuck = "1.22"
-candle-core = { version = "0.8.0" }
+candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
 offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
+dashmap = { version = "5.5.3" }
 
 # input/text
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 
 # block_manager
 nixl-sys = {version = "0.4.1", optional = true }
-cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
+cudarc = { version = "0.17.1", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }
 
@@ -102,14 +103,15 @@ unicode-segmentation = "1.12"
 
 # http-service
 axum = { workspace = true }
+tower-http = {workspace = true}
+
 
 # tokenizers
-tokenizers = { version = "0.21.2", default-features = false, features = [
+tokenizers = { version = "0.21.4", default-features = false, features = [
   "onig",
   "esaxx_fast",
   "rustls-tls",
 ] }
-sentencepiece = { version = "0.11.2", optional = true }
 
 # backend
 galil-seiferas = { version = "0.1" }
@@ -141,6 +143,7 @@ proptest = "1.5.0"
 reqwest = { workspace = true }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
+serial_test = "3"
 tempfile = "3.17.1"
 insta = { version = "1.41", features = [
   "glob",

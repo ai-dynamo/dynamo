@@ -27,6 +27,10 @@ limitations under the License.
 
 High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
 
+## Latest News
+
+* [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
+
 ## The Era of Multi-GPU, Multi-Node
 
 <p align="center">
@@ -54,8 +58,8 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 | [**Disaggregated Serving**](/docs/architecture/disagg_serving.md) | ✅ | ✅ | ✅ |
 | [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | 🚧 | 🚧 |
 | [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | 🚧 | 🚧 |
-| [**Load Based Planner**](/docs/architecture/load_planner.md) | ✅ | 🚧 | 🚧 |
+| [**Load Based Planner**](/docs/architecture/load_planner.md) | 🚧 | 🚧 | 🚧 |
+| [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | ✅ | 🚧 |
 | [**KVBM**](/docs/architecture/kvbm_architecture.md) | 🚧 | 🚧 | 🚧 |
 
 To learn more about each framework and their capabilities, check out each framework's README!
@@ -115,11 +119,11 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 
 ```
 # Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router:
-python -m dynamo.frontend [--http-port 8080]
+python -m dynamo.frontend --http-port 8080
 
 # Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
 # both for the same model and for multiple models. The frontend node will discover them.
-python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+python -m dynamo.sglang.worker --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --skip-tokenizer-init
 ```
 
 #### Send a Request

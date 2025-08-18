@@ -22,7 +22,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
+use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::tokenizers::Encoding;
 
@@ -33,7 +33,7 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
-    common::{SamplingOptionsProvider, StopConditionsProvider},
+    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -146,6 +146,7 @@ impl OpenAIPreprocessor {
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
+            + OutputOptionsProvider
             + NvExtProvider,
     >(
         &self,
@@ -153,6 +154,7 @@ impl OpenAIPreprocessor {
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
+        builder.model(request.model());
 
         // match request type before any conversion/processing
         match request.prompt_input_type() {
@@ -248,6 +250,7 @@ impl OpenAIPreprocessor {
 
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
+        builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);

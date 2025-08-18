@@ -39,6 +39,8 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_runtime::logging::get_distributed_tracing_context;
+use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -132,6 +134,13 @@ impl From<HttpError> for ErrorMessage {
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+    // Try to get request id from trace context
+    if let Some(trace_context) = get_distributed_tracing_context() {
+        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+            return x_dynamo_request_id;
+        }
+    }
+
     // Try to get the request ID from the primary source
     if let Some(primary) = primary {
         if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
@@ -181,7 +190,7 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle))
+    let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -281,7 +290,11 @@ async fn completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // TODO: report ISL/OSL for non-streaming requests
+        // Tap the stream to collect metrics for non-streaming requests without altering items
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
+        });
+
         let response = NvCreateCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
@@ -371,14 +384,15 @@ async fn handler_chat_completions(
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
 
-    let response = tokio::spawn(chat_completions(state, template, request, stream_handle))
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
-                e,
-            ))
-        })?;
+    let response =
+        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await chat completions task: {:?}",
+                    e,
+                ))
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -395,7 +409,6 @@ async fn handler_chat_completions(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
@@ -506,7 +519,10 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // TODO: report ISL/OSL for non-streaming requests
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
+        });
+
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
@@ -597,7 +613,7 @@ async fn handler_responses(
     // create the connection handles
     let (mut connection_handle, _stream_handle) = create_connection_monitor(context.clone()).await;
 
-    let response = tokio::spawn(responses(state, template, request))
+    let response = tokio::spawn(responses(state, template, request).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -899,6 +915,17 @@ struct EventConverter<T>(Annotated<T>);
 impl<T> From<Annotated<T>> for EventConverter<T> {
     fn from(annotated: Annotated<T>) -> Self {
         EventConverter(annotated)
+    }
+}
+
+fn process_metrics_only<T>(
+    annotated: &Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+) {
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
     }
 }
 
@@ -1228,6 +1255,7 @@ mod tests {
                 messages: vec![],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1254,6 +1282,7 @@ mod tests {
                 )],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);

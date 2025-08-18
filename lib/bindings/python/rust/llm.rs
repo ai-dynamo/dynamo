@@ -30,6 +30,7 @@ pub mod backend;
 pub mod disagg_router;
 pub mod entrypoint;
 pub mod kv;
+pub mod local_model;
 pub mod model_card;
 pub mod nats;
 pub mod preprocessor;

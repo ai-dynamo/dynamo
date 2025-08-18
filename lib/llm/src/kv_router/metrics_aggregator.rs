@@ -18,10 +18,14 @@ use std::sync::Once;
 pub use crate::kv_router::protocols::{ForwardPassMetrics, LoadMetrics, PredictiveLoadMetrics};
 use crate::kv_router::KV_METRICS_ENDPOINT;
 
-use crate::kv_router::scheduler::Endpoint;
+use crate::discovery::{ModelEntry, MODEL_ROOT_PATH};
+use crate::kv_router::scoring::Endpoint;
 use crate::kv_router::ProcessedEndpoints;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::Component;
+use dynamo_runtime::transports::etcd::{Client as EtcdClient, WatchEvent};
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
+use std::collections::HashMap;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -207,4 +211,72 @@ pub async fn collect_endpoints_task(
             }
         }
     }
+}
+
+pub async fn watch_model_runtime_configs(
+    etcd_client: EtcdClient,
+    cancellation_token: CancellationToken,
+) -> Result<watch::Receiver<HashMap<i64, ModelRuntimeConfig>>> {
+    let (watch_tx, watch_rx) = watch::channel(HashMap::new());
+
+    let prefix_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
+    let (_prefix, _watcher, mut events_rx) = prefix_watcher.dissolve();
+
+    tokio::spawn(async move {
+        let mut runtime_configs: HashMap<i64, ModelRuntimeConfig> = HashMap::new();
+
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    tracing::debug!("Runtime config watcher cancelled");
+                    break;
+                }
+                event = events_rx.recv() => {
+                    let Some(event) = event else {
+                        tracing::debug!("Runtime config watch stream closed");
+                        break;
+                    };
+
+                    match event {
+                        WatchEvent::Put(kv) => {
+                            let Ok(model_entry) = serde_json::from_slice::<ModelEntry>(kv.value()) else {
+                                tracing::warn!(
+                                    "Failed to parse ModelEntry from etcd. Key: {}",
+                                    kv.key_str().unwrap_or("<invalid>")
+                                );
+                                continue;
+                            };
+
+                            let lease_id = kv.lease();
+
+                            if let Some(runtime_config) = model_entry.runtime_config {
+                                runtime_configs.insert(lease_id, runtime_config);
+                                tracing::trace!("Updated runtime config for lease_id: {}", lease_id);
+                            } else {
+                                runtime_configs.remove(&lease_id);
+                                tracing::trace!("Removed runtime config (no config in ModelEntry)");
+                            }
+
+                            if watch_tx.send(runtime_configs.clone()).is_err() {
+                                tracing::error!("Failed to send runtime configs update; receiver dropped");
+                                break;
+                            }
+                        }
+                        WatchEvent::Delete(kv) => {
+                            let lease_id = kv.lease();
+                            runtime_configs.remove(&lease_id);
+                            tracing::trace!("Removed runtime config for deleted entry");
+
+                            if watch_tx.send(runtime_configs.clone()).is_err() {
+                                tracing::error!("Failed to send runtime configs update; receiver dropped");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(watch_rx)
 }

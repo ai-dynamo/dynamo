@@ -49,7 +49,8 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["KVBM"]=5)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["KVBM"]=5)
+
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -57,8 +58,8 @@ DOCKERFILE=${SOURCE_DIR}/Dockerfile
 BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
-TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TENSORRTLLM_BASE_IMAGE_TAG=25.05-py3
+TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
+TRTLLM_BASE_IMAGE_TAG=25.05-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -88,14 +89,15 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="69e9f6d48944b2ae0124ff57aa59340aa4dfae15"
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
+TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
-# Need to update the Dockerfile.tensorrt_llm to use the ai-dynamo[trtllm] package.
+# Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc4"
 TENSORRTLLM_PIP_WHEEL=""
 
@@ -107,8 +109,8 @@ VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # can be updated to later versions.
 VLLM_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NONE_BASE_IMAGE="ubuntu"
-NONE_BASE_IMAGE_TAG="24.04"
+NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
@@ -182,6 +184,14 @@ get_options() {
         --tensorrtllm-index-url)
             if [ "$2" ]; then
                 TENSORRTLLM_INDEX_URL=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --tensorrtllm-git-url)
+            if [ "$2" ]; then
+                TRTLLM_GIT_URL=$2
                 shift
             else
                 missing_requirement "$1"
@@ -340,7 +350,7 @@ show_image_options() {
     echo ""
     echo "   Base: '${BASE_IMAGE}'"
     echo "   Base_Image_Tag: '${BASE_IMAGE_TAG}'"
-    if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+    if [[ $FRAMEWORK == "TRTLLM" ]]; then
         echo "   Tensorrtllm_Pip_Wheel: '${TENSORRTLLM_PIP_WHEEL}'"
     fi
     echo "   Build Context: '${BUILD_CONTEXT}'"
@@ -360,6 +370,7 @@ show_help() {
     echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
+    echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
@@ -394,10 +405,10 @@ fi
 # Update DOCKERFILE if framework is VLLM
 if [[ $FRAMEWORK == "VLLM" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm
-elif [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.tensorrt_llm
+elif [[ $FRAMEWORK == "TRTLLM" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.trtllm
 elif [[ $FRAMEWORK == "NONE" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.none
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 elif [[ $FRAMEWORK == "KVBM" ]]; then
@@ -463,7 +474,7 @@ check_wheel_file() {
     fi
 }
 
-if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
         if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
             echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
@@ -491,7 +502,11 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF}; then
+            GIT_URL_ARG=""
+            if [ -n "${TRTLLM_GIT_URL}" ]; then
+                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+            fi
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi
