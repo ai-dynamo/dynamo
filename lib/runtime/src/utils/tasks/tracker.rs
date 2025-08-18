@@ -125,7 +125,7 @@
 //! - `pending`: Issued but not completed (issued - completed)
 //! - `queued`: Waiting for resources (pending - active)
 //!
-//! Optional Prometheus integration available via `RootTaskMetrics`.
+//! Optional Prometheus integration available via `PrometheusTaskMetrics`.
 //!
 //! ## Usage Examples
 //!
@@ -1191,9 +1191,6 @@ pub enum TaskExecutionResult<T> {
 trait TaskExecutor<T>: Send {
     /// Execute the task with the given cancellation token
     async fn execute(&mut self, cancel_token: CancellationToken) -> TaskExecutionResult<T>;
-
-    /// Whether this task type supports retry (can be called multiple times)
-    fn supports_retry(&self) -> bool;
 }
 
 /// Task executor for regular (non-cancellable) tasks
@@ -1236,10 +1233,6 @@ where
             TaskExecutionResult::Error(anyhow::anyhow!("Regular task already consumed"))
         }
     }
-
-    fn supports_retry(&self) -> bool {
-        false
-    }
 }
 
 /// Task executor for cancellable tasks
@@ -1277,10 +1270,6 @@ where
             CancellableTaskResult::Cancelled => TaskExecutionResult::Cancelled,
             CancellableTaskResult::Err(error) => TaskExecutionResult::Error(error),
         }
-    }
-
-    fn supports_retry(&self) -> bool {
-        true // Cancellable tasks support retry via RestartableError
     }
 }
 
@@ -1401,128 +1390,6 @@ pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
     ) -> SchedulingResult<Box<dyn ResourceGuard>>;
 }
 
-/// Task execution metrics for a tracker
-#[derive(Debug, Default)]
-pub struct TaskMetrics {
-    /// Number of tasks issued/submitted (via spawn methods)
-    pub issued_count: AtomicU64,
-    /// Number of successfully completed tasks
-    pub success_count: AtomicU64,
-    /// Number of cancelled tasks
-    pub cancelled_count: AtomicU64,
-    /// Number of failed tasks
-    pub failed_count: AtomicU64,
-    /// Number of rejected tasks (by scheduler)
-    pub rejected_count: AtomicU64,
-    /// Number of currently active tasks
-    pub active_count: AtomicU64,
-}
-
-impl TaskMetrics {
-    /// Create new metrics instance
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Increment issued task counter
-    pub fn increment_issued(&self) {
-        self.issued_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment success counter
-    pub fn increment_success(&self) {
-        self.success_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment cancelled counter
-    pub fn increment_cancelled(&self) {
-        self.cancelled_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment failed counter
-    pub fn increment_failed(&self) {
-        self.failed_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment rejected counter
-    pub fn increment_rejected(&self) {
-        self.rejected_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment active task counter
-    pub fn increment_active(&self) {
-        self.active_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement active task counter
-    pub fn decrement_active(&self) {
-        self.active_count.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    /// Get current issued count
-    pub fn issued(&self) -> u64 {
-        self.issued_count.load(Ordering::Relaxed)
-    }
-
-    /// Get current success count
-    pub fn success(&self) -> u64 {
-        self.success_count.load(Ordering::Relaxed)
-    }
-
-    /// Get current cancelled count
-    pub fn cancelled(&self) -> u64 {
-        self.cancelled_count.load(Ordering::Relaxed)
-    }
-
-    /// Get current failed count
-    pub fn failed(&self) -> u64 {
-        self.failed_count.load(Ordering::Relaxed)
-    }
-
-    /// Get current rejected count
-    pub fn rejected(&self) -> u64 {
-        self.rejected_count.load(Ordering::Relaxed)
-    }
-
-    /// Get current active count
-    pub fn active(&self) -> u64 {
-        self.active_count.load(Ordering::Relaxed)
-    }
-
-    /// Get total completed tasks (success + cancelled + failed + rejected)
-    pub fn total_completed(&self) -> u64 {
-        self.success() + self.cancelled() + self.failed() + self.rejected()
-    }
-
-    /// Get number of pending tasks (issued - completed)
-    ///
-    /// This represents tasks that have been issued but not yet completed
-    /// (includes both active tasks and those waiting in scheduler queues)
-    pub fn pending(&self) -> u64 {
-        self.issued().saturating_sub(self.total_completed())
-    }
-
-    /// Get number of tasks queued in scheduler (pending - active)
-    ///
-    /// This represents tasks that have been issued but are waiting
-    /// in the scheduler queue and not yet actively executing
-    pub fn queued(&self) -> u64 {
-        self.pending().saturating_sub(self.active())
-    }
-
-    /// Calculate failure rate (failed / total_completed)
-    ///
-    /// Returns 0.0 if no tasks have completed
-    pub fn failure_rate(&self) -> f64 {
-        let total = self.total_completed();
-        if total == 0 {
-            0.0
-        } else {
-            self.failed() as f64 / total as f64
-        }
-    }
-}
-
 /// Trait for hierarchical task metrics that supports aggregation up the tracker tree
 ///
 /// This trait provides different implementations for root and child trackers:
@@ -1532,6 +1399,9 @@ impl TaskMetrics {
 pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
     /// Increment issued task counter
     fn increment_issued(&self);
+
+    /// Increment started task counter
+    fn increment_started(&self);
 
     /// Increment success counter
     fn increment_success(&self);
@@ -1545,14 +1415,11 @@ pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
     /// Increment rejected counter
     fn increment_rejected(&self);
 
-    /// Increment active task counter
-    fn increment_active(&self);
-
-    /// Decrement active task counter
-    fn decrement_active(&self);
-
     /// Get current issued count (local to this tracker)
     fn issued(&self) -> u64;
+
+    /// Get current started count (local to this tracker)
+    fn started(&self) -> u64;
 
     /// Get current success count (local to this tracker)
     fn success(&self) -> u64;
@@ -1566,9 +1433,6 @@ pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
     /// Get current rejected count (local to this tracker)
     fn rejected(&self) -> u64;
 
-    /// Get current active count (local to this tracker)
-    fn active(&self) -> u64;
-
     /// Get total completed tasks (success + cancelled + failed + rejected)
     fn total_completed(&self) -> u64 {
         self.success() + self.cancelled() + self.failed() + self.rejected()
@@ -1579,19 +1443,100 @@ pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
         self.issued().saturating_sub(self.total_completed())
     }
 
-    /// Get number of tasks queued in scheduler (pending - active)
-    fn queued(&self) -> u64 {
-        self.pending().saturating_sub(self.active())
+    /// Get the number of tasks that are currently active (started - completed)
+    fn active(&self) -> u64 {
+        self.started().saturating_sub(self.total_completed())
     }
 
-    /// Calculate failure rate (failed / total_completed)
-    fn failure_rate(&self) -> f64 {
-        let total = self.total_completed();
-        if total == 0 {
-            0.0
-        } else {
-            self.failed() as f64 / total as f64
-        }
+    /// Get number of tasks queued in scheduler (issued - started)
+    fn queued(&self) -> u64 {
+        self.issued().saturating_sub(self.started())
+    }
+}
+
+/// Task execution metrics for a tracker
+#[derive(Debug, Default)]
+pub struct TaskMetrics {
+    /// Number of tasks issued/submitted (via spawn methods)
+    pub issued_count: AtomicU64,
+    /// Number of tasks that have started execution
+    pub started_count: AtomicU64,
+    /// Number of successfully completed tasks
+    pub success_count: AtomicU64,
+    /// Number of cancelled tasks
+    pub cancelled_count: AtomicU64,
+    /// Number of failed tasks
+    pub failed_count: AtomicU64,
+    /// Number of rejected tasks (by scheduler)
+    pub rejected_count: AtomicU64,
+}
+
+impl TaskMetrics {
+    /// Create new metrics instance
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl HierarchicalTaskMetrics for TaskMetrics {
+    /// Increment issued task counter
+    fn increment_issued(&self) {
+        self.issued_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment started task counter
+    fn increment_started(&self) {
+        self.started_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment success counter
+    fn increment_success(&self) {
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment cancelled counter
+    fn increment_cancelled(&self) {
+        self.cancelled_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment failed counter
+    fn increment_failed(&self) {
+        self.failed_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment rejected counter
+    fn increment_rejected(&self) {
+        self.rejected_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get current issued count
+    fn issued(&self) -> u64 {
+        self.issued_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current started count
+    fn started(&self) -> u64 {
+        self.started_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current success count
+    fn success(&self) -> u64 {
+        self.success_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current cancelled count
+    fn cancelled(&self) -> u64 {
+        self.cancelled_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current failed count
+    fn failed(&self) -> u64 {
+        self.failed_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current rejected count
+    fn rejected(&self) -> u64 {
+        self.rejected_count.load(Ordering::Relaxed)
     }
 }
 
@@ -1600,11 +1545,10 @@ pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
 /// This implementation maintains local counters and exposes them as Prometheus metrics
 /// through the provided MetricsRegistry.
 #[derive(Debug)]
-pub struct RootTaskMetrics {
-    /// Local metrics for this tracker
-    local_metrics: TaskMetrics,
+pub struct PrometheusTaskMetrics {
     /// Prometheus metrics integration
     prometheus_issued: prometheus::IntCounter,
+    prometheus_started: prometheus::IntCounter,
     prometheus_success: prometheus::IntCounter,
     prometheus_cancelled: prometheus::IntCounter,
     prometheus_failed: prometheus::IntCounter,
@@ -1613,7 +1557,7 @@ pub struct RootTaskMetrics {
     prometheus_queued: prometheus::IntGauge,
 }
 
-impl RootTaskMetrics {
+impl PrometheusTaskMetrics {
     /// Create new root metrics with Prometheus integration
     ///
     /// # Arguments
@@ -1623,10 +1567,10 @@ impl RootTaskMetrics {
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
-    /// # use dynamo_runtime::utils::tasks::tracker::RootTaskMetrics;
+    /// # use dynamo_runtime::utils::tasks::tracker::PrometheusTaskMetrics;
     /// # use dynamo_runtime::metrics::MetricsRegistry;
     /// # fn example(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<()> {
-    /// let metrics = RootTaskMetrics::new(registry.as_ref(), "main_tracker")?;
+    /// let metrics = PrometheusTaskMetrics::new(registry.as_ref(), "main_tracker")?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1637,6 +1581,12 @@ impl RootTaskMetrics {
         let issued_counter = registry.create_intcounter(
             &format!("{}_tasks_issued_total", component_name),
             "Total number of tasks issued/submitted",
+            &[],
+        )?;
+
+        let started_counter = registry.create_intcounter(
+            &format!("{}_tasks_started_total", component_name),
+            "Total number of tasks started",
             &[],
         )?;
 
@@ -1677,8 +1627,8 @@ impl RootTaskMetrics {
         )?;
 
         Ok(Self {
-            local_metrics: TaskMetrics::new(),
             prometheus_issued: issued_counter,
+            prometheus_started: started_counter,
             prometheus_success: success_counter,
             prometheus_cancelled: cancelled_counter,
             prometheus_failed: failed_counter,
@@ -1689,165 +1639,53 @@ impl RootTaskMetrics {
     }
 }
 
-impl RootTaskMetrics {
-    /// Update the queued gauge based on current metrics
-    fn update_queued_gauge(&self) {
-        let queued = self.local_metrics.queued() as i64;
-        self.prometheus_queued.set(queued);
-    }
-}
-
-impl HierarchicalTaskMetrics for RootTaskMetrics {
+impl HierarchicalTaskMetrics for PrometheusTaskMetrics {
     fn increment_issued(&self) {
-        self.local_metrics.increment_issued();
         self.prometheus_issued.inc();
-        self.update_queued_gauge();
+    }
+
+    fn increment_started(&self) {
+        self.prometheus_started.inc();
     }
 
     fn increment_success(&self) {
-        self.local_metrics.increment_success();
         self.prometheus_success.inc();
-        self.update_queued_gauge();
     }
 
     fn increment_cancelled(&self) {
-        self.local_metrics.increment_cancelled();
         self.prometheus_cancelled.inc();
-        self.update_queued_gauge();
     }
 
     fn increment_failed(&self) {
-        self.local_metrics.increment_failed();
         self.prometheus_failed.inc();
-        self.update_queued_gauge();
     }
 
     fn increment_rejected(&self) {
-        self.local_metrics.increment_rejected();
         self.prometheus_rejected.inc();
-        self.update_queued_gauge();
-    }
-
-    fn increment_active(&self) {
-        self.local_metrics.increment_active();
-        self.prometheus_active.inc();
-        self.update_queued_gauge();
-    }
-
-    fn decrement_active(&self) {
-        self.local_metrics.decrement_active();
-        self.prometheus_active.dec();
-        self.update_queued_gauge();
     }
 
     fn issued(&self) -> u64 {
-        self.local_metrics.issued()
+        self.prometheus_issued.get()
+    }
+
+    fn started(&self) -> u64 {
+        self.prometheus_started.get()
     }
 
     fn success(&self) -> u64 {
-        self.local_metrics.success()
+        self.prometheus_success.get()
     }
 
     fn cancelled(&self) -> u64 {
-        self.local_metrics.cancelled()
+        self.prometheus_cancelled.get()
     }
 
     fn failed(&self) -> u64 {
-        self.local_metrics.failed()
+        self.prometheus_failed.get()
     }
 
     fn rejected(&self) -> u64 {
-        self.local_metrics.rejected()
-    }
-
-    fn active(&self) -> u64 {
-        self.local_metrics.active()
-    }
-}
-
-/// Default root tracker metrics without Prometheus integration
-///
-/// This implementation only maintains local counters and is suitable for
-/// applications that don't need Prometheus metrics or want to handle
-/// metrics exposition themselves.
-#[derive(Debug)]
-pub struct DefaultRootTaskMetrics {
-    /// Local metrics for this tracker
-    local_metrics: TaskMetrics,
-}
-
-impl DefaultRootTaskMetrics {
-    /// Create new default root metrics
-    ///
-    /// # Example
-    /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::DefaultRootTaskMetrics;
-    /// let metrics = DefaultRootTaskMetrics::new();
-    /// ```
-    pub fn new() -> Self {
-        Self {
-            local_metrics: TaskMetrics::new(),
-        }
-    }
-}
-
-impl Default for DefaultRootTaskMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HierarchicalTaskMetrics for DefaultRootTaskMetrics {
-    fn increment_issued(&self) {
-        self.local_metrics.increment_issued();
-    }
-
-    fn increment_success(&self) {
-        self.local_metrics.increment_success();
-    }
-
-    fn increment_cancelled(&self) {
-        self.local_metrics.increment_cancelled();
-    }
-
-    fn increment_failed(&self) {
-        self.local_metrics.increment_failed();
-    }
-
-    fn increment_rejected(&self) {
-        self.local_metrics.increment_rejected();
-    }
-
-    fn increment_active(&self) {
-        self.local_metrics.increment_active();
-    }
-
-    fn decrement_active(&self) {
-        self.local_metrics.decrement_active();
-    }
-
-    fn issued(&self) -> u64 {
-        self.local_metrics.issued()
-    }
-
-    fn success(&self) -> u64 {
-        self.local_metrics.success()
-    }
-
-    fn cancelled(&self) -> u64 {
-        self.local_metrics.cancelled()
-    }
-
-    fn failed(&self) -> u64 {
-        self.local_metrics.failed()
-    }
-
-    fn rejected(&self) -> u64 {
-        self.local_metrics.rejected()
-    }
-
-    fn active(&self) -> u64 {
-        self.local_metrics.active()
+        self.prometheus_rejected.get()
     }
 }
 
@@ -1857,7 +1695,7 @@ impl HierarchicalTaskMetrics for DefaultRootTaskMetrics {
 /// all metric updates to the parent tracker for hierarchical aggregation.
 /// Holds a strong reference to parent metrics for optimal performance.
 #[derive(Debug)]
-pub struct ChildTaskMetrics {
+struct ChildTaskMetrics {
     /// Local metrics for this tracker
     local_metrics: TaskMetrics,
     /// Strong reference to parent metrics for fast chaining
@@ -1866,20 +1704,7 @@ pub struct ChildTaskMetrics {
 }
 
 impl ChildTaskMetrics {
-    /// Create new child metrics with parent chaining
-    ///
-    /// # Arguments
-    /// * `parent_metrics` - Strong reference to parent metrics for chaining
-    ///
-    /// # Example
-    /// ```rust
-    /// # use std::sync::Arc;
-    /// # use dynamo_runtime::utils::tasks::tracker::{ChildTaskMetrics, HierarchicalTaskMetrics};
-    /// # fn example(parent: Arc<dyn HierarchicalTaskMetrics>) {
-    /// let child_metrics = ChildTaskMetrics::new(parent);
-    /// # }
-    /// ```
-    pub fn new(parent_metrics: Arc<dyn HierarchicalTaskMetrics>) -> Self {
+    fn new(parent_metrics: Arc<dyn HierarchicalTaskMetrics>) -> Self {
         Self {
             local_metrics: TaskMetrics::new(),
             parent_metrics,
@@ -1891,6 +1716,11 @@ impl HierarchicalTaskMetrics for ChildTaskMetrics {
     fn increment_issued(&self) {
         self.local_metrics.increment_issued();
         self.parent_metrics.increment_issued();
+    }
+
+    fn increment_started(&self) {
+        self.local_metrics.increment_started();
+        self.parent_metrics.increment_started();
     }
 
     fn increment_success(&self) {
@@ -1913,18 +1743,12 @@ impl HierarchicalTaskMetrics for ChildTaskMetrics {
         self.parent_metrics.increment_rejected();
     }
 
-    fn increment_active(&self) {
-        self.local_metrics.increment_active();
-        self.parent_metrics.increment_active();
-    }
-
-    fn decrement_active(&self) {
-        self.local_metrics.decrement_active();
-        self.parent_metrics.decrement_active();
-    }
-
     fn issued(&self) -> u64 {
         self.local_metrics.issued()
+    }
+
+    fn started(&self) -> u64 {
+        self.local_metrics.started()
     }
 
     fn success(&self) -> u64 {
@@ -1942,13 +1766,6 @@ impl HierarchicalTaskMetrics for ChildTaskMetrics {
     fn rejected(&self) -> u64 {
         self.local_metrics.rejected()
     }
-
-    fn active(&self) -> u64 {
-        self.local_metrics.active()
-    }
-
-    // Child trackers don't expose Prometheus metrics directly
-    // They rely on their parent (root) tracker for metrics exposition
 }
 
 /// Builder for creating child trackers with custom policies
@@ -2182,9 +1999,7 @@ impl TaskTrackerBuilder {
             .error_policy
             .ok_or_else(|| anyhow::anyhow!("TaskTracker requires an error policy"))?;
 
-        let metrics = self
-            .metrics
-            .unwrap_or_else(|| Arc::new(DefaultRootTaskMetrics::new()));
+        let metrics = self.metrics.unwrap_or_else(|| Arc::new(TaskMetrics::new()));
 
         let cancel_token = self.cancel_token.unwrap_or_default();
 
@@ -2289,7 +2104,7 @@ impl TaskTracker {
         registry: &R,
         component_name: &str,
     ) -> anyhow::Result<Self> {
-        let prometheus_metrics = Arc::new(RootTaskMetrics::new(registry, component_name)?);
+        let prometheus_metrics = Arc::new(PrometheusTaskMetrics::new(registry, component_name)?);
 
         Self::builder()
             .scheduler(scheduler)
@@ -2640,13 +2455,14 @@ impl TaskTrackerInner {
 
         // Create a child cancellation token for this specific task
         let task_cancel_token = self.cancel_token.child_token();
+        let cancel_token = task_cancel_token.clone();
 
         // Clone the inner Arc to move into the task
         let inner = self.clone();
 
         // Wrap the user's future with our scheduling and error handling
         let wrapped_future =
-            async move { Self::execute_with_policies(task_id, future, inner).await };
+            async move { Self::execute_with_policies(task_id, future, cancel_token, inner).await };
 
         // Let tokio handle the actual task tracking
         let join_handle = self.tokio_tracker.spawn(wrapped_future);
@@ -2678,13 +2494,15 @@ impl TaskTrackerInner {
 
         // Create a child cancellation token for this specific task
         let task_cancel_token = self.cancel_token.child_token();
+        let cancel_token = task_cancel_token.clone();
 
         // Clone the inner Arc to move into the task
         let inner = self.clone();
 
         // Use the new execution pipeline that defers task creation until after guard acquisition
-        let wrapped_future =
-            async move { Self::execute_cancellable_with_policies(task_id, task_fn, inner).await };
+        let wrapped_future = async move {
+            Self::execute_cancellable_with_policies(task_id, task_fn, cancel_token, inner).await
+        };
 
         // Let tokio handle the actual task tracking
         let join_handle = self.tokio_tracker.spawn(wrapped_future);
@@ -2795,6 +2613,7 @@ impl TaskTrackerInner {
     async fn execute_with_policies<F, T>(
         task_id: TaskId,
         future: F,
+        task_cancel_token: CancellationToken,
         inner: Arc<TaskTrackerInner>,
     ) -> Result<T, TaskError>
     where
@@ -2803,7 +2622,7 @@ impl TaskTrackerInner {
     {
         // Wrap regular future in a task executor that doesn't support retry
         let task_executor = RegularTaskExecutor::new(future);
-        Self::execute_with_retry_loop(task_id, task_executor, inner).await
+        Self::execute_with_retry_loop(task_id, task_executor, task_cancel_token, inner).await
     }
 
     /// Execute a cancellable task with scheduling and error handling policies
@@ -2811,6 +2630,7 @@ impl TaskTrackerInner {
     async fn execute_cancellable_with_policies<F, Fut, T>(
         task_id: TaskId,
         task_fn: F,
+        task_cancel_token: CancellationToken,
         inner: Arc<TaskTrackerInner>,
     ) -> Result<T, TaskError>
     where
@@ -2820,7 +2640,7 @@ impl TaskTrackerInner {
     {
         // Wrap cancellable task function in a task executor that supports retry
         let task_executor = CancellableTaskExecutor::new(task_fn);
-        Self::execute_with_retry_loop(task_id, task_executor, inner).await
+        Self::execute_with_retry_loop(task_id, task_executor, task_cancel_token, inner).await
     }
 
     /// Core execution loop with retry support - unified for both task types
@@ -2828,6 +2648,7 @@ impl TaskTrackerInner {
     async fn execute_with_retry_loop<E, T>(
         task_id: TaskId,
         initial_executor: E,
+        task_cancellation_token: CancellationToken,
         inner: Arc<TaskTrackerInner>,
     ) -> Result<T, TaskError>
     where
@@ -2852,16 +2673,8 @@ impl TaskTrackerInner {
 
             fn activate(&mut self) {
                 if !self.is_active {
-                    self.metrics.increment_active();
+                    self.metrics.increment_started();
                     self.is_active = true;
-                }
-            }
-        }
-
-        impl Drop for ActiveCountGuard {
-            fn drop(&mut self) {
-                if self.is_active {
-                    self.metrics.decrement_active();
                 }
             }
         }
@@ -2882,7 +2695,7 @@ impl TaskTrackerInner {
         let mut guard_result = async {
             inner
                 .scheduler
-                .acquire_execution_slot(inner.cancel_token.child_token())
+                .acquire_execution_slot(task_cancellation_token.child_token())
                 .await
         }
         .instrument(tracing::debug_span!("scheduler_resource_reacquisition"))
@@ -5189,18 +5002,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cancellable_task_executor_supports_retry() {
-        // Test that CancellableTaskExecutor supports retry
-
-        let task_fn = |_token: CancellationToken| async move { CancellableTaskResult::Ok(42u32) };
-
-        let executor = CancellableTaskExecutor::new(task_fn);
-
-        // Test that it implements TaskExecutor and supports retry
-        assert!(executor.supports_retry());
-    }
-
-    #[test]
     fn test_continuation_error_with_task_executor() {
         // Test RestartableError creation with TaskExecutor
 
@@ -6102,9 +5903,16 @@ mod tests {
         assert_eq!(result1.unwrap(), "completed");
 
         // Test individual task cancellation
-        let handle2 = tracker.spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await; // Long task
-            Ok("should_be_cancelled".to_string())
+        let handle2 = tracker.spawn_cancellable(|cancel_token| async move {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    CancellableTaskResult::Ok("task_was_not_cancelled".to_string())
+                },
+                _ = cancel_token.cancelled() => {
+                    CancellableTaskResult::Cancelled
+                },
+
+            }
         });
 
         let cancel_token2 = handle2.cancellation_token();
