@@ -81,7 +81,7 @@ impl Decoder for TwoPartCodec {
             return Ok(None);
         }
 
-        // Advance the buffer past the lengths and _checksum
+        // Advance the buffer past the lengths and checksum
         src.advance(24);
 
         #[cfg(debug_assertions)]
