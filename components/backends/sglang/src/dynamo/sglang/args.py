@@ -11,6 +11,8 @@ from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
 
+from dynamo.sglang import __version__
+
 from sglang.srt.server_args import ServerArgs
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -63,6 +65,10 @@ def parse_args(args: list[str]) -> Config:
     Parse all arguments and return Config with server_args and dynamo_args
     """
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend SGLang {__version__}"
+    )
 
     # Dynamo args
     for info in DYNAMO_ARGS.values():
