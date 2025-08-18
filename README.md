@@ -183,7 +183,7 @@ Run the backend/worker like this:
 python -m dynamo.sglang.worker --help
 ```
 
-You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/backend/server_arguments.html . See there to use multiple GPUs.
+You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/advanced_features/server_arguments.html . See there to use multiple GPUs.
 
 ## TensorRT-LLM
 
@@ -255,7 +255,15 @@ source $HOME/.cargo/env
 
 ## 3. Create a Python virtual env:
 
+Follow the instructions in [uv installation](https://docs.astral.sh/uv/#installation) guide to install uv if you don't have `uv` installed. Once uv is installed, create a virtual environment and activate it.
+
+- Install uv
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
+
+- Create a virtual environment
+```bash
 uv venv dynamo
 source dynamo/bin/activate
 ```

@@ -14,7 +14,7 @@ Use this approach when installing from pre-built helm charts and docker images p
 
 ```bash
 export NAMESPACE=dynamo-cloud
-export RELEASE_VERSION=0.3.2
+export RELEASE_VERSION=0.4.0
 ```
 
 Install `envsubst`, `kubectl`, `helm`
@@ -67,7 +67,7 @@ Ensure you have the source code checked out and are in the `dynamo` directory:
 
 ### Set Environment Variables
 
-Our examples use the [`nvcr.io`](https://nvcr.io/nvidia/ai-dynamo/) but you can setup your own values if you use another docker registry.
+Our examples use the [`nvcr.io`](https://catalog.ngc.nvidia.com) but you can setup your own values if you use another docker registry.
 
 ```bash
 export NAMESPACE=dynamo-cloud # or whatever you prefer.

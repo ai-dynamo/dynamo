@@ -7,15 +7,20 @@ use dynamo_runtime::CancellationToken;
 use serial_test::serial;
 use std::{env, time::Duration};
 
+#[path = "common/ports.rs"]
+mod ports;
+use ports::get_random_port;
+
 #[tokio::test]
 #[serial]
 async fn metrics_prefix_default_then_env_override() {
     // Case 1: default prefix
     env::remove_var(metrics::METRICS_PREFIX_ENV);
-    let svc1 = HttpService::builder().port(9101).build().unwrap();
+    let p1 = get_random_port().await;
+    let svc1 = HttpService::builder().port(p1).build().unwrap();
     let token1 = CancellationToken::new();
-    let _h1 = svc1.spawn(token1.clone()).await;
-    wait_for_metrics_ready(9101).await;
+    let h1 = svc1.spawn(token1.clone()).await;
+    wait_for_metrics_ready(p1).await;
 
     // Populate labeled metrics
     let s1 = svc1.state_clone();
@@ -26,7 +31,7 @@ async fn metrics_prefix_default_then_env_override() {
             false,
         );
     }
-    let body1 = reqwest::get("http://localhost:9101/metrics")
+    let body1 = reqwest::get(format!("http://localhost:{}/metrics", p1))
         .await
         .unwrap()
         .text()
@@ -34,13 +39,15 @@ async fn metrics_prefix_default_then_env_override() {
         .unwrap();
     assert!(body1.contains("dynamo_frontend_requests_total"));
     token1.cancel();
+    let _ = h1.await; // ensure port is released
 
     // Case 2: env override to prefix
     env::set_var(metrics::METRICS_PREFIX_ENV, "custom_prefix");
-    let svc2 = HttpService::builder().port(9102).build().unwrap();
+    let p2 = get_random_port().await;
+    let svc2 = HttpService::builder().port(p2).build().unwrap();
     let token2 = CancellationToken::new();
-    let _h2 = svc2.spawn(token2.clone()).await;
-    wait_for_metrics_ready(9102).await;
+    let h2 = svc2.spawn(token2.clone()).await;
+    wait_for_metrics_ready(p2).await;
 
     // Populate labeled metrics
     let s2 = svc2.state_clone();
@@ -50,7 +57,7 @@ async fn metrics_prefix_default_then_env_override() {
                 .create_inflight_guard("test-model", Endpoint::ChatCompletions, true);
     }
     // Single fetch and assert
-    let body2 = reqwest::get("http://localhost:9102/metrics")
+    let body2 = reqwest::get(format!("http://localhost:{}/metrics", p2))
         .await
         .unwrap()
         .text()
@@ -59,13 +66,15 @@ async fn metrics_prefix_default_then_env_override() {
     assert!(body2.contains("custom_prefix_requests_total"));
     assert!(!body2.contains("dynamo_frontend_requests_total"));
     token2.cancel();
+    let _ = h2.await;
 
     // Case 3: invalid env prefix is sanitized
     env::set_var(metrics::METRICS_PREFIX_ENV, "nv-llm/http service");
-    let svc3 = HttpService::builder().port(9103).build().unwrap();
+    let p3 = get_random_port().await;
+    let svc3 = HttpService::builder().port(p3).build().unwrap();
     let token3 = CancellationToken::new();
-    let _h3 = svc3.spawn(token3.clone()).await;
-    wait_for_metrics_ready(9103).await;
+    let h3 = svc3.spawn(token3.clone()).await;
+    wait_for_metrics_ready(p3).await;
 
     let s3 = svc3.state_clone();
     {
@@ -73,7 +82,7 @@ async fn metrics_prefix_default_then_env_override() {
             s3.metrics_clone()
                 .create_inflight_guard("test-model", Endpoint::ChatCompletions, true);
     }
-    let body3 = reqwest::get("http://localhost:9103/metrics")
+    let body3 = reqwest::get(format!("http://localhost:{}/metrics", p3))
         .await
         .unwrap()
         .text()
@@ -82,6 +91,7 @@ async fn metrics_prefix_default_then_env_override() {
     assert!(body3.contains("nv_llm_http_service_requests_total"));
     assert!(!body3.contains("dynamo_frontend_requests_total"));
     token3.cancel();
+    let _ = h3.await;
 
     // Cleanup env to avoid leaking state
     env::remove_var(metrics::METRICS_PREFIX_ENV);

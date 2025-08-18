@@ -5,6 +5,8 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
+  annotations:
+    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
@@ -27,7 +29,7 @@ spec:
           memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -71,8 +73,11 @@ spec:
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/planner/src/dynamo/planner
+          ports:
+            - name: metrics
+              containerPort: 9085
           command:
             - /bin/sh
             - -c
@@ -83,6 +88,7 @@ spec:
               --backend=vllm
               --adjustment-interval=60
               --profile-results-dir=/workspace/profiling_results
+              --prometheus-port=9085
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
@@ -118,7 +124,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -147,7 +153,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -176,7 +182,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

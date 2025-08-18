@@ -50,8 +50,8 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 
 LWS is a simple multinode deployment mechanism that allows you to deploy a workload across multiple nodes.
 
-- **LWS**: [LWS Installation](https://github.com/NVIDIA/LWS#installation)
-- **Volcano**: [Volcano Installation](https://volcano.sh/docs/installation/install-volcano/)
+- **LWS**: [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+- **Volcano**: [Volcano Installation](https://volcano.sh/en/docs/installation/)
 
 Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It is used in conjunction with LWS to provide gang scheduling support.
 
@@ -110,8 +110,8 @@ args:
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [components/backends/sglang/deploy/](../../components/backends/sglang/deploy/)
-- **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../components/backends/trtllm/deploy/)
-- **vLLM**: [components/backends/vllm/deploy/](../../components/backends/vllm/deploy/)
+- **SGLang**: [components/backends/sglang/deploy/](../../../components/backends/sglang/deploy/)
+- **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../../components/backends/trtllm/deploy/)
+- **vLLM**: [components/backends/vllm/deploy/](../../../components/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.
