@@ -113,7 +113,7 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
     if args.is_prefill_worker:
         args.endpoint = f"dyn://{namespace}.prefill.generate"
