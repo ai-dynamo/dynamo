@@ -42,8 +42,8 @@ use futures::StreamExt;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, OnceCell};
-use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -567,7 +567,7 @@ mod integration_tests {
 
         let engine = MockVllmEngine::new(args);
         engine.start(test_component.clone()).await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let engine = Arc::new(engine);
         tracing::info!("✓ MockVllmEngine created with DP_SIZE: {DP_SIZE}");
 
@@ -597,7 +597,7 @@ mod integration_tests {
         tracing::info!("✓ Server started in background");
 
         // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         tracing::info!("✓ Server startup delay completed");
 
         // Print all registered instances from etcd
@@ -732,7 +732,7 @@ mod integration_tests {
             cancel_token,
         )
         .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let processed_endpoints = metrics_aggregator.get_endpoints();
         tracing::info!(
