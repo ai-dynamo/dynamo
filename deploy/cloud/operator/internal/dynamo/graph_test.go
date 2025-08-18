@@ -1059,7 +1059,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Envs: []corev1.EnvVar{
 							{
-								Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+								Name:  "DYN_POD_GANG_SET_REPLICAS",
 								Value: "1",
 							},
 						},
@@ -1284,7 +1284,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -1292,7 +1292,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYNAMO_PORT",
+														Name:  "DYN_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -1415,7 +1415,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -1494,7 +1494,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Envs: []corev1.EnvVar{
 							{
-								Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+								Name:  "DYN_POD_GANG_SET_REPLICAS",
 								Value: "1",
 							},
 						},
@@ -1743,7 +1743,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -1890,7 +1890,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -2021,7 +2021,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -2029,7 +2029,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYNAMO_PORT",
+														Name:  "DYN_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -2152,7 +2152,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -2231,7 +2231,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Envs: []corev1.EnvVar{
 							{
-								Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+								Name:  "DYN_POD_GANG_SET_REPLICAS",
 								Value: "1",
 							},
 						},
@@ -2504,7 +2504,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -2639,7 +2639,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -2770,7 +2770,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{
@@ -2778,7 +2778,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYNAMO_PORT",
+														Name:  "DYN_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -2901,7 +2901,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Name:  "DYN_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
 													{

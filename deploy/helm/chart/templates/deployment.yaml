@@ -77,7 +77,7 @@ spec:
             name: {{ $serviceSpec.envFromSecret }}
         {{- end }}
         env:
-        - name: DYNAMO_PORT
+        - name: DYN_PORT
           value: "{{ $.Values.dynamoPort | default 8000 }}"
         {{- if $.Values.etcdAddr }}
         - name: ETCD_ENDPOINTS

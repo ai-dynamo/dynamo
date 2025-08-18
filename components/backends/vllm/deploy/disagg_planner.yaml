@@ -9,9 +9,9 @@ metadata:
     nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
 spec:
   envs:
-    - name: DYNAMO_SERVICE_CONFIG
+    - name: DYN_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
-    - name: DYNAMO_PORT
+    - name: DYN_PORT
       value: "8000"
     - name: DYN_NAMESPACE
       value: "vllm-disagg-planner"

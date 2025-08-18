@@ -178,7 +178,7 @@ kubectl get dynamographdeployment llm-agg -n $NAMESPACE
 | Name                                               | Description                          | Default                                                |
 |----------------------------------------------------|--------------------------------------|--------------------------------------------------------|
 | `LOG_LEVEL`                                        | Logging verbosity level              | `info`                                                 |
-| `DYNAMO_SYSTEM_NAMESPACE`                          | System namespace                     | `dynamo`                                               |
+| `DYN_SYSTEM_NAMESPACE`                          | System namespace                     | `dynamo`                                               |
 
 - **Flags:**
   | Flag                  | Description                                | Default |
