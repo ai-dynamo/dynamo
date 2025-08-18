@@ -27,6 +27,9 @@ spec:
       replicas: 2
       extraPodSpec:
         mainContainer:
+          resources:
+            limits:
+              gpu: "1"
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:

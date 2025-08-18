@@ -18,13 +18,6 @@ spec:
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "32"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
@@ -58,13 +51,6 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       pvc:
         create: false
         name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
@@ -113,13 +99,6 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
@@ -135,13 +114,7 @@ spec:
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "8"
-          memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -164,13 +137,7 @@ spec:
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "8"
-          memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

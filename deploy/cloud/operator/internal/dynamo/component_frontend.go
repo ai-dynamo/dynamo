@@ -10,7 +10,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -64,17 +63,6 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		PeriodSeconds:       60,
 		TimeoutSeconds:      30,
 		FailureThreshold:    10,
-	}
-
-	container.Resources = corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
 	}
 
 	// Add standard environment variables

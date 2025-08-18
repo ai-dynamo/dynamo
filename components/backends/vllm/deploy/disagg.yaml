@@ -11,13 +11,6 @@ spec:
       dynamoNamespace: vllm-disagg
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "32"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
@@ -33,13 +26,7 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "32"
-          memory: "40Gi"
-          gpu: "1"
         limits:
-          cpu: "32"
-          memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -56,13 +43,7 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "32"
-          memory: "40Gi"
-          gpu: "1"
         limits:
-          cpu: "32"
-          memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

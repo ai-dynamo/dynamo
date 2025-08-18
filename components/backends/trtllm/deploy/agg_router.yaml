@@ -26,13 +26,7 @@ spec:
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
