@@ -65,7 +65,7 @@ impl Decoder for TwoPartCodec {
 
         let header_len = cursor.get_u64() as usize;
         let body_len = cursor.get_u64() as usize;
-        let checksum = cursor.get_u64();
+        let _checksum = cursor.get_u64();
 
         let total_len = 24 + header_len + body_len;
 
@@ -81,13 +81,13 @@ impl Decoder for TwoPartCodec {
             return Ok(None);
         }
 
-        // Advance the buffer past the lengths and checksum
+        // Advance the buffer past the lengths and _checksum
         src.advance(24);
 
         #[cfg(debug_assertions)]
         {
             // If the server sent a dummy checksum, skip it.
-            if checksum != 0 {
+            if _checksum != 0 {
                 let bytes_to_hash =
                     header_len
                         .checked_add(body_len)
@@ -100,7 +100,7 @@ impl Decoder for TwoPartCodec {
                 let computed_checksum = xxh3_64(data_to_hash);
 
                 // Compare checksums
-                if checksum != computed_checksum {
+                if _checksum != computed_checksum {
                     return Err(TwoPartCodecError::ChecksumMismatch);
                 }
             }
