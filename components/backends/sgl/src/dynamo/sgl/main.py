@@ -60,7 +60,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
-    publisher, metrics_task = setup_sgl_metrics(component, engine)
+    publisher, metrics_task = await setup_sgl_metrics(component, engine)
 
     if server_args.kv_events_config:
         kv_events = json.loads(server_args.kv_events_config)
