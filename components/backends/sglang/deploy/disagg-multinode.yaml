@@ -35,9 +35,6 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "40Gi"
         limits:
           gpu: "4"
       extraPodSpec:
@@ -65,9 +62,6 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "40Gi"
         limits:
           gpu: "4"
       extraPodSpec:

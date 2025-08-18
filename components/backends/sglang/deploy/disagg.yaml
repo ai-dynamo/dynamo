@@ -11,10 +11,6 @@ spec:
       dynamoNamespace: sglang-disagg
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "10"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
@@ -28,9 +24,6 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
         limits:
           gpu: "1"
       extraPodSpec:
@@ -58,9 +51,6 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
         limits:
           gpu: "1"
       extraPodSpec:

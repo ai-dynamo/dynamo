@@ -11,10 +11,6 @@ spec:
       dynamoNamespace: vllm-agg-router
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "5"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
@@ -32,9 +28,6 @@ spec:
       extraPodSpec:
         mainContainer:
           resources:
-            requests:
-              cpu: "10"
-              memory: "20Gi"
             limits:
               gpu: "1"
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
