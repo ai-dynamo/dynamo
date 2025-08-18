@@ -674,7 +674,7 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 }
 
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
-// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
+// Includes standard environment variables (DYN_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
 func GenerateBasePodSpec(
 	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,

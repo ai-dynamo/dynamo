@@ -25,12 +25,12 @@ class ServiceConfig(dict):
     def _load_from_env(cls):
         """Load config from environment variable"""
         configs = {}
-        env_config = os.environ.get("DYNAMO_SERVICE_CONFIG")
+        env_config = os.environ.get("DYN_SERVICE_CONFIG")
         if env_config:
             try:
                 configs = json.loads(env_config)
             except json.JSONDecodeError:
-                print("Failed to parse DYNAMO_SERVICE_CONFIG")
+                print("Failed to parse DYN_SERVICE_CONFIG")
         return cls(configs)  # Initialize dict subclass with configs
 
     def require(self, service_name, key):

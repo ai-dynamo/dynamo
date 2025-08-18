@@ -56,7 +56,7 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 				Command: []string{
 					"/bin/sh",
 					"-c",
-					"curl -s http://localhost:${DYNAMO_PORT}/health | jq -e \".status == \\\"healthy\\\"\"",
+					"curl -s http://localhost:${DYN_PORT}/health | jq -e \".status == \\\"healthy\\\"\"",
 				},
 			},
 		},
