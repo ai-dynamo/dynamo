@@ -61,6 +61,9 @@ struct DeltaChoice {
     logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     // Optional tool calls for the chat choice.
     tool_calls: Option<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>>,
+
+    /// Optional reasoning content for the chat choice.
+    reasoning_content: Option<String>,
 }
 
 impl Default for DeltaAggregator {
@@ -137,11 +140,23 @@ impl DeltaAggregator {
                                     finish_reason: None,
                                     logprobs: choice.logprobs,
                                     tool_calls: None,
+                                    reasoning_content: None,
                                 });
 
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
                             state_choice.text.push_str(content);
+                        }
+
+                        if let Some(reasoning_content) = &choice.delta.reasoning_content {
+                            if state_choice.reasoning_content.is_none() {
+                                state_choice.reasoning_content = Some("".to_string());
+                            }
+                            state_choice
+                                .reasoning_content
+                                .as_mut()
+                                .expect("Reason Content")
+                                .push_str(reasoning_content);
                         }
 
                         // Update finish reason if provided.

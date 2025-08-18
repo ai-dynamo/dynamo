@@ -24,14 +24,15 @@ pub trait ReasoningParser {
     fn parse_reasoning_streaming_incremental(&mut self, text: &str) -> ParserResult;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningParserType {
     DeepseekR1,
     Basic,
 }
 
 impl ReasoningParserType {
-    pub fn get_reasoning_parser() -> Box<dyn ReasoningParser> {
-        match ReasoningParserType::Basic {
+    pub fn get_reasoning_parser(self) -> Box<dyn ReasoningParser> {
+        match self {
             ReasoningParserType::DeepseekR1 => Box::new(DeepseekR1ReasoningParser::new()),
             ReasoningParserType::Basic => Box::new(BasicReasoningParser::new(
                 "<think>".to_string(),
