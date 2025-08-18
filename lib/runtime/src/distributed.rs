@@ -247,7 +247,8 @@ impl DistributedRuntime {
         self.instance_sources.clone()
     }
 
-    /// Add a Prometheus metric to a specific hierarchy's registry
+    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
+    /// to register the same metric name multiple times, as long as the labels are different.
     pub fn add_prometheus_metric(
         &self,
         hierarchy: &str,
@@ -256,16 +257,6 @@ impl DistributedRuntime {
     ) -> anyhow::Result<()> {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         let entry = registries.entry(hierarchy.to_string()).or_default();
-
-        // If a metric with this name already exists for the hierarchy, warn and skip registration
-        if entry.has_metric_named(metric_name) {
-            tracing::warn!(
-                hierarchy = ?hierarchy,
-                metric_name = ?metric_name,
-                "Metric already exists in registry; skipping registration"
-            );
-            return Ok(());
-        }
 
         // Try to register the metric and provide better error information
         match entry.prometheus_registry.register(prometheus_metric) {

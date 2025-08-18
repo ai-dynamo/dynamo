@@ -10,6 +10,7 @@ use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
+use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
@@ -94,7 +95,9 @@ pub(crate) struct EntrypointArgs {
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: Option<u32>,
-    http_port: Option<u16>,
+    http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
 }
 
@@ -102,7 +105,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_port=None, extra_engine_args=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -114,6 +117,8 @@ impl EntrypointArgs {
         router_config: Option<RouterConfig>,
         kv_cache_block_size: Option<u32>,
         http_port: Option<u16>,
+        tls_cert_path: Option<PathBuf>,
+        tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = match endpoint_id {
@@ -124,6 +129,13 @@ impl EntrypointArgs {
             })?),
             None => None,
         };
+        if (tls_cert_path.is_some() && tls_key_path.is_none())
+            || (tls_cert_path.is_none() && tls_key_path.is_some())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tls_cert_path and tls_key_path must be provided together",
+            ));
+        }
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -134,7 +146,9 @@ impl EntrypointArgs {
             template_file,
             router_config,
             kv_cache_block_size,
-            http_port,
+            http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
+            tls_cert_path,
+            tls_key_path,
             extra_engine_args,
         })
     }
@@ -164,6 +178,8 @@ pub fn make_engine<'p>(
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_port(args.http_port)
+        .tls_cert_path(args.tls_cert_path.clone())
+        .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {

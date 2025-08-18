@@ -16,10 +16,15 @@
 # Worker example:
 # - cd lib/bindings/python/examples/hello_world
 # - python server_sglang_static.py
+#
+# For TLS:
+# - python -m dynamo.frontend --http-port 8443 --tls-cert-path cert.pem --tls-key-path key.pem
+#
 
 import argparse
 import asyncio
 import os
+import pathlib
 import re
 
 import uvloop
@@ -86,6 +91,18 @@ def parse_args():
         "--http-port", type=int, default=8080, help="HTTP port for the engine (u16)."
     )
     parser.add_argument(
+        "--tls-cert-path",
+        type=pathlib.Path,
+        default=None,
+        help="TLS certificate path, PEM format.",
+    )
+    parser.add_argument(
+        "--tls-key-path",
+        type=pathlib.Path,
+        default=None,
+        help="TLS certificate key path, PEM format.",
+    )
+    parser.add_argument(
         "--router-mode",
         type=str,
         choices=["round-robin", "random", "kv"],
@@ -149,6 +166,8 @@ def parse_args():
 
     if flags.static_endpoint and (not flags.model_name or not flags.model_path):
         parser.error("--static-endpoint requires both --model-name and --model-path")
+    if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
+        parser.error("--tls-cert-path and --tls-key-path must be provided together")
 
     return flags
 
@@ -192,6 +211,10 @@ async def async_main():
         kwargs["model_name"] = flags.model_name
     if flags.model_path:
         kwargs["model_path"] = flags.model_path
+    if flags.tls_cert_path:
+        kwargs["tls_cert_path"] = flags.tls_cert_path
+    if flags.tls_key_path:
+        kwargs["tls_key_path"] = flags.tls_key_path
 
     if is_static:
         # out=dyn://<static_endpoint>
