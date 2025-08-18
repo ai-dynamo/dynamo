@@ -1284,7 +1284,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_HTTP_PORT",
+														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -2025,7 +2025,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_HTTP_PORT",
+														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -2778,7 +2778,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "DYNAMO_HTTP_PORT",
+														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -4249,7 +4249,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			},
 			backendFramework: BackendFrameworkVLLM,
 			wantEnvVars: map[string]string{
-				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
 		},
 	}

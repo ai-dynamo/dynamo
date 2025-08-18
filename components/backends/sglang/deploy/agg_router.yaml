@@ -22,7 +22,7 @@ spec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
       envs:
-        - name: DYNAMO_ROUTER_MODE
+        - name: DYN_ROUTER_MODE
           value: kv
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret

@@ -22,7 +22,7 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
       envs:
-        - name: DYNAMO_ROUTER_MODE
+        - name: DYN_ROUTER_MODE
           value: kv
     TRTLLMPrefillWorker:
       dynamoNamespace: trtllm-v1-disagg-router
