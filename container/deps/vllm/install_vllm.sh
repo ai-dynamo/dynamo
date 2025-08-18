@@ -147,11 +147,19 @@ if [ "$ARCH" = "arm64" ]; then
     fi
 else
     echo "Installing vllm for AMD64 architecture"
+    uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+    VLLM_TEMP_DIR=/tmp/vllm/wheel/$VLLM_REF
+    mkdir -p $VLLM_TEMP_DIR
+    REMOTE_WHEEL_URL=https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    export VLLM_PRECOMPILED_WHEEL_LOCATION=$VLLM_TEMP_DIR/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    rm -rf $VLLM_PRECOMPILED_WHEEL_LOCATION || true
+    curl -fS --retry 3 -L "$REMOTE_WHEEL_URL" -o "$VLLM_PRECOMPILED_WHEEL_LOCATION"
     if [ "$EDITABLE" = "true" ]; then
         VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=$TORCH_BACKEND
     else
         VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
     fi
+    rm -rf $VLLM_PRECOMPILED_WHEEL_LOCATION
 fi
 
 # Install ep_kernels and DeepGEMM
