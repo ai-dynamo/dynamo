@@ -26,11 +26,6 @@ on:
       - 'container/Dockerfile.docs'
       - '.github/workflows/generate-docs.yml'
 
-# Cancel any previous check runs for the same pull request to avoid redundant workflows.
-concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   build-docs:
     name: Build Documentation
