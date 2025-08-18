@@ -18,8 +18,8 @@
 #![allow(deprecated)]
 
 use super::*;
-use dlpark::prelude::{DataType, Device, ManagerCtx, ShapeAndStrides, ToTensor};
-use pyo3::{ffi::c_str, prelude::IntoPy, types::PyTuple, PyObject, PyResult, Python};
+use dlpark::ffi::{DataType, Device, ManagerCtx, ShapeAndStrides, ToTensor};
+use pyo3::{ffi::c_str, types::PyTuple, IntoPyObjectExt, PyObject, PyResult, Python};
 use std::sync::{Arc, Mutex};
 
 struct DlPackTensor {
@@ -102,7 +102,7 @@ pub fn dlpack<'py>(
         dtype: dtype,
         device_id: device_id,
     });
-    let py_capsule = manager_ctx.into_py(py);
+    let py_capsule = manager_ctx.into_pyobject(py).unwrap();
     Ok(py_capsule)
 }
 
@@ -123,7 +123,7 @@ pub fn dlpack_device<'py>(
         block::BlockType::Pinned(_) => dev_type_enum.getattr("CPU_PINNED").unwrap(),
         block::BlockType::Device(_) => dev_type_enum.getattr("CUDA").unwrap(),
     };
-    let dev_id = device_id.into_py(py).into_bound(py);
+    let dev_id = device_id.into_pyobject(py).unwrap().into_bound(py);
     let dev = vec![dev_type, dev_id];
     PyTuple::new(py, dev)
 }
