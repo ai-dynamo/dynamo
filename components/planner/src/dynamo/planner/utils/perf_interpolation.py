@@ -144,7 +144,7 @@ class DecodeInterpolator:
         ix, iy = self.compute_idx(concurrency, context_length)
         return self.thpt_interpolator[iy, ix]
 
-    def find_best_throughput_per_gpu(self, itl: float, context_length: float) -> float:
+    def find_best_throughput_per_gpu(self, itl: float, context_length: float) -> tuple[float, float, float]:
         # find the max kv_load that has itl <= target itl
         # here we cannot use binary search as interpolated itl might not be monotonic
         iy = int(
