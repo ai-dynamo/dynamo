@@ -19,6 +19,7 @@ use async_nats::client::{
 use async_trait::async_trait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
 use std::{
     collections::HashMap,
     future::Future,
@@ -28,7 +29,7 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 use tokio_stream::StreamExt;
 
 /// Worker load monitoring state
@@ -120,7 +121,7 @@ where
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
-            worker_load_states: worker_load_states.clone(),
+            worker_load_states,
             _phantom: PhantomData,
         };
 
@@ -322,7 +323,7 @@ where
                     _ = config_events_rx.changed() => {
                         let runtime_configs = config_events_rx.borrow().clone();
 
-                        let mut states = worker_load_states.write().await;
+                        let mut states = worker_load_states.write().unwrap();
                         states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
 
                         // Update worker load states with total blocks
@@ -347,7 +348,7 @@ where
                             let active_blocks = load_event.data.kv_stats.kv_active_blocks;
 
                             // Update worker load state
-                            let mut states = worker_load_states.write().await;
+                            let mut states = worker_load_states.write().unwrap();
                             let state = states.entry(worker_id).or_insert(WorkerLoadState {
                                 kv_active_blocks: None,
                                 kv_total_blocks: None,
@@ -356,7 +357,7 @@ where
                             drop(states);
 
                             // Recalculate all busy instances and update
-                            let states = worker_load_states.read().await;
+                            let states = worker_load_states.read().unwrap();
                             let busy_instances: Vec<i64> = states
                                 .iter()
                                 .filter_map(|(&id, state)| {
