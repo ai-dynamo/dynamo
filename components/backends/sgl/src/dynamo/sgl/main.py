@@ -7,9 +7,11 @@ import signal
 from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.publisher import setup_sgl_metrics
 
 import sglang as sgl
-from dynamo.sgl.args import parse_cmd_line_args, Config, DisaggregationMode
+from dynamo.sgl.args import parse_args, Config, DisaggregationMode
+from dynamo.sgl.publisher import setup_sgl_metrics
 
 configure_dynamo_logging()
 
@@ -25,8 +27,8 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    config = parse_cmd_line_args()
-    if config.serving_strategy != DisaggregationMode.PREFILL:
+    config = parse_args()
+    if config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
     else:
         await init_prefill(runtime, config)
@@ -39,14 +41,16 @@ async def init(runtime: DistributedRuntime, config: Config):
     # i think i will just do decode -> prefill
     # i dont think it makes sense to try to support both atm
 
-    component = runtime.namespace(config.dynamo_args.namespace).component(config.dynamo_args.component)
+    dynamo_args = config.dynamo_args
+    component = runtime.namespace(dynamo_args.namespace).component(dynamo_args.component)
     await component.create_service()
 
     engine = sgl.Engine(config.server_args)
 
-    generate_endpoint = component.endpoint(config.dynamo_args.endpoint)
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    if config.serving_strategy == DisaggregationMode.DECODE:
+    if config.serving_mode == DisaggregationMode.DECODE:
+        logging.info("Initializing prefill client")
         prefill_client = (
             await runtime.namespace(config.dynamo_args.namespace)
             .component("prefill") # todo naming? from "next field?"
@@ -54,7 +58,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
     
-    # setup publisher pieces (like trtllm maybe async?)
+    publisher, task = setup_sgl_metrics(component, engine)
 
     # figure out that new register_llm_runtime piece
 
