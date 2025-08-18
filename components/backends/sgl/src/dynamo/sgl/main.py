@@ -23,7 +23,7 @@ async def worker(runtime: DistributedRuntime):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logging.info("Signal handlers set up for graceful shutdown")
+    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
     config = parse_args()
     if config.serving_mode != DisaggregationMode.PREFILL:
@@ -37,10 +37,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # depending on the disaggregation mode and pass in
     # the correct arguments all the way through
 
-    # i think i will just do decode -> prefill
-    # i dont think it makes sense to try to support both atm
-
-    dynamo_args = config.dynamo_args
+    server_args, dynamo_args = config.server_args, config.dynamo_args
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
     )
@@ -50,6 +47,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
+    # TODO: think about implementing DisaggregationStrategy for P->D
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client")
         prefill_client = (

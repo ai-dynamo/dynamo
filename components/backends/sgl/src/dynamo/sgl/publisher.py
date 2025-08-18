@@ -20,7 +20,7 @@ from dynamo.llm import (
 from dynamo.runtime import Component
 
 
-class DynamoWorkerStatPublisher:
+class DynamoSglangStatPublisher:
     """
     Framework-agnostic wrapper around WorkerMetricsPublisher.
     Handles ZMQ metrics reception and publishing.
@@ -129,11 +129,11 @@ class DynamoWorkerStatPublisher:
 async def setup_sgl_metrics(
     component: Component,
     engine: sgl.Engine,
-) -> tuple[DynamoWorkerStatPublisher, asyncio.Task]:
+) -> tuple[DynamoSglangStatPublisher, asyncio.Task]:
     """
     Convenience bootstrap: create endpoint, publish an initial update, and start the metrics loop.
     """
-    publisher = DynamoWorkerStatPublisher(engine)
+    publisher = DynamoSglangStatPublisher(engine)
     await publisher.create_endpoint(component)
 
     publisher.init_publish()

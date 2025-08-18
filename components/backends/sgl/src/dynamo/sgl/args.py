@@ -7,6 +7,8 @@ import logging
 import socket
 from argparse import Namespace
 from enum import Enum
+import os
+import sys
 
 from sglang.srt.server_args import ServerArgs
 
@@ -15,8 +17,7 @@ DYNAMO_ARGS = {
     "endpoint": {
         "flags": ["--endpoint"],
         "type": str,
-        "default": DEFAULT_ENDPOINT,
-        "help": f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
+        "help": f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: {DEFAULT_ENDPOINT}",
     },
     "migration-limit": {
         "flags": ["--migration-limit"],
@@ -28,16 +29,16 @@ DYNAMO_ARGS = {
 
 
 class DynamoArgs:
-    def __init__(self, endpoint: str, migration_limit: int) -> None:
+    def __init__(self, namespace:str, component:str, endpoint: str,  migration_limit: int) -> None:
+        self.namespace = namespace
+        self.component = component
         self.endpoint = endpoint
         self.migration_limit = migration_limit
 
+    def __str__(self):
+        return f"DynamoArgs(namespace={self.namespace}, component={self.component}, endpoint={self.endpoint}, migration_limit={self.migration_limit})"
 
 class DisaggregationMode(Enum):
-    """
-    Set this instead of string matching
-    """
-
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
@@ -88,11 +89,37 @@ def parse_args(args: list[str] = None) -> Config:
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
 
+    # Dynamo argument processing
+    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+
+    # if an endpoint is provided, validate and use it
+    # otherwise fall back to default endpoints
+    endpoint = parsed_args.endpoint
+    if endpoint is None:
+        if hasattr(parsed_args, "disaggregation_mode") and parsed_args.disaggregation_mode == "prefill":
+            endpoint = f"dyn://{namespace}.prefill.generate"
+        else:
+            args.endpoint = f"dyn://{namespace}.backend.generate"
+    else:
+        endpoint_str = endpoint.replace("dyn://", "", 1)
+        endpoint_parts = endpoint_str.split(".")
+        if len(endpoint_parts) != 3:
+            logging.error(
+                f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+            )
+            sys.exit(1)
+
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
+
     # Create dynamo args from parsed values
     dynamo_args = DynamoArgs(
-        endpoint=parsed_args.endpoint,
+        namespace=parsed_namespace,
+        component=parsed_component_name,
+        endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
     )
+    logging.debug(f"Dynamo args: {dynamo_args}")
+
     server_args = ServerArgs.from_cli_args(parsed_args)
 
     # Create config
