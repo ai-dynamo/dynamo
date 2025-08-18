@@ -344,7 +344,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 "#;
         let config = ToolCallConfig::hermes();
         let result = try_tool_call_parse(input, &config).unwrap();
-        println!("Result: {:?}", result);
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());

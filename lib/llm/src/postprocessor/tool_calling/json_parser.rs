@@ -66,22 +66,30 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
         return input.to_string();
     }
 
-    // Split on the start token
-    let split_content: Vec<&str> = input.split(start_token).collect();
-
-    // Filter out empty strings and the start token itself
-    let filtered_content: Vec<&str> = split_content
-        .into_iter()
-        .filter(|c| !c.trim().is_empty() && *c != start_token)
-        .collect();
-
-    if filtered_content.is_empty() {
-        return input.to_string();
+    // Split on the start token and keep only JSON-looking segments
+    let mut items: Vec<String> = Vec::new();
+    for seg in input.split(start_token) {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // Only consider segments that start like JSON
+        if s.starts_with('{') || s.starts_with('[') {
+            // Trim trailing non-JSON by cutting at the last closing brace/bracket
+            if let Some(pos) = s.rfind(['}', ']']) {
+                let candidate = &s[..=pos];
+                // Keep only valid JSON candidates
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    items.push(candidate.to_string());
+                }
+            }
+        }
     }
 
-    // Join them with commas and wrap in array brackets
-    let joined = filtered_content.join(",");
-    format!("[{}]", joined).to_string()
+    if items.is_empty() {
+        return input.to_string();
+    }
+    format!("[{}]", items.join(","))
 }
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
