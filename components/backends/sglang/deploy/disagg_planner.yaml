@@ -108,9 +108,6 @@ spec:
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
         limits:
           gpu: "1"
       extraPodSpec:
