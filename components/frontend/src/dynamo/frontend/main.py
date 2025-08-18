@@ -83,10 +83,10 @@ def parse_args():
         "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
     )
     parser.add_argument(
-        "--http-port", 
-        type=int, 
-        default=int(os.environ.get("DYN_HTTP_PORT", "8080")), 
-        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var."
+        "--http-port",
+        type=int,
+        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
     )
     parser.add_argument(
         "--router-mode",
