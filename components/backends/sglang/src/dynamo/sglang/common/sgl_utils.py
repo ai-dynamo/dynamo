@@ -68,7 +68,7 @@ def setup_native_endpoints(server_args, component, handler):
     """Setup sgl native endpoints"""
     # flush cache
     flush_endpoint = component.endpoint("flush_cache")
-    tasks = []
+    tasks = []  
     tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
 
     # expert distribution endpoints
