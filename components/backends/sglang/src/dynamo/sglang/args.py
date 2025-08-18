@@ -11,9 +11,9 @@ from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
 
-from dynamo.sglang import __version__
-
 from sglang.srt.server_args import ServerArgs
+
+from dynamo.sglang import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DYNAMO_ARGS = {
