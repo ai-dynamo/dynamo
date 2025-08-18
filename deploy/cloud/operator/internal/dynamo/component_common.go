@@ -8,21 +8,22 @@ package dynamo
 import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 // ComponentDefaults interface defines how defaults should be provided
 type ComponentDefaults interface {
 	// GetBaseContainer returns the base container configuration for this component type
 	// The numberOfNodes parameter indicates the total number of nodes in the deployment
-	GetBaseContainer(numberOfNodes int32) (corev1.Container, error)
+	GetBaseContainer(context ComponentContext) (corev1.Container, error)
 
 	// GetBasePodSpec returns the base pod spec configuration for this component type
 	// The numberOfNodes parameter indicates the total number of nodes in the deployment
-	GetBasePodSpec(numberOfNodes int32) (corev1.PodSpec, error)
+	GetBasePodSpec(context ComponentContext) (corev1.PodSpec, error)
 }
 
 // ComponentDefaultsFactory creates appropriate defaults based on component type and number of nodes
-func ComponentDefaultsFactory(componentType string, numberOfNodes int32) ComponentDefaults {
+func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 	switch componentType {
 	case commonconsts.ComponentTypeFrontend:
 		return NewFrontendDefaults()
@@ -38,20 +39,48 @@ func ComponentDefaultsFactory(componentType string, numberOfNodes int32) Compone
 // BaseComponentDefaults provides common defaults shared by all components
 type BaseComponentDefaults struct{}
 
-func (b *BaseComponentDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
-	return b.getCommonContainer(), nil
+type ComponentContext struct {
+	numberOfNodes                  int32
+	DynamoNamespace                string
+	ParentGraphDeploymentName      string
+	ParentGraphDeploymentNamespace string
 }
 
-func (b *BaseComponentDefaults) GetBasePodSpec(numberOfNodes int32) (corev1.PodSpec, error) {
-	return corev1.PodSpec{}, nil
+func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
+	return b.getCommonContainer(context), nil
 }
 
-func (b *BaseComponentDefaults) getCommonContainer() corev1.Container {
+func (b *BaseComponentDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, error) {
+	return b.getCommonPodSpec(), nil
+}
+
+func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
+	return corev1.PodSpec{
+		TerminationGracePeriodSeconds: ptr.To(int64(60)),
+		RestartPolicy:                 corev1.RestartPolicyAlways,
+	}
+}
+
+func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) corev1.Container {
 	container := corev1.Container{
 		Name: "main",
 		Command: []string{
 			"/bin/sh",
 			"-c",
+		},
+	}
+	container.Env = []corev1.EnvVar{
+		{
+			Name:  "DYN_NAMESPACE",
+			Value: context.DynamoNamespace,
+		},
+		{
+			Name:  "DYN_PARENT_DGD_K8S_NAME",
+			Value: context.ParentGraphDeploymentName,
+		},
+		{
+			Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
+			Value: context.ParentGraphDeploymentNamespace,
 		},
 	}
 

@@ -22,9 +22,31 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
-    let mut http_service_builder = service_v2::HttpService::builder()
-        .port(engine_config.local_model().http_port())
-        .with_request_template(engine_config.local_model().request_template());
+    let local_model = engine_config.local_model();
+    let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
+        (Some(tls_cert_path), Some(tls_key_path)) => {
+            if !tls_cert_path.exists() {
+                anyhow::bail!("TLS certificate not found: {}", tls_cert_path.display());
+            }
+            if !tls_key_path.exists() {
+                anyhow::bail!("TLS key not found: {}", tls_key_path.display());
+            }
+            service_v2::HttpService::builder()
+                .enable_tls(true)
+                .tls_cert_path(Some(tls_cert_path.to_path_buf()))
+                .tls_key_path(Some(tls_key_path.to_path_buf()))
+                .port(local_model.http_port())
+        }
+        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (_, _) => {
+            // CLI should prevent us ever getting here
+            anyhow::bail!(
+                "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"
+            );
+        }
+    };
+    http_service_builder =
+        http_service_builder.with_request_template(engine_config.local_model().request_template());
 
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {

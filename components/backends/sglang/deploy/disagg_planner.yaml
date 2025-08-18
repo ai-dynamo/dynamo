@@ -6,7 +6,7 @@ kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner
   annotations:
-    nvidia.com/enable-grove: "false"
+    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG

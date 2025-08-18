@@ -162,7 +162,7 @@ def main():
 
     print("\n✅ Disagg config injection completed!")
     print(f"📁 Config available at: {args.target_path}")
-    print(f"🔧 Set DGD_CONFIG_FILE={args.target_path} in your profiler job")
+    print(f"🔧 Set DGD_CONFIG_FILE=/workspace{args.target_path} in your profiler job")
 
 
 if __name__ == "__main__":

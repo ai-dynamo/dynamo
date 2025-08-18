@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from prometheus_client import Gauge, start_http_server
+
 from dynamo.planner import KubernetesConnector, __version__
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
@@ -89,6 +91,23 @@ class Planner:
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
 
+        self.prometheus_port = args.prometheus_port
+
+        # Initialize Prometheus metrics
+        # TODO: use proper naming
+        self.num_p_workers_gauge = Gauge("num_p_workers", "Number of prefill workers")
+        self.num_d_workers_gauge = Gauge("num_d_workers", "Number of decode workers")
+
+        # Start Prometheus HTTP server if port is specified
+        if self.prometheus_port != 0:
+            try:
+                start_http_server(self.prometheus_port)
+                logger.info(
+                    f"Started Prometheus metrics server on port {self.prometheus_port}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to start Prometheus metrics server: {e}")
+
     async def get_workers_info(self):
         try:
             if self.prefill_client is None:
@@ -137,7 +156,17 @@ class Planner:
             raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
         return p_endpoints, d_endpoints
 
-    def observe_metrics(self):
+    async def observe_metrics(self):
+        self.p_endpoints, self.d_endpoints = await self.get_workers_info()
+        logger.debug(
+            f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
+        )
+
+        # Update Prometheus metrics if server is running
+        if self.prometheus_port != 0:
+            self.num_p_workers_gauge.set(len(self.p_endpoints))
+            self.num_d_workers_gauge.set(len(self.d_endpoints))
+
         self.last_metrics.ttft = self.prometheus_api_client.get_avg_time_to_first_token(
             f"{self.args.adjustment_interval}s"
         )
@@ -319,7 +348,7 @@ class Planner:
             ):
                 self.last_adjustment_time = time.time()
                 logger.info("New adjustment interval started!")
-                self.observe_metrics()
+                await self.observe_metrics()
                 await self.make_adjustments()
 
             # sleep for a while to avoid busy-waiting but not too long to miss the next adjustment
@@ -433,6 +462,12 @@ if __name__ == "__main__":
         type=int,
         default=SLAPlannerDefaults.load_prediction_window_size,
         help="Window size for load prediction",
+    )
+    parser.add_argument(
+        "--prometheus-port",
+        type=int,
+        default=SLAPlannerDefaults.prometheus_port,
+        help="Prometheus port for metrics server (0 to disable)",
     )
     args = parser.parse_args()
     asyncio.run(dynamo_worker()(start_sla_planner)(args))
