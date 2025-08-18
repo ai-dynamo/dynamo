@@ -23,15 +23,15 @@ pub fn try_tool_call_parse_aggregate(
         .into_iter()
         .map(
             |parsed| async_openai::types::ChatCompletionMessageToolCall {
-                    id: parsed.id,
-                    r#type: async_openai::types::ChatCompletionToolType::Function,
-                    function: async_openai::types::FunctionCall {
-                        name: parsed.function.name,
-                        arguments: parsed.function.arguments,
-                    },
+                id: parsed.id,
+                r#type: async_openai::types::ChatCompletionToolType::Function,
+                function: async_openai::types::FunctionCall {
+                    name: parsed.function.name,
+                    arguments: parsed.function.arguments,
                 },
-            )
-            .collect())
+            },
+        )
+        .collect())
 }
 
 /// Try parsing a string as a structured tool call, for streaming (delta) usage.
@@ -46,20 +46,19 @@ pub fn try_tool_call_parse_stream(
         return Ok(vec![]);
     }
     Ok(parsed
-            .into_iter()
-            .enumerate()
-            .map(
-                |(idx, parsed)| async_openai::types::ChatCompletionMessageToolCallChunk {
-                    index: idx as u32,
-                    id: Some(parsed.id),
-                    r#type: Some(async_openai::types::ChatCompletionToolType::Function),
-                    function: Some(async_openai::types::FunctionCallStream {
-                        name: Some(parsed.function.name),
-                        arguments: Some(parsed.function.arguments),
-                    }),
-                    // Add other fields as needed if required by the struct definition
-                },
+        .into_iter()
+        .enumerate()
+        .map(
+            |(idx, parsed)| async_openai::types::ChatCompletionMessageToolCallChunk {
+                index: idx as u32,
+                id: Some(parsed.id),
+                r#type: Some(async_openai::types::ChatCompletionToolType::Function),
+                function: Some(async_openai::types::FunctionCallStream {
+                    name: Some(parsed.function.name),
+                    arguments: Some(parsed.function.arguments),
+                }),
+                // Add other fields as needed if required by the struct definition
+            },
         )
-        .collect(),
-    )
+        .collect())
 }

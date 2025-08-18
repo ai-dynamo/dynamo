@@ -495,7 +495,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_calling_output() {
-
         // Simulate a delta with a tool call in the content
         let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
 
@@ -550,9 +549,6 @@ mod tests {
             choice.finish_reason,
             Some(async_openai::types::FinishReason::ToolCalls)
         );
-        assert_eq!(
-            choice.message.role,
-            async_openai::types::Role::Assistant
-        );
+        assert_eq!(choice.message.role, async_openai::types::Role::Assistant);
     }
 }
