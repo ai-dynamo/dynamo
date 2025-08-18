@@ -145,7 +145,7 @@ def parse_args():
     parser.add_argument(
         "--namespace",
         type=str,
-        default=None,
+        default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
         help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
     parser.set_defaults(use_kv_events=True)
@@ -183,9 +183,6 @@ def parse_args():
         parser.error("--static-endpoint requires both --model-name and --model-path")
     if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
         parser.error("--tls-cert-path and --tls-key-path must be provided together")
-
-    if not flags.namespace:
-        flags.namespace = os.environ.get(DYNAMO_NAMESPACE_ENV_VAR)
 
     return flags
 
