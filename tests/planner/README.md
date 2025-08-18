@@ -18,7 +18,9 @@ You have two options for setting up the planner:
 
 #### Option A: Use Test Configuration (Quickstart)
 
-Use the pre-configured test deployment with sample profiling data for `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, run on A100s:
+Use the pre-configured test deployment with sample profiling data, we provide the results and the deployment configuration for two models x hardware configurations:
+- placeholder for A100
+- `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 with max context length 16384, TP1 Prefill, and TP1 Decode. At ISL/OSL 3000/150, it achieves 40k tokens/s/gpu prefill with 80ms TTFT and 10k tokens/s/gpu decode with 10ms ITL. See `profiling_results/H200_TP1P_TP1D/`.
 
 ```bash
 kubectl apply -f tests/planner/disagg_planner.yaml
