@@ -124,6 +124,12 @@ def parse_args():
         help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
     )
     parser.add_argument(
+        "--busy-threshold",
+        type=float,
+        default=None,
+        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. If not set, busy detection is disabled.",
+    )
+    parser.add_argument(
         "--static-endpoint",
         type=validate_static_endpoint,
         help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
@@ -183,7 +189,9 @@ async def async_main():
     kwargs = {
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(router_mode, kv_router_config),
+        "router_config": RouterConfig(
+            router_mode, kv_router_config, flags.busy_threshold
+        ),
     }
 
     if flags.static_endpoint:

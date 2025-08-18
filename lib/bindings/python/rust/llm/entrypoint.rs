@@ -59,16 +59,22 @@ impl KvRouterConfig {
 pub struct RouterConfig {
     router_mode: RouterMode,
     kv_router_config: KvRouterConfig,
+    busy_threshold: Option<f64>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None))]
-    pub fn new(mode: RouterMode, config: Option<KvRouterConfig>) -> Self {
+    #[pyo3(signature = (mode, config=None, busy_threshold=None))]
+    pub fn new(
+        mode: RouterMode,
+        config: Option<KvRouterConfig>,
+        busy_threshold: Option<f64>,
+    ) -> Self {
         Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
+            busy_threshold,
         }
     }
 }
@@ -78,6 +84,7 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
+            busy_threshold: rc.busy_threshold,
         }
     }
 }

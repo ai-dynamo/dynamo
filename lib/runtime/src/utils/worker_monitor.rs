@@ -17,7 +17,6 @@ use tokio_stream::StreamExt;
 // Constants for monitoring configuration
 const KV_METRICS_SUBJECT: &str = "kv_metrics";
 const MODEL_ROOT_PATH: &str = "models";
-const BUSY_THRESHOLD: f64 = 0.95;
 
 // Internal structs for deserializing metrics events
 #[derive(serde::Deserialize)]
@@ -68,14 +67,16 @@ impl WorkerLoadState {
 pub struct WorkerMonitor {
     client: Arc<Client>,
     worker_load_states: Arc<RwLock<HashMap<i64, WorkerLoadState>>>,
+    busy_threshold: f64,
 }
 
 impl WorkerMonitor {
-    /// Create a new worker monitor
-    pub fn new(client: Arc<Client>) -> Self {
+    /// Create a new worker monitor with custom threshold
+    pub fn new_with_threshold(client: Arc<Client>, busy_threshold: f64) -> Self {
         Self {
             client,
             worker_load_states: Arc::new(RwLock::new(HashMap::new())),
+            busy_threshold,
         }
     }
 
@@ -110,9 +111,12 @@ impl WorkerMonitor {
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
         let cancellation_token = component.drt().child_token();
+        let busy_threshold = self.busy_threshold; // Capture threshold for the closure
 
         // Spawn background monitoring task
         tokio::spawn(async move {
+            let mut previous_busy_instances = Vec::new(); // Track previous state
+
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
@@ -162,12 +166,17 @@ impl WorkerMonitor {
                             let busy_instances: Vec<i64> = states
                                 .iter()
                                 .filter_map(|(&id, state)| {
-                                    state.is_busy(BUSY_THRESHOLD).then_some(id)
+                                    state.is_busy(busy_threshold).then_some(id)
                                 })
                                 .collect();
                             drop(states);
 
-                            client.update_free_instances(&busy_instances);
+                            // Only update if busy_instances has changed
+                            if busy_instances != previous_busy_instances {
+                                tracing::debug!("Busy instances changed: {:?}", busy_instances);
+                                client.update_free_instances(&busy_instances);
+                                previous_busy_instances = busy_instances;
+                            }
                         }
                     }
                 }

@@ -57,6 +57,10 @@ where
     /// Worker monitor for tracking KV cache usage
     worker_monitor: Option<Arc<WorkerMonitor>>,
 
+    /// Threshold for determining when a worker is busy (0.0 to 1.0)
+    /// If None, busy detection is disabled
+    busy_threshold: Option<f64>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -91,16 +95,30 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    /// Create a new PushRouter without busy threshold (no busy detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
+        Self::from_client_with_threshold(client, router_mode, None).await
+    }
+
+    /// Create a new PushRouter with optional busy threshold
+    pub async fn from_client_with_threshold(
+        client: Client,
+        router_mode: RouterMode,
+        busy_threshold: Option<f64>,
+    ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
-        // Create worker monitor if in dynamic mode
-        let worker_monitor = if let InstanceSource::Dynamic(_) = client.instance_source.as_ref() {
-            let monitor = Arc::new(WorkerMonitor::new(Arc::new(client.clone())));
-            monitor.start_monitoring().await?;
-            Some(monitor)
-        } else {
-            None
+        // Create worker monitor only if we have a threshold and are in dynamic mode
+        let worker_monitor = match (busy_threshold, client.instance_source.as_ref()) {
+            (Some(threshold), InstanceSource::Dynamic(_)) => {
+                let monitor = Arc::new(WorkerMonitor::new_with_threshold(
+                    Arc::new(client.clone()),
+                    threshold,
+                ));
+                monitor.start_monitoring().await?;
+                Some(monitor)
+            }
+            _ => None,
         };
 
         let router = PushRouter {
@@ -109,6 +127,7 @@ where
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             worker_monitor,
+            busy_threshold,
             _phantom: PhantomData,
         };
 
@@ -188,16 +207,18 @@ where
         instance_id: i64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
-        // Check if all workers are busy
-        let free_instances = self.client.instance_ids_free();
-        if free_instances.is_empty() {
-            // Check if we actually have any instances at all
-            let all_instances = self.client.instance_ids();
-            if !all_instances.is_empty() {
-                return Err(PipelineError::ServiceOverloaded(
-                    "All workers are busy, please retry later".to_string(),
-                )
-                .into());
+        // Check if all workers are busy (only if busy threshold is set)
+        if self.busy_threshold.is_some() {
+            let free_instances = self.client.instance_ids_free();
+            if free_instances.is_empty() {
+                // Check if we actually have any instances at all
+                let all_instances = self.client.instance_ids();
+                if !all_instances.is_empty() {
+                    return Err(PipelineError::ServiceOverloaded(
+                        "All workers are busy, please retry later".to_string(),
+                    )
+                    .into());
+                }
             }
         }
 
