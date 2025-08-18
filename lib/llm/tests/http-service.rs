@@ -46,10 +46,13 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use prometheus::{proto::MetricType, Registry};
 use reqwest::StatusCode;
-use rstest::*;
 use std::{io::Cursor, sync::Arc};
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
+
+#[path = "common/ports.rs"]
+mod ports;
+use ports::get_random_port;
 
 struct CounterEngine {}
 
@@ -270,8 +273,9 @@ fn inc_counter(
 #[allow(deprecated)]
 #[tokio::test]
 async fn test_http_service() {
+    let port = get_random_port().await;
     let service = HttpService::builder()
-        .port(8989)
+        .port(port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .build()
@@ -335,7 +339,7 @@ async fn test_http_service() {
     request.max_tokens = Some(3000);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -415,7 +419,7 @@ async fn test_http_service() {
     request.max_tokens = Some(0);
 
     let future = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send();
 
@@ -440,7 +444,7 @@ async fn test_http_service() {
     request.stream = Some(true);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -461,7 +465,7 @@ async fn test_http_service() {
     request.stream = Some(false);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -486,7 +490,7 @@ async fn test_http_service() {
         .unwrap();
 
     let response = client
-        .post("http://localhost:8989/v1/completions")
+        .post(format!("http://localhost:{}/v1/completions", port))
         .json(&request)
         .send()
         .await
@@ -507,7 +511,7 @@ async fn test_http_service() {
     request.stream = Some(true);
 
     let response = client
-        .post("http://localhost:8989/v1/completions")
+        .post(format!("http://localhost:{}/v1/completions", port))
         .json(&request)
         .send()
         .await
@@ -529,7 +533,7 @@ async fn test_http_service() {
     request.stream = Some(false);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -544,7 +548,7 @@ async fn test_http_service() {
 
     // =========== Query /metrics endpoint ===========
     let response = client
-        .get("http://localhost:8989/metrics")
+        .get(format!("http://localhost:{}/metrics", port))
         .send()
         .await
         .unwrap();
@@ -573,10 +577,8 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
-#[fixture]
-fn service_with_engines(
-    #[default(8990)] port: u16,
-) -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>) {
+async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, u16) {
+    let port = get_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -598,11 +600,10 @@ fn service_with_engines(
         .add_completions_model("bar", failure.clone())
         .unwrap();
 
-    (service, counter, failure)
+    (service, counter, failure, port)
 }
 
-#[fixture]
-fn pure_openai_client(#[default(8990)] port: u16) -> PureOpenAIClient {
+fn pure_openai_client(port: u16) -> PureOpenAIClient {
     let config = HttpClientConfig {
         openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
         verbose: false,
@@ -610,8 +611,7 @@ fn pure_openai_client(#[default(8990)] port: u16) -> PureOpenAIClient {
     PureOpenAIClient::new(config)
 }
 
-#[fixture]
-fn nv_custom_client(#[default(8991)] port: u16) -> NvCustomClient {
+fn nv_custom_client(port: u16) -> NvCustomClient {
     let config = HttpClientConfig {
         openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
         verbose: false,
@@ -619,8 +619,7 @@ fn nv_custom_client(#[default(8991)] port: u16) -> NvCustomClient {
     NvCustomClient::new(config)
 }
 
-#[fixture]
-fn generic_byot_client(#[default(8992)] port: u16) -> GenericBYOTClient {
+fn generic_byot_client(port: u16) -> GenericBYOTClient {
     let config = HttpClientConfig {
         openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
         verbose: false,
@@ -628,13 +627,11 @@ fn generic_byot_client(#[default(8992)] port: u16) -> GenericBYOTClient {
     GenericBYOTClient::new(config)
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_pure_openai_client(
-    #[with(8990)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
-    #[with(8990)] pure_openai_client: PureOpenAIClient,
-) {
-    let (service, _counter, _failure) = service_with_engines;
+async fn test_pure_openai_client() {
+    let (service, _counter, _failure, port) = service_with_engines().await;
+    let pure_openai_client = pure_openai_client(port);
+
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
@@ -642,7 +639,7 @@ async fn test_pure_openai_client(
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8990).await;
+    wait_for_service_ready(port).await;
 
     // Test successful streaming request
     let request = async_openai::types::CreateChatCompletionRequestArgs::default()
@@ -739,13 +736,11 @@ async fn test_pure_openai_client(
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_nv_custom_client(
-    #[with(8991)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
-    #[with(8991)] nv_custom_client: NvCustomClient,
-) {
-    let (service, _counter, _failure) = service_with_engines;
+async fn test_nv_custom_client() {
+    let (service, _counter, _failure, port) = service_with_engines().await;
+    let nv_custom_client = nv_custom_client(port);
+
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
@@ -753,7 +748,7 @@ async fn test_nv_custom_client(
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8991).await;
+    wait_for_service_ready(port).await;
 
     // Test successful streaming request
     let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
@@ -868,13 +863,11 @@ async fn test_nv_custom_client(
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_generic_byot_client(
-    #[with(8992)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
-    #[with(8992)] generic_byot_client: GenericBYOTClient,
-) {
-    let (service, _counter, _failure) = service_with_engines;
+async fn test_generic_byot_client() {
+    let (service, _counter, _failure, port) = service_with_engines().await;
+    let generic_byot_client = generic_byot_client(port);
+
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
@@ -882,7 +875,7 @@ async fn test_generic_byot_client(
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8992).await;
+    wait_for_service_ready(port).await;
 
     // Test successful streaming request
     let request = serde_json::json!({
@@ -965,13 +958,13 @@ async fn test_generic_byot_client(
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
+    let port = get_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
-        .port(8993)
+        .port(port)
         .build()
         .unwrap();
     let state = service.state_clone();
@@ -984,7 +977,7 @@ async fn test_client_disconnect_cancellation_unary() {
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8993).await;
+    wait_for_service_ready(port).await;
 
     // Create a long-running engine (10 seconds)
     let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
@@ -1015,7 +1008,7 @@ async fn test_client_disconnect_cancellation_unary() {
 
     let request_future = async {
         client
-            .post("http://localhost:8993/v1/chat/completions")
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
@@ -1054,15 +1047,15 @@ async fn test_client_disconnect_cancellation_unary() {
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
+    let port = get_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
-        .port(8994)
+        .port(port)
         .build()
         .unwrap();
     let state = service.state_clone();
@@ -1075,7 +1068,7 @@ async fn test_client_disconnect_cancellation_streaming() {
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8994).await;
+    wait_for_service_ready(port).await;
 
     // Create a long-running engine (10 seconds)
     let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
@@ -1106,7 +1099,7 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let request_future = async {
         let response = client
-            .post("http://localhost:8994/v1/chat/completions")
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
@@ -1151,16 +1144,16 @@ async fn test_client_disconnect_cancellation_streaming() {
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
 async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();
 
+    let port = get_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
-        .port(8995)
+        .port(port)
         .build()
         .unwrap();
     let state = service.state_clone();
@@ -1173,7 +1166,7 @@ async fn test_request_id_annotation() {
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8995).await;
+    wait_for_service_ready(port).await;
 
     // Add a counter engine for this test
     let counter_engine = Arc::new(CounterEngine {});
@@ -1205,7 +1198,7 @@ async fn test_request_id_annotation() {
 
     // Make the streaming request with custom header
     let response = client
-        .post("http://localhost:8995/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .header("x-dynamo-request-id", request_uuid.to_string())
         .json(&request_json)
         .send()
