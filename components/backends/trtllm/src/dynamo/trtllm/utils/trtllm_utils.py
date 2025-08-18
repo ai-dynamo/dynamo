@@ -6,6 +6,7 @@ from typing import Optional
 
 from tensorrt_llm.llmapi import BuildConfig
 
+from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
@@ -108,6 +109,9 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
 def cmd_line_args():
     parser = argparse.ArgumentParser(
         description="TensorRT-LLM server integrated with Dynamo LLM."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend TRTLLM {__version__}"
     )
     parser.add_argument(
         "--endpoint",

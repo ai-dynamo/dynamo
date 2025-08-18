@@ -166,6 +166,7 @@ impl DeltaAggregator {
                 if let Ok(Some(tool_call)) =
                     crate::postprocessor::tool_calling::tools::try_tool_call_parse_aggregate(
                         &choice.text,
+                        None,
                     )
                 {
                     tracing::debug!(

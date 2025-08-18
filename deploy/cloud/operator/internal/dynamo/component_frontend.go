@@ -23,9 +23,9 @@ func NewFrontendDefaults() *FrontendDefaults {
 	return &FrontendDefaults{&BaseComponentDefaults{}}
 }
 
-func (f *FrontendDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
+func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	// Frontend doesn't need backend-specific config
-	container := f.getCommonContainer()
+	container := f.getCommonContainer(context)
 
 	// Add HTTP port
 	container.Ports = []corev1.ContainerPort{
@@ -78,12 +78,12 @@ func (f *FrontendDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Contain
 	}
 
 	// Add standard environment variables
-	container.Env = []corev1.EnvVar{
+	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  commonconsts.EnvDynamoServicePort,
 			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 		},
-	}
+	}...)
 
 	return container, nil
 }

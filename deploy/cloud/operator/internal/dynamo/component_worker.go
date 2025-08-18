@@ -23,8 +23,8 @@ func NewWorkerDefaults() *WorkerDefaults {
 	return &WorkerDefaults{&BaseComponentDefaults{}}
 }
 
-func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
-	container := w.getCommonContainer()
+func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
+	container := w.getCommonContainer(context)
 
 	// Add system port
 	container.Ports = []corev1.ContainerPort{
@@ -84,7 +84,7 @@ func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container
 		FailureThreshold: 60,
 	}
 
-	container.Env = []corev1.EnvVar{
+	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYN_SYSTEM_ENABLED",
 			Value: "true",
@@ -97,7 +97,7 @@ func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container
 			Name:  "DYN_SYSTEM_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 		},
-	}
+	}...)
 
 	return container, nil
 }

@@ -20,7 +20,7 @@ spec:
           memory: "40Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0808-07
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
@@ -41,29 +41,23 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0808-07
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh
             - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.sglang.decode_worker"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--page-size"
-            - "16"
-            - "--tp"
-            - "1"
-            - "--trust-remote-code"
-            - "--skip-tokenizer-init"
-            - "--disaggregation-mode"
-            - "decode"
-            - "--disaggregation-transfer-backend"
-            - "nixl"
+            - >-
+              python3 -m dynamo.sglang.decode_worker
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+
     SGLangPrefillWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
@@ -80,26 +74,19 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0808-07
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh
             - -c
           args:
-            - "python3"
-            - "-m"
-            - "dynamo.sglang.worker"
-            - "--model-path"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--served-model-name"
-            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            - "--page-size"
-            - "16"
-            - "--tp"
-            - "1"
-            - "--trust-remote-code"
-            - "--skip-tokenizer-init"
-            - "--disaggregation-mode"
-            - "prefill"
-            - "--disaggregation-transfer-backend"
-            - "nixl"
+            - >-
+              python3 -m dynamo.sglang.worker
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl

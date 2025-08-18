@@ -79,14 +79,15 @@ __pycache__/
 *.so
 *.egg-info
 
+# Hatch build artifact
+components/**/_version.py
+
 ### Helm ###
 *.tgz
 Chart.lock
 generated-values.yaml
 
+# Local build artifacts for devcontainer
 .build/
 **/.devcontainer/.env
 TensorRT-LLM
-
-# Local build artifacts for devcontainer
-.build/
