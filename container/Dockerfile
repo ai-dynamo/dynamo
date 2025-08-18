@@ -254,6 +254,10 @@ ENV DYNAMO_HOME=/opt/dynamo \
 
 WORKDIR /opt/dynamo
 
+# Copy source code
+COPY lib/ /opt/dynamo/lib/
+COPY components/ /opt/dynamo/components/
+
 COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 
