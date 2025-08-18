@@ -1,7 +1,7 @@
 import asyncio
 import logging
-import socket
 import random
+import socket
 
 import msgspec
 import sglang as sgl
@@ -17,7 +17,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
         super().__init__(component, engine, config, None, None, None)
-        logging.info(f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}")
+        logging.info(
+            f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
+        )
 
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)

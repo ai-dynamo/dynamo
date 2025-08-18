@@ -1,11 +1,7 @@
-import asyncio
 import logging
 import random
-import socket
 
-import msgspec
 import sglang as sgl
-from sglang.srt.utils import get_ip
 
 from dynamo._core import Client, Component
 from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher

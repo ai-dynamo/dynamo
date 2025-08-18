@@ -57,6 +57,7 @@ class Config:
         elif self.server_args.disaggregation_mode == "decode":
             return DisaggregationMode.DECODE
 
+
 def parse_args(args: list[str]) -> Config:
     """
     Parse all arguments and return Config with server_args and dynamo_args
