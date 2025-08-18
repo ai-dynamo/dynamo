@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import signal
+import sys
 
 import sglang as sgl
 import uvloop
@@ -30,7 +31,7 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    config = parse_args()
+    config = parse_args(sys.argv[1:])
     if config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
     else:
@@ -51,6 +52,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # TODO: think about implementing DisaggregationStrategy for P->D
     # TODO: implement a `next` field in the config to dynamically set the next client
+    prefill_client = None
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client")
         prefill_client = (
@@ -60,8 +62,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
-    publisher, metrics_task = await setup_sgl_metrics(component, engine)
+    publisher, metrics_task = await setup_sgl_metrics(engine, component)
 
+    kv_publisher = None
     if server_args.kv_events_config:
         kv_events = json.loads(server_args.kv_events_config)
         ep = kv_events.get("endpoint")

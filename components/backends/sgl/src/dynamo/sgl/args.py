@@ -57,7 +57,7 @@ class Config:
         elif self.server_args.disaggregation_mode == "decode":
             return DisaggregationMode.DECODE
 
-def parse_args(args: list[str] = None) -> Config:
+def parse_args(args: list[str]) -> Config:
     """
     Parse all arguments and return Config with server_args and dynamo_args
     """
@@ -66,9 +66,9 @@ def parse_args(args: list[str] = None) -> Config:
     # Dynamo args
     for info in DYNAMO_ARGS.values():
         parser.add_argument(
-            info["flags"],
+            *info["flags"],
             type=info["type"],
-            default=info["default"],
+            default=info["default"] if "default" in info else None,
             help=info["help"],
         )
 
@@ -97,15 +97,16 @@ def parse_args(args: list[str] = None) -> Config:
         ):
             endpoint = f"dyn://{namespace}.prefill.generate"
         else:
-            args.endpoint = f"dyn://{namespace}.backend.generate"
-    else:
-        endpoint_str = endpoint.replace("dyn://", "", 1)
-        endpoint_parts = endpoint_str.split(".")
-        if len(endpoint_parts) != 3:
-            logging.error(
-                f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-            )
-            sys.exit(1)
+            endpoint = f"dyn://{namespace}.backend.generate"
+
+    # Always parse the endpoint (whether auto-generated or user-provided)
+    endpoint_str = endpoint.replace("dyn://", "", 1)
+    endpoint_parts = endpoint_str.split(".")
+    if len(endpoint_parts) != 3:
+        logging.error(
+            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
+        sys.exit(1)
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 

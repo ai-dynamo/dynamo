@@ -46,7 +46,4 @@ class PreprocessedRequest(BaseModel):
 class DisaggPreprocessedRequest(BaseModel):
     request: PreprocessedRequest
     sampling_params: dict
-    bootstrap_host: Union[str, List[str]]
-    bootstrap_port: Union[int, List[int]]
-    bootstrap_room: Union[int, List[int]]
     data_parallel_rank: Optional[int] = None

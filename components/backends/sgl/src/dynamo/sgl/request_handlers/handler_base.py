@@ -28,3 +28,6 @@ class BaseWorkerHandler(ABC):
     @abstractmethod
     async def generate(self, request: str):
         pass
+
+    def cleanup(self):
+        pass
