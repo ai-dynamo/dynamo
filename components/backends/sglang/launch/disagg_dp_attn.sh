@@ -27,7 +27,7 @@ mkdir -p /tmp/sglang_expert_distribution_record
 export SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR=/tmp/sglang_expert_distribution_record
 
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
@@ -42,7 +42,7 @@ python3 -m dynamo.sglang.worker \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \

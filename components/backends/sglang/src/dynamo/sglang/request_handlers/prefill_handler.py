@@ -8,8 +8,8 @@ import sglang as sgl
 from sglang.srt.utils import get_ip
 
 from dynamo._core import Component
-from dynamo.sgl.args import Config
-from dynamo.sgl.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.args import Config
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):

@@ -5,9 +5,9 @@ import sglang as sgl
 
 from dynamo._core import Client, Component
 from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
-from dynamo.sgl.args import Config, DisaggregationMode
-from dynamo.sgl.protocol import DisaggPreprocessedRequest
-from dynamo.sgl.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.protocol import DisaggPreprocessedRequest
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -51,15 +51,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_params["ignore_eos"] = request["stop_conditions"]["ignore_eos"]
         return sampling_params
 
-    def _generate_bootstrap_room(self):
-        return random.randint(0, 2**63 - 1)
-
     async def generate(self, request: str):
         sampling_params = self._build_sampling_params(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # remote prefill request
-            # grab the bootstrap info from the target prefill worker
+            # request the bootstrap info from the target prefill worker
             prefill_stream = await self.prefill_client.generate(
                 DisaggPreprocessedRequest(
                     request=request,
@@ -75,7 +71,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if not bootstrap_info:
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
-            # decode request
             decode = await self.engine.async_generate(
                 input_ids=request["token_ids"],
                 sampling_params=sampling_params,

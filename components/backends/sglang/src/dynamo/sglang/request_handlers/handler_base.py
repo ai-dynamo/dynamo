@@ -4,7 +4,7 @@ import sglang as sgl
 
 from dynamo._core import Client, Component
 from dynamo.llm import WorkerMetricsPublisher, ZmqKvEventPublisher
-from dynamo.sgl.args import Config
+from dynamo.sglang.args import Config
 
 
 class BaseWorkerHandler(ABC):
@@ -13,7 +13,7 @@ class BaseWorkerHandler(ABC):
         component: Component,
         engine: sgl.Engine,
         config: Config,
-        metrics_publisher: WorkerMetricsPublisher,
+        metrics_publisher: WorkerMetricsPublisher = None,
         kv_publisher: ZmqKvEventPublisher = None,
         prefill_client: Client = None,
     ):

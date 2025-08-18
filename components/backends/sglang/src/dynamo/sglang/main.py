@@ -11,10 +11,10 @@ from sglang.srt.utils import get_ip
 from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sgl.args import Config, DisaggregationMode, parse_args
-from dynamo.sgl.publisher import setup_sgl_metrics
-from dynamo.sgl.register import register_llm_with_runtime_config
-from dynamo.sgl.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.args import Config, DisaggregationMode, parse_args
+from dynamo.sglang.publisher import setup_sgl_metrics
+from dynamo.sglang.register import register_llm_with_runtime_config
+from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
 configure_dynamo_logging()
 
