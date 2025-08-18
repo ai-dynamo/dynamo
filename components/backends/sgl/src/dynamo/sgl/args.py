@@ -6,6 +6,7 @@ import contextlib
 import logging
 import socket
 from argparse import Namespace
+from dataclasses import dataclass
 from enum import Enum
 import os
 import sys
@@ -28,23 +29,18 @@ DYNAMO_ARGS = {
 }
 
 
+@dataclass
 class DynamoArgs:
-    def __init__(self, namespace:str, component:str, endpoint: str,  migration_limit: int) -> None:
-        self.namespace = namespace
-        self.component = component
-        self.endpoint = endpoint
-        self.migration_limit = migration_limit
-
-    def __str__(self):
-        return f"DynamoArgs(namespace={self.namespace}, component={self.component}, endpoint={self.endpoint}, migration_limit={self.migration_limit})"
+    namespace: str
+    component: str
+    endpoint: str
+    migration_limit: int
 
 class DisaggregationMode(Enum):
     AGGREGATED = "agg"
     PREFILL = "prefill"
     DECODE = "decode"
 
-
-# Configuration class to store SGL engine arguments and dynamo specific arguments
 class Config:
     def __init__(self, server_args: ServerArgs, dynamo_args: DynamoArgs) -> None:
         self.server_args = server_args
@@ -90,10 +86,10 @@ def parse_args(args: list[str] = None) -> Config:
         parsed_args = Namespace(**args_dict)
 
     # Dynamo argument processing
+    # If an endpoint is provided, validate and use it
+    # otherwise fall back to default endpoints
     namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
 
-    # if an endpoint is provided, validate and use it
-    # otherwise fall back to default endpoints
     endpoint = parsed_args.endpoint
     if endpoint is None:
         if hasattr(parsed_args, "disaggregation_mode") and parsed_args.disaggregation_mode == "prefill":
@@ -111,7 +107,6 @@ def parse_args(args: list[str] = None) -> Config:
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 
-    # Create dynamo args from parsed values
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -122,7 +117,6 @@ def parse_args(args: list[str] = None) -> Config:
 
     server_args = ServerArgs.from_cli_args(parsed_args)
 
-    # Create config
     return Config(server_args, dynamo_args)
 
 
