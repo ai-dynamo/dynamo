@@ -108,7 +108,7 @@ for ((i=1; i<=50; i++)); do
 
     if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
         if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm_next.generate"'; then
+            if echo "$body" | grep -q '"tensorrt_llm_next"'; then
                 echo "Health check succeeded on attempt $i"
                 echo "$body"
                 failed=false
