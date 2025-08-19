@@ -18,10 +18,10 @@ impl<'c, C: Config> Uploads<'c, C> {
     /// Creates an intermediate [Upload](https://platform.openai.com/docs/api-reference/uploads/object) object that
     /// you can add [Parts](https://platform.openai.com/docs/api-reference/uploads/part-object) to. Currently,
     /// an Upload can accept at most 8 GB in total and expires after an hour after you create it.
-    ///            
+    ///
     /// Once you complete the Upload, we will create a [File](https://platform.openai.com/docs/api-reference/files/object)
     /// object that contains all the parts you uploaded. This File is usable in the rest of our platform as a regular File object.
-    ///            
+    ///
     /// For certain `purpose`s, the correct `mime_type` must be specified. Please refer to documentation for the
     /// supported MIME types for your use case:
     /// - [Assistants](https://platform.openai.com/docs/assistants/tools/file-search/supported-files)

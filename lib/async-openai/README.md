@@ -136,7 +136,7 @@ let response: Value = client
 ```
 
 This can be useful in many scenarios:
-- To use this library with other OpenAI compatible APIs whose types don't exactly match OpenAI. 
+- To use this library with other OpenAI compatible APIs whose types don't exactly match OpenAI.
 - Extend existing types in this crate with new fields with `serde`.
 - To avoid verbose types.
 - To escape deserialization errors.
