@@ -34,12 +34,7 @@
    API/nixl_connect/writable_operation.md
    API/nixl_connect/read_operation.md
    API/nixl_connect/write_operation.md
-   components/backends/sglang/deploy/README.md
-   components/backends/sglang/docs/dsr1-wideep-h100.md
-   components/backends/sglang/docs/multinode-examples.md
 
-   components/backends/sglang/slurm_jobs/README.md
-   components/router/README.md
    examples/README.md
    guides/dynamo_deploy/create_deployment.md
    guides/dynamo_deploy/sla_planner_deployment.md
@@ -47,14 +42,6 @@
    guides/dynamo_deploy/gke_setup.md
    guides/dynamo_deploy/README.md
    guides/dynamo_run.md
-   components/backends/vllm/README.md
-   components/backends/trtllm/README.md
-   components/backends/trtllm/deploy/README.md
-   components/backends/trtllm/llama4_plus_eagle.md
-   components/backends/trtllm/multinode/multinode-examples.md
-   components/backends/trtllm/kv-cache-transfer.md
-   components/backends/vllm/deploy/README.md
-   components/backends/vllm/multi-node.md
 
    guides/metrics.md
    guides/deploy/k8s_metrics.md

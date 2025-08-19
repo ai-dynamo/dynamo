@@ -73,15 +73,9 @@ html_baseurl = "https://docs.nvidia.com/dynamo/latest/"
 
 # Suppress warnings for external links and missing references
 suppress_warnings = [
-    # "myst.xref_missing",  # Missing cross-references
-    #'toc.not_readable',     # Unreadable toctree entries
+    "myst.xref_missing",  # Missing cross-references of relative links outside docs folder
 ]
 
-# TODO: See if this is needed for rendering mermaid diagrams or not
-
-## Mermaid diagram support
-# myst_enable_extensions.append("html_admonition")
-#
-## Additional MyST configuration
-# myst_heading_anchors = 3  # Generate anchors for headers
-# myst_substitutions = {}  # Custom substitutions
+# Additional MyST configuration
+myst_heading_anchors = 7  # Generate anchors for headers
+myst_substitutions = {}  # Custom substitutions
