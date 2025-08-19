@@ -86,9 +86,14 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
         }
     }
     if items.is_empty() {
-        // Try removing the start token and see if it's a valid JSON in case it is already in an array format
-        let stripped_content = input.strip_prefix(start_token).unwrap_or(input);
-        return stripped_content.to_string();
+        // Remove everything up to and including the first occurrence of the start token
+        if let Some(idx) = input.find(start_token) {
+            let rest = &input[idx + start_token.len()..];
+            return rest.trim_start().to_string();
+        } else {
+            // Shouldn't happen because we checked contains() above, but be defensive
+            return input.to_string();
+        }
     }
     format!("[{}]", items.join(","))
 }
@@ -168,9 +173,8 @@ pub fn try_tool_call_parse_json(
         };
     }
 
-    // Convert json to &str if it's a String, otherwise keep as &str
+    // Convert json (String) to &str
     let json = json.as_str();
-    println!("JSON: {:?}", json);
 
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
