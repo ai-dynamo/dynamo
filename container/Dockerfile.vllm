@@ -42,10 +42,6 @@ ARG ARCH_ALT=x86_64
 # Use dynamo base image if provided, otherwise use original base image
 FROM ${DYNAMO_BASE_IMAGE} AS dev
 
-# Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
 ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
