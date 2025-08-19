@@ -32,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -67,6 +68,32 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
+	config := mgr.GetConfig()
+
+	// Create kubernetes client for discovery
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create cached discovery client
+	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
+
+	// Create REST mapper
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
+
+	// Use scale.New with the kubernetes client's REST client
+	scalesGetter := scale.New(
+		kubeClient.CoreV1().RESTClient(),
+		restMapper,
+		dynamic.LegacyAPIPathResolverFunc,
+		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
+	)
+
+	return scalesGetter, nil
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -325,21 +352,7 @@ func main() {
 		os.Exit(1)
 	}
 	// Create scale client for Grove resource scaling
-	config := mgr.GetConfig()
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		setupLog.Error(err, "unable to create kubernetes client for scale operations")
-		os.Exit(1)
-	}
-
-	// Create cached discovery client
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-
-	// Create REST mapper for discovery
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-
-	// Create scale client with proper parameters
-	scalesGetter, err := scale.NewForConfig(config, restMapper, nil, scale.NewDiscoveryScaleKindResolver(cachedDiscovery))
+	scaleClient, err := createScalesGetter(mgr)
 	if err != nil {
 		setupLog.Error(err, "unable to create scale client")
 		os.Exit(1)
@@ -350,7 +363,7 @@ func main() {
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                ctrlConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
-		ScaleClient:           scalesGetter,
+		ScaleClient:           scaleClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)

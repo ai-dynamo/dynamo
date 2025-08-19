@@ -33,20 +33,22 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 	logger := log.FromContext(ctx)
 	logger.Info("Scaling resource", "gvr", gvr, "name", name, "namespace", namespace, "replicas", replicas)
 
-	// Get current scale to check if scaling is needed
-	currentScale, err := scaleClient.Scales(namespace).Get(ctx, gvr.GroupResource(), name, metav1.GetOptions{})
-	if err != nil {
-		logger.Error(err, "Failed to get current scale", "gvr", gvr, "name", name)
-		return fmt.Errorf("failed to get current scale for %s %s: %w", gvr.Resource, name, err)
+	if scaleClient == nil {
+		logger.Error(nil, "Scale client is nil")
+		return fmt.Errorf("scale client is nil")
 	}
 
-	// Check if scaling is needed
+	currentScale, err := scaleClient.Scales(namespace).Get(ctx, gvr.GroupResource(), name, metav1.GetOptions{})
+	if err != nil {
+		logger.Error(err, "Failed to get current scale - resource may not support scale subresource", "gvr", gvr, "name", name, "namespace", namespace, "groupResource", gvr.GroupResource())
+		return fmt.Errorf("failed to get current scale for %s %s (resource may not support scale subresource): %w", gvr.Resource, name, err)
+	}
+
 	if currentScale.Spec.Replicas == replicas {
 		logger.V(1).Info("Resource already at desired replica count", "gvr", gvr, "name", name, "replicas", replicas)
 		return nil
 	}
 
-	// Update scale
 	scaleObj := &autoscalingv1.Scale{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -57,6 +59,7 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 		},
 	}
 
+	logger.V(1).Info("Updating scale", "gvr", gvr, "name", name, "newReplicas", replicas)
 	_, err = scaleClient.Scales(namespace).Update(ctx, gvr.GroupResource(), scaleObj, metav1.UpdateOptions{})
 	if err != nil {
 		logger.Error(err, "Failed to update scale", "gvr", gvr, "name", name, "replicas", replicas)
