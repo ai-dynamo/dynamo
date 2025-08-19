@@ -135,6 +135,12 @@ if __name__ == "__main__":
         default=SLAPlannerDefaults.load_prediction_window_size,
         help="Load prediction window size",
     )
+    parser.add_argument(
+        "--prometheus-port",
+        type=int,
+        default=SLAPlannerDefaults.prometheus_port,
+        help="Prometheus port",
+    )
 
     args = parser.parse_args()
     asyncio.run(init_planner(args))

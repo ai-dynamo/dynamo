@@ -20,7 +20,7 @@ pub async fn run(
     runtime: Runtime,
     in_opt: Input,
     out_opt: Option<Output>,
-    flags: Flags,
+    mut flags: Flags,
 ) -> anyhow::Result<()> {
     //
     // Configure
@@ -39,7 +39,9 @@ pub async fn run(
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
-        .http_port(Some(flags.http_port))
+        .http_port(flags.http_port)
+        .tls_cert_path(flags.tls_cert_path.take())
+        .tls_key_path(flags.tls_key_path.take())
         .router_config(Some(flags.router_config()))
         .request_template(flags.request_template.clone())
         .migration_limit(flags.migration_limit)

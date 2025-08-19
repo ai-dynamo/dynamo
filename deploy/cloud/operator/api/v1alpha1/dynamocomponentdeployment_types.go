@@ -260,3 +260,16 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	}
 	return 1
 }
+
+func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
+	for _, ownerRef := range s.ObjectMeta.OwnerReferences {
+		if ownerRef.Kind == "DynamoGraphDeployment" {
+			return ownerRef.Name
+		}
+	}
+	return ""
+}
+
+func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
+	return s.GetNamespace()
+}

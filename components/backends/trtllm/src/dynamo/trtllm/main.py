@@ -229,9 +229,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         endpoint = component.endpoint(config.endpoint)
 
         if is_first_worker(config):
-            # Get runtime configuration from the engine
-            runtime_config = await get_engine_runtime_config(engine, config)
-
             # Register the model with runtime config
             await register_llm(
                 modelType,
@@ -240,7 +237,6 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
-                runtime_config=runtime_config,  # Add runtime config here
             )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(

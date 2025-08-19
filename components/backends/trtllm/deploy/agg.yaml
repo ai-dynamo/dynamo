@@ -11,35 +11,16 @@ spec:
       dynamoNamespace: trtllm-agg
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "5"
-          memory: "10Gi"
-        limits:
-          cpu: "5"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
-          workingDir: /workspace/components/backends/trtllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000"
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

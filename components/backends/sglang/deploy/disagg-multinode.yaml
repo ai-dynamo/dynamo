@@ -23,10 +23,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
-          command: ["sh", "-c"]
-          args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg-multinode && python3 -m dynamo.frontend --http-port=8000"
     decode:
       multinode:
         nodeCount: 2
@@ -35,12 +31,7 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "40Gi"
         limits:
-          cpu: "10"
-          memory: "40Gi"
           gpu: "4"
       extraPodSpec:
         mainContainer:
@@ -67,12 +58,7 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "40Gi"
         limits:
-          cpu: "10"
-          memory: "40Gi"
           gpu: "4"
       extraPodSpec:
         mainContainer:
