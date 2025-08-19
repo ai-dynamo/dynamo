@@ -7,6 +7,8 @@ set -e
 set -u
 trap 'echo "Error occurred at line $LINENO"; exit 1' ERR
 
+WAIT_TIME=300
+
 model=$1
 multi_round=$2
 num_gen_servers=$3
@@ -99,6 +101,7 @@ echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
 # Wait for server to become healthy (up to 50 attempts)
 failed=true
 for ((i=1; i<=50; i++)); do
+    sleep $((i == 1 ? WAIT_TIME : 20))
     response=$(curl -s -w "\n%{http_code}" "${hostname}:${port}/health")
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
@@ -124,7 +127,6 @@ for ((i=1; i<=50; i++)); do
     else
         echo "Attempt $i failed: /health not ready (HTTP $http_code)."
     fi
-    sleep $((i == 1 ? 100 : 10))
 done
 
 if [[ "$failed" == "true" ]]; then
