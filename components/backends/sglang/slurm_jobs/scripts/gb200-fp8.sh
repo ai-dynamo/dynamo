@@ -31,7 +31,6 @@ fi
 echo "Mode: $mode"
 echo "Command: dynamo"
 
-
 # Check if required environment variables are set
 if [ -z "$HOST_IP" ]; then
     echo "Error: HOST_IP environment variable is not set"
@@ -61,9 +60,6 @@ fi
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
-    # We are not using a init-expert-location file for e2e benchmarking
-    # We also don't currently have a --deepep-config file for GB200
-    # Need to increase --context-length to 10k for 8k1k benchmarking
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
@@ -91,29 +87,30 @@ if [ "$mode" = "prefill" ]; then
         --enable-dp-attention \
         --host 0.0.0.0 \
         --decode-log-interval 1 \
-        --max-running-requests 6144 \
-        --context-length 2716 \
+        --max-running-requests 12288 \
+        --context-length 9600 \
         --disable-radix-cache \
         --enable-deepep-moe \
         --deepep-mode low_latency \
+        --ep-dispatch-algorithm dynamic \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \
         --disable-shared-experts-fusion \
         --ep-num-redundant-experts 32 \
-        --ep-dispatch-algorithm static \
         --eplb-algorithm deepseek \
         --attention-backend cutlass_mla \
         --watchdog-timeout 1000000 \
+        --init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json  \
         --disable-cuda-graph \
         --chunked-prefill-size 16384 \
-        --max-total-tokens 32768 \
-        --mem-fraction-static 0.8 \
+        --max-total-tokens 65536 \
+        --deepep-config /configs/deepep_config.json \
+        --stream-interval 50 \
         --log-level debug
+
 elif [ "$mode" = "decode" ]; then
     # GB200 dynamo decode command
-    # Need to increase --context-length to 10k for 8k1k benchmarking
-    # We are not using a init-expert-location file for e2e benchmarking
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=768 \
+    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
@@ -142,20 +139,22 @@ elif [ "$mode" = "decode" ]; then
         --host 0.0.0.0 \
         --decode-log-interval 1 \
         --max-running-requests 36864 \
-        --context-length 2716 \
+        --context-length 9600 \
         --disable-radix-cache \
         --enable-deepep-moe \
         --deepep-mode low_latency \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \
-        --cuda-graph-bs 768 \
+        --cuda-graph-bs 1 2 4 8 16 24 32 40 48 56 64 80 96 112 128 160 192 224 256 320 384 448 512 \
+        --cuda-graph-max-bs 512 \
         --disable-shared-experts-fusion \
         --ep-num-redundant-experts 32 \
         --ep-dispatch-algorithm static \
         --eplb-algorithm deepseek \
         --attention-backend cutlass_mla \
         --watchdog-timeout 1000000 \
+        --init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json \
         --chunked-prefill-size 36864 \
-        --mem-fraction-static 0.82 \
-        --log-level debug
+        --stream-interval 50 \
+        --mem-fraction-static 0.82
 fi
