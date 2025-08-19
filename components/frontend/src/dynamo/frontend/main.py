@@ -88,6 +88,12 @@ def parse_args():
         "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
     )
     parser.add_argument(
+        "--http-host",
+        type=str,
+        default=os.environ.get("DYN_HTTP_HOST", "0.0.0.0"),
+        help="HTTP host for the engine (str). Can be set via DYN_HTTP_HOST env var.",
+    )
+    parser.add_argument(
         "--http-port",
         type=int,
         default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
@@ -209,6 +215,7 @@ async def async_main():
         kv_router_config = None
 
     kwargs = {
+        "http_host": flags.http_host,
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(
