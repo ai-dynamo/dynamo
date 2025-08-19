@@ -35,6 +35,8 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Custom startup ordering for components
 - Resource-aware rolling updates
 
+For more information about Grove and its capabilities, see [Grove documentation](grove.md).
+
 
 [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is an optional enhancement that provides a Kubernetes native scheduler optimized for AI workloads at large scale.
 
@@ -45,6 +47,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Support for complex scheduling constraints
 - Integration with Grove for enhanced capabilities
 - Performance optimizations for large-scale deployments
+
 
 #### Using LWS and Volcano
 
@@ -110,8 +113,8 @@ args:
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [components/backends/sglang/deploy/](../../components/backends/sglang/deploy/)
-- **TensorRT-LLM**: [components/backends/trtllm/deploy/](../../components/backends/trtllm/deploy/)
-- **vLLM**: [components/backends/vllm/deploy/](../../components/backends/vllm/deploy/)
+- **SGLang**: [SGLang Deployment Guide](../../components/backends/sglang/README.md#deployment)
+- **TensorRT-LLM**: [TensorRT-LLM Deployment Guide](../../components/backends/trtllm/README.md#kubernetes-deployment)
+- **vLLM**: [vLLM Deployment Guide](../../components/backends/vllm/README.md#kubernetes-deployment)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

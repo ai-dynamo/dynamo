@@ -123,7 +123,7 @@ gcloud projects add-iam-policy-binding ${PROJECT} \
 
 ## Adding annotations to enable Workload Identity
 
-This is an example of values.yaml used to deploy Dynamo Cloud using custom GCP annotations to enable Workload Identity.
+This is an example of values.yaml used to deploy Dynamo Kubernetes Platform using custom GCP annotations to enable Workload Identity.
 
 ```yaml
 

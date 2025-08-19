@@ -17,7 +17,7 @@ limitations under the License.
 
 # Minikube Setup Guide
 
-Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide walks through the set up of everything you need to run Dynamo Cloud locally.
+Don't have a Kubernetes cluster? No problem! You can set up a local development environment using Minikube. This guide walks through the set up of everything you need to run Dynamo Kubernetes Platform locally.
 
 ## Setting Up Minikube
 
@@ -60,5 +60,5 @@ kubectl get storageclass
 
 ## Next Steps
 
-Once your local environment is set up, you can proceed with the [Dynamo Cloud deployment guide](./dynamo_cloud.md) to deploy the platform to your local cluster.
+Once your local environment is set up, you can proceed with the [Dynamo Kubernetes Platform deployment guide](./dynamo_cloud.md) to deploy the platform to your local cluster.
 
