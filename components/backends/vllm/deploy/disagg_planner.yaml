@@ -21,12 +21,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000"
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret

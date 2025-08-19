@@ -151,6 +151,7 @@ helm install dynamo-crds ./crds/ \
 ***Step 2: Build Dependencies and Install Platform**
 
 ```bash
+cd deploy/cloud/helm
 helm dep build ./platform/
 
 kubectl create namespace ${NAMESPACE}

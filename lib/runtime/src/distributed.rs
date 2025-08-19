@@ -14,7 +14,7 @@
 // limitations under the License.
 
 pub use crate::component::Component;
-use crate::transports::nats::DRTNatsPrometheusMetrics;
+use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
@@ -95,28 +95,29 @@ impl DistributedRuntime {
             system_health,
         };
 
-        let sys_nats_metrics = DRTNatsPrometheusMetrics::new(
+        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
             &distributed_runtime,
             nats_client_for_metrics.client().clone(),
         )?;
         let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
         drt_hierarchies.push(distributed_runtime.hierarchy());
         // Register a callback to update NATS client metrics
-        let nats_metrics_callback = Arc::new({
-            let sys_nats_metrics_clone = sys_nats_metrics.clone();
+        let nats_client_callback = Arc::new({
+            let nats_client_clone = nats_client_metrics.clone();
             move || {
-                sys_nats_metrics_clone.set_from_client_stats();
+                nats_client_clone.set_from_client_stats();
                 Ok(())
             }
         });
-        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_metrics_callback);
+        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
 
-        // Start system status server if enabled
+        // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
+            // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start system status server (it spawns its own task internally)
+            // Start system status server (it creates SystemStatusState internally)
             match crate::system_status_server::spawn_system_status_server(
                 &host,
                 port,
@@ -146,7 +147,18 @@ impl DistributedRuntime {
                 }
             }
         } else {
-            tracing::debug!("Health and system status server is disabled via DYN_SYSTEM_ENABLED");
+            // System server HTTP is disabled, but still create the state for metrics
+            // This ensures uptime_seconds metric is always registered
+            let system_status_state = crate::system_status_server::SystemStatusState::new(
+                Arc::new(distributed_runtime.clone()),
+            )?;
+
+            // Initialize the start time for uptime tracking
+            if let Err(e) = system_status_state.initialize_start_time() {
+                tracing::warn!("Failed to initialize system status start time: {}", e);
+            }
+
+            tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
         }
 
         Ok(distributed_runtime)

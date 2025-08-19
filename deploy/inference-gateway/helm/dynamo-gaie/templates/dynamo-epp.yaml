@@ -31,23 +31,44 @@ spec:
     spec:
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
+
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range .Values.imagePullSecrets }}
+        - name: {{ . | quote }}
+      {{- end }}
+      {{- end }}
+
       containers:
       - name: epp
-        image: {{ .Values.extension.image }}
-        imagePullPolicy: IfNotPresent
+        image: {{ if .Values.eppAware.enabled }}
+          {{ default .Values.extension.image .Values.eppAware.eppImage }}
+        {{ else }}
+          {{ .Values.extension.image }}
+        {{ end }}
+        imagePullPolicy: {{ .Values.epp.imagePullPolicy | default "IfNotPresent" }}
         args:
-        - -poolName
-        - "{{ .Values.model.shortName }}-pool"
-        - "-poolNamespace"
-        - "{{ .Release.Namespace }}"
-        - -v
-        - "4"
-        - --zap-encoder
-        - "json"
-        - -grpcPort
-        - "9002"
-        - -grpcHealthPort
-        - "9003"
+        {{- if .Values.epp.argsOverride }}
+        {{- toYaml .Values.epp.argsOverride | nindent 8 }}
+        {{- else }}
+          - -poolName
+          - "{{ .Values.model.shortName }}-pool"
+          - -poolNamespace
+          - "{{ .Release.Namespace }}"
+          - -v
+          - "4"
+          - --zap-encoder
+          - "json"
+          - -grpcPort
+          - "9002"
+          - -grpcHealthPort
+          - "9003"
+        {{- end }}
+        env:
+        {{- range .Values.epp.extraEnv }}
+          - name: {{ .name }}
+            value: {{ .value | quote }}
+        {{- end }}
         ports:
         - containerPort: 9002
         - containerPort: 9003
@@ -65,3 +86,25 @@ spec:
             service: inference-extension
           initialDelaySeconds: 5
           periodSeconds: 10
+
+      {{- if .Values.eppAware.enabled }}
+      - name: {{ .Values.eppAware.sidecar.name }}
+        image: {{ .Values.eppAware.sidecar.image }}
+        imagePullPolicy: {{ .Values.eppAware.sidecar.imagePullPolicy | default "IfNotPresent" }}
+        command: {{- toYaml .Values.eppAware.sidecar.command | nindent 8 }}
+        args: {{- toYaml .Values.eppAware.sidecar.args | nindent 8 }}
+        env:
+        {{- range .Values.eppAware.sidecar.env }}
+          {{- if .valueFromDynamoNamespace }}
+          - name: {{ .name }}
+            value: "{{ $.Values.dynamoNamespace }}"
+          {{- else }}
+          - name: {{ .name }}
+            value: {{ .value | quote }}
+          {{- end }}
+        {{- end }}
+        ports:
+        {{- toYaml .Values.eppAware.sidecar.ports | nindent 8 }}
+        resources:
+        {{- toYaml .Values.eppAware.sidecar.resources | nindent 10 }}
+      {{- end }}

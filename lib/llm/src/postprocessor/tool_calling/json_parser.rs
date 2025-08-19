@@ -24,11 +24,9 @@ pub struct CalledFunctionArguments {
     pub arguments: HashMap<String, Value>,
 }
 
-fn extract_tool_call_content<'a>(
-    input: &'a str,
-    start_token: &str,
-    end_token: &str,
-) -> Option<&'a str> {
+// Extract the contents between start and end tokens using regex parsing.
+// Returns a JSON array string if there are multiple matches, otherwise returns the last match directly.
+fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) -> Option<String> {
     let escaped_start = regex::escape(start_token);
     let escaped_end = regex::escape(end_token);
     let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
@@ -38,17 +36,60 @@ fn extract_tool_call_content<'a>(
         .build()
     {
         Ok(regex) => {
-            // Get all matches and take the last one for now. TODO : Handle multiple tool calls
+            // Get all matches and take the last one for now. TODO: Handle multiple tool calls
             let matches: Vec<_> = regex
                 .captures_iter(input)
                 .filter_map(|captures| captures.get(1))
-                .map(|m| m.as_str().trim())
+                .map(|m| m.as_str().trim().to_string())
                 .collect();
-
-            matches.last().copied()
+            if !matches.is_empty() {
+                // If only one match, return it directly, otherwise return as a JSON array string
+                if matches.len() == 1 {
+                    // Return the last match directly
+                    return Some(matches.last().unwrap().clone());
+                } else {
+                    // Join the matches into a JSON array string
+                    return Some(format!("[{}]", matches.join(",")));
+                }
+            }
+            None
         }
         Err(_) => None,
     }
+}
+
+// Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
+// Handles single tool and multiple tool call cases for single start_token like <|python_tag|>
+fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
+    // Return the input if it doesn't contain the start token
+    if !input.contains(start_token) {
+        return input.to_string();
+    }
+
+    // Split on the start token and keep only JSON-looking segments
+    let mut items: Vec<String> = Vec::new();
+    for seg in input.split(start_token) {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // Only consider segments that start like JSON
+        if s.starts_with('{') || s.starts_with('[') {
+            // Trim trailing non-JSON by cutting at the last closing brace/bracket
+            if let Some(pos) = s.rfind(['}', ']']) {
+                let candidate = &s[..=pos];
+                // Keep only valid JSON candidates
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    items.push(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return input.to_string();
+    }
+    format!("[{}]", items.join(","))
 }
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
@@ -110,20 +151,24 @@ pub fn try_tool_call_parse_json(
     );
 
     // Iterate over all start and end tokens and try to extract the content between them
-    let mut json = trimmed;
+    // Assumption : One message will not contain different tags for tool calls. Iteration over tags is to support different tags by default for multiple models
+    let mut json = trimmed.to_string();
     for (start_token, end_token) in tool_call_start_tokens
         .iter()
         .zip(tool_call_end_tokens.iter())
     {
         // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
         json = if !start_token.is_empty() && end_token.is_empty() {
-            json.strip_prefix(start_token).unwrap_or(json)
-        } else if let Some(content) = extract_tool_call_content(json, start_token, end_token) {
+            handle_single_token_tool_calls(&json, start_token)
+        } else if let Some(content) = extract_tool_call_content(&json, start_token, end_token) {
             content
         } else {
             json
         };
     }
+
+    // Convert json to &str if it's a String, otherwise keep as &str
+    let json = json.as_str();
 
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {

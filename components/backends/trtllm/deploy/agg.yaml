@@ -14,12 +14,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
-          workingDir: /workspace/components/backends/trtllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000"
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg

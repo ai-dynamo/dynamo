@@ -21,7 +21,7 @@ Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -40,7 +40,7 @@ python3 -m dynamo.sglang.worker \
 
 Node 2: Run the remaining 8 shards of the prefill worker
 ```bash
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -59,7 +59,7 @@ python3 -m dynamo.sglang.worker \
 
 Node 3: Run the first 8 shards of the decode worker
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
