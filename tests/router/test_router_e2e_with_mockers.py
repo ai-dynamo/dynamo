@@ -404,7 +404,7 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
 
         # First, send one request with retry to ensure system is ready
         logger.info("Sending initial request to ensure system is ready...")
-        asyncio.run(send_concurrent_requests([url], test_payload_503, 1))
+        asyncio.run(send_inflight_requests([url], test_payload_503, 1))
 
         # Now send 50 concurrent requests to exhaust resources, then verify 503
         logger.info("Sending 50 concurrent requests to exhaust resources...")
