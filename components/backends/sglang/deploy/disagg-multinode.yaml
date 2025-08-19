@@ -40,7 +40,7 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              python3 -m dynamo.sglang.decode_worker
+              python3 -m dynamo.sglang
               --model-path meta-llama/Llama-3.3-70B-Instruct
               --served-model-name meta-llama/Llama-3.3-70B-Instruct
               --tp-size 8
@@ -67,7 +67,7 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              python3 -m dynamo.sglang.worker
+              python3 -m dynamo.sglang
               --model-path meta-llama/Llama-3.3-70B-Instruct
               --served-model-name meta-llama/Llama-3.3-70B-Instruct
               --tp-size 8
