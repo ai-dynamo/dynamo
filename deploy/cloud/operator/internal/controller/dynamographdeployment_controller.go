@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/errors"
+
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -178,6 +180,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 // scaleGroveResource scales a Grove resource using the generic scaling function
 func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context, resourceName, namespace string, newReplicas int32, resourceType string) error {
+	logger := log.FromContext(ctx)
 	// Determine the GroupVersionResource based on resource type
 	var gvr schema.GroupVersionResource
 	switch resourceType {
@@ -190,7 +193,15 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	}
 
 	// Use the generic scaling function
-	return commonController.ScaleResource(ctx, r.ScaleClient, gvr, namespace, resourceName, newReplicas)
+	err := commonController.ScaleResource(ctx, r.ScaleClient, gvr, namespace, resourceName, newReplicas)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Resource doesn't exist yet - this is normal during initial creation when Grove is still creating the resources asynchronously
+			logger.V(1).Info("Grove resource not found yet, skipping scaling for now - will retry on next reconciliation", "gvr", gvr, "name", resourceName, "namespace", namespace)
+			return nil
+		}
+	}
+	return err
 }
 
 // reconcileGroveScaling handles scaling operations for Grove resources based on service replica changes

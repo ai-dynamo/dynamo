@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/scale"
@@ -41,11 +40,6 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 
 	currentScale, err := scaleClient.Scales(namespace).Get(ctx, gvr.GroupResource(), name, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
-			// Resource doesn't exist yet - this is normal during initial creation when Grove is still creating the resources asynchronously
-			logger.V(1).Info("Grove resource not found yet, skipping scaling for now - will retry on next reconciliation", "gvr", gvr, "name", name, "namespace", namespace)
-			return nil
-		}
 		logger.Error(err, "Failed to get current scale - resource may not support scale subresource", "gvr", gvr, "name", name, "namespace", namespace, "groupResource", gvr.GroupResource())
 		return fmt.Errorf("failed to get current scale for %s %s (resource may not support scale subresource): %w", gvr.Resource, name, err)
 	}
