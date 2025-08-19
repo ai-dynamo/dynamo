@@ -13,216 +13,210 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![cfg(feature = "block-manager")]
-
 use super::*;
+use dynamo_llm::block_manager::block::{
+    data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
+};
+use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use pyo3::PyResult;
+use tokio_util::sync::CancellationToken;
 
-mod block;
-mod block_list;
-mod dlpack;
-mod layer;
+mod controller;
+mod distributed;
+
+pub mod vllm;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<layer::Layer>()?;
-    m.add_class::<block::Block>()?;
-    m.add_class::<block_list::BlockList>()?;
     m.add_class::<BlockManager>()?;
+    m.add_class::<distributed::KvbmWorker>()?;
+    m.add_class::<distributed::KvbmLeader>()?;
+    m.add_class::<controller::BlockManagerClient>()?;
+    m.add_class::<controller::BlockPoolStatus>()?;
+    m.add_class::<controller::ResetBlocksResponse>()?;
+
+    vllm::add_to_module(m)?;
+
     Ok(())
 }
 
+type VllmBlockManager = dynamo_llm::block_manager::KvBlockManager<
+    Logical<DistributedLeaderWorkerResources>,
+    BasicMetadata,
+>;
+
+type VllmController = Arc<
+    dynamo_llm::block_manager::controller::Controller<
+        Logical<DistributedLeaderWorkerResources>,
+        BasicMetadata,
+    >,
+>;
+
 #[pyclass]
+#[derive(Clone)]
 pub struct BlockManager {
-    inner: Arc<dynamo_llm::block_manager::ReferenceBlockManager>,
-    // TODO: Metadata should be stored in the block manager?
-    dtype: dynamo_llm::common::dtype::DType,
-    device_id: usize,
+    inner: VllmBlockManager,
+    drt: DistributedRuntime,
+    _controller: Option<VllmController>,
 }
 
+// TODO: This is in desperate need of a massive refactor. We bind and instantiate this in Python, but we never actually use it.
 #[pymethods]
+#[allow(unused_variables)]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, num_layer, outer_dim, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
+    #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None, disable_device_pool = false))]
     fn new(
         worker_id: u64,
-        num_layer: usize,
-        outer_dim: usize,
+        leader: Option<distributed::KvbmLeader>,
         page_size: usize,
-        inner_dim: usize,
-        dtype: Option<String>,
-        host_num_blocks: Option<usize>,
-        device_num_blocks: Option<usize>,
-        device_id: usize,
+        num_device_blocks: Option<usize>,
+        disable_device_pool: bool,
     ) -> PyResult<Self> {
+        let cancel_token = CancellationToken::new();
         let mut config = dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(
             dynamo_llm::block_manager::KvManagerRuntimeConfig::builder()
                 .worker_id(worker_id)
+                .cancellation_token(cancel_token.clone())
                 .build()
                 .map_err(to_pyerr)?,
         );
-        let mut model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
-            .num_layers(num_layer)
-            .outer_dim(outer_dim)
+
+        let model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
+            .num_layers(1)
+            .outer_dim(1)
             .page_size(page_size)
-            .inner_dim(inner_dim);
-        let mut dtype_ = dynamo_llm::common::dtype::DType::FP16; // Default in block_manager config
-        if let Some(dtype_str) = dtype {
-            dtype_ = match dtype_str.as_str() {
-                "fp8" | "FP8" => dynamo_llm::common::dtype::DType::FP8,
-                "fp16" | "FP16" => dynamo_llm::common::dtype::DType::FP16,
-                "bf16" | "BF16" => dynamo_llm::common::dtype::DType::BF16,
-                "fp32" | "FP32" => dynamo_llm::common::dtype::DType::FP32,
-                "u8" | "U8" => dynamo_llm::common::dtype::DType::U8,
-                "u16" | "U16" => dynamo_llm::common::dtype::DType::U16,
-                "u32" | "U32" => dynamo_llm::common::dtype::DType::U32,
-                "u64" | "U64" => dynamo_llm::common::dtype::DType::U64,
-                "i8" | "I8" => dynamo_llm::common::dtype::DType::I8,
-                "i16" | "I16" => dynamo_llm::common::dtype::DType::I16,
-                "i32" | "I32" => dynamo_llm::common::dtype::DType::I32,
-                "i64" | "I64" => dynamo_llm::common::dtype::DType::I64,
-                _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Unsupported dtype: {}",
-                        dtype_str
-                    )))
-                }
-            };
-        }
-        model_config = model_config.dtype(dtype_.clone());
+            .inner_dim(1);
+
         config = config.model(model_config.build().map_err(to_pyerr)?);
-        if let Some(host_num_blocks) = host_num_blocks {
-            config = config.host_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(host_num_blocks)
-                    .allocator(
-                        dynamo_llm::block_manager::storage::PinnedAllocator::new()
-                            .map_err(to_pyerr)?,
-                    )
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
-        }
-        if let Some(device_num_blocks) = device_num_blocks {
-            config = config.device_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(device_num_blocks)
-                    .allocator(
-                        dynamo_llm::block_manager::storage::DeviceAllocator::new(device_id)
-                            .map_err(to_pyerr)?,
-                    )
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
-        }
+
+        let (leader, drt) = if let Some(leader) = leader {
+            let (leader, rt) = leader.dissolve();
+
+            if !disable_device_pool {
+                config = config.device_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_device_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                        .build()
+                        .map_err(to_pyerr)?,
+                );
+            }
+
+            if leader.num_host_blocks() > 0 {
+                tracing::info!("Using {} host blocks", leader.num_host_blocks());
+                config = config.host_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_host_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                        .build()
+                        .map_err(to_pyerr)?,
+                );
+            }
+
+            if leader.num_disk_blocks() > 0 {
+                tracing::info!("Using {} disk blocks", leader.num_disk_blocks());
+                config = config.disk_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_disk_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                        .build()
+                        .map_err(to_pyerr)?,
+                );
+            }
+            (Some(leader), rt)
+        } else {
+            tracing::info!("Leader not provided. Block transfer functionality will be disabled.");
+
+            // let num_device_blocks = num_device_blocks
+            //     .expect("num_device_blocks must be provided if leader is not provided");
+
+            // config = config.device_layout(
+            //     dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+            //         .num_blocks(num_device_blocks)
+            //         .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+            //         .build()
+            //         .map_err(to_pyerr)?,
+            // );
+
+            unimplemented!("Leader not provided");
+            // (
+            //     None,
+            //     Arc::new(
+            //         tokio::runtime::Builder::new_multi_thread()
+            //             .enable_all()
+            //             .build()
+            //             .map_err(to_pyerr)?,
+            //     ),
+            // )
+        };
+
+        let rt = drt.inner().runtime().primary();
+
         let config = config.build().map_err(to_pyerr)?;
-        let tokio_runtime = pyo3_async_runtimes::tokio::get_runtime();
         Ok(BlockManager {
-            inner: Arc::from(
-                tokio_runtime
-                    .block_on(async {
-                        dynamo_llm::block_manager::ReferenceBlockManager::new(config)
-                    })
-                    .map_err(to_pyerr)?,
-            ),
-            dtype: dtype_,
-            device_id: device_id,
+            inner: rt
+                .block_on(async {
+                    let resources =
+                        DistributedLeaderWorkerResources::new(leader, cancel_token.child_token())?;
+
+                    dynamo_llm::block_manager::KvBlockManager::<
+                        Logical<DistributedLeaderWorkerResources>,
+                        BasicMetadata,
+                    >::new(config, resources)
+                    .await
+                })
+                .map_err(to_pyerr)?,
+            drt,
+            _controller: None,
         })
     }
 
-    fn allocate_host_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
-        let blocks = self
-            .inner
-            .host()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
-            })?
-            .allocate_blocks_blocking(count)
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
+    fn init_controller(&mut self, component: Component) -> PyResult<()> {
+        if self._controller.is_some() {
+            tracing::warn!("Controller already initialized. Ignoring init_controller call.");
+            return Ok(());
+        }
+
+        let block_manager = self.inner.clone();
+        let controller = self
+            .drt
+            .inner()
+            .runtime()
+            .primary()
+            .block_on(controller::Controller::new(
+                block_manager,
+                component.inner.clone(),
+            ))
             .map_err(to_pyerr)?;
-        // Wrap each block in an enum accounting for Pinned & Device block
-        let blocks = blocks
-            .into_iter()
-            .map(|b| block::BlockType::Pinned(b))
-            .collect();
-        Ok(block_list::BlockList::from_rust(
-            blocks,
-            self.dtype.clone(),
-            self.device_id,
-        ))
-    }
 
-    #[pyo3(signature = (count))]
-    fn allocate_host_blocks<'py>(
-        &self,
-        py: Python<'py>,
-        count: usize,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        let dtype = self.dtype.clone();
-        let device_id = self.device_id;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let blocks = inner
-                .host()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
-                })?
-                .allocate_blocks(count)
-                .await
-                .map_err(to_pyerr)?;
-            // Wrap each block in an enum accounting for Pinned & Device block
-            let blocks = blocks
-                .into_iter()
-                .map(|b| block::BlockType::Pinned(b))
-                .collect();
-            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
-        })
-    }
+        self._controller = Some(Arc::new(controller));
 
-    fn allocate_device_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
-        let blocks = self
+        let instance_id = component
             .inner
-            .device()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
-            })?
-            .allocate_blocks_blocking(count)
-            .map_err(to_pyerr)?;
-        // Wrap each block in an enum accounting for Pinned & Device block
-        let blocks = blocks
-            .into_iter()
-            .map(|b| block::BlockType::Device(b))
-            .collect();
-        Ok(block_list::BlockList::from_rust(
-            blocks,
-            self.dtype.clone(),
-            self.device_id,
-        ))
-    }
+            .drt()
+            .primary_lease()
+            .map(|lease| lease.id())
+            .ok_or_else(|| to_pyerr(anyhow::anyhow!("no instance id")))?;
 
-    #[pyo3(signature = (count))]
-    fn allocate_device_blocks<'py>(
-        &self,
-        py: Python<'py>,
-        count: usize,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        let dtype = self.dtype.clone();
-        let device_id = self.device_id;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let blocks = inner
-                .device()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
-                })?
-                .allocate_blocks(count)
-                .await
-                .map_err(to_pyerr)?;
-            // Wrap each block in an enum accounting for Pinned & Device block
-            let blocks = blocks
-                .into_iter()
-                .map(|b| block::BlockType::Device(b))
-                .collect();
-            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
-        })
+        tracing::info!(
+            "Dynamo KVBM Controller: {}.{}:{}",
+            component.inner.namespace().name(),
+            component.inner.name(),
+            instance_id
+        );
+
+        Ok(())
+    }
+}
+
+impl BlockManager {
+    #[inline(always)]
+    pub fn get_block_manager(&self) -> &VllmBlockManager {
+        &self.inner
     }
 }

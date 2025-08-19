@@ -997,7 +997,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(dynamo_component_errors_total{dynamendpoint=\"generate\"}[1m])",
+          "expr": "rate(dynamo_component_errors_total{dynamo_endpoint=\"generate\"}[1m])",
           "legendFormat": "{{error_type}}",
           "range": true,
           "refId": "A"

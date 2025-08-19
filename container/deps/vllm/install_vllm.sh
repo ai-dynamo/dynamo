@@ -20,13 +20,16 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="77a6bf07aedf132aad2b6719f6d87abc5d3311ab"
+VLLM_REF="aab549870df50edf0512f0a59b574f692f546465"  # from v0.10.1
+# When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
+# aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
+VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1-cp38-abi3-manylinux1_x86_64.whl"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
 DEEPGEMM_REF="f85ec64"
-FLASHINF_REF="v0.2.8rc1"
+FLASHINF_REF="v0.2.11"
 TORCH_BACKEND="cu128"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
@@ -83,13 +86,13 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
-            echo "  --vllm-ref REF    Git reference to checkout (default: f4135232b9a8c4845f8961fb1cd17581c56ae2ce)"
-            echo "  --max-jobs NUM    Maximum number of parallel jobs (default: 16)"
+            echo f"  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
+            echo f"  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
-            echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
-            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 1876566)"
-            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: v0.2.8rc1)"
-            echo "  --torch-backend BACKEND  Torch backend to use (default: cu128)"
+            echo f"  --installation-dir DIR  Directory to install vllm (default: ${INSTALLATION_DIR})"
+            echo f"  --deepgemm-ref REF  Git reference for DeepGEMM (default: ${DEEPGEMM_REF})"
+            echo f"  --flashinf-ref REF  Git reference for Flash Infer (default: ${FLASHINF_REF})"
+            echo f"  --torch-backend BACKEND  Torch backend to use (default: ${TORCH_BACKEND})"
             exit 0
             ;;
         *)
@@ -154,7 +157,7 @@ else
         exit 1
     fi
 
-    export VLLM_PRECOMPILED_WHEEL_LOCATION=https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    export VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_PRECOMPILED_WHEEL_LOCATION}"
 
     if [ "$EDITABLE" = "true" ]; then
 	uv pip install -e . --torch-backend=$TORCH_BACKEND
