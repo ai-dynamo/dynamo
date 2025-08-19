@@ -20,11 +20,12 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
+VLLM_REF="77a6bf07aedf132aad2b6719f6d87abc5d3311ab"
+VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="03d0be3"
+DEEPGEMM_REF="f85ec64"
 FLASHINF_REF="v0.2.8rc1"
 TORCH_BACKEND="cu128"
 
@@ -47,6 +48,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --vllm-ref)
             VLLM_REF="$2"
+            shift 2
+            ;;
+        --vllm-git-url)
+            VLLM_GIT_URL="$2"
             shift 2
             ;;
         --max-jobs)
@@ -107,13 +112,17 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 # Install common dependencies
 uv pip install pip cuda-python
 
-# Install LMCache
-uv pip install lmcache
+if [ "$ARCH" = "amd64" ]; then
+    # LMCache installation currently fails on arm64 due to CUDA dependency issues:
+    # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
+    # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
+    uv pip install lmcache==0.3.3
+fi
 
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
 cd $INSTALLATION_DIR
-git clone https://github.com/vllm-project/vllm.git
+git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
@@ -122,7 +131,7 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+    if ! uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl; then
         echo "Pinned versions failed"
         exit 1
         # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
@@ -138,17 +147,26 @@ if [ "$ARCH" = "arm64" ]; then
     fi
 else
     echo "Installing vllm for AMD64 architecture"
+
+    echo "Attempting to install pinned OpenAI version..."
+    if ! uv pip install  openai==1.99.9; then
+        echo "Pinned versions failed"
+        exit 1
+    fi
+
+    export VLLM_PRECOMPILED_WHEEL_LOCATION=https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+
     if [ "$EDITABLE" = "true" ]; then
-        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=$TORCH_BACKEND
+	uv pip install -e . --torch-backend=$TORCH_BACKEND
     else
-        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
+        uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
 
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-bash install_python_libraries.sh # These libraries aren't pinned.
+TORCH_CUDA_ARCH_LIST="9.0;10.0" bash install_python_libraries.sh # These libraries aren't pinned.
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM

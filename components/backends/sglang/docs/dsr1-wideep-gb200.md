@@ -29,7 +29,7 @@ docker build \
   -f container/Dockerfile.sglang-wideep \
   -t dynamo-wideep-gb200 \
   --build-arg MODE=blackwell \
-  --build-arg SGLANG_IMAGE_TAG=v0.4.9.post6-cu128-gb200 \
+  --build-arg SGLANG_IMAGE_TAG=v0.5.0rc0-cu129-gb200 \
   --build-arg ARCH=arm64 \
   --build-arg ARCH_ALT=aarch64 \
   .
@@ -80,7 +80,7 @@ NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
 SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --model-path /model/ \
   --skip-tokenizer-init \
@@ -131,7 +131,7 @@ NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
 SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --model-path /model/ \
   --skip-tokenizer-init \

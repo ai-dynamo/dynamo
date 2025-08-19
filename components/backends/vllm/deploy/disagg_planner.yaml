@@ -5,53 +5,22 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
+  annotations:
+    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
-    - name: DYNAMO_PORT
-      value: "8000"
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
-      componentType: main
+      componentType: frontend
       replicas: 1
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 20
-        periodSeconds: 5
-        timeoutSeconds: 5
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      resources:
-        requests:
-          cpu: "32"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000"
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -76,32 +45,31 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       pvc:
         create: false
         name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/planner/src/dynamo/planner
+          ports:
+            - name: metrics
+              containerPort: 9085
+          command:
+            - /bin/sh
+            - -c
           args:
-            - python
-            - -m
-            - planner_sla
-            - --environment=kubernetes
-            - --backend=vllm
-            - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
-    Prometheus:
+            - >-
+              python3 -m planner_sla
+              --environment=kubernetes
+              --backend=vllm
+              --adjustment-interval=60
+              --profile-results-dir=/workspace/profiling_results
+              --prometheus-port=9085
+    Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
-      componentType: main
+      componentType: frontend
       replicas: 1
       envs:
         - name: PYTHONPATH
@@ -125,16 +93,9 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -146,36 +107,9 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       resources:
-        requests:
-          cpu: "8"
-          memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -184,48 +118,21 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       resources:
-        requests:
-          cpu: "8"
-          memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -234,10 +141,10 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3 2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3

@@ -290,7 +290,11 @@ async fn completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // TODO: report ISL/OSL for non-streaming requests
+        // Tap the stream to collect metrics for non-streaming requests without altering items
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
+        });
+
         let response = NvCreateCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
@@ -515,7 +519,10 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // TODO: report ISL/OSL for non-streaming requests
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
+        });
+
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
@@ -911,6 +918,17 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
     }
 }
 
+fn process_metrics_only<T>(
+    annotated: &Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+) {
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+    }
+}
+
 fn process_event_converter<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
@@ -1237,6 +1255,7 @@ mod tests {
                 messages: vec![],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1263,6 +1282,7 @@ mod tests {
                 )],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);

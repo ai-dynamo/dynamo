@@ -4,6 +4,16 @@
 
 To ensure Dynamo deployments comply with the SLA, we provide a pre-deployment script to profile the model performance with different parallelization mappings and recommend the parallelization mapping for prefill and decode workers and planner configurations. To use this script, the user needs to provide the target ISL, OSL, TTFT SLA, and ITL SLA.
 
+Support matrix:
+| Backends | Model Types | Supported |
+| --- | --- | --- |
+| vLLM | Dense | ✅ |
+| vLLM | MoE | 🚧 |
+| SGLang | Dense | ✅ |
+| SGLang | MoE | 🚧 |
+| TensorRT-LLM | Dense | 🚧 |
+| TensorRT-LLM | MoE | 🚧 |
+
 > [!NOTE]
 > The script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
 
@@ -103,7 +113,7 @@ Use the default pre-built image and inject custom configurations via PVC:
 
 3. **Set the config path for the profiling job:**
    ```bash
-   export DGD_CONFIG_FILE=/profiling_results/disagg.yaml # or your custom path
+   export DGD_CONFIG_FILE=/workspace/profiling_results/disagg.yaml # or your custom path
    ```
 
 This approach allows you to:
@@ -120,7 +130,7 @@ This approach allows you to:
 Only needed if you require custom code modifications beyond configuration changes:
 ```bash
 # in the project's root folder
-./container/build.sh --framework VLLM
+./container/build.sh --framework <VLLM/sglang>
 # Tag and push to your container registry
 export DOCKER_IMAGE=<your docker tag>
 export DGD_CONFIG_FILE=<disagg config path> # path to your disagg.yaml file within the DOCKER_IMAGE
@@ -128,7 +138,7 @@ export DGD_CONFIG_FILE=<disagg config path> # path to your disagg.yaml file with
 
 **Step 2: Set SLA target**
 
-Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL.
+Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
 
 ```yaml
 spec:
@@ -145,6 +155,8 @@ spec:
             - "200" # target TTFT is 200ms
             - --itl
             - "20" # target ITL is 20ms
+            - --backend
+            - <vllm/sglang>
 ```
 
 **Step 3: Run profiling (required)**

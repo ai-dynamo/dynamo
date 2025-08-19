@@ -144,7 +144,7 @@ impl EndpointConfigBuilder {
         if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
             if let Err(e) = etcd_client
                 .kv_create(
-                    endpoint.etcd_path_with_lease_id(lease_id),
+                    &endpoint.etcd_path_with_lease_id(lease_id),
                     info,
                     Some(lease_id),
                 )

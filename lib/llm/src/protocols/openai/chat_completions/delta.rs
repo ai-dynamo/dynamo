@@ -14,7 +14,10 @@
 // limitations under the License.
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
-use crate::protocols::common;
+use crate::{
+    protocols::common::{self},
+    types::TokenIdType,
+};
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
@@ -25,7 +28,8 @@ impl NvCreateChatCompletionRequest {
     pub fn response_generator(&self) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
             enable_usage: true,
-            enable_logprobs: self.inner.logprobs.unwrap_or(false),
+            enable_logprobs: self.inner.logprobs.unwrap_or(false)
+                || self.inner.top_logprobs.unwrap_or(0) > 0,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options)
@@ -110,6 +114,71 @@ impl DeltaGenerator {
     /// * `isl` - The number of prompt tokens used.
     pub fn update_isl(&mut self, isl: u32) {
         self.usage.prompt_tokens = isl;
+    }
+
+    pub fn create_logprobs(
+        &self,
+        tokens: Vec<common::llm_backend::TokenType>,
+        token_ids: Vec<TokenIdType>,
+        logprobs: Option<common::llm_backend::LogProbs>,
+        top_logprobs: Option<common::llm_backend::TopLogprobs>,
+    ) -> Option<async_openai::types::ChatChoiceLogprobs> {
+        if !self.options.enable_logprobs || logprobs.is_none() {
+            return None;
+        }
+
+        let toks = tokens
+            .into_iter()
+            .zip(token_ids)
+            .map(|(token, token_id)| (token.unwrap_or_default(), token_id))
+            .collect::<Vec<(String, TokenIdType)>>();
+        let tok_lps = toks
+            .iter()
+            .zip(logprobs.unwrap())
+            .map(|(_, lp)| lp as f32)
+            .collect::<Vec<f32>>();
+
+        let content = top_logprobs.map(|top_logprobs| {
+            toks.iter()
+                .zip(tok_lps)
+                .zip(top_logprobs)
+                .map(|(((t, tid), lp), top_lps)| {
+                    let mut found_selected_token = false;
+                    let mut converted_top_lps = top_lps
+                        .iter()
+                        .map(|top_lp| {
+                            let top_t = top_lp.token.clone().unwrap_or_default();
+                            let top_tid = top_lp.token_id;
+                            found_selected_token = found_selected_token || top_tid == *tid;
+                            async_openai::types::TopLogprobs {
+                                token: top_t,
+                                logprob: top_lp.logprob as f32,
+                                bytes: None,
+                            }
+                        })
+                        .collect::<Vec<async_openai::types::TopLogprobs>>();
+                    if !found_selected_token {
+                        // If the selected token is not in the top logprobs, add it
+                        converted_top_lps.push(async_openai::types::TopLogprobs {
+                            token: t.clone(),
+                            logprob: lp,
+                            bytes: None,
+                        });
+                    }
+                    async_openai::types::ChatCompletionTokenLogprob {
+                        token: t.clone(),
+                        logprob: lp,
+                        bytes: None,
+                        top_logprobs: converted_top_lps,
+                    }
+                })
+                .collect()
+        });
+
+        Some(async_openai::types::ChatChoiceLogprobs {
+            content,
+            refusal: None,
+        })
     }
 
     /// Creates a choice within a chat completion response.
@@ -203,8 +272,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             self.usage.completion_tokens += token_length;
         }
 
-        // TODO: Implement log probabilities aggregation.
-        let logprobs = None;
+        let logprobs = self.create_logprobs(
+            delta.tokens,
+            delta.token_ids,
+            delta.log_probs,
+            delta.top_logprobs,
+        );
 
         // Map backend finish reasons to OpenAI's finish reasons.
         let finish_reason = match delta.finish_reason {

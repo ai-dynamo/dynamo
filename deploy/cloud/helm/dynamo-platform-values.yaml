@@ -32,7 +32,7 @@ dynamo-operator:
       gateway: ${ISTIO_GATEWAY}
     ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
-      useKubernetesSecret: true
+      useKubernetesSecret: ${DOCKER_REGISTRY_USE_KUBERNETES_SECRET}
       server: ${PIPELINES_DOCKER_SERVER}
       username: ${PIPELINES_DOCKER_USERNAME}
       password: ${PIPELINES_DOCKER_PASSWORD}

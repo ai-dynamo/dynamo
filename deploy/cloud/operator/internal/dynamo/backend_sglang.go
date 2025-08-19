@@ -6,27 +6,30 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+)
+
+const (
+	SglangPort = "29500"
 )
 
 type SGLangBackend struct{}
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return
 	}
 
-	// Remove probes for multinode leader and worker
-	if role == RoleLeader || role == RoleWorker {
+	// Remove probes for multinode worker
+	if role == RoleWorker {
 		container.LivenessProbe = nil
 		container.ReadinessProbe = nil
 		container.StartupProbe = nil
 	}
 
 	// Generate the flags to add
-	flags := b.getMultinodeFlags(numberOfNodes, role, multinodeDeploymentType, serviceName)
+	flags := b.getMultinodeFlags(numberOfNodes, role, serviceName, multinodeDeployer)
 	if flags == "" {
 		return
 	}
@@ -39,33 +42,18 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, serviceName string) {
 	// do nothing
 }
 
 // getMultinodeFlags returns the multinode flags as a single string
-func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) string {
-	var distInitAddr, nodeRank string
-
-	// Determine dist-init-addr
-	if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
-		leaderHostname := generateGroveLeaderHostname(serviceName)
-		distInitAddr = fmt.Sprintf("%s:29500", leaderHostname)
-	} else {
-		distInitAddr = "${LWS_LEADER_ADDRESS}:29500"
-	}
-
+func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) string {
+	distInitAddr := fmt.Sprintf("%s:%s", multinodeDeployer.GetLeaderHostname(serviceName), SglangPort)
+	nodeRank := multinodeDeployer.GetNodeRank()
 	// Determine node-rank
 	if role == RoleLeader {
 		nodeRank = "0"
-	} else {
-		if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
-			nodeRank = "$((GROVE_PCLQ_POD_INDEX + 1))"
-		} else {
-			nodeRank = "${LWS_WORKER_INDEX}"
-		}
 	}
-
 	return fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
 }
 

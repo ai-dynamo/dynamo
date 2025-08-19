@@ -36,7 +36,11 @@ impl CompletionSample {
 
         let inner = builder.build().unwrap();
 
-        let request = NvCreateCompletionRequest { inner, nvext: None };
+        let request = NvCreateCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+        };
 
         Ok(Self {
             request,

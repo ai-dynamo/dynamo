@@ -20,10 +20,10 @@ from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
 from transformers import AutoConfig
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.engine import get_llm_engine
+from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -47,6 +47,39 @@ async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
+
+
+async def get_engine_runtime_config(
+    engine: TensorRTLLMEngine, config: Config
+) -> ModelRuntimeConfig:
+    """Retrieve runtime configuration from TensorRT-LLM engine."""
+    runtime_config = ModelRuntimeConfig()
+
+    try:
+        # Extract total_kv_blocks from engine stats
+        stats = engine.llm.get_stats_async(timeout=5)
+        stat = await anext(stats)
+        runtime_config.total_kv_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+        logging.info(
+            f"Set runtime config total_kv_blocks: {runtime_config.total_kv_blocks}"
+        )
+
+        # Extract max number of sequences
+        runtime_config.max_num_seqs = config.max_batch_size
+        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
+
+        # Get max_num_batched_tokens from config
+        runtime_config.max_num_batched_tokens = config.max_num_tokens
+        logging.info(
+            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+        )
+
+        return runtime_config
+
+    except Exception as e:
+        logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
+        # Return config with default/None values if retrieval fails
+        return runtime_config
 
 
 @dynamo_worker(static=False)
@@ -196,7 +229,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         endpoint = component.endpoint(config.endpoint)
 
         if is_first_worker(config):
-            # Register the model with the endpoint if only the worker is first in the disaggregation chain.
+            # Register the model with runtime config
             await register_llm(
                 modelType,
                 endpoint,

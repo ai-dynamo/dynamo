@@ -52,7 +52,7 @@ jobs:
             - 'components/backends/vllm/**'
             - 'tests/serve/test_vllm.py'
           trtllm:
-            - 'container/Dockerfile.tensorrt_llm'
+            - 'container/Dockerfile.trtllm'
             - 'components/backends/trtllm/**'
             - 'container/build.sh'
             - 'container/build_trtllm_wheel.sh'
@@ -105,7 +105,7 @@ jobs:
         fi
 
         if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
-          ci_variables["RUN_TENSORRTLLM"]="true"
+          ci_variables["RUN_TRTLLM"]="true"
         fi
 
         if [ "${{ steps.src_changes.outputs.sglang }}" == "true" ]; then

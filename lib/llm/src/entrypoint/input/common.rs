@@ -22,6 +22,7 @@ use crate::{
         Annotated,
     },
 };
+
 use dynamo_runtime::{
     component::Client,
     distributed::DistributedConfig,
@@ -110,6 +111,7 @@ pub async fn prepare_engine(
             let component = distributed_runtime
                 .namespace(&endpoint_id.namespace)?
                 .component(&endpoint_id.component)?;
+
             let client = component.endpoint(&endpoint_id.name).client().await?;
 
             let kv_chooser = if router_mode == RouterMode::KV {

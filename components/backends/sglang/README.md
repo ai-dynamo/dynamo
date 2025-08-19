@@ -37,7 +37,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ❌ | Planned |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
@@ -52,7 +52,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Quick Start
 
-Below we provide a guide that lets you run all of our the common deployment patterns on a single node. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
+Below we provide a guide that lets you run all of our common deployment patterns on a single node.
 
 ### Start NATS and ETCD in the background
 
@@ -141,6 +141,9 @@ cd $DYNAMO_HOME/components/backends/sglang
 
 ### Aggregated Serving with KV Routing
 
+> [!NOTE]
+> Until sglang releases a version > v0.5.0rc0, you will have to install from source to use kv_routing. You can do this by running `git clone https://github.com/sgl-project/sglang.git && cd sglang && uv pip install -e "python[all]"`. We will update this section once sglang releases a newer version.
+
 ```bash
 cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_router.sh
@@ -197,7 +200,7 @@ curl localhost:8000/v1/chat/completions \
         "content": "Explain why Roger Federer is considered one of the greatest tennis players of all time"
     }
     ],
-    "stream": false,
+    "stream": true,
     "max_tokens": 30
   }'
 ```
@@ -222,9 +225,6 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 ### Large scale P/D disaggregation with WideEP
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
 - **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
-
-### Supporting SGLang's native endpoints via Dynamo
-- **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
 
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**

@@ -23,6 +23,7 @@ dynamo-operator:
     enabled: true
     targetNamespace:
   controllerManager:
+    tolerations: []
     manager:
       image:
         repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
@@ -75,6 +76,8 @@ etcd:
 
   livenessProbe:
     enabled: false
+
+  tolerations: []
 
 nats:
   enabled: true
@@ -337,7 +340,9 @@ nats:
 
     # merge or patch the pod template
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#pod-v1-core
-    merge: {}
+    merge:
+      spec:
+        tolerations: []
     patch: []
 
   # headless service
@@ -435,3 +440,9 @@ nats:
     # service account
     serviceAccount:
       enabled: false
+
+    podTemplate:
+      merge:
+        spec:
+          tolerations: []
+      patch: []

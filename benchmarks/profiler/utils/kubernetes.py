@@ -78,7 +78,7 @@ def deploy_access_pod(namespace: str) -> str:
     print(f"Deploying access pod '{pod_name}' in namespace '{namespace}'...")
 
     # Get the directory where this script is located
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.parent
     pod_yaml_path = script_dir / "deploy" / "pvc-access-pod.yaml"
 
     if not pod_yaml_path.exists():

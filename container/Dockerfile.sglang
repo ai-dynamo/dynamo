@@ -27,7 +27,7 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.4.9.post6"
+ARG SGLANG_VERSION="0.5.0rc2"
 
 ##################################
 ########## Base Image ############
@@ -231,6 +231,20 @@ ARG CARGO_BUILD_JOBS
 # which might exceed the number of opened files limit.
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
+
 #######################################
 ########## Local Development ##########
 #######################################
@@ -323,6 +337,7 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/

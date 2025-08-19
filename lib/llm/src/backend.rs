@@ -95,12 +95,16 @@ impl Backend {
     fn decoder(
         &self,
         stream: ManyOut<ExecutionOutputStream>,
+        prompt_token_ids: &[TokenIdType],
         stop_conditions: StopConditions,
     ) -> anyhow::Result<DecoderUnfoldState> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
-        let decoder = Decoder::new(tokenizer.decode_stream(false), stop_conditions);
+        let decoder = Decoder::new(
+            tokenizer.decode_stream(prompt_token_ids, false),
+            stop_conditions,
+        );
 
         Ok(DecoderUnfoldState {
             stream,
@@ -125,10 +129,13 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
         let stop_conditions = request.stop_conditions.clone();
+
+        let prompt_token_ids = request.token_ids.clone();
+
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(next_stream, stop_conditions)?;
+        let state = self.decoder(next_stream, &prompt_token_ids, stop_conditions)?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             match state.stream.next().await {
@@ -224,6 +231,7 @@ impl
                     text: data.text,
                     cum_log_probs: data.cum_log_probs,
                     log_probs: data.log_probs,
+                    top_logprobs: data.top_logprobs,
                     finish_reason: data.finish_reason,
                     //mdcsum: mdcsum.clone(),
                     index: data.index,

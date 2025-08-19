@@ -41,6 +41,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | WIP |
+| [**LMCache**](./LMCache_Integration.md) | ✅ |  |
 
 ### Large Scale P/D and WideEP Features
 
@@ -152,73 +153,7 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 
 ### Kubernetes Deployment
 
-For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
-
-- `agg.yaml` - Aggregated serving
-- `agg_router.yaml` - Aggregated serving with KV routing
-- `disagg.yaml` - Disaggregated serving
-- `disagg_router.yaml` - Disaggregated serving with KV routing
-- `disagg_planner.yaml` - Disaggregated serving with [SLA Planner](../../../docs/architecture/sla_planner.md). See [SLA Planner Deployment Guide](../../../docs/guides/dynamo_deploy/sla_planner_deployment.md) for more details.
-
-#### Prerequisites
-
-- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
-
-- **Container Images**: We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
-  ```bash
-  ./container/build.sh --framework VLLM
-  # Tag and push to your container registry
-  # Update the image references in the YAML files
-  ```
-
-- **Pre-Deployment Profiling (if Using SLA Planner)**: Follow the [pre-deployment profiling guide](../../../docs/architecture/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `profiling-pvc` PVC and queried by the SLA Planner.
-
-- **Port Forwarding**: After deployment, forward the frontend service to access the API:
-  ```bash
-  kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
-  ```
-
-#### Deploy to Kubernetes
-
-Example with disagg:
-Export the NAMESPACE  you used in your Dynamo Cloud Installation.
-
-```bash
-cd dynamo
-cd components/backends/vllm/deploy
-kubectl apply -f disagg.yaml -n $NAMESPACE
-```
-
-To change `DYN_LOG` level, edit the yaml file by adding
-
-```yaml
-...
-spec:
-  envs:
-    - name: DYN_LOG
-      value: "debug" # or other log levels
-  ...
-```
-
-### Testing the Deployment
-
-Send a test request to verify your deployment:
-
-```bash
-curl localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-    }
-    ],
-    "stream": false,
-    "max_tokens": 30
-  }'
-```
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](deploy/README.md)
 
 ## Configuration
 

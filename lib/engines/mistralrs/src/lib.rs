@@ -590,7 +590,7 @@ impl
                             None => None,
                         };
                         #[allow(deprecated)]
-                        let inner = response_generator.create_choice(0, Some(from_assistant), None);
+                        let inner = response_generator.create_choice(0, Some(from_assistant), None, None);
                         let ann = Annotated{
                             id: None,
                             data: Some(inner),

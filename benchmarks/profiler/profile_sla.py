@@ -21,7 +21,7 @@ import os
 
 import numpy as np
 import yaml
-from utils.config import CONFIG_MODIFIERS
+from utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
 from utils.dynamo_deployment import (
     DynamoDeploymentClient,
@@ -35,9 +35,8 @@ from utils.profile_cache import (
     load_existing_decode_results,
     load_existing_prefill_results,
 )
+from utils.profile_decode import profile_decode
 from utils.profile_prefill import profile_prefill
-
-from benchmarks.profiler.utils.profile_decode import profile_decode
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -140,6 +139,7 @@ async def run_profile(args):
                 model_name=model_name,
                 service_name=args.service_name,
                 frontend_port=frontend_port,
+                deployment_name=prefill_config["metadata"]["name"],
             )
             logger.info(f"Created client with service_name: {client.service_name}")
             deployment_clients.append(client)  # Track for cleanup
@@ -247,6 +247,7 @@ async def run_profile(args):
                 model_name=model_name,
                 service_name=args.service_name,
                 frontend_port=frontend_port,
+                deployment_name=decode_config["metadata"]["name"],
             )
             deployment_clients.append(client)  # Track for cleanup
             await client.create_deployment(decode_config_fn)
@@ -261,7 +262,7 @@ async def run_profile(args):
             )
 
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
             )
             max_concurrency = max_kv_tokens // (args.isl + args.osl)
             sweep_num_request = [
@@ -393,6 +394,7 @@ async def run_profile(args):
             model_name=model_name,
             service_name=args.service_name,
             frontend_port=frontend_port,
+            deployment_name=prefill_config["metadata"]["name"],
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(prefill_config_fn)
@@ -448,8 +450,10 @@ async def run_profile(args):
         client = DynamoDeploymentClient(
             namespace=args.namespace,
             base_log_dir=work_dir,
+            model_name=model_name,
             service_name=args.service_name,
             frontend_port=frontend_port,
+            deployment_name=decode_config["metadata"]["name"],
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(decode_config_fn)
@@ -464,7 +468,7 @@ async def run_profile(args):
         )
 
         max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-            f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+            f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
         )
 
         base_url = client.get_service_url()
@@ -508,8 +512,8 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="vllm",
-        choices=["vllm"],
-        help="backend type, currently support [vllm]",
+        choices=["vllm", "sglang"],
+        help="backend type, currently support [vllm, sglang]",
     )
     parser.add_argument(
         "--config",

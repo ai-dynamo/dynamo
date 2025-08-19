@@ -20,7 +20,10 @@ use validator::Validate;
 use crate::engines::ValidateRequest;
 
 use super::{
-    nvext::NvExt, nvext::NvExtProvider, validate, OpenAISamplingOptionsProvider,
+    common_ext::{CommonExt, CommonExtProvider},
+    nvext::NvExt,
+    nvext::NvExtProvider,
+    validate, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
 };
 
@@ -31,16 +34,20 @@ pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
 /// A request structure for creating a chat completion, extending OpenAI's
-/// `CreateChatCompletionRequest` with [`NvExt`] extensions.
+/// `CreateChatCompletionRequest` with [`NvExt`] extensions and common fields.
 ///
 /// # Fields
 /// - `inner`: The base OpenAI chat completion request, embedded using `serde(flatten)`.
-/// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for
-///   more details.
+/// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
+/// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
+///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateChatCompletionRequest,
+
+    #[serde(flatten, default)]
+    pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -139,6 +146,52 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     }
 }
 
+/// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
+/// providing access to common extension fields.
+impl CommonExtProvider for NvCreateChatCompletionRequest {
+    /// Returns a reference to the CommonExt struct.
+    fn common_ext(&self) -> Option<&CommonExt> {
+        Some(&self.common)
+    }
+
+    /// Guided Decoding Options
+    fn get_guided_json(&self) -> Option<&serde_json::Value> {
+        self.common
+            .guided_json
+            .as_ref()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+    }
+
+    fn get_guided_regex(&self) -> Option<String> {
+        self.common
+            .guided_regex
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_regex.clone()))
+    }
+
+    fn get_guided_grammar(&self) -> Option<String> {
+        self.common
+            .guided_grammar
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_grammar.clone()))
+    }
+
+    fn get_guided_choice(&self) -> Option<Vec<String>> {
+        self.common
+            .guided_choice
+            .clone()
+            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_choice.clone()))
+    }
+
+    fn get_guided_decoding_backend(&self) -> Option<String> {
+        self.common.guided_decoding_backend.clone().or_else(|| {
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_decoding_backend.clone())
+        })
+    }
+}
+
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to stop conditions that control chat completion behavior.
 impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
@@ -149,12 +202,10 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     }
 
     /// Retrieves the minimum number of tokens required in the response.
-    ///
-    /// # Note
-    /// This method is currently a placeholder and always returns `None`
-    /// since `min_tokens` is not an OpenAI-supported parameter.
+    /// Returns `min_tokens` Value
+    /// `min_tokens` is not an OpenAI-supported parameter.
     fn get_min_tokens(&self) -> Option<u32> {
-        None
+        self.common.min_tokens
     }
 
     /// Retrieves the stop conditions that terminate the chat completion response.
@@ -174,6 +225,36 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// Returns a reference to the optional `NvExt` extension, if available.
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    /// Get ignore_eos from CommonExt.
+    fn get_common_ignore_eos(&self) -> Option<bool> {
+        self.common.ignore_eos
+    }
+}
+
+impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
+    fn get_logprobs(&self) -> Option<u32> {
+        match self.inner.logprobs {
+            Some(true) => match self.inner.top_logprobs {
+                Some(top_logprobs) => Some(top_logprobs as u32),
+                None => Some(1_u32),
+            },
+            Some(false) => None,
+            None => None,
+        }
+    }
+
+    fn get_prompt_logprobs(&self) -> Option<u32> {
+        None
+    }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_formatted_prompt(&self) -> Option<bool> {
+        None
     }
 }
 

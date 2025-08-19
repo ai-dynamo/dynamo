@@ -62,7 +62,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         default=SLAPlannerDefaults.backend,
-        choices=["vllm"],
+        choices=["vllm", "sglang"],
         help="Backend type",
     )
     parser.add_argument(
@@ -134,6 +134,12 @@ if __name__ == "__main__":
         type=int,
         default=SLAPlannerDefaults.load_prediction_window_size,
         help="Load prediction window size",
+    )
+    parser.add_argument(
+        "--prometheus-port",
+        type=int,
+        default=SLAPlannerDefaults.prometheus_port,
+        help="Prometheus port",
     )
 
     args = parser.parse_args()

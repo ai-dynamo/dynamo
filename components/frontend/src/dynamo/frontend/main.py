@@ -16,10 +16,15 @@
 # Worker example:
 # - cd lib/bindings/python/examples/hello_world
 # - python server_sglang_static.py
+#
+# For TLS:
+# - python -m dynamo.frontend --http-port 8443 --tls-cert-path cert.pem --tls-key-path key.pem
+#
 
 import argparse
 import asyncio
 import os
+import pathlib
 import re
 
 import uvloop
@@ -34,6 +39,8 @@ from dynamo.llm import (
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
+
+from . import __version__
 
 
 def validate_static_endpoint(value):
@@ -72,20 +79,38 @@ def parse_args():
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
     )
     parser.add_argument(
+        "--version", action="version", version=f"Dynamo Frontend {__version__}"
+    )
+    parser.add_argument(
         "-i", "--interactive", action="store_true", help="Interactive text chat"
     )
     parser.add_argument(
         "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
     )
     parser.add_argument(
-        "--http-port", type=int, default=8080, help="HTTP port for the engine (u16)."
+        "--http-port",
+        type=int,
+        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
+    )
+    parser.add_argument(
+        "--tls-cert-path",
+        type=pathlib.Path,
+        default=None,
+        help="TLS certificate path, PEM format.",
+    )
+    parser.add_argument(
+        "--tls-key-path",
+        type=pathlib.Path,
+        default=None,
+        help="TLS certificate key path, PEM format.",
     )
     parser.add_argument(
         "--router-mode",
         type=str,
         choices=["round-robin", "random", "kv"],
-        default="round-robin",
-        help="How to route the request",
+        default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
+        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
     )
     parser.add_argument(
         "--kv-overlap-score-weight",
@@ -133,11 +158,19 @@ def parse_args():
         type=validate_model_path,
         help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
     )
+    parser.add_argument(
+        "--metrics-prefix",
+        type=str,
+        default=None,
+        help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
+    )
 
     flags = parser.parse_args()
 
     if flags.static_endpoint and (not flags.model_name or not flags.model_path):
         parser.error("--static-endpoint requires both --model-name and --model-path")
+    if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
+        parser.error("--tls-cert-path and --tls-key-path must be provided together")
 
     return flags
 
@@ -145,6 +178,12 @@ def parse_args():
 async def async_main():
     flags = parse_args()
     is_static = bool(flags.static_endpoint)  # true if the string has a value
+
+    # Configure Dynamo frontend HTTP service metrics prefix
+    if flags.metrics_prefix is not None:
+        prefix = flags.metrics_prefix.strip()
+        if prefix:
+            os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
     runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
 
@@ -175,6 +214,10 @@ async def async_main():
         kwargs["model_name"] = flags.model_name
     if flags.model_path:
         kwargs["model_path"] = flags.model_path
+    if flags.tls_cert_path:
+        kwargs["tls_cert_path"] = flags.tls_cert_path
+    if flags.tls_key_path:
+        kwargs["tls_key_path"] = flags.tls_key_path
 
     if is_static:
         # out=dyn://<static_endpoint>
