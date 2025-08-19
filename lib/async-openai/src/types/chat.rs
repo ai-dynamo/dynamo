@@ -449,6 +449,9 @@ pub struct ChatCompletionResponseMessage {
     /// If the audio output modality is requested, this object contains data about the audio response from the model. [Learn more](https://platform.openai.com/docs/guides/audio).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio: Option<ChatCompletionResponseMessageAudio>,
+
+    /// NVIDIA-specific extensions for the chat completion response.
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Clone, Serialize, Default, Debug, Deserialize, Builder, PartialEq)]

@@ -351,6 +351,7 @@ mod tests {
                     role: dynamo_async_openai::types::Role::Assistant,
                     function_call: None,
                     audio: None,
+                    reasoning_content: None,
                 },
                 finish_reason: None,
                 logprobs: None,
