@@ -96,11 +96,11 @@ pub fn dlpack<'py>(
     device_id: usize,
 ) -> PyResult<PyObject> {
     let manager_ctx = ManagerCtx::new(DlPackTensor {
-        block: block,
-        ptr: ptr,
-        shape: shape,
-        dtype: dtype,
-        device_id: device_id,
+        block,
+        ptr,
+        shape,
+        dtype,
+        device_id,
     });
     let py_capsule = manager_ctx.into_py(py);
     Ok(py_capsule)
