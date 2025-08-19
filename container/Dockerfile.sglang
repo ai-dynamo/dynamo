@@ -414,6 +414,7 @@ WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ARG SGLANG_VERSION
 
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from base image
