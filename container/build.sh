@@ -382,6 +382,7 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
     exit 0
 }
