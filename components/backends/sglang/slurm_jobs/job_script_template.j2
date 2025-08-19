@@ -43,7 +43,7 @@ for i in "${!nodes[@]}"; do
 done
 
 # Get IP address of the master node (first prefill node) for NATS/ETCD
-MASTER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[0]} ip route get $(getent ahosts ${nodes[0]} | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+MASTER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[0]} ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
 if [ -z "$MASTER_IP" ]; then
     echo "Error: Could not retrieve IP address for master host ${nodes[0]} on interface $NETWORK_INTERFACE"
     exit 1
