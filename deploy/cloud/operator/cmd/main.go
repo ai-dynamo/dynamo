@@ -84,13 +84,15 @@ func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
 	// Create REST mapper
 	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
 
-	// Use scale.New with the kubernetes client's REST client
-	scalesGetter := scale.New(
-		kubeClient.CoreV1().RESTClient(),
+	scalesGetter, err := scale.NewForConfig(
+		config,
 		restMapper,
 		dynamic.LegacyAPIPathResolverFunc,
 		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	return scalesGetter, nil
 }

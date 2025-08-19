@@ -44,6 +44,10 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 		return fmt.Errorf("failed to get current scale for %s %s (resource may not support scale subresource): %w", gvr.Resource, name, err)
 	}
 
+	if replicas < 0 {
+		return fmt.Errorf("replicas must be >= 0, got %d", replicas)
+	}
+
 	if currentScale.Spec.Replicas == replicas {
 		logger.V(1).Info("Resource already at desired replica count", "gvr", gvr, "name", name, "replicas", replicas)
 		return nil
@@ -51,8 +55,9 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 
 	scaleObj := &autoscalingv1.Scale{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name:            name,
+			Namespace:       namespace,
+			ResourceVersion: currentScale.ObjectMeta.ResourceVersion,
 		},
 		Spec: autoscalingv1.ScaleSpec{
 			Replicas: replicas,
