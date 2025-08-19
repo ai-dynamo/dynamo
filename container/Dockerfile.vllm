@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Base image can be overridden by build script to use pre-built dynamo base
-ARG DYNAMO_BASE_IMAGE=""
+# Dynamo base image MUST be provided by build script (use ./container/build.sh --framework VLLM)
+ARG DYNAMO_BASE_IMAGE
 ARG RELEASE_BUILD
 ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
