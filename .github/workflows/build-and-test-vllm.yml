@@ -15,6 +15,11 @@
 
 name: NVIDIA Github Validation - vLLM
 
+# Do not cancel merges into main
+concurrency:
+  group: pr-build-test-vllm-${{ github.event.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name != 'push' && github.ref_name != 'main' }}
+
 on:
   push:
     branches:
@@ -23,8 +28,7 @@ on:
 
 jobs:
   build-test:
-    runs-on:
-        group: GPU_runners
+    runs-on: gpu-l40-runners
     name: Build and Test - vLLM
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_vllm
