@@ -135,6 +135,7 @@ addopts = [
     "--strict-config",
     "--mypy",
     "--ignore-glob=*model.py",
+    "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
@@ -173,7 +174,8 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
-    "slow: marks tests as known to be slow"
+    "slow: marks tests as known to be slow",
+    "kvbm: marks tests for KV behavior and model determinism"
 ]
 
 # Linting/formatting

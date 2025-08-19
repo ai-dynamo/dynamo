@@ -43,6 +43,12 @@ impl MetricsRegistry for DistributedRuntime {
     }
 }
 
+impl std::fmt::Debug for DistributedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DistributedRuntime")
+    }
+}
+
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let (etcd_config, nats_config, is_static) = config.dissolve();

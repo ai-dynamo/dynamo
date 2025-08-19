@@ -26,13 +26,13 @@ description = "Dynamo LLM Library"
 
 [features]
 default = []
-
-# todo: enable this as default
+# todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
 testing-full  = ["testing-cuda", "testing-nixl"]
 testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
+testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda          = ["dep:cudarc"]
 integration = []
@@ -58,6 +58,7 @@ derive_builder = {workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures =  { workspace = true }
+futures-util = "0.3.31"
 hf-hub = { workspace = true }
 humantime = { workspace = true } # input/batch
 rand = { workspace = true }
@@ -68,6 +69,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+tmq = "0.5.0"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
