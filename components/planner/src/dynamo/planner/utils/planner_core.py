@@ -52,20 +52,23 @@ class Metrics:
 
 
 class Planner:
-    def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
-        self.runtime = runtime
+    def __init__(self, runtime: Optional[DistributedRuntime], args: argparse.Namespace, dryrun: bool = False):
         self.args = args
-        self.namespace = SLAPlannerDefaults.namespace
+        self.dryrun = dryrun
 
-        if not args.no_operation:
-            if args.environment == "kubernetes":
-                self.connector = KubernetesConnector(self.namespace)
-            else:
-                raise ValueError(f"Invalid environment: {args.environment}")
+        if not self.dryrun:
+            self.runtime = runtime
+            self.namespace = SLAPlannerDefaults.namespace
 
-        self.prometheus_api_client = PrometheusAPIClient(
-            SLAPlannerDefaults.prometheus_endpoint
-        )
+            if not args.no_operation:
+                if args.environment == "kubernetes":
+                    self.connector = KubernetesConnector(self.namespace)
+                else:
+                    raise ValueError(f"Invalid environment: {args.environment}")
+
+            self.prometheus_api_client = PrometheusAPIClient(
+                SLAPlannerDefaults.prometheus_endpoint
+            )
 
         self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
             window_size=args.load_prediction_window_size,
@@ -80,33 +83,34 @@ class Planner:
         self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
         self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
 
-        self.prefill_client = None
-        self.workers_client = None
-        self.p_endpoints = []  # type: ignore
-        self.d_endpoints = []  # type: ignore
+        if not self.dryrun:
+            self.prefill_client = None
+            self.workers_client = None
+            self.p_endpoints = []  # type: ignore
+            self.d_endpoints = []  # type: ignore
 
-        self.last_adjustment_time = time.time()
-        self.last_metrics = Metrics()
+            self.last_adjustment_time = time.time()
+            self.last_metrics = Metrics()
 
-        self.p_correction_factor = 1.0
-        self.d_correction_factor = 1.0
+            self.p_correction_factor = 1.0
+            self.d_correction_factor = 1.0
 
-        self.prometheus_port = args.prometheus_port
+            self.prometheus_port = args.prometheus_port
 
-        # Initialize Prometheus metrics
-        # TODO: use proper naming
-        self.num_p_workers_gauge = Gauge("num_p_workers", "Number of prefill workers")
-        self.num_d_workers_gauge = Gauge("num_d_workers", "Number of decode workers")
+            # Initialize Prometheus metrics
+            # TODO: use proper naming
+            self.num_p_workers_gauge = Gauge("num_p_workers", "Number of prefill workers")
+            self.num_d_workers_gauge = Gauge("num_d_workers", "Number of decode workers")
 
-        # Start Prometheus HTTP server if port is specified
-        if self.prometheus_port != 0:
-            try:
-                start_http_server(self.prometheus_port)
-                logger.info(
-                    f"Started Prometheus metrics server on port {self.prometheus_port}"
-                )
-            except Exception as e:
-                logger.error(f"Failed to start Prometheus metrics server: {e}")
+            # Start Prometheus HTTP server if port is specified
+            if self.prometheus_port != 0:
+                try:
+                    start_http_server(self.prometheus_port)
+                    logger.info(
+                        f"Started Prometheus metrics server on port {self.prometheus_port}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to start Prometheus metrics server: {e}")
 
     async def get_workers_info(self):
         try:
@@ -203,6 +207,29 @@ class Planner:
         self.isl_predictor.add_data_point(self.last_metrics.isl)
         self.osl_predictor.add_data_point(self.last_metrics.osl)
 
+    def predict_load(self):
+        try:
+            # predict the next load
+            next_num_req = self.num_req_predictor.predict_next()
+            next_isl = self.isl_predictor.predict_next()
+            next_osl = self.osl_predictor.predict_next()
+            logger.info(
+                f"Predicted load: num_req={next_num_req:.2f}, isl={next_isl:.2f}, osl={next_osl:.2f}"
+            )
+            return next_num_req, next_isl, next_osl
+        except Exception as e:
+            logger.error(f"Failed to predict load: {e}")
+            return None, None, None, None
+
+    def dryrun_observe_metrics(self, num_req: int, isl_avg: float, osl_avg: float):
+        self.num_req_predictor.add_data_point(num_req)
+        self.isl_predictor.add_data_point(isl_avg)
+        self.osl_predictor.add_data_point(osl_avg)
+
+    def dryrun_make_adjustments(self):
+
+
+
     async def make_adjustments(self):
         try:
             # Skip adjustment if no traffic
@@ -239,91 +266,82 @@ class Planner:
             logger.error(f"Failed to correct prediction factors: {e}")
             return
 
-        try:
-            # predict the next load
-            next_num_req = self.num_req_predictor.predict_next()
-            next_isl = self.isl_predictor.predict_next()
-            next_osl = self.osl_predictor.predict_next()
-            logger.info(
-                f"Predicted load: num_req={next_num_req:.2f}, isl={next_isl:.2f}, osl={next_osl:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to predict load: {e}")
-            return
+        next_num_req, next_isl, next_osl = self.predict_load()
 
-        try:
-            # compute how many replicas are needed for prefill
-            # here we assume the prefill bias is purely due to request queueing
-            # and we increase the number of prefill replicas linearly to account for the queueing delay
-            pred_prefill_load_per_gpu = (
-                next_num_req
-                * next_isl
-                / self.args.adjustment_interval
-                * min(1, self.p_correction_factor)
-            )
-            next_num_p = math.ceil(
-                pred_prefill_load_per_gpu
-                / self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
-                / self.args.prefill_engine_num_gpu
-            )
-
-            # compute how many replicas are needed for decode
-            # 1. apply d_correction_factor to the ITL SLA
-            # Prevent divide by zero when d_correction_factor is 0 (no metrics yet)
-            if self.d_correction_factor <= 0:
-                logger.warning(
-                    f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
+        if next_num_req is not None and next_isl is not None and next_osl is not None:
+            try:
+                # compute how many replicas are needed for prefill
+                # here we assume the prefill bias is purely due to request queueing
+                # and we increase the number of prefill replicas linearly to account for the queueing delay
+                pred_prefill_load_per_gpu = (
+                    next_num_req
+                    * next_isl
+                    / self.args.adjustment_interval
+                    * min(1, self.p_correction_factor)
                 )
-                corrected_itl = self.args.itl
-            else:
-                corrected_itl = self.args.itl / self.d_correction_factor
-            # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
-            (
-                pred_decode_thpt_per_gpu,
-                _,
-                _,
-            ) = self.decode_interpolator.find_best_throughput_per_gpu(
-                itl=corrected_itl, context_length=next_isl + next_osl / 2
-            )
-            # 3. compute number of decode replicas needed
-            next_num_d = math.ceil(
-                next_num_req
-                * next_osl
-                / self.args.adjustment_interval
-                / pred_decode_thpt_per_gpu
-                / self.args.decode_engine_num_gpu
-            )
-
-            # correct num_p and num_d based on the gpu budget
-            next_num_p = max(next_num_p, self.args.min_endpoint)
-            next_num_d = max(next_num_d, self.args.min_endpoint)
-            logger.info(
-                f"Predicted number of engine replicas: prefill={next_num_p}, decode={next_num_d}"
-            )
-
-            total_gpu_required = (
-                next_num_p * self.args.prefill_engine_num_gpu
-                + next_num_d * self.args.decode_engine_num_gpu
-            )
-            if total_gpu_required > self.args.max_gpu_budget:
-                scale = self.args.max_gpu_budget / total_gpu_required
-                next_num_p = max(self.args.min_endpoint, round(next_num_p * scale))
-                next_num_d = max(
-                    self.args.min_endpoint,
-                    round(
-                        (
-                            self.args.max_gpu_budget
-                            - next_num_p * self.args.prefill_engine_num_gpu
-                        )
-                        / self.args.decode_engine_num_gpu
-                    ),
+                next_num_p = math.ceil(
+                    pred_prefill_load_per_gpu
+                    / self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
+                    / self.args.prefill_engine_num_gpu
                 )
-                logger.warning(
-                    f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({self.args.max_gpu_budget}), scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
+
+                # compute how many replicas are needed for decode
+                # 1. apply d_correction_factor to the ITL SLA
+                # Prevent divide by zero when d_correction_factor is 0 (no metrics yet)
+                if self.d_correction_factor <= 0:
+                    logger.warning(
+                        f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
+                    )
+                    corrected_itl = self.args.itl
+                else:
+                    corrected_itl = self.args.itl / self.d_correction_factor
+                # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
+                (
+                    pred_decode_thpt_per_gpu,
+                    _,
+                    _,
+                ) = self.decode_interpolator.find_best_throughput_per_gpu(
+                    itl=corrected_itl, context_length=next_isl + next_osl / 2
                 )
-        except Exception as e:
-            logger.error(f"Failed to compute number of replicas: {e}")
-            return
+                # 3. compute number of decode replicas needed
+                next_num_d = math.ceil(
+                    next_num_req
+                    * next_osl
+                    / self.args.adjustment_interval
+                    / pred_decode_thpt_per_gpu
+                    / self.args.decode_engine_num_gpu
+                )
+
+                # correct num_p and num_d based on the gpu budget
+                next_num_p = max(next_num_p, self.args.min_endpoint)
+                next_num_d = max(next_num_d, self.args.min_endpoint)
+                logger.info(
+                    f"Predicted number of engine replicas: prefill={next_num_p}, decode={next_num_d}"
+                )
+
+                total_gpu_required = (
+                    next_num_p * self.args.prefill_engine_num_gpu
+                    + next_num_d * self.args.decode_engine_num_gpu
+                )
+                if total_gpu_required > self.args.max_gpu_budget:
+                    scale = self.args.max_gpu_budget / total_gpu_required
+                    next_num_p = max(self.args.min_endpoint, round(next_num_p * scale))
+                    next_num_d = max(
+                        self.args.min_endpoint,
+                        round(
+                            (
+                                self.args.max_gpu_budget
+                                - next_num_p * self.args.prefill_engine_num_gpu
+                            )
+                            / self.args.decode_engine_num_gpu
+                        ),
+                    )
+                    logger.warning(
+                        f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({self.args.max_gpu_budget}), scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to compute number of replicas: {e}")
+                return
 
         if not self.args.no_operation:
             target_replicas = {

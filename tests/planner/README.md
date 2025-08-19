@@ -44,20 +44,50 @@ For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on 
 python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
   --isl 3000 \
-  --osl 150 \
+  --osl 300 \
   --ttft 0.1 \
   --itl 0.01
 
-> ISL=3000, OSL=150
+> ISL=3000, OSL=300
 > TTFT=0.1s, ITL=0.01s
 > Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
->
+> 
 > Interpolating prefill performance ...
->         Estimated TTFT=0.027s <= target TTFT=0.100s. Requests can queue 0.073s maximally while meeting TTFT SLA.
->         Estimated throughput: 110893.48 tokens/s/gpu. Request rate at 36.96 requests/s will saturate one GPU.
->
-> Interpolating decode performance ...
->         Average context length: isl + osl/2 = 3075.
->         Estimated ITL=0.0098s <= target ITL=0.0100s at 33.33% active kv usage.
->         Estimated throughput: 10226.60 token/s/gpu. Request rate at 68.18 requests/s will saturate one GPU.
+>     Estimated TTFT=0.027s <= target TTFT=0.100s. Requests can queue 0.073s maximally while meeting TTFT SLA.
+>     Estimated throughput: 110893.48 tokens/s/gpu. Request rate at 36.96 requests/s will saturate one GPU.
+
+Interpolating decode performance ...
+>     Average context length: isl + osl/2 = 3150.
+>     Estimated ITL=0.0098s <= target ITL=0.0100s at 36.36% active kv usage.
+>     Estimated throughput: 10009.88 token/s/gpu. Request rate at 33.37 requests/s will saturate one GPU.
 ```
+
+## Generating Load Dataset
+
+We provide a tool to generate load dataset with varying request rate. More details can be found in [sin_load_generator](../../benchmarks/sin_load_generator/README.md). 
+
+From previous interpolator testing, ISL 3000 and OSL 300 can handle ~30 request/s/gpu for both prefill and decode. 
+To test planner's performance for different request rates, we can generate a load dataset with request rate varying between 30 to 90 request/s.
+For TP1 H200 engine, planner should scale between 1P1D and 3P3D. 
+
+```bash
+python benchmarks/sin_load_generator/sin_synth.py \
+  --time-duration 1800 \
+  --request-rate-min 30 \
+  --request-rate-max 90 \
+  --request-rate-period 600 \
+  --isl1 3000 \
+  --osl1 300 \
+  --isl2 3000 \
+  --osl2 300 \
+  --output-file rr-30-90_i3000o300.jsonl
+```
+
+The dataset will start with 30 request/s, increase to 90 request/s at t=300s, decrease back to 30 request/s at t=600s, and repeat. 
+The total duration is 30 minutes or 1800 seconds.
+
+## Planner Dry Run
+
+Before testing SLA planner on real deployments, we provide a dry run feature to estimate the performance on the given dataset. Specifically, in dry run mode,
+- The load predictor will be tested. However, the load metrics will be different from the real deployment because the actual OSL is only known after the requests are processed.
+- The correction factor will be disabled because there is no real performance metrics as reference.
