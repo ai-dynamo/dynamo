@@ -113,5 +113,10 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         default=SLAPlannerDefaults.prometheus_port,
         help="Prometheus port",
     )
-    
+    parser.add_argument(
+        "--no-correction",
+        action="store_true",
+        default=SLAPlannerDefaults.no_correction,
+        help="Disable correction factor",
+    )
     return parser
