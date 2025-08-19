@@ -26,7 +26,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 
    - `Dynamo README <https://github.com/ai-dynamo/dynamo/blob/main/README.md>`_
    - `Architecture and features doc <https://github.com/ai-dynamo/dynamo/blob/main/docs/architecture/>`_
-   - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/docs/guides>`_
+   - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/guides>`_
    - `Dynamo examples repo <https://github.com/ai-dynamo/dynamo/tree/main/examples>`_
 
 
@@ -135,7 +135,6 @@ The examples below assume you build the latest image yourself from source. If us
    KV Cache Routing <architecture/kv_cache_routing.md>
    Planner <architecture/planner_intro.rst>
    Dynamo Architecture Flow <architecture/dynamo_flow.md>
-   Request Migration <architecture/request_migration.md>
 
 .. toctree::
    :hidden:
@@ -147,7 +146,7 @@ The examples below assume you build the latest image yourself from source. If us
 
 .. toctree::
    :hidden:
-   :caption: Deployment guides
+   :caption: Deployment Guides
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
@@ -160,20 +159,12 @@ The examples below assume you build the latest image yourself from source. If us
    :hidden:
    :caption: Examples
 
-   Hello World <examples/runtime/hello_world/README.md>
-   LLM Deployment Examples using VLLM <components/backends/vllm/README.md>
-   LLM Deployment Examples using SGLang <components/backends/sglang/README.md>
-   Multinode Examples using SGLang <components/backends/sglang/docs/multinode-examples.md>
+   Hello World <../examples/runtime/hello_world/README.md>
+   LLM Deployment Examples using VLLM <../components/backends/vllm/README.md>
+   LLM Deployment Examples using SGLang <../components/backends/sglang/README.md>
+   LLM Deployment Examples using TensorRT-LLM <../components/backends/trtllm/README.md>
+   Multinode Examples using SGLang <../components/backends/sglang/docs/multinode-examples.md>
    Planner Benchmark Example <guides/planner_benchmark/README.md>
-   LLM Deployment Examples using TensorRT-LLM <components/backends/trtllm/README.md>
-
-.. toctree::
-   :hidden:
-   :caption: Observability
-
-   Dynamo Metrics <guides/metrics.md>
-   K8s Metrics <guides/deploy/k8s_metrics.md>
-
 
 .. toctree::
    :hidden:

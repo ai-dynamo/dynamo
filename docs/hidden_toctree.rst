@@ -56,3 +56,7 @@
    components/backends/vllm/deploy/README.md
    components/backends/vllm/multi-node.md
 
+   guides/metrics.md
+   guides/deploy/k8s_metrics.md
+   architecture/request_migration.md
+
