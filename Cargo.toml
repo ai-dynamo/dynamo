@@ -9,7 +9,8 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/tokens",
-	"lib/async-openai",
+    "lib/async-openai",
+    "lib/async-openai-macros",
     "lib/bindings/c",
     "lib/engines/*",
 ]
