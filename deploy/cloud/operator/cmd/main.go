@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
@@ -321,11 +322,19 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
+	// Create scale client using manager's config
+	scalesGetter, err := scale.NewForConfig(mgr.GetConfig(), nil, nil, nil)
+	if err != nil {
+		setupLog.Error(err, "unable to create scale client")
+		os.Exit(1)
+	}
+
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                ctrlConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
+		ScaleClient:           scalesGetter,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)
