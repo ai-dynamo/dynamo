@@ -222,14 +222,14 @@ impl Client {
         }
     }
 
-    /// Upload a serializable struct to NATS object store
+    /// Upload a serializable struct to NATS object store using bincode
     pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: Url) -> anyhow::Result<()>
     where
         T: Serialize,
     {
-        // Serialize the data to JSON bytes
-        let json_bytes = serde_json::to_vec(data)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize data: {e}"))?;
+        // Serialize the data using bincode (more efficient binary format)
+        let binary_data = bincode::serialize(data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize data with bincode: {e}"))?;
 
         let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
@@ -240,7 +240,7 @@ impl Client {
         };
 
         // Upload the serialized bytes
-        let mut cursor = std::io::Cursor::new(json_bytes);
+        let mut cursor = std::io::Cursor::new(binary_data);
         bucket.put(key_meta, &mut cursor).await.map_err(|e| {
             anyhow::anyhow!("Failed uploading to bucket / object store {bucket_name}/{key}: {e}")
         })?;
@@ -248,7 +248,7 @@ impl Client {
         Ok(())
     }
 
-    /// Download and deserialize a struct from NATS object store
+    /// Download and deserialize a struct from NATS object store using bincode
     pub async fn object_store_download_data<T>(&self, nats_url: Url) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
@@ -268,9 +268,9 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("Failed reading object data: {e}"))?;
 
-        // Deserialize from JSON
-        let data = serde_json::from_slice(&buffer)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize data: {e}"))?;
+        // Deserialize from bincode
+        let data = bincode::deserialize(&buffer)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize data with bincode: {e}"))?;
 
         Ok(data)
     }
@@ -733,7 +733,7 @@ mod tests {
         });
     }
 
-    // Integration test for object store data operations
+    // Integration test for object store data operations using bincode
     #[tokio::test]
     #[ignore] // Requires NATS server to be running
     async fn test_object_store_data_operations() {
@@ -755,9 +755,9 @@ mod tests {
             .await
             .expect("Failed to connect to NATS");
 
-        // Test URL
+        // Test URL (using .bin extension to indicate binary format)
         let url =
-            Url::parse("nats://localhost/test-bucket/test-data.json").expect("Failed to parse URL");
+            Url::parse("nats://localhost/test-bucket/test-data.bin").expect("Failed to parse URL");
 
         // Upload the data
         client
