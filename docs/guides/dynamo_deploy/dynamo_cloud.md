@@ -21,13 +21,13 @@ Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestra
 
 ## Quick Start Paths
 
-**Path A: Production Install**  
+**Path A: Production Install**
 Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
 
-**Path B: Local Development**  
+**Path B: Local Development**
 Set up Minikube first → [Minikube Setup](minikube.md) → Then follow Path A
 
-**Path C: Custom Development**  
+**Path C: Custom Development**
 Build from source for customization → [Jump to Path C](#path-c-custom-development)
 
 ## Prerequisites

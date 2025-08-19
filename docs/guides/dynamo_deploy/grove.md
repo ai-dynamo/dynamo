@@ -87,7 +87,7 @@ Grove represents a significant advancement in Kubernetes-based orchestration for
 
 ## Getting Started
 
-> **Note**: Grove is currently in development and aligning with NVIDIA Dynamo's release schedule. 
+> **Note**: Grove is currently in development and aligning with NVIDIA Dynamo's release schedule.
 
 For installation instructions, see the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md).
 

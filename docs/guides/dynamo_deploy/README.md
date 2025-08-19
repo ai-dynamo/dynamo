@@ -30,7 +30,7 @@ Each backend has deployment examples and configuration options:
 |---------|--------------------------|
 | **[vLLM](../../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
 | **[SGLang](../../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](../../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router | 
+| **[TensorRT-LLM](../../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router |
 
 ## 3. Deploy Your First Model
 
@@ -115,7 +115,7 @@ Worker command examples per backend:
 args:
   - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
-# SGLang worker  
+# SGLang worker
 args:
   - >-
     python3 -m dynamo.sglang
