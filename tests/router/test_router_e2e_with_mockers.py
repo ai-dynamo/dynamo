@@ -131,7 +131,7 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4)
     return False
 
 
-async def send_concurrent_requests(urls: list, payload: dict, num_requests: int):
+async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     """Send multiple requests concurrently, alternating between URLs if multiple provided"""
 
     # First, send test requests with retry to ensure all systems are ready
