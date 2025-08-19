@@ -61,3 +61,49 @@ python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
 >         Estimated ITL=0.0098s <= target ITL=0.0100s at 33.33% active kv usage.
 >         Estimated throughput: 10226.60 token/s/gpu. Request rate at 68.18 requests/s will saturate one GPU.
 ```
+
+## Scaling Tests
+
+This directory contains comprehensive tests for validating the SLA planner's scaling behavior. The tests validate both the replica calculation logic and end-to-end scaling behavior.
+
+### Test Types
+
+1. **Unit Tests** (`test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
+2. **End-to-End Tests** (`run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
+
+### Quick Start
+
+#### Run Unit Tests Only
+Test the replica calculation logic without requiring Kubernetes:
+
+```bash
+python -m pytest test_replica_calculation.py -v
+```
+
+#### Run Full End-to-End Test
+Test complete scaling behavior including Kubernetes deployment and load generation:
+
+```bash
+./run_scaling_test.sh
+```
+
+With custom namespace:
+```bash
+./run_scaling_test.sh --namespace production
+```
+
+### Test Scenario
+
+The main test scenario validates scaling for **H200 with 1P1D configuration**:
+- **Phase 1**: 10 req/s (maintains 1P1D)
+- **Phase 2**: 20 req/s (scales to 1P2D - 1 prefill, 2 decode workers)
+- **ISL/OSL**: 3000/150 tokens
+
+### Prerequisites for E2E Tests
+
+- Kubernetes cluster with GPU nodes
+- kubectl configured and accessible
+- genai-perf available in PATH
+- Python dependencies installed
+
+For detailed configuration, troubleshooting, and architecture information, see [README_scaling_tests.md](README_scaling_tests.md).
