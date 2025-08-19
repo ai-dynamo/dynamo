@@ -30,13 +30,10 @@ To use KVBM in vLLM, you can follow the steps below:
 docker compose -f deploy/metrics/docker-compose.yml up -d
 
 # build a container containing vllm and kvbm
-./container/build.sh --framework kvbm
+./container/build.sh --framework vllm --enable-kvbm
 
 # launch the container
-./container/run.sh --framework kvbm -it --mount-workspace --use-nixl-gds
-
-# enable using kvbm instead of vllm's own kv cache manager
-export DYN_KVBM_MANAGER=kvbm
+./container/run.sh --framework vllm -it --mount-workspace --use-nixl-gds
 
 # enable kv offloading to CPU memory
 # 4 means 4GB of CPU memory would be used
@@ -47,7 +44,7 @@ export DYN_KVBM_CPU_CACHE_GB=4
 export DYN_KVBM_DISK_CACHE_GB=8
 
 # serve an example LLM model
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 # make a call to LLM
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
