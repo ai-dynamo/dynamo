@@ -73,7 +73,7 @@ html_baseurl = "https://docs.nvidia.com/dynamo/latest/"
 
 # Suppress warnings for external links and missing references
 suppress_warnings = [
-    "myst.xref_missing",  # Missing cross-references
+    # "myst.xref_missing",  # Missing cross-references
     #'toc.not_readable',     # Unreadable toctree entries
 ]
 
