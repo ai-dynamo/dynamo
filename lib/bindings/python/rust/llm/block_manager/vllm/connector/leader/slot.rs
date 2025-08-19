@@ -50,6 +50,7 @@ pub trait SlotManager<R: RequestKey>: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SlotState {
     /// The slot was not scheduled in the previous iteration.
     Initialized,
@@ -85,6 +86,7 @@ pub enum SlotState {
     Preempted,
 }
 
+#[allow(dead_code)]
 pub trait Slot: std::fmt::Debug {
     fn request_id(&self) -> &str;
 
@@ -452,7 +454,7 @@ impl Slot for VllmConnectorSlot {
         &mut self,
         tokens: &[u32],
         block_ids: &[BlockId],
-        num_computed_tokens: usize,
+        _num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
         if !tokens.is_empty() {
@@ -1126,7 +1128,7 @@ impl LocalTransferEngine {
     }
 }
 
-pub async fn process_offload_request(
+async fn process_offload_request(
     offload_req: LocalOffloadRequest,
     block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
@@ -1232,7 +1234,7 @@ pub async fn process_offload_request(
     Ok(())
 }
 
-pub async fn process_onboard_request(
+async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
     leader: &Arc<KvbmLeader>,
 ) -> anyhow::Result<()> {

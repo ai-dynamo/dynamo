@@ -62,6 +62,7 @@ pub struct BlockManager {
 
 // TODO: This is in desperate need of a massive refactor. We bind and instantiate this in Python, but we never actually use it.
 #[pymethods]
+#[allow(unused_variables)]
 impl BlockManager {
     #[new]
     #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None, disable_device_pool = false))]
