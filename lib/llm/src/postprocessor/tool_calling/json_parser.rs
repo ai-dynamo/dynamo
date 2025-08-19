@@ -74,10 +74,10 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
             continue;
         }
         // Only consider segments that start like JSON
-        if s.starts_with('{') || s.starts_with('[') {
+        if s.starts_with('{') {
             // Trim trailing non-JSON by cutting at the last closing brace/bracket
-            if let Some(pos) = s.rfind(['}', ']']) {
-                let candidate = &s[..=pos];
+            if let Some(pos) = s.rfind('}') {
+                let candidate = &s[..=pos].trim();
                 // Keep only valid JSON candidates
                 if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
                     items.push(candidate.to_string());
@@ -85,9 +85,15 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
             }
         }
     }
-
     if items.is_empty() {
-        return input.to_string();
+        // Remove everything up to and including the first occurrence of the start token
+        if let Some(idx) = input.find(start_token) {
+            let rest = &input[idx + start_token.len()..];
+            return rest.trim_start().to_string();
+        } else {
+            // Shouldn't happen because we checked contains() above, but be defensive
+            return input.to_string();
+        }
     }
     format!("[{}]", items.join(","))
 }
@@ -167,7 +173,7 @@ pub fn try_tool_call_parse_json(
         };
     }
 
-    // Convert json to &str if it's a String, otherwise keep as &str
+    // Convert json (String) to &str
     let json = json.as_str();
 
     // Anonymous function to attempt deserialization into a known representation

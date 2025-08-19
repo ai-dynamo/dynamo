@@ -45,6 +45,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             );
         }
     };
+    if let Some(http_host) = local_model.http_host() {
+        http_service_builder = http_service_builder.host(http_host);
+    }
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
@@ -66,6 +69,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         MODEL_ROOT_PATH,
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
+                        router_config.busy_threshold,
                         Arc::new(http_service.clone()),
                     )
                     .await?;
@@ -109,14 +113,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, kv_chooser.clone())
+            >(card, &client, router_mode, None, kv_chooser.clone())
             .await?;
             manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
 
             let completions_engine = entrypoint::build_routed_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(card, &client, router_mode, kv_chooser)
+            >(card, &client, router_mode, None, kv_chooser)
             .await?;
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
 
@@ -188,6 +192,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
@@ -195,9 +200,16 @@ async fn run_watcher(
     network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
+    busy_threshold: Option<f64>,
     http_service: Arc<HttpService>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
+    let mut watch_obj = ModelWatcher::new(
+        runtime,
+        model_manager,
+        router_mode,
+        kv_router_config,
+        busy_threshold,
+    );
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
