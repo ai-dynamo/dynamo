@@ -113,7 +113,7 @@ Use the default pre-built image and inject custom configurations via PVC:
 
 3. **Set the config path for the profiling job:**
    ```bash
-   export DGD_CONFIG_FILE=/profiling_results/disagg.yaml # or your custom path
+   export DGD_CONFIG_FILE=/workspace/profiling_results/disagg.yaml # or your custom path
    ```
 
 This approach allows you to:

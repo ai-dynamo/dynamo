@@ -115,7 +115,7 @@ flowchart LR
 
 #### Code Examples
 
-See [prefill_worker](../components/prefill_worker.py#L199) or [decode_worker](../components/decode_worker.py#L239),
+See [prefill_worker](../components/worker.py) or [decode_worker](../components/worker.py),
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](#writableoperation),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
@@ -338,5 +338,5 @@ Use the [`.to_serialized()`](#to_serialized) method on either of the above types
 
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal)
+  - [Dynamo Multimodal Example](../../../examples/multimodal)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

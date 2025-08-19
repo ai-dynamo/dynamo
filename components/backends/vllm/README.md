@@ -41,6 +41,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | WIP |
+| [**LMCache**](./LMCache_Integration.md) | ✅ |  |
 
 ### Large Scale P/D and WideEP Features
 

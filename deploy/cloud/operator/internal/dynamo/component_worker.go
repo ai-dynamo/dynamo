@@ -10,7 +10,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -23,8 +22,8 @@ func NewWorkerDefaults() *WorkerDefaults {
 	return &WorkerDefaults{&BaseComponentDefaults{}}
 }
 
-func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container, error) {
-	container := w.getCommonContainer()
+func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
+	container := w.getCommonContainer(context)
 
 	// Add system port
 	container.Ports = []corev1.ContainerPort{
@@ -32,19 +31,6 @@ func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container
 			Protocol:      corev1.ProtocolTCP,
 			Name:          commonconsts.DynamoSystemPortName,
 			ContainerPort: int32(commonconsts.DynamoSystemPort),
-		},
-	}
-
-	// Add worker base defaults
-	container.Resources = corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("10"),
-			corev1.ResourceMemory: resource.MustParse("20Gi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("10"),
-			corev1.ResourceMemory: resource.MustParse("20Gi"),
-			"nvidia.com/gpu":      resource.MustParse("1"),
 		},
 	}
 
@@ -84,7 +70,7 @@ func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container
 		FailureThreshold: 60,
 	}
 
-	container.Env = []corev1.EnvVar{
+	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYN_SYSTEM_ENABLED",
 			Value: "true",
@@ -97,7 +83,7 @@ func (w *WorkerDefaults) GetBaseContainer(numberOfNodes int32) (corev1.Container
 			Name:  "DYN_SYSTEM_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 		},
-	}
+	}...)
 
 	return container, nil
 }

@@ -10,7 +10,7 @@ This guide shows how to enable SGLang's Hierarchical Cache (HiCache) inside Dyna
 ## 1) Start the SGLang worker with HiCache enabled
 
 ```bash
-python -m dynamo.sglang.worker \
+python -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --host 0.0.0.0 --port 8000 \
   --page-size 64 \

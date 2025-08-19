@@ -108,6 +108,24 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        // First check for PipelineError::ServiceOverloaded
+        if let Some(pipeline_err) =
+            err.downcast_ref::<dynamo_runtime::pipeline::error::PipelineError>()
+        {
+            if matches!(
+                pipeline_err,
+                dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
+            ) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorMessage {
+                        error: pipeline_err.to_string(),
+                    }),
+                );
+            }
+        }
+
+        // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
             Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
@@ -1147,6 +1165,22 @@ mod tests {
                 BACKUP_ERROR_MESSAGE,
                 other_error_from_engine().unwrap_err()
             )
+        );
+    }
+
+    #[test]
+    fn test_service_overloaded_error_response_from_anyhow() {
+        use dynamo_runtime::pipeline::error::PipelineError;
+
+        let err: anyhow::Error = PipelineError::ServiceOverloaded(
+            "All workers are busy, please retry later".to_string(),
+        )
+        .into();
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.error,
+            "Service temporarily unavailable: All workers are busy, please retry later"
         );
     }
 

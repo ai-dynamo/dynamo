@@ -52,7 +52,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Quick Start
 
-Below we provide a guide that lets you run all of our the common deployment patterns on a single node. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
+Below we provide a guide that lets you run all of our common deployment patterns on a single node.
 
 ### Start NATS and ETCD in the background
 
@@ -225,9 +225,6 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 ### Large scale P/D disaggregation with WideEP
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
 - **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
-
-### Supporting SGLang's native endpoints via Dynamo
-- **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
 
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**

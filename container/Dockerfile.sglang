@@ -27,7 +27,7 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.4.9.post6"
+ARG SGLANG_VERSION="0.5.0rc2"
 
 ##################################
 ########## Base Image ############
@@ -337,6 +337,7 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/

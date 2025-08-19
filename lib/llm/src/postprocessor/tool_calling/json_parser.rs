@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use regex::RegexBuilder;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -21,6 +22,74 @@ pub struct CalledFunctionParameters {
 pub struct CalledFunctionArguments {
     pub name: String,
     pub arguments: HashMap<String, Value>,
+}
+
+// Extract the contents between start and end tokens using regex parsing.
+// Returns a JSON array string if there are multiple matches, otherwise returns the last match directly.
+fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) -> Option<String> {
+    let escaped_start = regex::escape(start_token);
+    let escaped_end = regex::escape(end_token);
+    let pattern = format!(r"{}(.*?){}", escaped_start, escaped_end);
+
+    match RegexBuilder::new(&pattern)
+        .dot_matches_new_line(true)
+        .build()
+    {
+        Ok(regex) => {
+            // Get all matches and take the last one for now. TODO: Handle multiple tool calls
+            let matches: Vec<_> = regex
+                .captures_iter(input)
+                .filter_map(|captures| captures.get(1))
+                .map(|m| m.as_str().trim().to_string())
+                .collect();
+            if !matches.is_empty() {
+                // If only one match, return it directly, otherwise return as a JSON array string
+                if matches.len() == 1 {
+                    // Return the last match directly
+                    return Some(matches.last().unwrap().clone());
+                } else {
+                    // Join the matches into a JSON array string
+                    return Some(format!("[{}]", matches.join(",")));
+                }
+            }
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+// Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
+// Handles single tool and multiple tool call cases for single start_token like <|python_tag|>
+fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
+    // Return the input if it doesn't contain the start token
+    if !input.contains(start_token) {
+        return input.to_string();
+    }
+
+    // Split on the start token and keep only JSON-looking segments
+    let mut items: Vec<String> = Vec::new();
+    for seg in input.split(start_token) {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // Only consider segments that start like JSON
+        if s.starts_with('{') || s.starts_with('[') {
+            // Trim trailing non-JSON by cutting at the last closing brace/bracket
+            if let Some(pos) = s.rfind(['}', ']']) {
+                let candidate = &s[..=pos];
+                // Keep only valid JSON candidates
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    items.push(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return input.to_string();
+    }
+    format!("[{}]", items.join(","))
 }
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
@@ -67,29 +136,39 @@ pub struct CalledFunctionArguments {
 pub fn try_tool_call_parse_json(
     message: &str,
     config: &JsonParserConfig,
-) -> anyhow::Result<Option<ToolCallResponse>> {
+) -> anyhow::Result<Vec<ToolCallResponse>> {
     // Log the config we are using
     tracing::debug!("Using JSON parser config: {:?}", config);
     let trimmed = message.trim();
 
-    // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]
-    let json = if let Some(stripped) = trimmed.strip_prefix("<TOOLCALL>[") {
-        if let Some(stripped) = stripped.strip_suffix("]</TOOLCALL>") {
-            tracing::debug!("Stripping <TOOLCALL> wrapper from tool call payload");
-            stripped
+    // Use config to get tool call start and end token vectors, then use the first element for now
+    let tool_call_start_tokens = &config.tool_call_start_tokens;
+    let tool_call_end_tokens = &config.tool_call_end_tokens;
+
+    assert!(
+        tool_call_start_tokens.len() == tool_call_end_tokens.len(),
+        "Tool call start and end tokens must have the same length"
+    );
+
+    // Iterate over all start and end tokens and try to extract the content between them
+    // Assumption : One message will not contain different tags for tool calls. Iteration over tags is to support different tags by default for multiple models
+    let mut json = trimmed.to_string();
+    for (start_token, end_token) in tool_call_start_tokens
+        .iter()
+        .zip(tool_call_end_tokens.iter())
+    {
+        // Special case for <|python_tag|> . Regex pattern does not work well with it as it has no end token
+        json = if !start_token.is_empty() && end_token.is_empty() {
+            handle_single_token_tool_calls(&json, start_token)
+        } else if let Some(content) = extract_tool_call_content(&json, start_token, end_token) {
+            content
         } else {
-            trimmed
-        }
+            json
+        };
+    }
 
-    // Support custom/LLM-formatted `<|python_tag|>` preamble
-    } else if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
-        tracing::debug!("Stripping <|python_tag|> prefix from tool call payload");
-        stripped
-
-    // Otherwise, assume input is clean JSON
-    } else {
-        trimmed
-    };
+    // Convert json to &str if it's a String, otherwise keep as &str
+    let json = json.as_str();
 
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
@@ -113,19 +192,20 @@ pub fn try_tool_call_parse_json(
     //   }
     // }
     if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
-        return parse(single.name, single.parameters).map(Some);
+        return Ok(vec![parse(single.name, single.parameters)?]);
+        //parse(single.name, single.parameters).map(Some);
 
-    // CalledFunctionArguments: Single { name, arguments }
-    // Example:
-    // {
-    //   "name": "summarize",
-    //   "arguments": {
-    //     "text": "Rust is a systems programming language.",
-    //     "length": "short"
-    //   }
-    // }
+        // CalledFunctionArguments: Single { name, arguments }
+        // Example:
+        // {
+        //   "name": "summarize",
+        //   "arguments": {
+        //     "text": "Rust is a systems programming language.",
+        //     "length": "short"
+        //   }
+        // }
     } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(json) {
-        return parse(single.name, single.arguments).map(Some);
+        return Ok(vec![parse(single.name, single.arguments)?]);
 
     // Vec<CalledFunctionParameters>: List of { name, parameters }
     // Example:
@@ -134,10 +214,12 @@ pub fn try_tool_call_parse_json(
     //   { "name": "send_email", "parameters": { "to": "user@example.com", "subject": "Welcome!" } }
     // ]
     // We pop the last item in the list to use.
-    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
-        if let Some(item) = list.pop() {
-            return parse(item.name, item.parameters).map(Some);
+    } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
+        let mut results = Vec::new();
+        for item in list {
+            results.push(parse(item.name, item.parameters)?);
         }
+        return Ok(results);
 
     // Vec<CalledFunctionArguments>: List of { name, arguments }
     // Example:
@@ -151,11 +233,13 @@ pub fn try_tool_call_parse_json(
     //   }
     // ]
     // Again, we take the last item for processing.
-    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
-        if let Some(item) = list.pop() {
-            return parse(item.name, item.arguments).map(Some);
+    } else if let Ok(list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
+        let mut results = Vec::new();
+        for item in list {
+            results.push(parse(item.name, item.arguments)?);
         }
+        return Ok(results);
     }
 
-    Ok(None)
+    Ok(vec![])
 }
