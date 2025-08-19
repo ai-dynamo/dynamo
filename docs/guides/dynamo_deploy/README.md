@@ -28,9 +28,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend | Available Configurations |
 |---------|--------------------------|
-| **[vLLM](../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
-| **[SGLang](../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router | 
+| **[vLLM](../../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
+| **[SGLang](../../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
+| **[TensorRT-LLM](../../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router | 
 
 ## 3. Deploy Your First Model
 
@@ -57,25 +57,87 @@ It's a Kubernetes Custom Resource that defines your inference pipeline:
 - Scaling policies
 - Frontend/backend connections
 
+The scripts in the `components/<backend>/launch` folder like `agg.sh` demonstrate how you can serve your models locally. The corresponding YAML files like `agg.yaml` show you how you could create a kubernetes deployment for your inference graph.
+
+### Choosing Your Architecture Pattern
+
+When creating a deployment, select the architecture pattern that best fits your use case:
+
+- **Development / Testing** - Use `agg.yaml` as the base configuration
+- **Production with Load Balancing** - Use `agg_router.yaml` to enable scalable, load-balanced inference
+- **High Performance / Disaggregated** - Use `disagg_router.yaml` for maximum throughput and modular scalability
+
+### Frontend and Worker Components
+
+You can run the Frontend on one machine (e.g., a CPU node) and workers on different machines (GPU nodes). The Frontend serves as a framework-agnostic HTTP entry point that:
+
+- Provides OpenAI-compatible `/v1/chat/completions` endpoint
+- Auto-discovers backend workers via etcd
+- Routes requests and handles load balancing
+- Validates and preprocesses requests
+
+### Customizing Your Deployment
+
 Example structure:
 ```yaml
-apiVersion: dynamo.ai.nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: my-llm
 spec:
-  frontends:
-    - type: http
-      port: 8000
-  backends:
-    - type: vllm
-      model: "Qwen/Qwen2-0.5B"
-      gpus: 1
+  services:
+    Frontend:
+      dynamoNamespace: my-llm
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: your-image
+    VllmDecodeWorker:  # or SGLangDecodeWorker, TrtllmDecodeWorker
+      dynamoNamespace: dynamo-dev
+      componentType: worker
+      replicas: 1
+      envFromSecret: hf-token-secret  # for HuggingFace models
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: your-image
+          command: ["/bin/sh", "-c"]
+          args:
+            - python3 -m dynamo.vllm --model YOUR_MODEL [--your-flags]
 ```
+
+Worker command examples per backend:
+```yaml
+# vLLM worker
+args:
+  - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+
+# SGLang worker  
+args:
+  - >-
+    python3 -m dynamo.sglang
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    --tp 1
+    --trust-remote-code
+
+# TensorRT-LLM worker
+args:
+  - python3 -m dynamo.trtllm --engine_path /workspace/engines/
+```
+
+Key customization points include:
+- **Model Configuration**: Specify model in the args command
+- **Resource Allocation**: Configure GPU requirements under `resources.limits`
+- **Scaling**: Set `replicas` for number of worker instances
+- **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
+- **Worker Specialization**: Add `--is-prefill-worker` flag for disaggregated prefill workers
 
 ## Additional Resources
 
 - **[Examples](../../examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](create_deployment.md)** - Build your own CRDs
 - **[Operator Documentation](dynamo_operator.md)** - How the platform works
-- **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
+- **[Helm Charts](../../../deploy/helm/README.md)** - For advanced users

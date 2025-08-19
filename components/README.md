@@ -29,7 +29,7 @@ Dynamo supports multiple inference engines (with a focus on SGLang, vLLM, and Te
 
 Each engine provides launch scripts for different deployment patterns in their respective `/launch` & `/deploy` directories.
 
-## Core Services
+## Core Components
 
 ### [Backends](backends/)
 
