@@ -60,6 +60,7 @@ fi
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
+    NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=enP6p9s0np0 \
     NCCL_SOCKET_IFNAME=enP6p9s0np0 \
     GLOO_SOCKET_IFNAME=enP6p9s0np0 \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
@@ -113,6 +114,7 @@ if [ "$mode" = "prefill" ]; then
 
 elif [ "$mode" = "decode" ]; then
     # GB200 dynamo decode command
+    NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=enP6p9s0np0 \
     NCCL_SOCKET_IFNAME=enP6p9s0np0 \
     GLOO_SOCKET_IFNAME=enP6p9s0np0 \
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
