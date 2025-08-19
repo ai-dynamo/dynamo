@@ -44,7 +44,7 @@ pub use delta::DeltaGenerator;
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateChatCompletionRequest,
+    pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
     pub common: CommonExt,
@@ -62,7 +62,7 @@ pub struct NvCreateChatCompletionRequest {
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateChatCompletionResponse,
+    pub inner: dynamo_async_openai::types::CreateChatCompletionResponse,
 }
 
 /// A response structure for streamed chat completions, embedding OpenAI's
@@ -74,7 +74,7 @@ pub struct NvCreateChatCompletionResponse {
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateChatCompletionStreamResponse,
+    pub inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse,
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
@@ -217,8 +217,8 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
         self.inner.stop.as_ref().map(|stop| match stop {
-            async_openai::types::Stop::String(s) => vec![s.clone()],
-            async_openai::types::Stop::StringArray(arr) => arr.clone(),
+            dynamo_async_openai::types::Stop::String(s) => vec![s.clone()],
+            dynamo_async_openai::types::Stop::StringArray(arr) => arr.clone(),
         })
     }
 

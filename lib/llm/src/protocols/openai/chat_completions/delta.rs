@@ -59,9 +59,9 @@ pub struct DeltaGenerator {
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
     /// Optional service tier information for the response.
-    service_tier: Option<async_openai::types::ServiceTierResponse>,
+    service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
-    usage: async_openai::types::CompletionUsage,
+    usage: dynamo_async_openai::types::CompletionUsage,
     /// Counter tracking the number of messages issued.
     msg_counter: u64,
     /// Configuration options for response generation.
@@ -87,7 +87,7 @@ impl DeltaGenerator {
         // but this will not be an issue until 2106.
         let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
 
-        let usage = async_openai::types::CompletionUsage {
+        let usage = dynamo_async_openai::types::CompletionUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
@@ -122,7 +122,7 @@ impl DeltaGenerator {
         token_ids: Vec<TokenIdType>,
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) -> Option<async_openai::types::ChatChoiceLogprobs> {
+    ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
         if !self.options.enable_logprobs || logprobs.is_none() {
             return None;
         }
@@ -150,22 +150,22 @@ impl DeltaGenerator {
                             let top_t = top_lp.token.clone().unwrap_or_default();
                             let top_tid = top_lp.token_id;
                             found_selected_token = found_selected_token || top_tid == *tid;
-                            async_openai::types::TopLogprobs {
+                            dynamo_async_openai::types::TopLogprobs {
                                 token: top_t,
                                 logprob: top_lp.logprob as f32,
                                 bytes: None,
                             }
                         })
-                        .collect::<Vec<async_openai::types::TopLogprobs>>();
+                        .collect::<Vec<dynamo_async_openai::types::TopLogprobs>>();
                     if !found_selected_token {
                         // If the selected token is not in the top logprobs, add it
-                        converted_top_lps.push(async_openai::types::TopLogprobs {
+                        converted_top_lps.push(dynamo_async_openai::types::TopLogprobs {
                             token: t.clone(),
                             logprob: lp,
                             bytes: None,
                         });
                     }
-                    async_openai::types::ChatCompletionTokenLogprob {
+                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
                         token: t.clone(),
                         logprob: lp,
                         bytes: None,
@@ -175,7 +175,7 @@ impl DeltaGenerator {
                 .collect()
         });
 
-        Some(async_openai::types::ChatChoiceLogprobs {
+        Some(dynamo_async_openai::types::ChatChoiceLogprobs {
             content,
             refusal: None,
         })
@@ -190,28 +190,28 @@ impl DeltaGenerator {
     /// * `logprobs` - Optional log probabilities of the generated tokens.
     ///
     /// # Returns
-    /// * An [`async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
+    /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
     #[allow(deprecated)]
     pub fn create_choice(
         &self,
         index: u32,
         text: Option<String>,
-        finish_reason: Option<async_openai::types::FinishReason>,
-        logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
-    ) -> async_openai::types::CreateChatCompletionStreamResponse {
-        let delta = async_openai::types::ChatCompletionStreamResponseDelta {
+        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+        logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
+    ) -> dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+        let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: text,
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
-                Some(async_openai::types::Role::Assistant)
+                Some(dynamo_async_openai::types::Role::Assistant)
             } else {
                 None
             },
             refusal: None,
         };
 
-        let choice = async_openai::types::ChatChoiceStream {
+        let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
@@ -225,7 +225,7 @@ impl DeltaGenerator {
             usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
         }
 
-        async_openai::types::CreateChatCompletionStreamResponse {
+        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -281,12 +281,18 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Map backend finish reasons to OpenAI's finish reasons.
         let finish_reason = match delta.finish_reason {
-            Some(common::FinishReason::EoS) => Some(async_openai::types::FinishReason::Stop),
-            Some(common::FinishReason::Stop) => Some(async_openai::types::FinishReason::Stop),
-            Some(common::FinishReason::Length) => Some(async_openai::types::FinishReason::Length),
-            Some(common::FinishReason::Cancelled) => Some(async_openai::types::FinishReason::Stop),
+            Some(common::FinishReason::EoS) => Some(dynamo_async_openai::types::FinishReason::Stop),
+            Some(common::FinishReason::Stop) => {
+                Some(dynamo_async_openai::types::FinishReason::Stop)
+            }
+            Some(common::FinishReason::Length) => {
+                Some(dynamo_async_openai::types::FinishReason::Length)
+            }
+            Some(common::FinishReason::Cancelled) => {
+                Some(dynamo_async_openai::types::FinishReason::Stop)
+            }
             Some(common::FinishReason::ContentFilter) => {
-                Some(async_openai::types::FinishReason::ContentFilter)
+                Some(dynamo_async_openai::types::FinishReason::ContentFilter)
             }
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));

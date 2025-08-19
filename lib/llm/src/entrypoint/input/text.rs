@@ -81,15 +81,17 @@ async fn main_loop(
         };
 
         // Construct messages
-        let user_message = async_openai::types::ChatCompletionRequestMessage::User(
-            async_openai::types::ChatCompletionRequestUserMessage {
-                content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(prompt),
+        let user_message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                    prompt,
+                ),
                 name: None,
             },
         );
         messages.push(user_message);
         // Request
-        let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
+        let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
             .messages(messages.clone())
             .model(
                 template
@@ -170,12 +172,12 @@ async fn main_loop(
         println!();
 
         let assistant_content =
-            async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
+            dynamo_async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
                 assistant_message,
             );
 
-        let assistant_message = async_openai::types::ChatCompletionRequestMessage::Assistant(
-            async_openai::types::ChatCompletionRequestAssistantMessage {
+        let assistant_message = dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(
+            dynamo_async_openai::types::ChatCompletionRequestAssistantMessage {
                 content: Some(assistant_content),
                 ..Default::default()
             },
