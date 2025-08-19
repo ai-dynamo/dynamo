@@ -61,6 +61,7 @@ fi
 if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
     MELLANOX_VISIBLE_DEVICES=all \
+    NVSHMEM_IB_GID_INDEX=3 \
     NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=enP6p9s0np0 \
     NCCL_SOCKET_IFNAME=enP6p9s0np0 \
     GLOO_SOCKET_IFNAME=enP6p9s0np0 \
@@ -115,6 +116,7 @@ if [ "$mode" = "prefill" ]; then
 
 elif [ "$mode" = "decode" ]; then
     # GB200 dynamo decode command
+    NVSHMEM_IB_GID_INDEX=3 \
     MELLANOX_VISIBLE_DEVICES=all \
     NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=enP6p9s0np0 \
     NCCL_SOCKET_IFNAME=enP6p9s0np0 \
