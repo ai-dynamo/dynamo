@@ -74,10 +74,10 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
             continue;
         }
         // Only consider segments that start like JSON
-        if s.starts_with('{') || s.starts_with('[') {
+        if s.starts_with('{') {
             // Trim trailing non-JSON by cutting at the last closing brace/bracket
-            if let Some(pos) = s.rfind(['}', ']']) {
-                let candidate = &s[..=pos];
+            if let Some(pos) = s.rfind('}') {
+                let candidate = &s[..=pos].trim();
                 // Keep only valid JSON candidates
                 if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
                     items.push(candidate.to_string());
@@ -85,9 +85,10 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> String {
             }
         }
     }
-
     if items.is_empty() {
-        return input.to_string();
+        // Try removing the start token and see if it's a valid JSON in case it is already in an array format
+        let stripped_content = input.strip_prefix(start_token).unwrap_or(input);
+        return stripped_content.to_string();
     }
     format!("[{}]", items.join(","))
 }
@@ -169,6 +170,7 @@ pub fn try_tool_call_parse_json(
 
     // Convert json to &str if it's a String, otherwise keep as &str
     let json = json.as_str();
+    println!("JSON: {:?}", json);
 
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
