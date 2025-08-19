@@ -353,11 +353,14 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
