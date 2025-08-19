@@ -125,7 +125,10 @@ args:
 
 # TensorRT-LLM worker
 args:
-  - python3 -m dynamo.trtllm --engine_path /workspace/engines/
+  - python3 -m dynamo.trtllm
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    --extra-engine-args engine_configs/agg.yaml
 ```
 
 Key customization points include:
