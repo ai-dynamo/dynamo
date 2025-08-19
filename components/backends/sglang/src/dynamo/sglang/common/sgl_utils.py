@@ -4,6 +4,7 @@
 import argparse
 import contextlib
 import logging
+import os
 import socket
 from argparse import Namespace
 
@@ -100,3 +101,7 @@ def setup_native_endpoints(server_args, component, handler):
         )
 
     return tasks
+
+
+def get_dynamo_namespace():
+    return os.environ.get("DYN_NAMESPACE", "global")
