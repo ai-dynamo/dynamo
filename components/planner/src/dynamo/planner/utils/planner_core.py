@@ -90,6 +90,7 @@ class Planner:
 
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
+        self.no_correction = args.no_correction
 
         self.prometheus_port = args.prometheus_port
 
