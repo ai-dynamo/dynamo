@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Dynamo supports running Deepseek R1 with data parallel attention and wide expert parallelism. Each data parallel attention rank is a seperate dynamo component that will emit its own KV Events and Metrics. vLLM controls the expert parallelism using the flag `--enable-expert-parallel`
 
-# Instructions
+## Instructions
 
 The following script can be adapted to run Deepseek R1 with a variety of different configuration. The current configuration uses 2 nodes, 16 GPUs, and a dp of 16. Follow the [ReadMe](README.md) Getting Started section on each node, and then run these two commands.
 

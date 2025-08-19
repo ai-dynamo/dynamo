@@ -5,8 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Multinode Examples
 
-## Multi-node sized models
-
 SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires 4 nodes of 8xH100 GPUs.
 
 **Step 1**: Use the provided helper script to generate commands to start NATS/ETCD on your head prefill node. This script will also give you environment variables to export on each other node. You will need the IP addresses of your head prefill and head decode node to run this script.

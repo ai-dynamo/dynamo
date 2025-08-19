@@ -1,0 +1,48 @@
+---
+globs: *.md
+alwaysApply: false
+---
+Spell out numbers under 10 unless you are talking about a specific value or a parameter.
+Correct: This uses four nodes.
+Incorrect: This uses 4 nodes
+Avoid using "please" and "see."
+Please is used in marketing documents rather than technical documentation.
+"Refer to" is more sensitive to users with visual disabilities than "see."
+Refer to the following rather than see the following.
+Use "can" instead of "may" whenever possible.
+Use: The installation can take up to 20 minutes.
+Avoid: The installation may take up to 20 minutes.
+For parenthetical statements, ensure your punctuation is in the correct location when using quotation marks.
+Correct: A key and familiar paradigm in Biology exists that "Structure determines Function."
+Incorrect: A key and familiar paradigm in Biology exists that "Structure determines Function". (I know this looks odd to most people educated outside of the U.S.)
+Avoid using Latin terms (e.g., etc., i.e., and via).
+e.g. = for example, etc. = and so on, i.e. = that is, and via = using, by, or through.
+Avoid excessive hyphenation.
+For example, if using command line as a noun, you don't need a hyphen, but you need one when it's an adjective.
+Example: The command line is very easy to use, but command-line output can be hard to understand.
+Ensure commas are used correctly.
+Use a comma before the conjunction in a list of three or more items. (The comma that comes before the conjunction is known as the Oxford or serial comma.)
+Google includes Mail, Calendar, People, and Tasks.
+Save your file to a hard drive, an external drive, or OneDrive.
+               Note: If a series contains more than three items or the items are long, consider a bulleted list to improve readability.
+Commas also follow an introductory phrase.
+With WhatsApp, you can call any phone.
+To join independent clauses with a conjunction, such as and, or, but, yet or so.
+This tool is used to parse incoming parameters, and it can also be used to parse the outgoing results.
+               Note: If the sentence is long or complex, consider rewriting it as two sentences.
+Case headings​ consistently throughout the document (we currently use title casing).
+NVIDIA is not cased "Nvidia" (when referring to the company or products). You will see this casing in marketing docs and blogs, but it shouldn't be used in our tech docs.
+Use “after” instead of “once” because they have a subtle difference.
+What Is Their Main Difference?
+The main difference between "once" and "after" is that "once" expresses a sense of urgency while "after" simply points out what follows an action or event.
+     Example: 
+     Call me once you get home. Means as soon as you step in the door.
+     Call me after you get home. Means call me sometime after you arrive. 
+Once is also meant to illustrate something is done one time only.
+Make ​sure you use "which" and "that”  (relative pronouns) correctly.
+Relative Pronouns
+What are they?
+
+Relative pronouns such as "which" and "that" are words that begin adjective clauses. Often, relative pronouns can be removed from a sentence without changing its meaning. In fact, at times, the omission of these clauses results in cleaner, tighter sentences. If required for clarity, it is important to know which one to use and when.
+
+Clauses can be essential because they can provide the reader with more information about the noun they follow. Clauses that start with "which" are nonrestrictive or nonessential clauses. A nonrestrictive/nonessential clause is a clause that does not limit the essential meaning of the element it modifies, and if it were removed from the sentence, the implied meaning behind it would remain the same. Nonrestrictive/nonessential clauses should always be set off from the rest of the sentence with commas.

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Supporting SGLang's native endpoints via HTTP Server
 
-# Introduction
+## Introduction
 
 The SGLang HTTP server provides a REST API interface for managing and monitoring SGLang components running in a dynamo distributed environment. It leverages dynamo's service discovery mechanism to automatically find and communicate with SGLang workers across the cluster.
 
