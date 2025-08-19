@@ -170,7 +170,7 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
     # Allocate side channel ports
-    # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L372
+    # https://github.com/vllm-project/vllm/blob/releases/v0.10.1/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L443
     # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
     # For dp_rank, we need to reserve tp_size consecutive ports
     tp_size = config.engine_args.tensor_parallel_size or 1
