@@ -11,6 +11,7 @@ members = [
     "lib/tokens",
     "lib/async-openai",
     "lib/async-openai-macros",
+    "lib/parsers",
     "lib/bindings/c",
     "lib/engines/*",
 ]
@@ -32,6 +33,7 @@ dynamo-runtime = { path = "lib/runtime", version = "0.4.1" }
 dynamo-llm = { path = "lib/llm", version = "0.4.1" }
 dynamo-tokens = { path = "lib/tokens", version = "0.4.1" }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.4.1", features = ["byot", "rustls"]}
+dynamo-parsers = { path = "lib/parsers", version = "0.4.0" }
 
 # External dependencies
 anyhow = { version = "1" }

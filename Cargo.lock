@@ -1974,6 +1974,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-parsers"
+version = "0.4.0+post0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid 1.17.0",
+]
+
+[[package]]
 name = "dynamo-run"
 version = "0.4.1"
 dependencies = [
