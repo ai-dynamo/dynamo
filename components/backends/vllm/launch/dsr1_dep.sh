@@ -10,6 +10,7 @@ NODE_RANK=""
 GPUS_PER_NODE=""
 MASTER_ADDR="localhost"
 LOG_DIR="./logs"
+MODEL="deepseek-ai/DeepSeek-R1"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             LOG_DIR="$2"
             shift 2
             ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -42,6 +47,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --gpus-per-node L     Number of GPUs per node (required, int)"
             echo "  --master-addr ADDR    Master node address (default: localhost)"
             echo "  --log-dir DIR         Directory for log files (default: ./logs)"
+            echo "  --model MODEL    Model name to use (default: deepseek-ai/DeepSeek-R1)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -71,6 +77,7 @@ echo "  GPUs per node: $GPUS_PER_NODE"
 echo "  Data parallel size: $DATA_PARALLEL_SIZE"
 echo "  Master address: $MASTER_ADDR"
 echo "  Log directory: $LOG_DIR"
+echo "  Model name: $MODEL"
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
@@ -90,7 +97,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         VLLM_USE_DEEP_GEMM=1 \
         VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
         python3 -m dynamo.vllm \
-        --model deepseek-ai/DeepSeek-R1 \
+        --model $MODEL \
         --data_parallel_size $DATA_PARALLEL_SIZE \
         --data-parallel-rank $dp_rank \
         --enable-expert-parallel \
