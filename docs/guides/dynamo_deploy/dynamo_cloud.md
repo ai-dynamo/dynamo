@@ -146,9 +146,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](../../components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](../../components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](../../../components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../../components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../../components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](k8s_metrics.md)
