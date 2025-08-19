@@ -88,7 +88,10 @@ def parse_args():
         "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
     )
     parser.add_argument(
-        "--http-port", type=int, default=8080, help="HTTP port for the engine (u16)."
+        "--http-port",
+        type=int,
+        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
     )
     parser.add_argument(
         "--tls-cert-path",
@@ -106,8 +109,8 @@ def parse_args():
         "--router-mode",
         type=str,
         choices=["round-robin", "random", "kv"],
-        default="round-robin",
-        help="How to route the request",
+        default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
+        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
     )
     parser.add_argument(
         "--kv-overlap-score-weight",

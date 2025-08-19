@@ -26,6 +26,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	// Frontend doesn't need backend-specific config
 	container := f.getCommonContainer(context)
 
+	// Set default command and args
+	container.Command = []string{"python3"}
+	container.Args = []string{"-m", "dynamo.frontend"}
+
 	// Add HTTP port
 	container.Ports = []corev1.ContainerPort{
 		{
@@ -69,6 +73,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  commonconsts.EnvDynamoServicePort,
+			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+		},
+		{
+			Name:  "DYN_HTTP_PORT", // TODO: need to reconcile DYNAMO_PORT and DYN_HTTP_PORT
 			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 		},
 	}...)

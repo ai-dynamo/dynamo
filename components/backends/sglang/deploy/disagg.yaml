@@ -14,10 +14,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
-          command: ["sh", "-c"]
-          args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-disagg
