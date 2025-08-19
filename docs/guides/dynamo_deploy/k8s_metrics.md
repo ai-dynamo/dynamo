@@ -1,297 +1,203 @@
-# Kubernetes Metrics Setup
-
-This guide covers setting up comprehensive metrics collection for Dynamo deployments on Kubernetes using Prometheus and Grafana.
+# Dynamo Metrics Collection on Kubernetes
 
 ## Overview
 
-The Dynamo Kubernetes Platform provides extensive telemetry through:
-- **Application metrics**: Request latency, throughput, error rates
-- **Infrastructure metrics**: GPU utilization, memory usage, network I/O
-- **Kubernetes metrics**: Pod status, resource consumption, cluster health
-- **Custom Dynamo metrics**: KV cache efficiency, disaggregation performance
+This guide provides a walkthrough for collecting and visualizing metrics from Dynamo components using the Prometheus Operator stack. The Prometheus Operator provides a powerful and flexible way to configure monitoring for Kubernetes applications through custom resources like PodMonitors, making it easy to automatically discover and scrape metrics from Dynamo components.
 
 ## Prerequisites
 
-- Kubernetes cluster with Dynamo deployed
-- Cluster admin permissions for installing monitoring stack
-- Sufficient storage for metrics retention (recommended: 50GB+ for production)
+### Install Dynamo Operator
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/dynamo_cloud.md) for detailed instructions on deploying the Dynamo operator.
 
-## Quick Setup with Helm
+### Install Prometheus Operator
+If you don't have an existing Prometheus setup, you'll need to install the Prometheus Operator. The Prometheus Operator introduces custom resources that make it easy to deploy and manage Prometheus monitoring in Kubernetes:
 
-### 1. Install Prometheus Stack
+- `PodMonitor`: Automatically discovers and scrapes metrics from pods based on label selectors
+- `ServiceMonitor`: Similar to PodMonitor but works with Services
+- `PrometheusRule`: Defines alerting and recording rules
 
+For a basic installation:
 ```bash
-# Add prometheus community helm repo
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
-
-# Install kube-prometheus-stack
-helm install prometheus-stack prometheus-community/kube-prometheus-stack \
-  --namespace monitoring \
-  --create-namespace \
-  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
-  --set grafana.adminPassword=admin123
+helm install prometheus prometheus-community/kube-prometheus-stack
 ```
 
-### 2. Configure Dynamo Service Monitors
+## Deploy a DynamoGraphDeployment
 
-Create ServiceMonitor resources to scrape Dynamo metrics:
+Let's start by deploying a simple vLLM aggregated deployment:
+
+```bash
+export NAMESPACE=dynamo # namespace where dynamo operator is installed
+pushd components/backends/vllm/deploy
+kubectl apply -f agg.yaml -n $NAMESPACE
+popd
+```
+
+This will create two components:
+- A Frontend component exposing metrics on its HTTP port
+- A Worker component exposing metrics on its system port
+
+Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
+- Deployment configuration: See the [vLLM README](../../components/backends/vllm/README.md)
+- Available metrics: See the [metrics guide](../metrics.md)
+
+### Validate the Deployment
+
+Let's send some test requests to populate metrics:
+
+```bash
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream": true,
+    "max_tokens": 30
+  }'
+```
+
+For more information about validating the deployment, see the [vLLM README](../../components/backends/vllm/README.md).
+
+## Set Up Metrics Collection
+
+### Create PodMonitors
+
+The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. To enable this discovery, the Dynamo operator automatically adds these labels to all pods:
+- `nvidia.com/metrics-enabled: "true"` - Enables metrics collection
+- `nvidia.com/dynamo-component-type: "frontend|worker"` - Identifies the component type
+
+> **Note**: You can opt-out specific deployments from metrics collection by adding this annotation to your DynamoGraphDeployment:
+```yaml
+apiVersion: nvidia.com/v1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+  annotations:
+    nvidia.com/enable-metrics: "false"
+spec:
+  # …
+```
+
+Let's create two monitors - one for each component type:
+
+First, create the frontend PodMonitor:
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
+kind: PodMonitor
 metadata:
   name: dynamo-frontend-metrics
-  namespace: monitoring
+  namespace: $NAMESPACE
 spec:
   selector:
     matchLabels:
-      app: dynamo-frontend
-  endpoints:
-  - port: metrics
-    path: /metrics
-    interval: 15s
+      nvidia.com/metrics-enabled: "true"
+      nvidia.com/dynamo-component-type: "frontend"
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 2s
   namespaceSelector:
     matchNames:
-    - default
-    - dynamo-system
----
+      - $NAMESPACE
+```
+
+Then, create the worker PodMonitor:
+
+```yaml
 apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
+kind: PodMonitor
 metadata:
   name: dynamo-worker-metrics
-  namespace: monitoring
+  namespace: $NAMESPACE
 spec:
   selector:
     matchLabels:
-      app: dynamo-worker
-  endpoints:
-  - port: metrics
-    path: /metrics
-    interval: 15s
+      nvidia.com/metrics-enabled: "true"
+      nvidia.com/dynamo-component-type: "worker"
+  podMetricsEndpoints:
+    - port: system
+      path: /metrics
+      interval: 2s
   namespaceSelector:
     matchNames:
-    - default
-    - dynamo-system
+      - $NAMESPACE
 ```
 
-### 3. Access Grafana Dashboard
-
-```bash
-# Port forward to Grafana
-kubectl port-forward -n monitoring svc/prometheus-stack-grafana 3000:80
-
-# Access at http://localhost:3000
-# Username: admin
-# Password: admin123
-```
-
-## Custom Metrics Configuration
-
-### Enable Metrics in Dynamo Components
-
-Update your Dynamo deployment to expose metrics endpoints:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: dynamo-frontend
-spec:
-  template:
-    spec:
-      containers:
-      - name: frontend
-        image: nvcr.io/nvidia/ai-dynamo/frontend:latest
-        ports:
-        - name: http
-          containerPort: 8000
-        - name: metrics  # Add metrics port
-          containerPort: 9090
-        env:
-        - name: ENABLE_METRICS
-          value: "true"
-        - name: METRICS_PORT
-          value: "9090"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: dynamo-frontend
-  labels:
-    app: dynamo-frontend
-spec:
-  ports:
-  - name: http
-    port: 8000
-    targetPort: 8000
-  - name: metrics  # Add metrics service port
-    port: 9090
-    targetPort: 9090
-  selector:
-    app: dynamo-frontend
-```
-
-### GPU Metrics with DCGM
-
-Install NVIDIA DCGM for detailed GPU metrics:
-
-```bash
-# Install NVIDIA GPU Operator with DCGM enabled
-helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
-helm install gpu-operator nvidia/gpu-operator \
-  --namespace gpu-operator \
-  --create-namespace \
-  --set dcgmExporter.enabled=true \
-  --set dcgmExporter.serviceMonitor.enabled=true
-```
-
-## Grafana Dashboards
-
-### Import Dynamo Dashboard
-
-1. Download the Dynamo dashboard JSON from: `deploy/monitoring/grafana-dashboard.json`
-2. In Grafana, go to **Dashboards** > **Import**
-3. Upload the JSON file or paste the content
-4. Configure data source as your Prometheus instance
-
-### Key Metrics to Monitor
-
-**Request Metrics:**
-- `dynamo_requests_total` - Total request count
-- `dynamo_request_duration_seconds` - Request latency percentiles
-- `dynamo_active_requests` - Currently processing requests
-
-**Inference Metrics:**
-- `dynamo_ttft_seconds` - Time to First Token
-- `dynamo_itl_seconds` - Inter-Token Latency
-- `dynamo_tokens_per_second` - Generation throughput
-
-**KV Cache Metrics:**
-- `dynamo_kv_cache_hit_rate` - Cache hit percentage
-- `dynamo_kv_cache_memory_usage_bytes` - Cache memory consumption
-- `dynamo_kv_transfers_total` - Cross-worker KV transfers
-
-**GPU Metrics (via DCGM):**
-- `DCGM_FI_DEV_GPU_UTIL` - GPU utilization
-- `DCGM_FI_DEV_MEM_COPY_UTIL` - Memory bandwidth utilization
-- `DCGM_FI_DEV_FB_USED` - GPU memory usage
-
-## Alerting Rules
-
-Create alerting rules for critical conditions:
-
+If you are using planner, you can also create a PodMonitor for the planner:
 ```yaml
 apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
+kind: PodMonitor
 metadata:
-  name: dynamo-alerts
-  namespace: monitoring
+  name: dynamo-planner-metrics
+  namespace: $NAMESPACE
 spec:
-  groups:
-  - name: dynamo.rules
-    rules:
-    - alert: HighRequestLatency
-      expr: histogram_quantile(0.95, dynamo_request_duration_seconds_bucket) > 2
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: "High request latency detected"
-        description: "95th percentile latency is {{ $value }}s"
-        
-    - alert: LowKVCacheHitRate
-      expr: dynamo_kv_cache_hit_rate < 0.7
-      for: 10m
-      labels:
-        severity: warning
-      annotations:
-        summary: "KV cache hit rate is low"
-        description: "Hit rate is {{ $value | humanizePercentage }}"
-        
-    - alert: GPUMemoryHigh
-      expr: DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL > 0.9
-      for: 5m
-      labels:
-        severity: critical
-      annotations:
-        summary: "GPU memory usage is high"
-        description: "GPU {{ $labels.gpu }} memory usage is {{ $value | humanizePercentage }}"
+  selector:
+    matchLabels:
+      nvidia.com/metrics-enabled: "true"
+      nvidia.com/dynamo-component-type: "planner"
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 2s
+  namespaceSelector:
+    matchNames:
+      - $NAMESPACE
 ```
 
-## Performance Tuning
-
-### Prometheus Configuration
-
-Optimize retention and storage for your workload:
-
-```yaml
-# values.yaml for prometheus-stack helm chart
-prometheus:
-  prometheusSpec:
-    retention: 30d
-    retentionSize: 50GB
-    storageSpec:
-      volumeClaimTemplate:
-        spec:
-          accessModes: ["ReadWriteOnce"]
-          resources:
-            requests:
-              storage: 100Gi
-          storageClassName: fast-ssd
-```
-
-### Scrape Interval Tuning
-
-Adjust scrape intervals based on your monitoring needs:
-
-```yaml
-# High frequency for critical metrics
-- job_name: 'dynamo-critical'
-  scrape_interval: 5s
-  metrics_path: '/metrics'
-  static_configs:
-  - targets: ['dynamo-frontend:9090']
-
-# Lower frequency for resource metrics  
-- job_name: 'dynamo-resources'
-  scrape_interval: 30s
-  metrics_path: '/metrics'
-  static_configs:
-  - targets: ['node-exporter:9100']
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Metrics not appearing:**
-- Verify ServiceMonitor is in correct namespace
-- Check Prometheus targets: `http://prometheus:9090/targets`
-- Ensure firewall/network policies allow scraping
-
-**High cardinality warnings:**
-- Review metric labels and limit dynamic labels
-- Use recording rules for complex queries
-- Configure metric relabeling to drop unnecessary labels
-
-**Grafana connection issues:**
-- Verify Prometheus data source URL
-- Check authentication credentials
-- Ensure network connectivity between Grafana and Prometheus
-
-### Debugging Commands
-
+Apply the PodMonitors:
 ```bash
-# Check Prometheus configuration
-kubectl exec -n monitoring prometheus-prometheus-stack-kube-prom-prometheus-0 \
-  -- cat /etc/prometheus/config_out/prometheus.env.yaml
-
-# View ServiceMonitor status
-kubectl get servicemonitor -n monitoring -o yaml
-
-# Check DCGM exporter status
-kubectl logs -n gpu-operator -l app=nvidia-dcgm-exporter
+pushd deploy/metrics/k8s
+# envsubst replaces ${NAMESPACE} with the actual namespace value
+envsubst < frontend-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
+envsubst < worker-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
+envsubst < planner-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
+popd
 ```
 
-For advanced configuration and troubleshooting, see the [Prometheus Operator Documentation](https://prometheus-operator.dev/).
+This will cause Prometheus to be re-configured to scrape metrics from the pods of your DynamoGraphDeployment.
+
+### Configure Grafana Dashboard
+
+Apply the Dynamo dashboard configuration to populate Grafana with the Dynamo dashboard:
+```bash
+pushd deploy/metrics/k8s
+kubectl apply -n monitoring -f grafana-dynamo-dashboard-configmap.yaml
+popd
+```
+
+The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_dashboard: "1"`, the Grafana will discover and populate it to its list of available dashboards. The dashboard includes panels for:
+- Frontend request rates
+- Time to first token
+- Inter-token latency
+- Request duration
+- Input/Output sequence lengths
+- GPU utilization
+
+## Viewing the Metrics
+
+### In Prometheus
+```bash
+kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring
+```
+
+Visit http://localhost:9090 and try these example queries:
+- `dynamo_frontend_requests_total`
+- `dynamo_frontend_time_to_first_token_seconds_bucket`
+
+![Prometheus UI showing Dynamo metrics](../../images/prometheus-k8s.png)
+
+### In Grafana
+```bash
+kubectl port-forward svc/grafana 3000:80 -n monitoring
+```
+
+Visit http://localhost:3000 and find the Dynamo dashboard under General.
+
+![Grafana dashboard showing Dynamo metrics](../../images/grafana-k8s.png)

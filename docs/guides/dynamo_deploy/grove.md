@@ -1,171 +1,96 @@
-# Grove: Advanced Kubernetes Scheduling
+# Grove Deployment Guide
 
-Grove is an advanced Kubernetes scheduler and batch workload manager built on top of the Dynamo Kubernetes Platform. It enables sophisticated scheduling policies for multi-node GPU workloads, with special support for large-scale LLM inference deployments.
+Grove is a Kubernetes API specifically designed to address the orchestration challenges of modern AI workloads, particularly disaggregated inference systems. Grove provides seamless integration with NVIDIA Dynamo for comprehensive AI infrastructure management.
 
 ## Overview
 
-Grove extends Kubernetes' default scheduling capabilities with:
-- **Gang scheduling**: Ensures all pods in a workload start together or not at all
-- **Topology-aware placement**: Optimizes pod placement based on network topology
-- **Resource-aware scheduling**: Makes intelligent decisions based on GPU memory, compute capacity, and network bandwidth
-- **Priority-based queueing**: Manages workload priorities and preemption policies
+Grove was originally motivated by the challenges of orchestrating multinode, disaggregated inference systems. It provides a consistent and unified API that allows users to define, configure, and scale prefill, decode, and any other components like routing within a single custom resource.
 
-## Key Features
+### How Grove Works for Disaggregated Serving
+
+Grove enables disaggregated serving by breaking down large language model inference into separate, specialized components that can be independently scaled and managed. This architecture provides several advantages:
+
+- **Component Specialization**: Separate prefill, decode, and routing components optimized for their specific tasks
+- **Independent Scaling**: Each component can scale based on its individual resource requirements and workload patterns
+- **Resource Optimization**: Better utilization of hardware resources through specialized workload placement
+- **Fault Isolation**: Issues in one component don't necessarily affect others
+
+## Core Components and API Resources
+
+Grove implements disaggregated serving through several custom Kubernetes resources that provide declarative composition of role-based pod groups:
 
 ### PodGangSet
-PodGangSet is Grove's primary scheduling primitive that groups related pods that must be scheduled together.
-
-```yaml
-apiVersion: grove.dynamo.ai/v1
-kind: PodGangSet
-metadata:
-  name: llm-inference-gang
-  namespace: default
-spec:
-  template:
-    spec:
-      containers:
-      - name: worker
-        image: dynamo/worker:latest
-        resources:
-          requests:
-            nvidia.com/gpu: 1
-  replicas: 8
-  minAvailable: 8  # All pods must be schedulable
-  scheduling:
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: node-type
-            operator: In
-            values: ["gpu-compute"]
-```
+The top-level Grove object that defines a group of components managed and colocated together. Key features include:
+- Support for autoscaling
+- Topology-aware spread of replicas for availability
+- Unified management of multiple disaggregated components
 
 ### PodClique
-PodClique provides fine-grained control over pod co-location and anti-affinity rules within a gang.
+Represents a group of pods with a specific role (e.g., leader, worker, frontend). Each clique features:
+- Independent configuration options
+- Custom scaling logic support
+- Role-specific resource allocation
 
-```yaml
-apiVersion: grove.dynamo.ai/v1
-kind: PodClique
-metadata:
-  name: prefill-decode-clique
-spec:
-  selector:
-    matchLabels:
-      app: dynamo-worker
-  topology:
-    # Prefer pods to be co-located on the same rack
-    preferredDuringSchedulingIgnoredDuringExecution:
-    - weight: 100
-      podAffinityTerm:
-        labelSelector:
-          matchLabels:
-            component: prefill
-        topologyKey: topology.kubernetes.io/rack
-```
+### PodCliqueScalingGroup
+A set of PodCliques that scale and are scheduled together, ideal for tightly coupled roles like prefill leader and worker components that need coordinated scaling behavior.
 
-## Deployment
+## Key Capabilities for Disaggregated Serving
 
-### Prerequisites
-- Kubernetes cluster with GPU nodes
-- NVIDIA GPU Operator installed
-- Node topology labels configured
+Grove provides several specialized features that make it particularly well-suited for disaggregated serving:
 
-### Install Grove Scheduler
+### Flexible Gang Scheduling
+PodCliques and PodCliqueScalingGroups allow users to specify flexible gang-scheduling requirements at multiple levels within a PodGangSet to prevent resource deadlocks and ensure all components of a disaggregated system start together.
 
-```bash
-# Install Grove CRDs and scheduler
-kubectl apply -f https://github.com/ai-dynamo/grove/releases/latest/download/grove-crds.yaml
-kubectl apply -f https://github.com/ai-dynamo/grove/releases/latest/download/grove-scheduler.yaml
-```
+### Multi-level Horizontal Auto-Scaling
+Supports pluggable horizontal auto-scaling solutions to scale PodGangSet, PodClique, and PodCliqueScalingGroup custom resources independently based on their specific metrics and requirements.
 
-### Configure Node Topology
+### Network Topology-Aware Scheduling
+Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication.
 
-Label your nodes with topology information:
+### Custom Startup Dependencies
+Prescribes the order in which PodCliques must start in a declarative specification, with pod startup decoupled from pod creation or scheduling. This ensures proper initialization order for disaggregated components.
 
-```bash
-# Label nodes with rack information
-kubectl label node gpu-node-01 topology.kubernetes.io/rack=rack-1
-kubectl label node gpu-node-02 topology.kubernetes.io/rack=rack-1
-kubectl label node gpu-node-03 topology.kubernetes.io/rack=rack-2
+## Use Cases and Examples
 
-# Label nodes with GPU types
-kubectl label node gpu-node-01 accelerator=h100
-kubectl label node gpu-node-02 accelerator=h100
-kubectl label node gpu-node-03 accelerator=a100
-```
+Grove specifically supports:
 
-## Integration with Dynamo
+- **Multi-node disaggregated inference** for large models such as DeepSeek-R1 and Llama-4-Maverick
+- **Single-node disaggregated inference** for optimized resource utilization
+- **Agentic pipelines of models** for complex AI workflows
+- **Standard aggregated serving** patterns for single node or single GPU inference
 
-Grove integrates seamlessly with Dynamo's disaggregated serving architecture:
+## Integration with NVIDIA Dynamo
 
-### Multi-Node Prefill/Decode Scheduling
+Grove is strategically aligned with NVIDIA Dynamo for seamless integration within the AI infrastructure stack:
 
-```yaml
-apiVersion: grove.dynamo.ai/v1
-kind: PodGangSet
-metadata:
-  name: dynamo-multinode-serving
-spec:
-  template:
-    metadata:
-      labels:
-        app: dynamo-worker
-    spec:
-      schedulerName: grove-scheduler
-      containers:
-      - name: dynamo-worker
-        image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:latest
-        env:
-        - name: WORKER_TYPE
-          value: "prefill"  # or "decode"
-  replicas: 16
-  minAvailable: 16
-  scheduling:
-    # Ensure all workers can communicate efficiently
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-        - matchExpressions:
-          - key: network-tier
-            operator: In
-            values: ["high-bandwidth"]
-```
+### Complementary Roles
+- **Grove**: Handles the Kubernetes orchestration layer for disaggregated AI workloads
+- **Dynamo**: Provides comprehensive AI infrastructure capabilities including serving backends, routing, and resource management
 
-## Best Practices
+### Release Coordination
+Grove is aligning its release schedule with NVIDIA Dynamo to ensure seamless integration, with the finalized release cadence reflected in the project roadmap.
 
-### Resource Planning
-- Use `minAvailable: replicas` for strict gang scheduling
-- Set appropriate resource requests and limits
-- Consider network bandwidth requirements for multi-node workloads
+### Unified AI Platform
+The integration creates a comprehensive platform where:
+- Grove manages complex orchestration of disaggregated components
+- Dynamo provides the serving infrastructure, routing capabilities, and backend integrations
+- Together they enable sophisticated AI serving architectures with simplified management
 
-### Topology Awareness
-- Label nodes with rack, zone, and network topology information
-- Use PodClique for fine-grained placement control
-- Test different affinity rules to optimize for your workload
+## Architecture Benefits
 
-### Monitoring
-Grove provides metrics for scheduling decisions:
+Grove represents a significant advancement in Kubernetes-based orchestration for AI workloads by:
 
-```bash
-# View Grove scheduler metrics
-kubectl port-forward -n grove-system svc/grove-scheduler-metrics 8080:8080
-curl localhost:8080/metrics | grep grove_
-```
+1. **Simplifying Complex Deployments**: Provides a unified API that can manage multiple components (prefill, decode, routing) within a single resource definition
+2. **Enabling Sophisticated Architectures**: Supports advanced disaggregated inference patterns that were previously difficult to orchestrate
+3. **Reducing Operational Complexity**: Abstracts away the complexity of coordinating multiple interdependent AI components
+4. **Optimizing Resource Utilization**: Enables fine-grained control over component placement and scaling
 
-## Troubleshooting
+## Getting Started
 
-### Common Issues
+> **Note**: Grove is currently in development and aligning with NVIDIA Dynamo's release schedule. 
 
-**Pods stuck in Pending state:**
-- Check if sufficient resources are available across required nodes
-- Verify node labels match gang affinity requirements
-- Review Grove scheduler logs: `kubectl logs -n grove-system deployment/grove-scheduler`
+For installation instructions, see the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md).
 
-**Gang scheduling not working:**
-- Ensure `schedulerName: grove-scheduler` is set in pod specs
-- Verify PodGangSet controller is running
-- Check for resource conflicts with other scheduled workloads
+For practical examples of Grove-based multinode deployments in action, see the [Multinode Deployment Guide](multinode-deployment.md), which demonstrates multi-node disaggregated serving scenarios.
 
-For more detailed troubleshooting, see the [Grove Documentation](https://grove.dynamo.ai/docs).
+For the latest updates on Grove, refer to the [official project on GitHub](https://github.com/NVIDIA/grove).
