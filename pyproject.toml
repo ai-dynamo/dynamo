@@ -56,7 +56,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl<=0.4.1",
-    "vllm==0.10.0",
+    "vllm[flashinfer]==0.10.1",
 ]
 
 sglang = [
@@ -135,6 +135,7 @@ addopts = [
     "--strict-config",
     "--mypy",
     "--ignore-glob=*model.py",
+    "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
@@ -174,7 +175,8 @@ markers = [
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
     "slow: marks tests as known to be slow",
-    "h100: marks tests to run on H100"
+    "h100: marks tests to run on H100",
+    "kvbm: marks tests for KV behavior and model determinism"
 ]
 
 # Linting/formatting

@@ -13,35 +13,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::block_manager::block::BlockState;
+use std::sync::atomic::AtomicU64;
+
+use crate::block_manager::block::{locality::LocalityProvider, BlockState};
 
 use super::*;
-use std::collections::HashSet;
+use priority_key::PriorityKey;
+
 use tracing::instrument;
 
 #[derive(Default)]
-pub struct InactiveBlockPool<S: Storage, M: BlockMetadata> {
+pub struct InactiveBlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     // Direct lookup by sequence_hash.
-    lookup_map: HashMap<SequenceHash, Block<S, M>>,
+    lookup_map: HashMap<SequenceHash, Block<S, L, M>>,
 
-    // A priority ordering for the leaf nodes.
-    // Leaf nodes are defined as blocks that have no children in the inactive pool.
-    leaf_set: BTreeSet<PriorityKey<M>>,
-
-    // Mapping from parents to their children.
-    parent_children: HashMap<SequenceHash, HashSet<SequenceHash>>,
+    // Ordered by timestamp (oldest first)
+    priority_set: BTreeSet<PriorityKey<M>>,
 
     // Fully Uninitialized
-    uninitialized_set: VecDeque<Block<S, M>>,
+    uninitialized_set: VecDeque<Block<S, L, M>>,
 
     // Return Tick
     return_tick: u64,
 
-    // Total blocks
-    total_blocks: u64,
+    // Total blocks counter
+    total_blocks: Arc<AtomicU64>,
+
+    // Inactive blocks
+    available_blocks: Arc<AtomicU64>,
 }
 
-impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, M> {
     /// Creates a new, empty [`InactiveBlockPool`].
     ///
     /// # Returns
@@ -50,12 +52,30 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     pub(crate) fn new() -> Self {
         Self {
             lookup_map: HashMap::new(),
-            leaf_set: BTreeSet::new(),
-            parent_children: HashMap::new(),
+            priority_set: BTreeSet::new(),
             uninitialized_set: VecDeque::new(),
             return_tick: 0,
-            total_blocks: 0,
+            total_blocks: Arc::new(AtomicU64::new(0)),
+            available_blocks: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Returns a counter for the number of available blocks.
+    ///
+    /// # Returns
+    ///
+    /// A counter for the number of available blocks as an [`Arc<AtomicU64>`].
+    pub fn available_blocks_counter(&self) -> Arc<AtomicU64> {
+        self.available_blocks.clone()
+    }
+
+    /// Returns a counter for the total number of blocks.
+    ///
+    /// # Returns
+    ///
+    /// A counter for the total number of blocks as an [`Arc<AtomicU64>`].
+    pub fn total_blocks_counter(&self) -> Arc<AtomicU64> {
+        self.total_blocks.clone()
     }
 
     /// Returns the total number of blocks managed by this pool (both available and acquired).
@@ -64,7 +84,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// The total block count as a [`u64`].
     pub fn total_blocks(&self) -> u64 {
-        self.total_blocks
+        self.total_blocks.load(Ordering::Relaxed)
     }
 
     /// Returns the number of blocks currently available in the pool.
@@ -84,17 +104,15 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     /// If an entry with the same sequence hash already exists in the [`lookup_map`]
     /// the block is reset and moved to the [`uninitialized_set`].
     /// Otherwise, the block is added to the [`lookup_map`].
-    /// If there are no children of the block, it is added to the [`leaf_set`].
-    /// If the parent of the block is in the [`leaf_set`], it is removed from the [`leaf_set`].
     ///
     /// # Arguments
     ///
     /// * `block` - The block to insert ([`Block<T, M>`]).
     /// * `sequence_hash` - The sequence hash associated with the block's content ([`SequenceHash`]).
     #[instrument(level = "trace", skip(self, block), fields(sequence_hash = ?sequence_hash))]
-    fn insert_with_sequence_hash(&mut self, block: Block<S, M>, sequence_hash: SequenceHash) {
+    fn insert_with_sequence_hash(&mut self, block: Block<S, L, M>, sequence_hash: SequenceHash) {
         let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
-        if self.lookup_map.contains_key(&sequence_hash) {
+        if self.priority_set.contains(&priority_key) {
             tracing::trace!("multiple entries with the same sequence hash, resetting block and inserting into uninitialized set");
             let mut block = block;
             block.reset();
@@ -102,27 +120,8 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
         } else {
             tracing::trace!("inserting block to map and priority set");
 
-            if let Ok(Some(parent)) = block.parent_sequence_hash() {
-                // Add the entry for the parent->child link.
-                self.parent_children
-                    .entry(parent)
-                    .or_default()
-                    .insert(sequence_hash);
-
-                // If the parent is currently in the inactive pool, remove it from the leaf set.
-                if let Some(parent_block) = self.lookup_map.get_mut(&parent) {
-                    self.leaf_set
-                        .remove(&PriorityKey::new(parent_block.metadata().clone(), parent));
-                }
-            }
-
-            // Create the entry for the block in the lookup map.
+            self.priority_set.insert(priority_key);
             self.lookup_map.insert(sequence_hash, block);
-
-            // If the block has no children, it is a leaf.
-            if !self.parent_children.contains_key(&sequence_hash) {
-                self.leaf_set.insert(priority_key);
-            }
         }
     }
 
@@ -137,7 +136,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// * `block` - The block to insert ([`Block<S, M>`]).
     #[instrument(level = "trace", skip(self, block), fields(block_state = ?block.state()))]
-    fn insert(&mut self, block: Block<S, M>) {
+    fn insert(&mut self, block: Block<S, L, M>) {
         tracing::trace!("Inserting block into available pool");
 
         // If we already have an entry for this sequence hash or the block is reset,
@@ -161,6 +160,8 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
                 self.insert_with_sequence_hash(block, sequence_hash);
             }
         }
+
+        self.available_blocks.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Adds multiple blocks to the pool.
@@ -171,7 +172,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// * `blocks` - A vector of blocks ([`Block<T, M>`]) to add.
     #[instrument(level = "debug", skip(self, blocks))]
-    pub fn add_blocks(&mut self, blocks: Vec<Block<S, M>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<Block<S, L, M>>) {
         let count = blocks.len();
         tracing::debug!(count, "Adding blocks to pool");
 
@@ -181,7 +182,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
             self.insert(block);
         }
 
-        self.total_blocks += count as u64;
+        self.total_blocks.fetch_add(count as u64, Ordering::Relaxed);
     }
 
     /// Adds multiple blocks to the pool.
@@ -192,10 +193,10 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// * `blocks` - A vector of blocks ([`Block<T, M>`]) to add.
     #[instrument(level = "debug", skip(self, blocks))]
-    pub fn add_blocks_with_state(&mut self, blocks: Vec<Block<S, M>>) {
+    pub fn add_blocks_with_state(&mut self, blocks: Vec<Block<S, L, M>>) {
         let count = blocks.len();
         tracing::debug!(count, "Adding blocks to pool");
-        self.total_blocks += count as u64;
+        self.total_blocks.fetch_add(count as u64, Ordering::Relaxed);
         // self.available_blocks += count as u64;
         self.return_blocks(blocks);
     }
@@ -209,7 +210,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// * `block` - The block ([`Block<S, M>`]) to return.
     #[instrument(level = "debug", skip(self, block))]
-    pub fn return_block(&mut self, mut block: Block<S, M>) {
+    pub fn return_block(&mut self, mut block: Block<S, L, M>) {
         // increment the return tick
         self.return_tick += 1;
 
@@ -231,7 +232,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// * `blocks` - A vector of blocks ([`Block<T, M>`]) to return.
     #[instrument(level = "debug", skip(self, blocks))]
-    pub fn return_blocks(&mut self, blocks: Vec<Block<S, M>>) {
+    pub fn return_blocks(&mut self, blocks: Vec<Block<S, L, M>>) {
         let count = blocks.len();
         tracing::debug!(count, "Returning blocks to pool");
         // return the block to the pool from tail to head
@@ -243,7 +244,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     }
 
     /// Attempts to remove and return a block associated with the given sequence hash
-    /// from the [`lookup_map`] and [`leaf_set`].
+    /// from the [`lookup_map`] and [`priority_set`].
     ///
     /// # Arguments
     ///
@@ -253,13 +254,15 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// An [`Option<Block<S, M>>`] containing the block if found, otherwise `None`.
     #[instrument(level = "trace", skip(self), fields(sequence_hash = ?sequence_hash))]
-    fn take_with_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, M>> {
+    fn take_with_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, L, M>> {
         match self.lookup_map.remove(&sequence_hash) {
             Some(block) => {
-                // Remove from leaf set, if it exists.
-                self.leaf_set
-                    .remove(&PriorityKey::new(block.metadata().clone(), sequence_hash));
+                // Remove from priority set.
+                let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
+                // Remove from priority set, if it exists.
+                self.priority_set.remove(&priority_key);
 
+                self.available_blocks.fetch_sub(1, Ordering::Relaxed);
                 Some(block)
             }
             None => None,
@@ -278,7 +281,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     ///
     /// An [`Option<Block<S, M>>`] containing the block if found, otherwise `None`.
     #[instrument(level = "debug", skip(self), fields(sequence_hash = ?sequence_hash))]
-    pub fn match_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, M>> {
+    pub fn match_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, L, M>> {
         self.take_with_sequence_hash(sequence_hash)
     }
 
@@ -299,7 +302,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     pub fn match_sequence_hashes(
         &mut self,
         sequence_hashes: Vec<SequenceHash>,
-    ) -> Vec<Block<S, M>> {
+    ) -> Vec<Block<S, L, M>> {
         let total_hashes = sequence_hashes.len();
         let mut matched_blocks = Vec::with_capacity(total_hashes);
 
@@ -332,7 +335,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     /// A vector containing the blocks ([`Block<T, M>`]) that were successfully matched and taken.
     /// The vector may be shorter than `token_blocks` if not all corresponding hashes were found.
     #[instrument(level = "debug", skip(self, token_blocks), fields(num_token_blocks = token_blocks.len()))]
-    pub fn match_token_blocks(&mut self, token_blocks: &[TokenBlock]) -> Vec<Block<S, M>> {
+    pub fn match_token_blocks(&mut self, token_blocks: &[TokenBlock]) -> Vec<Block<S, L, M>> {
         let total_blocks = token_blocks.len();
         let mut matched_blocks = Vec::with_capacity(total_blocks);
 
@@ -375,52 +378,27 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     /// and [`lookup_map`] (i.e., a key exists in the set but not the map). This indicates
     /// a bug in the pool's internal logic.
     #[instrument(level = "debug", skip(self))]
-    pub fn acquire_free_block(&mut self) -> Option<Block<S, M>> {
+    pub fn acquire_free_block(&mut self) -> Option<Block<S, L, M>> {
         // First try uninitialized blocks - these are often part of sequences
         // that have been arranged in the correct order
         if let Some(mut block) = self.uninitialized_set.pop_front() {
             tracing::trace!("Acquired uninitialized block");
             self.return_tick += 1;
             block.metadata_on_acquired(self.return_tick);
+            self.available_blocks.fetch_sub(1, Ordering::Relaxed);
             return Some(block);
         }
 
-        // if we have blocks in the leaf set, pop the first (it's sorted by priority)
+        // if we have blocks in the priority set, pop the first (it's sorted by priority)
         // a fatal error will occur if the block is not found in the lookup map
-        if let Some(key) = self.leaf_set.pop_first() {
+        if let Some(key) = self.priority_set.pop_first() {
             tracing::trace!("Acquired priority/registered block map; resetting block");
             match self.lookup_map.remove(&key.sequence_hash()) {
                 Some(mut block) => {
-                    if let Some(children) = self.parent_children.get(&key.sequence_hash()) {
-                        panic!(
-                            "Block has {} inactive children, but should have none.",
-                            children.len()
-                        );
-                    }
-
-                    if let Ok(Some(parent)) = block.parent_sequence_hash() {
-                        let is_leaf = match self.parent_children.get_mut(&parent) {
-                            Some(children) => {
-                                children.remove(&key.sequence_hash());
-                                children.is_empty()
-                            }
-                            None => true,
-                        };
-
-                        if is_leaf {
-                            self.parent_children.remove(&parent);
-                            if let Some(parent_block) = self.lookup_map.get(&parent) {
-                                self.leaf_set.insert(PriorityKey::new(
-                                    parent_block.metadata().clone(),
-                                    parent,
-                                ));
-                            }
-                        }
-                    }
-
                     block.reset();
                     self.return_tick += 1;
                     block.metadata_on_acquired(self.return_tick);
+                    self.available_blocks.fetch_sub(1, Ordering::Relaxed);
                     Some(block)
                 }
                 None => {
@@ -457,7 +435,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     pub fn acquire_free_blocks(
         &mut self,
         count: usize,
-    ) -> Result<Vec<Block<S, M>>, BlockPoolError> {
+    ) -> Result<Vec<Block<S, L, M>>, BlockPoolError> {
         if count == 0 {
             return Ok(Vec::new());
         }
@@ -529,13 +507,48 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
 
         Ok(blocks)
     }
+
+    /// Resets the pool to its initial state.
+    ///
+    /// This function will acquire all blocks, which will reset their state, then return them.
+    ///
+    /// A [`Result`] containing `Ok(())` if the reset was successful, otherwise an error.
+    pub fn reset(&mut self) -> Result<(), BlockPoolError> {
+        let total_blocks = self.total_blocks.load(Ordering::Relaxed);
+        let available_blocks = self.available_blocks.load(Ordering::Relaxed);
+
+        if total_blocks != available_blocks {
+            return Err(BlockPoolError::ResetError(format!(
+                "total blocks: {}, available blocks: {}",
+                total_blocks, available_blocks
+            )));
+        }
+
+        let blocks = self.acquire_free_blocks(total_blocks as usize)?;
+
+        for block in blocks.into_iter() {
+            self.return_block(block);
+        }
+
+        Ok(())
+    }
+
+    /// Returns the [`PoolStatus`] of the pool.
+    pub fn status(&self) -> (usize, usize) {
+        let inactive_blocks = self.priority_set.len();
+        let empty_blocks = self.uninitialized_set.len();
+        (inactive_blocks, empty_blocks)
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{
         block_manager::{
-            block::{registry::BlockRegistry, state::CompleteState, Blocks, PrivateBlockExt},
+            block::{
+                locality::Local, registry::BlockRegistry, state::CompleteState, Blocks,
+                PrivateBlockExt,
+            },
             events::NullEventManager,
             layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},
             storage::tests::{NullDeviceAllocator, NullDeviceStorage},
@@ -650,7 +663,7 @@ pub(crate) mod tests {
         tokens: Tokens,
         block_size: u32,
         async_runtime: Handle,
-    ) -> Vec<Block<NullDeviceStorage, TestMetadata>> {
+    ) -> Vec<Block<NullDeviceStorage, Local, TestMetadata>> {
         let (token_blocks, _partial_token_block) =
             tokens.into_sequence(block_size, None).into_parts();
         let num_blocks = token_blocks.len();
@@ -681,7 +694,7 @@ pub(crate) mod tests {
 
     pub fn create_block_pool(
         num_blocks: usize,
-    ) -> InactiveBlockPool<NullDeviceStorage, TestMetadata> {
+    ) -> InactiveBlockPool<NullDeviceStorage, Local, TestMetadata> {
         let mut pool = InactiveBlockPool::new();
         let blocks = create_block_collection(num_blocks).into_blocks().unwrap();
         pool.add_blocks(blocks);
@@ -692,9 +705,9 @@ pub(crate) mod tests {
     pub fn acquire_blocks(
         tokens: Tokens,
         block_size: u32,
-        pool: &mut InactiveBlockPool<NullDeviceStorage, TestMetadata>,
+        pool: &mut InactiveBlockPool<NullDeviceStorage, Local, TestMetadata>,
         async_runtime: Handle,
-    ) -> (Vec<Block<NullDeviceStorage, TestMetadata>>, usize) {
+    ) -> (Vec<Block<NullDeviceStorage, Local, TestMetadata>>, usize) {
         let (mut token_blocks, _partial_token_block) =
             tokens.into_sequence(block_size, None).into_parts();
 
@@ -764,6 +777,10 @@ pub(crate) mod tests {
 
         assert_eq!(pool.total_blocks(), 10);
         assert_eq!(pool.available_blocks(), 10);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         let tokens = create_token_sequence(&[1, 2, 3, 4]);
 
@@ -776,11 +793,19 @@ pub(crate) mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(matched_block_count, 0);
         assert_eq!(pool.available_blocks(), 8);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         pool.return_blocks(blocks);
 
         assert_eq!(pool.total_blocks(), 10);
         assert_eq!(pool.available_blocks(), 10);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         let (blocks, matched_block_count) = acquire_blocks(
             tokens.clone(),
@@ -791,11 +816,19 @@ pub(crate) mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(matched_block_count, 2);
         assert_eq!(pool.available_blocks(), 8);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         pool.return_blocks(blocks);
 
         assert_eq!(pool.total_blocks(), 10);
         assert_eq!(pool.available_blocks(), 10);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         let blocks = pool.acquire_free_blocks(10).unwrap();
         for block in &blocks {
@@ -828,6 +861,10 @@ pub(crate) mod tests {
 
         assert_eq!(pool.total_blocks(), 2);
         assert_eq!(pool.available_blocks(), 2);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         // Match the blocks in sequence
         let matched = pool.match_sequence_hashes(hashes.clone());
@@ -835,6 +872,10 @@ pub(crate) mod tests {
 
         assert_eq!(pool.total_blocks(), 2);
         assert_eq!(pool.available_blocks(), 0);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
 
         // Validate the blocks are in the correct order and match the sequence hashes
         assert_eq!(matched[0].sequence_hash().unwrap(), hashes[0]);
@@ -845,5 +886,9 @@ pub(crate) mod tests {
 
         assert_eq!(pool.total_blocks(), 2);
         assert_eq!(pool.available_blocks(), 2);
+        assert_eq!(
+            pool.available_blocks_counter().load(Ordering::Relaxed),
+            pool.available_blocks()
+        );
     }
 }

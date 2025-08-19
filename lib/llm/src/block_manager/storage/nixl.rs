@@ -156,7 +156,7 @@ impl StorageType {
             StorageType::Device(_) => MemType::Vram,
             StorageType::Nixl => MemType::Unknown,
             StorageType::Null => MemType::Unknown,
-            StorageType::Disk => MemType::File,
+            StorageType::Disk(_) => MemType::File,
         }
     }
 }
@@ -169,6 +169,15 @@ impl RegistationHandle for NixlRegistrationHandle {
     }
 }
 
+fn handle_nixl_register<S: NixlRegisterableStorage>(
+    storage: &mut S,
+    agent: &NixlAgent,
+    opt_args: Option<&OptArgs>,
+) -> Result<(), StorageError> {
+    let handle = Box::new(agent.register_memory(storage, opt_args)?);
+    storage.register("nixl", handle)
+}
+
 /// Extension to the [`RegisterableStorage`] trait for NIXL-compatible storage.
 pub trait NixlRegisterableStorage: RegisterableStorage + NixlDescriptor + Sized {
     /// Register the storage with the NIXL agent.
@@ -177,9 +186,7 @@ pub trait NixlRegisterableStorage: RegisterableStorage + NixlDescriptor + Sized 
         agent: &NixlAgent,
         opt_args: Option<&OptArgs>,
     ) -> Result<(), StorageError> {
-        let handle = Box::new(agent.register_memory(self, opt_args)?);
-        // Assuming PinnedStorage has `handles: RegistrationHandles`
-        self.register("nixl", handle)
+        handle_nixl_register(self, agent, opt_args)
     }
 
     /// Check if the storage is registered with the NIXL agent.
@@ -379,7 +386,23 @@ impl NixlDescriptor for DeviceStorage {
 }
 
 impl NixlAccessible for DiskStorage {}
-impl NixlRegisterableStorage for DiskStorage {}
+impl NixlRegisterableStorage for DiskStorage {
+    fn nixl_register(
+        &mut self,
+        agent: &NixlAgent,
+        opt_args: Option<&OptArgs>,
+    ) -> Result<(), StorageError> {
+        if self.unlinked() {
+            return Err(StorageError::AllocationFailed(
+                "Disk storage has already been unlinked. GDS registration will fail.".to_string(),
+            ));
+        }
+
+        handle_nixl_register(self, agent, opt_args)?;
+        self.unlink()?;
+        Ok(())
+    }
+}
 
 impl MemoryRegion for DiskStorage {
     unsafe fn as_ptr(&self) -> *const u8 {
