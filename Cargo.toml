@@ -9,6 +9,8 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/tokens",
+    "lib/async-openai",
+    "lib/async-openai-macros",
     "lib/bindings/c",
     "lib/engines/*",
 ]
@@ -29,11 +31,11 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 dynamo-runtime = { path = "lib/runtime", version = "0.4.0" }
 dynamo-llm = { path = "lib/llm", version = "0.4.0" }
 dynamo-tokens = { path = "lib/tokens", version = "0.4.0" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.4.0", features = ["byot", "rustls"]}
 
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.40", features = ["service"] }
-async-openai = { version = "0.29.0", features = ["rustls", "byot"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }

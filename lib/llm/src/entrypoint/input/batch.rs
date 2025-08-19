@@ -7,7 +7,7 @@ use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
 use anyhow::Context as _;
-use async_openai::types::FinishReason;
+use dynamo_async_openai::types::FinishReason;
 use dynamo_runtime::{pipeline::Context, runtime::CancellationToken, Runtime};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -199,15 +199,15 @@ async fn evaluate(
     entry: &mut Entry,
     template: Option<Arc<RequestTemplate>>,
 ) -> anyhow::Result<String> {
-    let user_message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let user_message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 entry.text.clone(),
             ),
             name: None,
         },
     );
-    let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .messages(vec![user_message])
         .model(
             template

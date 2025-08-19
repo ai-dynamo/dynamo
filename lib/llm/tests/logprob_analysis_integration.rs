@@ -10,7 +10,7 @@ use dynamo_llm::perf::logprobs::analyze_logprob_sensitivity;
 use dynamo_llm::perf::{RecordedStream, TimestampedResponse};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
-use async_openai::types::{
+use dynamo_async_openai::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
     ChatCompletionTokenLogprob, CreateChatCompletionStreamResponse, FinishReason, Role,
     TopLogprobs,
