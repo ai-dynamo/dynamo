@@ -41,9 +41,13 @@ pub struct Client {
     // This is me
     pub endpoint: Endpoint,
     // These are the remotes I know about from watching etcd
-    pub instance_source: Arc<InstanceSource>,
+    instance_etcd: Arc<InstanceSource>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<i64>>>,
+    // These are the instance source less those reported as down from sending rpc
+    pub instance_source: Arc<InstanceSource>,
+    // Sender for the instance_source watch channel
+    instance_source_tx: tokio::sync::watch::Sender<Vec<Instance>>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,10 +59,14 @@ pub enum InstanceSource {
 impl Client {
     // Client will only talk to a single static endpoint
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
+        let (instance_source_tx, _) = tokio::sync::watch::channel(vec![]);
+
         Ok(Client {
             endpoint,
-            instance_source: Arc::new(InstanceSource::Static),
+            instance_etcd: Arc::new(InstanceSource::Static),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_source: Arc::new(InstanceSource::Static),
+            instance_source_tx,
         })
     }
 
@@ -71,15 +79,19 @@ impl Client {
             anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
         };
 
-        let instance_source =
-            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
+        let instance_etcd =
+            Self::get_or_create_dynamic_instance_etcd(etcd_client, &endpoint).await?;
+
+        let (instance_source_tx, instance_source_rx) = tokio::sync::watch::channel(vec![]);
 
         let client = Client {
             endpoint,
-            instance_source,
+            instance_etcd,
             instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_source: Arc::new(InstanceSource::Dynamic(instance_source_rx)),
+            instance_source_tx,
         };
-        client.monitor_instance_source();
+        client.monitor_instance_etcd();
         Ok(client)
     }
 
@@ -94,6 +106,14 @@ impl Client {
 
     /// Instances available from watching etcd
     pub fn instances(&self) -> Vec<Instance> {
+        match self.instance_etcd.as_ref() {
+            InstanceSource::Static => vec![],
+            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
+        }
+    }
+
+    /// Instances available from etcd less those reported as down from sending rpc
+    pub fn instances_avail(&self) -> Vec<Instance> {
         match self.instance_source.as_ref() {
             InstanceSource::Static => vec![],
             InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
@@ -111,7 +131,7 @@ impl Client {
     /// Wait for at least one Instance to be available for this Endpoint
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
         let mut instances: Vec<Instance> = vec![];
-        if let InstanceSource::Dynamic(mut rx) = self.instance_source.as_ref().clone() {
+        if let InstanceSource::Dynamic(mut rx) = self.instance_etcd.as_ref().clone() {
             // wait for there to be 1 or more endpoints
             loop {
                 instances = rx.borrow_and_update().to_vec();
@@ -127,27 +147,34 @@ impl Client {
 
     /// Is this component know at startup and not discovered via etcd?
     pub fn is_static(&self) -> bool {
-        matches!(self.instance_source.as_ref(), InstanceSource::Static)
+        matches!(self.instance_etcd.as_ref(), InstanceSource::Static)
     }
 
     /// Mark an instance as down/unavailable
     pub fn report_instance_down(&self, instance_id: i64) {
-        let filtered = self
+        let filtered_ids = self
             .instance_ids_avail()
             .iter()
             .filter_map(|&id| if id == instance_id { None } else { Some(id) })
             .collect::<Vec<_>>();
-        self.instance_avail.store(Arc::new(filtered));
+        self.instance_avail.store(Arc::new(filtered_ids));
+
+        let filtered_instances: Vec<Instance> = self
+            .instances_avail()
+            .into_iter()
+            .filter(|instance| instance.id() != instance_id)
+            .collect();
+        let _ = self.instance_source_tx.send(filtered_instances);
 
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
     /// Monitor the ETCD instance source and update instance_avail.
-    fn monitor_instance_source(&self) {
+    fn monitor_instance_etcd(&self) {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         tokio::task::spawn(async move {
-            let mut rx = match client.instance_source.as_ref() {
+            let mut rx = match client.instance_etcd.as_ref() {
                 InstanceSource::Static => {
                     tracing::error!("Static instance source is not watchable");
                     return;
@@ -155,12 +182,13 @@ impl Client {
                 InstanceSource::Dynamic(rx) => rx.clone(),
             };
             while !cancel_token.is_cancelled() {
-                let instance_ids: Vec<i64> = rx
-                    .borrow_and_update()
-                    .iter()
-                    .map(|instance| instance.id())
-                    .collect();
+                let instances = rx.borrow_and_update().clone();
+
+                let instance_ids: Vec<i64> =
+                    instances.iter().map(|instance| instance.id()).collect();
                 client.instance_avail.store(Arc::new(instance_ids));
+
+                let _ = client.instance_source_tx.send(instances);
 
                 tracing::debug!("instance source updated");
 
@@ -172,7 +200,7 @@ impl Client {
         });
     }
 
-    async fn get_or_create_dynamic_instance_source(
+    async fn get_or_create_dynamic_instance_etcd(
         etcd_client: &EtcdClient,
         endpoint: &Endpoint,
     ) -> Result<Arc<InstanceSource>> {
