@@ -338,10 +338,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 <TOOLCALL>
 [{"name": "get_weather",
  "arguments": {"location": "San Francisco, CA",
-  "unit": "fahrenheit"}}, 
+  "unit": "fahrenheit"}},
   {"name": "get_weather",
-   "arguments": 
-  {"location": "New York, NY", 
+   "arguments":
+  {"location": "New York, NY",
   "unit": "fahrenheit"}}]
   </TOOLCALL>
   "#;
@@ -413,13 +413,13 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_qwen_qwq_32b_multiple_tool_calls_with_new_lines() {
         let input = r#"<tool_call>
-{"name": "get_weather", 
-"arguments": {"location": "San Francisco, CA", 
+{"name": "get_weather",
+"arguments": {"location": "San Francisco, CA",
 "unit": "fahrenheit"}}
 </tool_call>
 <tool_call>
-{"name": "get_weather", "arguments": 
-{"location": "New York, NY", "unit": 
+{"name": "get_weather", "arguments":
+{"location": "New York, NY", "unit":
 "fahrenheit"}}
 </tool_call>
 "#;
@@ -483,9 +483,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_mistralai_mistral_7b_instruct_v03_simple_with_new_lines() {
         let input = r#"
-        [{"name": "get_weather", 
-        "arguments": {"location": 
-        "San Francisco, CA", 
+        [{"name": "get_weather",
+        "arguments": {"location":
+        "San Francisco, CA",
         "unit": "fahrenheit"}}]
         "#;
         let config = ToolCallConfig {
@@ -526,9 +526,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_mistralai_mistral_7b_instruct_v03_multiple_with_new_lines() {
         let input = r#"
-        [{"name": "get_weather", 
-        "arguments": {"location": "San Francisco, CA", 
-        "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": 
+        [{"name": "get_weather",
+        "arguments": {"location": "San Francisco, CA",
+        "unit": "fahrenheit"}}, {"name": "get_weather", "arguments":
         {"location": "New York, NY", "unit": "fahrenheit"}}]
         "#;
         let config = ToolCallConfig::mistral();
@@ -561,10 +561,10 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_mistralai_mistral_7b_instruct_v03_single_with_start_tokenwith_new_lines() {
         let input = r#"
-        [TOOL_CALLS] 
-        [{"name": "get_weather", 
-        "arguments": {"location": 
-        "San Francisco, CA", 
+        [TOOL_CALLS]
+        [{"name": "get_weather",
+        "arguments": {"location":
+        "San Francisco, CA",
         "unit": "fahrenheit"}}]
         "#;
         let config = ToolCallConfig::mistral();
@@ -597,13 +597,13 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_multiple_with_new_lines() {
         let input = r#"
-        [TOOL_CALLS] 
-        [{"name": "get_weather", 
-        "arguments": {"location": 
-        "San Francisco, CA", 
-        "unit": "fahrenheit"}}, 
-        {"name": "get_weather", "arguments": 
-        {"location": "New York, NY", "unit": 
+        [TOOL_CALLS]
+        [{"name": "get_weather",
+        "arguments": {"location":
+        "San Francisco, CA",
+        "unit": "fahrenheit"}},
+        {"name": "get_weather", "arguments":
+        {"location": "New York, NY", "unit":
         "fahrenheit"}}]
         "#;
         let config = ToolCallConfig::mistral();
@@ -635,7 +635,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[test]
     fn test_meta_llama_llama31_8b_instruct_with_new_lines() {
         let input = r#"
-        {"name": "get_weather", 
+        {"name": "get_weather",
         "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
         "#;
         let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
@@ -823,10 +823,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     fn test_detect_and_parse_tool_call_default_parser_llama3_json_with_python_tag_with_new_lines() {
         let input = r#"
         <|python_tag|>
-        {"name": 
+        {"name":
         "get_weather",
          "arguments":
-          {"location": "San Francisco, CA", 
+          {"location": "San Francisco, CA",
           "unit": "fahrenheit" }}
         "#;
         let result = detect_and_parse_tool_call(input, None).unwrap();
@@ -898,8 +898,8 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[test]
     fn test_phi4_single_function_call_nested_json_arguments() {
-        let input = r#"functools[{"name": "get_weather_forecast", "arguments": 
-        {"location": {"city": "San Francisco", 
+        let input = r#"functools[{"name": "get_weather_forecast", "arguments":
+        {"location": {"city": "San Francisco",
         "state": "CA"}, "date": "2023-10-05"}}]"#;
         let result = detect_and_parse_tool_call(input, Some("phi4")).unwrap();
         assert_eq!(result.len(), 1);
