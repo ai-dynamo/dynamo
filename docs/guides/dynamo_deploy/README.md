@@ -35,7 +35,7 @@ We provide a Custom Resource YAML file for many examples under the components/ba
 
 [View TRT-LLM K8s](../../../components/backends/trtllm/deploy/README.md)
 
-### Deploying a particular example
+## Deploying a particular example
 
 ```bash
 # Set your dynamo root directory

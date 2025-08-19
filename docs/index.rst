@@ -26,7 +26,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 
    - `Dynamo README <https://github.com/ai-dynamo/dynamo/blob/main/README.md>`_
    - `Architecture and features doc <https://github.com/ai-dynamo/dynamo/blob/main/docs/architecture/>`_
-   - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/guides>`_
+   - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/docs/guides>`_
    - `Dynamo examples repo <https://github.com/ai-dynamo/dynamo/tree/main/examples>`_
 
 
@@ -135,6 +135,7 @@ The examples below assume you build the latest image yourself from source. If us
    KV Cache Routing <architecture/kv_cache_routing.md>
    Planner <architecture/planner_intro.rst>
    Dynamo Architecture Flow <architecture/dynamo_flow.md>
+   Request Migration <architecture/request_migration.md>
 
 .. toctree::
    :hidden:
@@ -146,11 +147,12 @@ The examples below assume you build the latest image yourself from source. If us
 
 .. toctree::
    :hidden:
-   :caption: Deployment Guides
+   :caption: Deployment guides
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
-   Manual Helm Deployment <guides/dynamo_deploy/helm_install.md>
+
+   Multinode Deployment <guides/dynamo_deploy/multinode-deployment.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
 
@@ -167,8 +169,15 @@ The examples below assume you build the latest image yourself from source. If us
 
 .. toctree::
    :hidden:
-   :caption: Reference
+   :caption: Observability
 
+   Dynamo Metrics <guides/metrics.md>
+   K8s Metrics <guides/deploy/k8s_metrics.md>
+
+
+.. toctree::
+   :hidden:
+   :caption: Reference
 
    Glossary <dynamo_glossary.md>
    NIXL Connect API <API/nixl_connect/README.md>

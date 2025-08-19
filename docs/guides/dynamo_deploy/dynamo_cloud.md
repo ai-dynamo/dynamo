@@ -42,7 +42,7 @@ Before getting started with the Dynamo cloud platform, ensure you have:
 > [!TIP]
 > Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
 
-#### 🏗️ Build Dynamo inference runtime.
+### 🏗️ Build Dynamo inference runtime.
 
 [One-time Action]
 Before you could use Dynamo make sure you have setup the Inference Runtime Image.
@@ -70,7 +70,7 @@ docker push <your-registry>/dynamo:${IMAGE_TAG}
 
 Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-#### 1. 🛡️ Istio Installation
+### 1. 🛡️ Istio Installation
 Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
 
 ```bash
@@ -81,7 +81,7 @@ kubectl get pods -n istio-system
 # istiod-* pods should be in Running state
 ```
 
-#### 2. 💾 PVC Support with Default Storage Class
+### 2. 💾 PVC Support with Default Storage Class
 Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
