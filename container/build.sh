@@ -363,6 +363,7 @@ show_image_options() {
 
 show_help() {
     echo "usage: build.sh"
+    echo "  [--base-image base image]"
     echo "  [--base-image-tag base image tag]"
     echo "  [--platform platform for docker build]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
