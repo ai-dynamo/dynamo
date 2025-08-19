@@ -16,10 +16,15 @@
 # Worker example:
 # - cd lib/bindings/python/examples/hello_world
 # - python server_sglang_static.py
+#
+# For TLS:
+# - python -m dynamo.frontend --http-port 8443 --tls-cert-path cert.pem --tls-key-path key.pem
+#
 
 import argparse
 import asyncio
 import os
+import pathlib
 import re
 
 import uvloop
@@ -83,14 +88,35 @@ def parse_args():
         "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
     )
     parser.add_argument(
-        "--http-port", type=int, default=8080, help="HTTP port for the engine (u16)."
+        "--http-host",
+        type=str,
+        default=os.environ.get("DYN_HTTP_HOST", "0.0.0.0"),
+        help="HTTP host for the engine (str). Can be set via DYN_HTTP_HOST env var.",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
+    )
+    parser.add_argument(
+        "--tls-cert-path",
+        type=pathlib.Path,
+        default=None,
+        help="TLS certificate path, PEM format.",
+    )
+    parser.add_argument(
+        "--tls-key-path",
+        type=pathlib.Path,
+        default=None,
+        help="TLS certificate key path, PEM format.",
     )
     parser.add_argument(
         "--router-mode",
         type=str,
         choices=["round-robin", "random", "kv"],
-        default="round-robin",
-        help="How to route the request",
+        default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
+        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
     )
     parser.add_argument(
         "--kv-overlap-score-weight",
@@ -124,6 +150,12 @@ def parse_args():
         help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
     )
     parser.add_argument(
+        "--busy-threshold",
+        type=float,
+        default=None,
+        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. If not set, busy detection is disabled.",
+    )
+    parser.add_argument(
         "--static-endpoint",
         type=validate_static_endpoint,
         help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
@@ -149,6 +181,8 @@ def parse_args():
 
     if flags.static_endpoint and (not flags.model_name or not flags.model_path):
         parser.error("--static-endpoint requires both --model-name and --model-path")
+    if bool(flags.tls_cert_path) ^ bool(flags.tls_key_path):  # ^ is XOR
+        parser.error("--tls-cert-path and --tls-key-path must be provided together")
 
     return flags
 
@@ -181,9 +215,12 @@ async def async_main():
         kv_router_config = None
 
     kwargs = {
+        "http_host": flags.http_host,
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(router_mode, kv_router_config),
+        "router_config": RouterConfig(
+            router_mode, kv_router_config, flags.busy_threshold
+        ),
     }
 
     if flags.static_endpoint:
@@ -192,6 +229,10 @@ async def async_main():
         kwargs["model_name"] = flags.model_name
     if flags.model_path:
         kwargs["model_path"] = flags.model_path
+    if flags.tls_cert_path:
+        kwargs["tls_cert_path"] = flags.tls_cert_path
+    if flags.tls_key_path:
+        kwargs["tls_key_path"] = flags.tls_key_path
 
     if is_static:
         # out=dyn://<static_endpoint>

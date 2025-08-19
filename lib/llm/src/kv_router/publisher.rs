@@ -503,14 +503,16 @@ impl WorkerMetricsPublisher {
         let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
 
-        // let worker_id = component
-        //     .drt()
-        //     .primary_lease()
-        //     .map(|lease| lease.id())
-        //     .unwrap_or_else(|| {
-        //         tracing::warn!("Component is static, assuming worker_id of 0");
-        //         0
-        //     });
+        let worker_id = component
+            .drt()
+            .primary_lease()
+            .map(|lease| lease.id())
+            .unwrap_or_else(|| {
+                tracing::warn!("Component is static, assuming worker_id of 0");
+                0
+            });
+
+        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
 
         component
             .endpoint(KV_METRICS_ENDPOINT)

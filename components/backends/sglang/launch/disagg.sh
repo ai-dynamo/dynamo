@@ -19,7 +19,7 @@ python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 16 \
@@ -31,7 +31,7 @@ python3 -m dynamo.sglang.worker \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 16 \

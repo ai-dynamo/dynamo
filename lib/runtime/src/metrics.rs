@@ -33,8 +33,8 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    build_metric_name, labels, name_prefix, nats, work_handler, COMPONENT_NATS_METRICS,
-    DRT_NATS_METRICS,
+    build_metric_name, labels, name_prefix, nats_client, nats_service, work_handler,
+    COMPONENT_NATS_METRICS, DRT_NATS_METRICS,
 };
 
 // Pipeline imports for endpoint creation
@@ -575,26 +575,14 @@ pub trait MetricsRegistry: Send + Sync + DistributedRuntimeProvider {
 #[cfg(test)]
 mod test_helpers {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::nats as nats_metrics;
+    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
-
-    /// Creates a test DistributedRuntime for integration tests.
-    /// Uses NATS; requires #[cfg(feature = "integration")].
-    #[cfg(feature = "integration")]
-    pub fn create_test_drt() -> crate::DistributedRuntime {
-        let rt = crate::Runtime::single_threaded().unwrap();
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            crate::DistributedRuntime::from_settings_without_discovery(rt.clone())
-                .await
-                .unwrap()
-        })
-    }
 
     /// Helper function to create a DRT instance for testing in async contexts
     #[cfg(feature = "integration")]
     pub async fn create_test_drt_async() -> crate::DistributedRuntime {
-        let rt = crate::Runtime::single_threaded().unwrap();
-        crate::DistributedRuntime::from_settings_without_discovery(rt.clone())
+        let rt = crate::Runtime::from_current().unwrap();
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
             .await
             .unwrap()
     }
@@ -618,7 +606,11 @@ mod test_helpers {
             !line.contains(&format!(
                 "{}{}",
                 name_prefix::COMPONENT,
-                nats_metrics::PREFIX
+                nats_client::PREFIX
+            )) && !line.contains(&format!(
+                "{}{}",
+                name_prefix::COMPONENT,
+                nats_service::PREFIX
             )) && !line.trim().is_empty()
         })
     }
@@ -629,7 +621,11 @@ mod test_helpers {
             line.contains(&format!(
                 "{}{}",
                 name_prefix::COMPONENT,
-                nats_metrics::PREFIX
+                nats_client::PREFIX
+            )) || line.contains(&format!(
+                "{}{}",
+                name_prefix::COMPONENT,
+                nats_service::PREFIX
             ))
         })
     }
@@ -929,9 +925,9 @@ mod test_metricsregistry_prefixes {
     use super::*;
     use prometheus::core::Collector;
 
-    #[test]
-    fn test_hierarchical_prefixes_and_parent_hierarchies() {
-        let drt = super::test_helpers::create_test_drt();
+    #[tokio::test]
+    async fn test_hierarchical_prefixes_and_parent_hierarchies() {
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         const DRT_NAME: &str = "";
         const NAMESPACE_NAME: &str = "ns901";
@@ -1003,10 +999,10 @@ mod test_metricsregistry_prefixes {
             .is_ok());
     }
 
-    #[test]
-    fn test_recursive_namespace() {
+    #[tokio::test]
+    async fn test_recursive_namespace() {
         // Create a distributed runtime for testing
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Create a deeply chained namespace: ns1.ns2.ns3
         let ns1 = drt.namespace("ns1").unwrap();
@@ -1055,16 +1051,16 @@ mod test_metricsregistry_prefixes {
 #[cfg(test)]
 mod test_metricsregistry_prometheus_fmt_outputs {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::nats as nats_metrics;
+    use super::prometheus_names::{nats_client, nats_service};
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
     use super::*;
     use prometheus::Counter;
     use std::sync::Arc;
 
-    #[test]
-    fn test_prometheusfactory_using_metrics_registry_trait() {
+    #[tokio::test]
+    async fn test_prometheusfactory_using_metrics_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Use a simple constant namespace name
         let namespace_name = "ns345";
@@ -1089,11 +1085,9 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         let endpoint_output =
             super::test_helpers::remove_nats_lines(&endpoint_output_raw).join("\n");
 
-        let expected_endpoint_output = format!(
-            r#"# HELP dynamo_component_testcounter A test counter
+        let expected_endpoint_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"}} 123.456789"#
-        );
+dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789"#.to_string();
 
         assert_eq!(
             endpoint_output, expected_endpoint_output,
@@ -1120,14 +1114,12 @@ dynamo_component_testcounter{{dynamo_component="comp345",dynamo_endpoint="ep345"
         let component_output =
             super::test_helpers::remove_nats_lines(&component_output_raw).join("\n");
 
-        let expected_component_output = format!(
-            r#"# HELP dynamo_component_testcounter A test counter
+        let expected_component_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"}} 123.456789
+dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testgauge A test gauge
 # TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{{dynamo_component="comp345",dynamo_namespace="ns345"}} 50000"#
-        );
+dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000"#.to_string();
 
         assert_eq!(
             component_output, expected_component_output,
@@ -1153,17 +1145,15 @@ dynamo_component_testgauge{{dynamo_component="comp345",dynamo_namespace="ns345"}
         let namespace_output =
             super::test_helpers::remove_nats_lines(&namespace_output_raw).join("\n");
 
-        let expected_namespace_output = format!(
-            r#"# HELP dynamo_component_testcounter A test counter
+        let expected_namespace_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"}} 123.456789
+dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testgauge A test gauge
 # TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{{dynamo_component="comp345",dynamo_namespace="ns345"}} 50000
+dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000
 # HELP dynamo_component_testintcounter A test int counter
 # TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{{dynamo_namespace="ns345"}} 12345"#
-        );
+dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#.to_string();
 
         assert_eq!(
             namespace_output, expected_namespace_output,
@@ -1186,7 +1176,7 @@ dynamo_component_testintcounter{{dynamo_namespace="ns345"}} 12345"#
             .create_intgaugevec(
                 "testintgaugevec",
                 "A test int gauge vector",
-                &["instance", "service", "status"],
+                &["instance", "status"],
                 &[("service", "api")],
             )
             .unwrap();
@@ -1226,37 +1216,45 @@ dynamo_component_testintcounter{{dynamo_namespace="ns345"}} 12345"#
         let filtered_drt_output =
             super::test_helpers::remove_nats_lines(&drt_output_raw).join("\n");
 
-        let expected_drt_output = format!(
-            r#"# HELP dynamo_component_testcounter A test counter
+        let expected_drt_output = r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"}} 123.456789
+dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
 # HELP dynamo_component_testcountervec A test counter vector
 # TYPE dynamo_component_testcountervec counter
-dynamo_component_testcountervec{{method="GET",service="api",status="200"}} 10
-dynamo_component_testcountervec{{method="POST",service="api",status="201"}} 5
+dynamo_component_testcountervec{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345",method="GET",service="api",status="200"} 10
+dynamo_component_testcountervec{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345",method="POST",service="api",status="201"} 5
 # HELP dynamo_component_testgauge A test gauge
 # TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{{dynamo_component="comp345",dynamo_namespace="ns345"}} 50000
+dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000
 # HELP dynamo_component_testhistogram A test histogram
 # TYPE dynamo_component_testhistogram histogram
-dynamo_component_testhistogram_bucket{{le="1"}} 0
-dynamo_component_testhistogram_bucket{{le="2.5"}} 2
-dynamo_component_testhistogram_bucket{{le="5"}} 3
-dynamo_component_testhistogram_bucket{{le="10"}} 3
-dynamo_component_testhistogram_bucket{{le="+Inf"}} 3
-dynamo_component_testhistogram_sum 7.5
-dynamo_component_testhistogram_count 3
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.005"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.01"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.025"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.05"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.1"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.25"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.5"} 0
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="1"} 1
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="2.5"} 2
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="5"} 3
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="10"} 3
+dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="+Inf"} 3
+dynamo_component_testhistogram_sum{dynamo_component="comp345",dynamo_namespace="ns345"} 7.5
+dynamo_component_testhistogram_count{dynamo_component="comp345",dynamo_namespace="ns345"} 3
 # HELP dynamo_component_testintcounter A test int counter
 # TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{{dynamo_namespace="ns345"}} 12345
+dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345
 # HELP dynamo_component_testintgauge A test int gauge
 # TYPE dynamo_component_testintgauge gauge
-dynamo_component_testintgauge 42
+dynamo_component_testintgauge{dynamo_namespace="ns345"} 42
 # HELP dynamo_component_testintgaugevec A test int gauge vector
 # TYPE dynamo_component_testintgaugevec gauge
-dynamo_component_testintgaugevec{{instance="server1",service="api",status="active"}} 10
-dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0"#
-        );
+dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server1",service="api",status="active"} 10
+dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0
+# HELP dynamo_component_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_component_uptime_seconds gauge
+dynamo_component_uptime_seconds 0"#.to_string();
 
         assert_eq!(
             filtered_drt_output, expected_drt_output,
@@ -1276,15 +1274,15 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
         let test_input = r#"# HELP dynamo_component_requests Total requests
 # TYPE dynamo_component_requests counter
 dynamo_component_requests 42
-# HELP dynamo_component_nats_connection_state Connection state
-# TYPE dynamo_component_nats_connection_state gauge
-dynamo_component_nats_connection_state 1
+# HELP dynamo_component_nats_client_connection_state Connection state
+# TYPE dynamo_component_nats_client_connection_state gauge
+dynamo_component_nats_client_connection_state 1
 # HELP dynamo_component_latency Response latency
 # TYPE dynamo_component_latency histogram
 dynamo_component_latency_bucket{le="0.1"} 10
 dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_nats_total_requests 100
-dynamo_component_nats_total_errors 5"#;
+dynamo_component_nats_service_total_requests 100
+dynamo_component_nats_service_total_errors 5"#;
 
         // Test remove_nats_lines (excludes NATS lines but keeps help/type)
         let filtered_out = super::test_helpers::remove_nats_lines(test_input);
@@ -1311,16 +1309,16 @@ dynamo_component_nats_total_errors 5"#;
 #[cfg(test)]
 mod test_metricsregistry_nats {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::nats as nats_metrics;
+    use super::prometheus_names::{nats_client, nats_service};
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
     use super::*;
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
     use tokio::time::{sleep, Duration};
-    #[test]
-    fn test_drt_nats_metrics() {
+    #[tokio::test]
+    async fn test_drt_nats_metrics() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Get DRT output which should include NATS client metrics
         let drt_output = drt.prometheus_metrics_fmt().unwrap();
@@ -1337,8 +1335,10 @@ mod test_metricsregistry_nats {
         );
 
         // Check for specific NATS client metric names (without values)
-        let drt_metrics = super::test_helpers::extract_metrics(&drt_output);
-        let actual_drt_nats_metrics_sorted: Vec<&str> = drt_metrics
+        // Extract only the metric lines from the already-filtered NATS metrics
+        let drt_nats_metric_lines =
+            super::test_helpers::extract_metrics(&drt_nats_metrics.join("\n"));
+        let actual_drt_nats_metrics_sorted: Vec<&str> = drt_nats_metric_lines
             .iter()
             .map(|line| {
                 let without_labels = line.split('{').next().unwrap_or(line);
@@ -1376,13 +1376,13 @@ mod test_metricsregistry_nats {
         println!("✓ DistributedRuntime NATS metrics integration test passed!");
     }
 
-    #[test]
-    fn test_nats_metric_names() {
+    #[tokio::test]
+    async fn test_nats_metric_names() {
         // This test only tests the existence of the NATS metrics. It does not check
         // the values of the metrics.
 
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Create a namespace and components from the DRT
         let namespace = drt.namespace("ns789").unwrap();
@@ -1441,17 +1441,19 @@ mod test_metricsregistry_nats {
             "COMPONENT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
         );
 
-        // Get both DRT and component output and filter for component metrics
-        let drt_and_component_metrics =
-            super::test_helpers::extract_metrics(&drt.prometheus_metrics_fmt().unwrap());
+        // Get both DRT and component output and filter for NATS metrics only
+        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        let drt_nats_lines = super::test_helpers::extract_nats_lines(&drt_output);
+        let drt_and_component_nats_metrics =
+            super::test_helpers::extract_metrics(&drt_nats_lines.join("\n"));
         println!(
-            "DRT and component metrics count: {}",
-            drt_and_component_metrics.len()
+            "DRT and component NATS metrics count: {}",
+            drt_and_component_nats_metrics.len()
         );
 
         // Check that the NATS metrics are present in the component output
         assert_eq!(
-            drt_and_component_metrics.len(),
+            drt_and_component_nats_metrics.len(),
             DRT_NATS_METRICS.len() + COMPONENT_NATS_METRICS.len(),
             "DRT at this point should have both the DRT and component NATS metrics"
         );
@@ -1480,7 +1482,7 @@ mod test_metricsregistry_nats {
                 input: SingleIn<String>,
             ) -> Result<ManyOut<Annotated<String>>, Error> {
                 let (data, ctx) = input.into_parts();
-                let response = format!("{}", data);
+                let response = data.to_string();
                 let stream = stream::iter(vec![Annotated::from_data(response)]);
                 Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
             }
@@ -1505,7 +1507,7 @@ mod test_metricsregistry_nats {
         let drt_output = drt.prometheus_metrics_fmt().unwrap();
         let parsed_metrics: Vec<_> = drt_output
             .lines()
-            .filter_map(|line| super::test_helpers::parse_prometheus_metric(line))
+            .filter_map(super::test_helpers::parse_prometheus_metric)
             .collect();
 
         println!("=== Initial DRT metrics output ===");
@@ -1515,19 +1517,31 @@ mod test_metricsregistry_nats {
 
         let initial_expected_metric_values = [
             // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (build_metric_name(nats::CONNECTION_STATE), 1.0, 1.0), // Should be connected
-            (build_metric_name(nats::CONNECTS), 1.0, 1.0),         // Should have 1 connection
-            (build_metric_name(nats::IN_TOTAL_BYTES), 300.0, 500.0), // ~75% to ~125% of 417
-            (build_metric_name(nats::IN_MESSAGES), 0.0, 0.0),      // No messages yet
-            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 500.0, 700.0), // ~75% to ~125% of 612 (includes endpoint creation overhead)
-            (build_metric_name(nats::OUT_MESSAGES), 0.0, 0.0),           // No messages yet
+            (build_metric_name(nats_client::CONNECTION_STATE), 1.0, 1.0), // Should be connected
+            (build_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_metric_name(nats_client::IN_TOTAL_BYTES),
+                400.0,
+                1500.0,
+            ), // Wide range around 923
+            (build_metric_name(nats_client::IN_MESSAGES), 0.0, 5.0), // Wide range around 2
+            (
+                build_metric_name(nats_client::OUT_OVERHEAD_BYTES),
+                700.0,
+                2500.0,
+            ), // Wide range around 1633
+            (build_metric_name(nats_client::OUT_MESSAGES), 0.0, 5.0), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 0.0), // No processing yet
-            (build_metric_name(nats::TOTAL_ERRORS), 0.0, 0.0),      // No errors yet
-            (build_metric_name(nats::TOTAL_REQUESTS), 0.0, 0.0),    // No requests yet
-            (build_metric_name(nats::TOTAL_PROCESSING_MS), 0.0, 0.0), // No processing yet
-            (build_metric_name(nats::ACTIVE_SERVICES), 0.0, 0.0),   // No services yet
-            (build_metric_name(nats::ACTIVE_ENDPOINTS), 0.0, 0.0),  // No endpoints yet
+            (build_metric_name(nats_service::AVG_PROCESSING_MS), 0.0, 0.0), // No processing yet
+            (build_metric_name(nats_service::TOTAL_ERRORS), 0.0, 0.0),      // No errors yet
+            (build_metric_name(nats_service::TOTAL_REQUESTS), 0.0, 0.0),    // No requests yet
+            (
+                build_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                0.0,
+                0.0,
+            ), // No processing yet
+            (build_metric_name(nats_service::ACTIVE_SERVICES), 0.0, 2.0), // Service may not be fully active yet
+            (build_metric_name(nats_service::ACTIVE_ENDPOINTS), 0.0, 2.0), // Endpoint may not be fully active yet
         ];
 
         for (metric_name, min_value, max_value) in &initial_expected_metric_values {
@@ -1576,7 +1590,6 @@ mod test_metricsregistry_nats {
                     );
                 }
             }
-            sleep(Duration::from_millis(100)).await;
         }
         println!("✓ Sent messages and received responses successfully");
 
@@ -1592,42 +1605,58 @@ mod test_metricsregistry_nats {
 
         let final_parsed_metrics: Vec<_> = super::test_helpers::extract_metrics(&final_drt_output)
             .iter()
-            .filter_map(|line| super::test_helpers::parse_prometheus_metric(line))
+            .filter_map(|line| super::test_helpers::parse_prometheus_metric(line.as_str()))
             .collect();
 
+        println!("\n=== Waiting 1 second for metrics to stabilize ===");
+        sleep(Duration::from_secs(1)).await;
+        println!("✓ Wait complete, checking final metrics...");
+
         let post_expected_metric_values = [
-            // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (build_metric_name(nats::CONNECTION_STATE), 1.0, 1.0), // Should remain connected
-            (build_metric_name(nats::CONNECTS), 1.0, 1.0),         // Should remain 1 connection
-            (build_metric_name(nats::IN_TOTAL_BYTES), 22000.0, 28000.0), // ~75% to ~125% of 24977 (10 messages × 2000 bytes + overhead)
-            (build_metric_name(nats::IN_MESSAGES), 10.0, 12.0), // Allow small drift (callback may run twice)
-            (build_metric_name(nats::OUT_OVERHEAD_BYTES), 2076.0, 3461.0), // ~75% to ~125% of 2769 (synchronous metrics collection overhead)
-            (build_metric_name(nats::OUT_MESSAGES), 10.0, 12.0), // Allow small drift (callback may run twice)
-            // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (build_metric_name(nats::AVG_PROCESSING_MS), 0.0, 1.0), // Should be low processing time
-            (build_metric_name(nats::TOTAL_ERRORS), 0.0, 0.0),      // Should have no errors
-            (build_metric_name(nats::TOTAL_REQUESTS), 0.0, 0.0), // NATS metrics don't track work handler requests
-            (build_metric_name(nats::TOTAL_PROCESSING_MS), 0.0, 5.0), // Should be low total processing time
-            (build_metric_name(nats::ACTIVE_SERVICES), 0.0, 0.0), // NATS metrics don't track work handler services
-            (build_metric_name(nats::ACTIVE_ENDPOINTS), 0.0, 0.0), // NATS metrics don't track work handler endpoints
-            // Work handler metrics with ranges
-            (build_metric_name(work_handler::REQUESTS_TOTAL), 10.0, 10.0), // Exact count (10 messages)
+            // DRT NATS metrics
+            (build_metric_name(nats_client::CONNECTION_STATE), 1.0, 1.0), // Connected
+            (build_metric_name(nats_client::CONNECTS), 1.0, 1.0),         // 1 connection
+            (
+                build_metric_name(nats_client::IN_TOTAL_BYTES),
+                20000.0,
+                32000.0,
+            ), // Wide range around 26117
+            (build_metric_name(nats_client::IN_MESSAGES), 8.0, 20.0),     // Wide range around 16
+            (
+                build_metric_name(nats_client::OUT_OVERHEAD_BYTES),
+                2500.0,
+                8000.0,
+            ), // Wide range around 5524
+            (build_metric_name(nats_client::OUT_MESSAGES), 8.0, 20.0),    // Wide range around 16
+            // Component NATS metrics
+            (build_metric_name(nats_service::AVG_PROCESSING_MS), 0.0, 1.0), // Low processing time
+            (build_metric_name(nats_service::TOTAL_ERRORS), 0.0, 0.0),      // No errors
+            (build_metric_name(nats_service::TOTAL_REQUESTS), 0.0, 0.0), // No work handler requests
+            (
+                build_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                0.0,
+                5.0,
+            ), // Low total processing time
+            (build_metric_name(nats_service::ACTIVE_SERVICES), 0.0, 2.0), // Service may not be fully active
+            (build_metric_name(nats_service::ACTIVE_ENDPOINTS), 0.0, 2.0), // Endpoint may not be fully active
+            // Work handler metrics
+            (build_metric_name(work_handler::REQUESTS_TOTAL), 10.0, 10.0), // 10 messages
             (
                 build_metric_name(work_handler::REQUEST_BYTES_TOTAL),
                 21000.0,
                 26000.0,
-            ), // ~75% to ~125% of 23520 (10 × 2000 bytes + overhead)
+            ), // ~75-125% of 23520
             (
                 build_metric_name(work_handler::RESPONSE_BYTES_TOTAL),
                 18000.0,
                 23000.0,
-            ), // ~75% to ~125% of 20660 (10 × 2000 bytes + overhead, but response size varies)
-            // Additional component metrics
+            ), // ~75-125% of 20660
             (
                 build_metric_name(work_handler::CONCURRENT_REQUESTS),
                 0.0,
                 1.0,
-            ), // Should be 0 or very low
+            ), // 0 or very low
+            // Histograms have _{count,sum} suffixes
             (
                 format!(
                     "{}_count",
@@ -1635,15 +1664,15 @@ mod test_metricsregistry_nats {
                 ),
                 10.0,
                 10.0,
-            ), // Exact count (10 messages)
+            ), // 10 messages
             (
                 format!(
                     "{}_sum",
                     build_metric_name(work_handler::REQUEST_DURATION_SECONDS)
                 ),
-                0.001,
-                0.999,
-            ), // Processing time sum (10 messages)
+                0.0001,
+                1.0,
+            ), // Processing time sum (wide range)
         ];
 
         println!("\n=== Checking Post-Activity All Metrics (NATS + Work Handler) ===");

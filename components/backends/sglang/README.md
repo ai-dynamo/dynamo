@@ -226,9 +226,6 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
 - **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
 
-### Supporting SGLang's native endpoints via Dynamo
-- **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
-
 ### Hierarchical Cache (HiCache)
 - **[Enable SGLang Hierarchical Cache (HiCache)](docs/sgl-hicache-example.md)**
 

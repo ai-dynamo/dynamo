@@ -10,118 +10,54 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-## Setup Instructions
+## Pre-Requisite: Pre-Deployment Profiling Data
 
-### Step 1: Start a Deployment with Planner
+You have two options to obtain the pre-deployment profiling data:
 
-You have two options for setting up the planner:
+### Option A: Use Test Configuration (Quickstart)
 
-#### Option A: Use Test Configuration (Quickstart)
-
-Use the pre-configured test deployment with sample profiling data, we provide the results and the deployment configuration for two models x hardware configurations:
-- placeholder for A100
+Use the pre-configured test deployment with sample profiling data, we provide the results and the deployment configuration for the following models x hardware configurations:
 - `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 with max context length 16384, TP1 Prefill, and TP1 Decode. At ISL/OSL 3000/150, it achieves 40k tokens/s/gpu prefill with 80ms TTFT and 10k tokens/s/gpu decode with 10ms ITL. See `profiling_results/H200_TP1P_TP1D/`.
 
-```bash
-kubectl apply -f tests/planner/disagg_planner.yaml
-```
-
-This deployment uses test profiling results from the `profiling_results/` directory.
-
-#### Option B: Use Your Own Profiling Results
+### Option B: Use Your Own Profiling Results
 
 1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/architecture/pre_deployment_profiling.md) for detailed instructions.
 
-2. Start your own planner instance using one of the components/backends if you want to use planner based on your real profiling results in your repository.
+## Interpolator Testing
 
-### Step 2: Verify Deployment
-
-Wait for all pods to be ready:
+SLA planner uses two interpolators to estimate the performance of prefill and decode. You can test the interpolators with the following command:
 
 ```bash
-kubectl get pods -n default -w
+python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
+  --profile_results_dir <path_to_profile_results> \
+  --isl <ISL> \
+  --osl <OSL> \
+  --ttft <TTFT(s)> \
+  --itl <ITL(s)>
 ```
 
-Check that the frontend is accessible and port-forward the frontend to localhost:
+The script will perform the interpolation based on ISL, OSL, and TTFT and ITL SLAs and advise the load that can saturate the engine.
+
+For example, to test the interpolator for `nvidia/Llama-3.1-8B-Instruct-FP8` on H200,
 
 ```bash
-kubectl port-forward service/vllm-disagg-planner-frontend 8000:8000
+python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
+  --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
+  --isl 3000 \
+  --osl 150 \
+  --ttft 0.1 \
+  --itl 0.01
+
+> ISL=3000, OSL=150
+> TTFT=0.1s, ITL=0.01s
+> Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
+>
+> Interpolating prefill performance ...
+>         Estimated TTFT=0.027s <= target TTFT=0.100s. Requests can queue 0.073s maximally while meeting TTFT SLA.
+>         Estimated throughput: 110893.48 tokens/s/gpu. Request rate at 36.96 requests/s will saturate one GPU.
+>
+> Interpolating decode performance ...
+>         Average context length: isl + osl/2 = 3075.
+>         Estimated ITL=0.0098s <= target ITL=0.0100s at 33.33% active kv usage.
+>         Estimated throughput: 10226.60 token/s/gpu. Request rate at 68.18 requests/s will saturate one GPU.
 ```
-
-## Test Types
-
-### Load Pattern Tests
-
-Generate different types of load to stress the system:
-
-```bash
-# Sustained load -- simulating continuous concurrent requests from multiple users
-python sla_planner_load_test.py --pattern sustained --concurrent-users 10 --duration 300
-
-# Burst load pattern -- period bursts of requests, testing scaling responsiveness
-python sla_planner_load_test.py --pattern burst --burst-requests 15 --burst-interval 30 --duration 300
-
-# Ramp-up pattern -- gradually increasing load over time
-python sla_planner_load_test.py --pattern ramp --concurrent-users 15 --ramp-duration 60 --duration 300
-```
-
-### Scaling Validation Tests
-
-Validate that pods are scaling up and down as expected:
-
-```bash
-# Test scale-up behavior
-python sla_planner_load_test.py --pattern scale_up_test --kubernetes-namespace default
-
-# Test scale-down behavior
-python sla_planner_load_test.py --pattern scale_down_test --kubernetes-namespace default
-
-# Test selective scaling (one worker type scales but not the other)
-python sla_planner_load_test.py --pattern selective_scaling_test --kubernetes-namespace default
-
-# Run all scaling validation tests
-python sla_planner_load_test.py --pattern all_scaling_tests --kubernetes-namespace default
-```
-
-## Configuration Options
-
-| Category | Option | Default Value | Description |
-|----------|---------|---------------|-------------|
-| **Basic Configuration** | | | |
-| | `--frontend-url` | `http://localhost:8000` | Frontend URL |
-| | `--pattern` | `sustained` | Load pattern or validation test |
-| | `--concurrent-users` | `5` | Number of concurrent users |
-| | `--duration` | `180` | Test duration in seconds |
-| **Advanced Configuration** | | | |
-| | `--request-timeout` | `120` | Request timeout in seconds |
-| | `--metrics-interval` | `30` | Metrics reporting interval in seconds |
-| | `--kubernetes-namespace` | `default` | K8s namespace for pod monitoring |
-| | `--expected-scaling-time` | `120` | Expected time for scaling events in seconds |
-| | `--validate-scaling` | `False` | Enable pod scaling validation (auto-enabled for scaling tests) |
-| **Pattern-Specific Configuration** | | | |
-| | `--ramp-duration` | `60` | Ramp-up duration in seconds (for ramp pattern) |
-| | `--burst-interval` | `30` | Interval between bursts in seconds (for burst pattern) |
-| | `--burst-requests` | `10` | Number of requests per burst (for burst pattern) |
-
-## Understanding Results
-
-### Load Test Output
-
-The test provides real-time metrics including:
-- Active and total request counts
-- Error rates and response times
-- TTFT (Time to First Token) statistics
-- Current pod counts (when validation enabled)
-
-### Scaling Validation
-
-When running scaling tests, look for:
-- ✓ PASSED: Scaling behavior detected as expected
-- ✗ FAILED: No scaling detected within timeout
-- Pod count changes in real-time monitoring
-
-### Expected Scaling Behavior
-
-- **Scale-up**: Triggered by sustained high TTFT/ITL metrics (typically after 60-120 seconds)
-- **Scale-down**: Occurs when load decreases and metrics stabilize (typically takes longer)
-- **Selective scaling**: May scale only prefill or decode workers based on workload characteristics

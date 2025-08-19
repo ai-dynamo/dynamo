@@ -22,7 +22,7 @@
 use crate::{
     component::Component,
     error,
-    metrics::{prometheus_names, MetricsRegistry},
+    metrics::{prometheus_names, prometheus_names::nats_service, MetricsRegistry},
     traits::*,
     transports::nats,
     utils::stream,
@@ -318,67 +318,79 @@ mod tests {
 /// Flow: NATS Service → NatsStatsMetrics (Counters) → Metrics Callback → Prometheus Gauge
 /// Note: These are snapshots updated when execute_metrics_callbacks() is called.
 #[derive(Debug, Clone)]
-pub struct ComponentNatsPrometheusMetrics {
+pub struct ComponentNatsServerPrometheusMetrics {
     /// Average processing time in milliseconds (maps to: average_processing_time)
-    pub avg_processing_ms: prometheus::Gauge,
+    pub service_avg_processing_ms: prometheus::Gauge,
     /// Total errors across all endpoints (maps to: num_errors)
-    pub total_errors: prometheus::IntGauge,
+    pub service_total_errors: prometheus::IntGauge,
     /// Total requests across all endpoints (maps to: num_requests)
-    pub total_requests: prometheus::IntGauge,
+    pub service_total_requests: prometheus::IntGauge,
     /// Total processing time in milliseconds (maps to: processing_time)
-    pub total_processing_ms: prometheus::IntGauge,
+    pub service_total_processing_ms: prometheus::IntGauge,
     /// Number of active services (derived from ServiceSet.services)
-    pub active_services: prometheus::IntGauge,
+    pub service_active_services: prometheus::IntGauge,
     /// Number of active endpoints (derived from ServiceInfo.endpoints)
-    pub active_endpoints: prometheus::IntGauge,
+    pub service_active_endpoints: prometheus::IntGauge,
 }
 
-impl ComponentNatsPrometheusMetrics {
+impl ComponentNatsServerPrometheusMetrics {
     /// Create new ComponentServiceMetrics using Component's DistributedRuntime's Prometheus constructors
     pub fn new(component: &Component) -> Result<Self> {
-        let avg_processing_ms = component.create_gauge(
-            prometheus_names::nats::AVG_PROCESSING_MS,
+        let service_name = component.service_name();
+
+        // Build labels: service_name first, then component's labels
+        let mut labels_vec = vec![("service_name", service_name.as_str())];
+
+        // Add component's labels (convert from (String, String) to (&str, &str))
+        for (key, value) in component.labels() {
+            labels_vec.push((key.as_str(), value.as_str()));
+        }
+
+        let labels: &[(&str, &str)] = &labels_vec;
+
+        let service_avg_processing_ms = component.create_gauge(
+            nats_service::AVG_PROCESSING_MS,
             "Average processing time across all component endpoints in milliseconds",
-            &[],
+            labels,
         )?;
 
-        let total_errors = component.create_intgauge(
-            prometheus_names::nats::TOTAL_ERRORS,
+        let service_total_errors = component.create_intgauge(
+            nats_service::TOTAL_ERRORS,
             "Total number of errors across all component endpoints",
-            &[],
+            labels,
         )?;
 
-        let total_requests = component.create_intgauge(
-            prometheus_names::nats::TOTAL_REQUESTS,
+        let service_total_requests = component.create_intgauge(
+            nats_service::TOTAL_REQUESTS,
             "Total number of requests across all component endpoints",
-            &[],
+            labels,
         )?;
 
-        let total_processing_ms = component.create_intgauge(
-            prometheus_names::nats::TOTAL_PROCESSING_MS,
+        let service_total_processing_ms = component.create_intgauge(
+            nats_service::TOTAL_PROCESSING_MS,
             "Total processing time across all component endpoints in milliseconds",
-            &[],
+            labels,
         )?;
 
-        let active_services = component.create_intgauge(
-            prometheus_names::nats::ACTIVE_SERVICES,
+        let service_active_services = component.create_intgauge(
+            nats_service::ACTIVE_SERVICES,
             "Number of active services in this component",
-            &[],
+            labels,
         )?;
 
-        let active_endpoints = component.create_intgauge(
-            prometheus_names::nats::ACTIVE_ENDPOINTS,
+        let service_active_endpoints = component.create_intgauge(
+            nats_service::ACTIVE_ENDPOINTS,
             "Number of active endpoints across all services",
-            &[],
+            labels,
         )?;
 
         Ok(Self {
-            avg_processing_ms,
-            total_errors,
-            total_requests,
-            total_processing_ms,
-            active_services,
-            active_endpoints,
+            service_avg_processing_ms,
+            service_total_errors,
+            service_total_requests,
+            service_total_processing_ms,
+            service_active_services,
+            service_active_endpoints,
         })
     }
 
@@ -414,26 +426,26 @@ impl ComponentNatsPrometheusMetrics {
         if processing_time_samples > 0 && total_requests > 0 {
             let avg_time_nanos = total_processing_time_nanos as f64 / total_requests as f64;
             let avg_time_ms = avg_time_nanos / 1_000_000.0; // Convert nanoseconds to milliseconds
-            self.avg_processing_ms.set(avg_time_ms);
+            self.service_avg_processing_ms.set(avg_time_ms);
         } else {
-            self.avg_processing_ms.set(0.0);
+            self.service_avg_processing_ms.set(0.0);
         }
 
-        self.total_errors.set(total_errors as i64); // maps to: num_errors
-        self.total_requests.set(total_requests as i64); // maps to: num_requests
-        self.total_processing_ms
+        self.service_total_errors.set(total_errors as i64); // maps to: num_errors
+        self.service_total_requests.set(total_requests as i64); // maps to: num_requests
+        self.service_total_processing_ms
             .set((total_processing_time_nanos / 1_000_000) as i64); // maps to: processing_time (converted to milliseconds)
-        self.active_services.set(service_count); // derived from ServiceSet.services
-        self.active_endpoints.set(endpoint_count as i64); // derived from ServiceInfo.endpoints
+        self.service_active_services.set(service_count); // derived from ServiceSet.services
+        self.service_active_endpoints.set(endpoint_count as i64); // derived from ServiceInfo.endpoints
     }
 
     /// Reset all metrics to zero. Useful when no data is available or to clear stale values.
     pub fn reset_to_zeros(&self) {
-        self.avg_processing_ms.set(0.0);
-        self.total_errors.set(0);
-        self.total_requests.set(0);
-        self.total_processing_ms.set(0);
-        self.active_services.set(0);
-        self.active_endpoints.set(0);
+        self.service_avg_processing_ms.set(0.0);
+        self.service_total_errors.set(0);
+        self.service_total_requests.set(0);
+        self.service_total_processing_ms.set(0);
+        self.service_active_services.set(0);
+        self.service_active_endpoints.set(0);
     }
 }

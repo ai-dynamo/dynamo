@@ -278,10 +278,12 @@ class Planner:
             else:
                 corrected_itl = self.args.itl / self.d_correction_factor
             # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
-            pred_decode_thpt_per_gpu = (
-                self.decode_interpolator.find_best_throughput_per_gpu(
-                    itl=corrected_itl, context_length=next_isl + next_osl / 2
-                )
+            (
+                pred_decode_thpt_per_gpu,
+                _,
+                _,
+            ) = self.decode_interpolator.find_best_throughput_per_gpu(
+                itl=corrected_itl, context_length=next_isl + next_osl / 2
             )
             # 3. compute number of decode replicas needed
             next_num_d = math.ceil(

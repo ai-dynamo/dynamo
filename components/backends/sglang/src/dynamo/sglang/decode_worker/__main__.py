@@ -2,7 +2,16 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 
-from dynamo.sglang.decode_worker.main import main
+import logging
+
+from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang.main import main
 
 if __name__ == "__main__":
+    configure_dynamo_logging()
+
+    logging.warning(
+        "DEPRECATION WARNING: `python3 -m dynamo.sglang.decode_worker` is deprecated and will be removed in dynamo v0.5.0."
+        "Use `python3 -m dynamo.sglang` instead.",
+    )
     main()

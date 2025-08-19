@@ -116,18 +116,3 @@ kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
 
 > [!NOTE]
 > The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The dynamo frontend provides these metrics automatically.
-
-## Testing and Validation
-
-To validate that your SLA planner is working correctly and scaling pods as expected, use the comprehensive testing suite in the `tests/planner/` directory:
-
-```bash
-# Run all scaling validation tests
-python tests/planner/sla_planner_load_test.py --pattern all_scaling_tests --kubernetes-namespace {$NAMESPACE}
-
-# Test individual scaling behaviors
-python tests/planner/sla_planner_load_test.py --pattern scale_up_test --kubernetes-namespace {$NAMESPACE}
-python tests/planner/sla_planner_load_test.py --pattern scale_down_test --kubernetes-namespace {$NAMESPACE}
-```
-
-For detailed testing instructions, configuration options, and troubleshooting, see the [SLA Planner Testing Guide](../../tests/planner/README.md).

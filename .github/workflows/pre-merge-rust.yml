@@ -52,10 +52,10 @@ jobs:
       run: |
         echo "Disk space before:"
         df -h
-        rm -rf \
-          /host_usr/share/dotnet /host_usr/local/lib/android /opt/ghc \
-          /host_usr/local/share/powershell /host_usr/share/swift /host_usr/local/.ghcup \
-          /host_usr/lib/jvm /opt/hostedtoolcache
+        sudo rm -rf \
+          /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+          /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+          /usr/lib/jvm /opt/hostedtoolcache
         echo "Disk space after:"
         df -h
 

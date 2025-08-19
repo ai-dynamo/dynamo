@@ -48,7 +48,7 @@ use super::{
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
 use crate::protocols::Endpoint as EndpointId;
-use crate::service::ComponentNatsPrometheusMetrics;
+use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -223,6 +223,10 @@ impl Component {
         self.name.clone()
     }
 
+    pub fn labels(&self) -> &[(String, String)] {
+        &self.labels
+    }
+
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
         Endpoint {
             component: self.clone(),
@@ -259,6 +263,7 @@ impl Component {
     /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
     /// embedded in data field of ServiceInfo.
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
+        // Debug: scraping stats for component
         let service_name = self.service_name();
         let service_client = self.drt().service_client();
         service_client
@@ -266,74 +271,63 @@ impl Component {
             .await
     }
 
-    /// Add Prometheus metrics for this component's service stats.
+    /// Add Prometheus metrics for this component's NATS service stats.
     ///
-    /// Uses a channel to synchronize with the spawned async task, ensuring
-    /// metrics are updated before the callback returns.
-    pub fn add_metrics_callback(&self) -> Result<()> {
-        let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
+    /// Starts a background task that periodically requests service statistics from NATS
+    /// and updates the corresponding Prometheus metrics. The scraping interval is set to
+    /// approximately 873ms (MAX_DELAY_MS), which is arbitrary but any value less than a second
+    /// is fair game. This frequent scraping provides real-time service statistics updates.
+    pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
+        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
+            std::time::Duration::from_millis(300);
+        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(873);
+
+        // If there is another component with the same service name, this will fail.
+        let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
 
         let component_clone = self.clone();
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
-        debug_assert_eq!(
-            hierarchies.last().cloned().unwrap_or_default(),
-            self.service_name()
-        ); // it happens that in component, hierarchy and service name are the same
+        debug_assert!(hierarchies
+            .last()
+            .map(|x| x.as_str())
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(&self.service_name())); // it happens that in component, hierarchy and service name are the same
 
-        // Register a metrics callback that scrapes component statistics
-        let metrics_callback = Arc::new(move || {
-            // Timeout for scraping metrics from components (in milliseconds)
-            // This value is also used by KV Router metrics aggregator (300ms) and other components
-            const METRICS_SCRAPE_TIMEOUT_MS: u64 = 300;
+        // Start a background task that scrapes stats every 5 seconds
+        let m = component_metrics.clone();
+        let c = component_clone.clone();
 
-            // Get the current Tokio runtime handle
-            let handle = tokio::runtime::Handle::try_current()
-                .map_err(|err| anyhow::anyhow!("No Tokio runtime handle available: {}", err))?;
+        // Use the DRT's runtime handle to spawn the background task.
+        // We cannot use regular `tokio::spawn` here because:
+        // 1. This method may be called from contexts without an active Tokio runtime
+        //    (e.g., tests that create a DRT in a blocking context)
+        // 2. Tests often create a temporary runtime just to build the DRT, then drop it
+        // 3. `tokio::spawn` requires being called from within a runtime context
+        // By using the DRT's own runtime handle, we ensure the task runs in the
+        // correct runtime that will persist for the lifetime of the component.
+        c.drt().runtime().secondary().spawn(async move {
+            let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
+            let mut interval = tokio::time::interval(MAX_DELAY_MS);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            let m = component_metrics.clone();
-            let c = component_clone.clone();
-
-            // Create a channel to synchronize with the spawned task
-            let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
-
-            let timeout = std::time::Duration::from_millis(METRICS_SCRAPE_TIMEOUT_MS);
-            handle.spawn(async move {
-                let result = match c.scrape_stats(timeout).await {
+            loop {
+                match c.scrape_stats(timeout).await {
                     Ok(service_set) => {
                         m.update_from_service_set(&service_set);
-                        Ok(())
                     }
                     Err(err) => {
-                        // Reset metrics on failure
+                        tracing::error!(
+                            "Background scrape failed for {}: {}",
+                            c.service_name(),
+                            err
+                        );
                         m.reset_to_zeros();
-                        Err(anyhow::anyhow!("Failed to scrape stats: {}", err))
                     }
-                };
-
-                // Send the result back to the waiting thread
-                // If send fails, the receiver has already given up waiting
-                let _ = tx.send(result);
-            });
-
-            // Wait for the spawned task to complete (with a timeout to prevent hanging)
-            // Add 100ms buffer to the scrape timeout to account for processing overhead
-            let recv_timeout = std::time::Duration::from_millis(METRICS_SCRAPE_TIMEOUT_MS + 100);
-            match rx.recv_timeout(recv_timeout) {
-                Ok(result) => result, // Return the actual result from scraping
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    component_metrics.reset_to_zeros();
-                    Err(anyhow::anyhow!("Metrics collection timed out"))
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    component_metrics.reset_to_zeros();
-                    Err(anyhow::anyhow!("Metrics collection task failed"))
-                }
+                interval.tick().await;
             }
         });
-
-        self.drt()
-            .register_metrics_callback(hierarchies, metrics_callback);
 
         Ok(())
     }
@@ -587,12 +581,27 @@ impl Namespace {
         // Register the metrics callback for this component.
         // If registration fails, log a warning but do not propagate the error,
         // as metrics are not mission critical and should not block component creation.
-        if let Err(err) = component.add_metrics_callback() {
-            tracing::warn!(
-                "Failed to add metrics callback for component '{}': {}",
-                component.service_name(),
-                err
-            );
+        if let Err(err) = component.start_scraping_nats_service_component_metrics() {
+            let error_str = err.to_string();
+
+            // Check if this is a duplicate metrics registration (expected in some cases)
+            // or a different error (unexpected)
+            if error_str.contains("Duplicate metrics") {
+                // This is not a critical error because it's possible for multiple Components
+                // with the same service_name to register metrics callbacks.
+                tracing::debug!(
+                    "Duplicate metrics registration for component '{}' (expected when multiple components share the same service_name): {}",
+                    component.service_name(),
+                    error_str
+                );
+            } else {
+                // This is unexpected and should be more visible
+                tracing::warn!(
+                    "Failed to start scraping metrics for component '{}': {}",
+                    component.service_name(),
+                    err
+                );
+            }
         }
 
         Ok(component)

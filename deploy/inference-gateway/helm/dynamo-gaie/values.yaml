@@ -49,5 +49,49 @@ httpRoute:
     request: "300s"
 
 extension:
-  # the GAIE extension
+  # default (non-epp-aware) EPP image for the GAIE extension
   image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0
+
+# generic knobs you may want in both modes
+imagePullSecrets: []     # e.g. ["docker-imagepullsecret"]
+epp:
+  imagePullPolicy: IfNotPresent
+  # Add env in name/value pairs
+  extraEnv: []           # e.g. [{name: USE_STREAMING, value: "true"}]
+  # If you ever want to completely override args, supply a list here.
+  # When empty, chart will render sane defaults
+  argsOverride: []
+
+# epp-aware mode toggle + specific settings
+eppAware:
+  enabled: false
+  # Optional: override EPP image when epp-aware=true
+  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:1.0.0
+
+  # Sidecar (frontend-router)
+  sidecar:
+    # Container name for the sidecar
+    name: frontend-router
+    # Sidecar image
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+    # Image pull policy for the sidecar
+    imagePullPolicy: IfNotPresent
+    # Command and args for running the frontend in router mode.
+    command: ["/bin/sh", "-c"]
+    args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
+    # Environment variables for the sidecar.
+    env:
+      - name: DYNAMO_NAMESPACE
+        valueFromDynamoNamespace: true
+      - name: ETCD_ENDPOINTS
+        value: "http://dynamo-platform-etcd:2379"
+      - name: NATS_SERVER
+        value: "nats://dynamo-platform-nats:4222"
+    # Resource requests/limits for the sidecar container.
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+    # Ports exposed by the sidecar container.
+    ports:
+      - containerPort: 8000

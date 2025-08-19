@@ -65,5 +65,17 @@ helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
 | `natsAddr` | Address of the NATS messaging service | `nats://dynamo-platform-nats:4222` |
 | `deploymentType` | Type of deployment to use. Can be `basic` or `grove`. If not specified, `basic` is used. | `deploymentType=grove` |
 
+## Feature Support Comparison
 
+The following table shows which deployment features are supported by the **Helm chart installation** versus the **Operator path**:
+
+| Feature | Helm Chart | Operator | Description |
+|---------|------------|----------|-------------|
+| **Singlenode** (k8sDeployments) | ✅ Supported | ✅ Supported | Single-node deployments using standard Kubernetes Deployments |
+| **Singlenode** (Grove PodGangSet) | ✅ Supported | ✅ Supported | Single-node deployments using Grove PodGangSet resources |
+| **Multinode** (Grove PodGangSet and LWS) | ❌ Not Supported | ✅ Supported | Multi-node deployments requiring Grove PodGangSet and LeaderWorkerSet (LWS) |
+
+**Key Differences:**
+- **Helm Chart**: Best for simple single-node deployments and quick testing. Supports both basic Kubernetes deployments and Grove PodGangSet resources.
+- **Operator**: Required for advanced multi-node deployments. Provides full feature support including complex distributed inference configurations.
 

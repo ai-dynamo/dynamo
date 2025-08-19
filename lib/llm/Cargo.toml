@@ -101,7 +101,9 @@ unicode-segmentation = "1.12"
 
 # http-service
 axum = { workspace = true }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = {workspace = true}
+rustls = { version = "0.23" }
 
 
 # tokenizers
