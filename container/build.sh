@@ -591,8 +591,8 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-# Build base image first if building a framework container
-if [[ $FRAMEWORK != "NONE" ]]; then
+# TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
+if [[ $FRAMEWORK == "VLLM" ]]; then
     echo ""
     echo "======================================"
     echo "Step 1: Building Base Image"
@@ -608,8 +608,8 @@ if [[ $FRAMEWORK != "NONE" ]]; then
     echo ""
     
     # Use the base image as the foundation for framework builds
-    BASE_IMAGE_FOR_FRAMEWORK="dynamo-base:${VERSION}"
-    BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${BASE_IMAGE_FOR_FRAMEWORK}"
+    DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+    BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
 fi
 
 $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE

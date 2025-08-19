@@ -48,6 +48,10 @@ ARG ARCH_ALT=x86_64
 # Use dynamo base image if provided, otherwise use original base image
 FROM ${DYNAMO_BASE_IMAGE:-${BASE_IMAGE}:${BASE_IMAGE_TAG}} AS dev
 
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
+    
 ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
@@ -75,6 +79,10 @@ ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 /usr/local/cuda/lib64:\
 $LD_LIBRARY_PATH
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+
+CMD []
 
 #######################################
 ########## Local Development ##########
@@ -170,12 +178,14 @@ COPY --from=dev /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 # Copy nats and etcd from dev image
 COPY --from=dev /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
-ENV PATH=/usr/local/bin/etcd/:$PATH
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Copy UCX from dev image as plugin for NIXL
-# Copy NIXL source from wheel_builder image
+# Copy NIXL source from devr image
 # Copy dynamo wheels for gitlab artifacts
 COPY --from=dev /usr/local/ucx /usr/local/ucx
+COPY --from=dev $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=dev /opt/dynamo/wheelhouse/*.whl wheelhouse/
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
