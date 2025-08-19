@@ -205,6 +205,7 @@ pub struct DistributedRuntime {
 }
 
 impl DistributedRuntime {
+    #[allow(dead_code)]
     fn inner(&self) -> &rs::DistributedRuntime {
         &self.inner
     }

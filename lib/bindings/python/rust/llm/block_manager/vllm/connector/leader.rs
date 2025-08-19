@@ -10,8 +10,8 @@ use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
 use crate::llm::block_manager::BlockManager as PyBlockManager;
 use crate::llm::block_manager::{
-    distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest, VllmBlockManager,
-    vllm::connector::leader::slot::VllmConnectorSlot,
+    distributed::KvbmLeader as PyKvbmLeader, vllm::connector::leader::slot::VllmConnectorSlot,
+    vllm::KvbmRequest, VllmBlockManager,
 };
 use crate::DistributedRuntime as PyDistributedRuntime;
 
@@ -410,7 +410,9 @@ impl Leader for KvConnectorLeader {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
 
         if !self.slot_manager.has_slot(&request_id) {
-            tracing::warn!("request_finished called for request_id: {request_id} but slot is not found");
+            tracing::warn!(
+                "request_finished called for request_id: {request_id} but slot is not found"
+            );
             self.inflight_requests.remove(&request_id);
             return Ok(false);
         }

@@ -191,7 +191,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let drt_for_task = drt;
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
-            |cancellation_token| async move { xfer_engine.execute(cancellation_token, drt_for_task).await },
+            |cancellation_token| async move {
+                xfer_engine.execute(cancellation_token, drt_for_task).await
+            },
             primary_token,
             "LocalTransferEngine",
             &runtime_primary,
@@ -372,11 +374,11 @@ impl VllmConnectorSlot {
             SlotState::Prefilling => self.mark_as_skipped_prefill(),
             SlotState::Decoding => self.mark_as_skipped_decode(),
             SlotState::SkippedPrefill => Ok(()), // already skipped
-            SlotState::SkippedDecode => Ok(()), // already skipped
+            SlotState::SkippedDecode => Ok(()),  // already skipped
             _ => {
                 tracing::warn!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
                 Ok(())
-            },
+            }
         }
     }
 }
@@ -1019,12 +1021,14 @@ impl LocalTransferEngine {
     //
     // This should be a composable unit that we can layer on specialized types of critical tasks
     // with their own sets of custom metrics.
-    async fn execute(&mut self, cancellation_token: CancellationToken, drt: DistributedRuntime) -> anyhow::Result<()> {
-
+    async fn execute(
+        &mut self,
+        cancellation_token: CancellationToken,
+        drt: DistributedRuntime,
+    ) -> anyhow::Result<()> {
         let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel();
         let (offload_tx, mut offload_rx) = mpsc::unbounded_channel();
         let drt_clone = drt.clone();
-
 
         // Clone resources needed for tasks
         let block_manager_offload = self.block_manager.clone();
@@ -1056,7 +1060,9 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOffloadTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) = process_offload_request(req, &block_manager_offload, &leader_offload).await {
+                    if let Err(e) =
+                        process_offload_request(req, &block_manager_offload, &leader_offload).await
+                    {
                         tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
                     }
                 }
@@ -1120,7 +1126,11 @@ impl LocalTransferEngine {
     }
 }
 
-pub async fn process_offload_request(offload_req: LocalOffloadRequest, block_manager: &VllmBlockManager, leader: &Arc<KvbmLeader>) -> anyhow::Result<()> {
+pub async fn process_offload_request(
+    offload_req: LocalOffloadRequest,
+    block_manager: &VllmBlockManager,
+    leader: &Arc<KvbmLeader>,
+) -> anyhow::Result<()> {
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1222,7 +1232,10 @@ pub async fn process_offload_request(offload_req: LocalOffloadRequest, block_man
     Ok(())
 }
 
-pub async fn process_onboard_request(onboard_req: LocalOnboardRequest, leader: &Arc<KvbmLeader>) -> anyhow::Result<()> {
+pub async fn process_onboard_request(
+    onboard_req: LocalOnboardRequest,
+    leader: &Arc<KvbmLeader>,
+) -> anyhow::Result<()> {
     let request_id = &onboard_req.request_id;
     let operation_id = &onboard_req.operation_id;
 
