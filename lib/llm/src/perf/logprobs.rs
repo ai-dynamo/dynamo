@@ -572,7 +572,7 @@ mod tests {
     use crate::protocols::codec::create_message_stream;
     use crate::protocols::convert_sse_stream;
     use approx::assert_abs_diff_eq;
-    use async_openai::types::{
+    use dynamo_async_openai::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
         ChatCompletionTokenLogprob, CreateChatCompletionStreamResponse, FinishReason, Role,
         TopLogprobs,
@@ -1556,7 +1556,7 @@ mod tests {
     fn create_mock_response() -> NvCreateChatCompletionStreamResponse {
         // Create a mock response for testing
         // In practice, this would have real logprobs data
-        use async_openai::types::CreateChatCompletionStreamResponse;
+        use dynamo_async_openai::types::CreateChatCompletionStreamResponse;
 
         let inner = CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),

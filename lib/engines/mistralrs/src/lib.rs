@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 use std::{num::NonZero, sync::Arc};
 
-use async_openai::types::FinishReason;
 use async_stream::stream;
 use async_trait::async_trait;
+use dynamo_async_openai::types::FinishReason;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs::{
@@ -277,10 +277,10 @@ impl
 
         let mut messages = vec![];
         for m in request.inner.messages {
-            let async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
+            let dynamo_async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
                 continue;
             };
-            let async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
+            let dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
                 inner_m.content
             else {
                 anyhow::bail!("Only Text type chat completion supported");
@@ -396,13 +396,13 @@ impl
                         //tracing::trace!("from_assistant: {from_assistant}");
 
                         #[allow(deprecated)]
-                        let inner = async_openai::types::CreateChatCompletionStreamResponse{
+                        let inner = dynamo_async_openai::types::CreateChatCompletionStreamResponse{
                             id: c.id,
-                            choices: vec![async_openai::types::ChatChoiceStream{
+                            choices: vec![dynamo_async_openai::types::ChatChoiceStream{
                                 index: 0,
-                                delta: async_openai::types::ChatCompletionStreamResponseDelta{
+                                delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta{
                                     //role: c.choices[0].delta.role,
-                                    role: Some(async_openai::types::Role::Assistant),
+                                    role: Some(dynamo_async_openai::types::Role::Assistant),
                                     content: Some(from_assistant),
                                     tool_calls: None,
                                     refusal: None,
@@ -441,10 +441,10 @@ impl
 }
 
 /// openai stop tokens to mistralrs stop tokens
-fn to_stop_tokens(t: async_openai::types::Stop) -> StopTokens {
+fn to_stop_tokens(t: dynamo_async_openai::types::Stop) -> StopTokens {
     match t {
-        async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
-        async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
+        dynamo_async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
+        dynamo_async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
     }
 }
 

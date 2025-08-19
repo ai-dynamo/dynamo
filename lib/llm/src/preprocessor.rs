@@ -15,7 +15,7 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
-use async_openai::types::EncodingFormat;
+use dynamo_async_openai::types::EncodingFormat;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -276,11 +276,11 @@ impl OpenAIPreprocessor {
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
         let all_token_ids = match &request.inner.input {
-            async_openai::types::EmbeddingInput::String(s) => {
+            dynamo_async_openai::types::EmbeddingInput::String(s) => {
                 let encoding = self.tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
-            async_openai::types::EmbeddingInput::StringArray(arr) => {
+            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = self.tokenizer.clone();
@@ -296,8 +296,10 @@ impl OpenAIPreprocessor {
                     .collect();
                 token_arrays
             }
-            async_openai::types::EmbeddingInput::IntegerArray(token_ids) => vec![token_ids.clone()],
-            async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+            dynamo_async_openai::types::EmbeddingInput::IntegerArray(token_ids) => {
+                vec![token_ids.clone()]
+            }
+            dynamo_async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
                 token_arrays.clone()
             }
         };
@@ -437,11 +439,11 @@ impl OpenAIPreprocessor {
         let transformed_stream = stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
-                let embeddings: Vec<async_openai::types::Embedding> = engine_output
+                let embeddings: Vec<dynamo_async_openai::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| async_openai::types::Embedding {
+                    .map(|(index, embedding)| dynamo_async_openai::types::Embedding {
                         index: index as u32,
                         object: "embedding".to_string(),
                         embedding: embedding.into_iter().map(|f| f as f32).collect(),
@@ -449,11 +451,11 @@ impl OpenAIPreprocessor {
                     .collect();
 
                 let response = NvCreateEmbeddingResponse {
-                    inner: async_openai::types::CreateEmbeddingResponse {
+                    inner: dynamo_async_openai::types::CreateEmbeddingResponse {
                         object: "list".to_string(),
                         model: original_request.inner.model.clone(),
                         data: embeddings,
-                        usage: async_openai::types::EmbeddingUsage {
+                        usage: dynamo_async_openai::types::EmbeddingUsage {
                             prompt_tokens: engine_output.prompt_tokens,
                             total_tokens: engine_output.total_tokens,
                         },

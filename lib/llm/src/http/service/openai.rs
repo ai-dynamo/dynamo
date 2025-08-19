@@ -763,7 +763,7 @@ pub fn validate_response_input_is_text_only(
     request: &NvCreateResponse,
 ) -> Option<impl IntoResponse> {
     match &request.inner.input {
-        async_openai::types::responses::Input::Text(_) => None,
+        dynamo_async_openai::types::responses::Input::Text(_) => None,
         _ => Some(ErrorMessage::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
     }
 }
@@ -1069,12 +1069,12 @@ pub fn responses_router(
 mod tests {
     use std::collections::HashMap;
 
-    use async_openai::types::responses::{
+    use dynamo_async_openai::types::responses::{
         CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
         Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
         ToolChoiceMode, Truncation,
     };
-    use async_openai::types::{
+    use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };
