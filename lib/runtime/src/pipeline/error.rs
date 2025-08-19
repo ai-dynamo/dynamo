@@ -131,6 +131,10 @@ pub enum PipelineError {
 
     #[error("NATS KV Err: {0} for bucket '{1}")]
     KeyValueError(String, String),
+
+    /// All instances are busy and cannot handle new requests
+    #[error("Service temporarily unavailable: {0}")]
+    ServiceOverloaded(String),
 }
 
 #[derive(Debug, thiserror::Error)]
