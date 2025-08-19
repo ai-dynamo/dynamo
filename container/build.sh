@@ -400,37 +400,25 @@ get_options "$@"
 # Function to build base image first
 build_base_image() {
     local base_tag="dynamo-base:${VERSION}"
-    local base_dockerfile="${SOURCE_DIR}/Dockerfile"
-    
     echo ""
     echo "======================================"
     echo "Building Base Image: ${base_tag}"
     echo "======================================"
     echo ""
-    
-    # Build base image with common dependencies
-    local base_build_args="$BUILD_ARGS"
-    base_build_args+=" --build-arg BASE_IMAGE=$BASE_IMAGE"
-    base_build_args+=" --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG"
-    base_build_args+=" --build-arg VERSION=$VERSION"
-    base_build_args+=" --build-arg PYTHON_PACKAGE_VERSION=$PYTHON_PACKAGE_VERSION"
-    
-    $RUN_PREFIX docker build -f "$base_dockerfile" \
+    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" \
         --target dev \
         $PLATFORM \
-        $base_build_args \
+        $BUILD_ARGS \
         $CACHE_FROM \
         $CACHE_TO \
         --tag "$base_tag" \
         $BUILD_CONTEXT_ARG \
         $BUILD_CONTEXT \
         $NO_CACHE
-    
     if [ $? -ne 0 ]; then
         echo "ERROR: Failed to build base image"
         exit 1
     fi
-    
     echo "Base image built successfully: $base_tag"
     return 0
 }
@@ -597,16 +585,14 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
     echo "======================================"
     echo "Step 1: Building Base Image"
     echo "======================================"
-    
     # Build the base image first
     build_base_image
-    
     echo ""
     echo "======================================"
     echo "Step 2: Building Framework Image"
     echo "======================================"
     echo ""
-    
+
     # Use the base image as the foundation for framework builds
     DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
     BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
