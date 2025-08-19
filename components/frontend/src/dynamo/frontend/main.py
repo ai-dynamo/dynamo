@@ -88,7 +88,16 @@ def parse_args():
         "--kv-cache-block-size", type=int, help="KV cache block size (u32)."
     )
     parser.add_argument(
-        "--http-port", type=int, default=8080, help="HTTP port for the engine (u16)."
+        "--http-host",
+        type=str,
+        default=os.environ.get("DYN_HTTP_HOST", "0.0.0.0"),
+        help="HTTP host for the engine (str). Can be set via DYN_HTTP_HOST env var.",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
     )
     parser.add_argument(
         "--tls-cert-path",
@@ -106,8 +115,8 @@ def parse_args():
         "--router-mode",
         type=str,
         choices=["round-robin", "random", "kv"],
-        default="round-robin",
-        help="How to route the request",
+        default=os.environ.get("DYN_ROUTER_MODE", "round-robin"),
+        help="How to route the request. Can be set via DYN_ROUTER_MODE env var.",
     )
     parser.add_argument(
         "--kv-overlap-score-weight",
@@ -139,6 +148,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
+    )
+    parser.add_argument(
+        "--busy-threshold",
+        type=float,
+        default=None,
+        help="Threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache usage. If not set, busy detection is disabled.",
     )
     parser.add_argument(
         "--static-endpoint",
@@ -200,9 +215,12 @@ async def async_main():
         kv_router_config = None
 
     kwargs = {
+        "http_host": flags.http_host,
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(router_mode, kv_router_config),
+        "router_config": RouterConfig(
+            router_mode, kv_router_config, flags.busy_threshold
+        ),
     }
 
     if flags.static_endpoint:

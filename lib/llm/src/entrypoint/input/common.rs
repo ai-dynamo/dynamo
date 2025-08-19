@@ -71,6 +71,7 @@ pub async fn prepare_engine(
                 model_manager.clone(),
                 dynamo_runtime::pipeline::RouterMode::RoundRobin,
                 None,
+                None,
             ));
             let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
@@ -133,7 +134,7 @@ pub async fn prepare_engine(
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, kv_chooser.clone())
+            >(card, &client, router_mode, None, kv_chooser.clone())
             .await?;
 
             let service_name = local_model.service_name().to_string();
@@ -216,6 +217,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
     router_mode: RouterMode,
+    busy_threshold: Option<f64>,
     chooser: Option<Arc<KvRouter>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -232,11 +234,13 @@ where
     let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
     let backend = Backend::from_mdc(card.clone()).await?.into_operator();
     let migration = Migration::from_mdc(card.clone()).await?.into_operator();
-    let router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
-        client.clone(),
-        router_mode,
-    )
-    .await?;
+    let router =
+        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+            client.clone(),
+            router_mode,
+            busy_threshold,
+        )
+        .await?;
     let service_backend = match router_mode {
         RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
             ServiceBackend::from_engine(Arc::new(router))

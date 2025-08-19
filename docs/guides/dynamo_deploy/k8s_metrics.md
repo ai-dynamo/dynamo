@@ -7,7 +7,7 @@ This guide provides a walkthrough for collecting and visualizing metrics from Dy
 ## Prerequisites
 
 ### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Quickstart Guide](../dynamo_deploy/quickstart.md) for detailed instructions on deploying the Dynamo operator.
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/dynamo_cloud.md) for detailed instructions on deploying the Dynamo operator.
 
 ### Install Prometheus Operator
 If you don't have an existing Prometheus setup, you'll need to install the Prometheus Operator. The Prometheus Operator introduces custom resources that make it easy to deploy and manage Prometheus monitoring in Kubernetes:
@@ -39,7 +39,7 @@ This will create two components:
 - A Worker component exposing metrics on its system port
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
-- Deployment configuration: See the [vLLM README](../../../components/backends/vllm/README.md)
+- Deployment configuration: See the [vLLM README](../../components/backends/vllm/README.md)
 - Available metrics: See the [metrics guide](../metrics.md)
 
 ### Validate the Deployment
@@ -47,7 +47,7 @@ Both components expose a `/metrics` endpoint following the OpenMetrics format, b
 Let's send some test requests to populate metrics:
 
 ```bash
-curl localhost:8080/v1/chat/completions \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",

@@ -20,12 +20,12 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="ba81acbdc1eec643ba815a76628ae3e4b2263b76"
+VLLM_REF="77a6bf07aedf132aad2b6719f6d87abc5d3311ab"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="03d0be3"
+DEEPGEMM_REF="f85ec64"
 FLASHINF_REF="v0.2.8rc1"
 TORCH_BACKEND="cu128"
 
@@ -147,10 +147,19 @@ if [ "$ARCH" = "arm64" ]; then
     fi
 else
     echo "Installing vllm for AMD64 architecture"
+
+    echo "Attempting to install pinned OpenAI version..."
+    if ! uv pip install  openai==1.99.9; then
+        echo "Pinned versions failed"
+        exit 1
+    fi
+
+    export VLLM_PRECOMPILED_WHEEL_LOCATION=https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+
     if [ "$EDITABLE" = "true" ]; then
-        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=$TORCH_BACKEND
+	uv pip install -e . --torch-backend=$TORCH_BACKEND
     else
-        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
+        uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
 

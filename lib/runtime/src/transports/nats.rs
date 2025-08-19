@@ -44,7 +44,7 @@ use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
 
-use crate::metrics::prometheus_names::nats as nats_metrics;
+use crate::metrics::prometheus_names::nats_client as nats_metrics;
 pub use crate::slug::Slug;
 use tracing as log;
 
@@ -520,7 +520,7 @@ impl NatsQueue {
 /// Flow: NATS Client → Client Statistics → set_from_client_stats() → Prometheus Gauge
 /// Note: These are snapshots updated when set_from_client_stats() is called.
 #[derive(Debug, Clone)]
-pub struct DRTNatsPrometheusMetrics {
+pub struct DRTNatsClientPrometheusMetrics {
     nats_client: client::Client,
     /// Number of bytes received (excluding protocol overhead)
     pub in_bytes: IntGauge,
@@ -536,7 +536,7 @@ pub struct DRTNatsPrometheusMetrics {
     pub connection_state: IntGauge,
 }
 
-impl DRTNatsPrometheusMetrics {
+impl DRTNatsClientPrometheusMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
         let in_bytes = drt.create_intgauge(

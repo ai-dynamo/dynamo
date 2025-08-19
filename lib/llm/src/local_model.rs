@@ -50,6 +50,7 @@ pub struct LocalModelBuilder {
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
+    http_host: Option<String>,
     http_port: u16,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
@@ -64,6 +65,7 @@ impl Default for LocalModelBuilder {
     fn default() -> Self {
         LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
+            http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
@@ -112,6 +114,11 @@ impl LocalModelBuilder {
     /// Passing None resets it to default
     pub fn kv_cache_block_size(&mut self, kv_cache_block_size: Option<u32>) -> &mut Self {
         self.kv_cache_block_size = kv_cache_block_size.unwrap_or(DEFAULT_KV_CACHE_BLOCK_SIZE);
+        self
+    }
+
+    pub fn http_host(&mut self, host: Option<String>) -> &mut Self {
+        self.http_host = host;
         self
     }
 
@@ -200,6 +207,7 @@ impl LocalModelBuilder {
                 full_path: PathBuf::new(),
                 endpoint_id,
                 template,
+                http_host: self.http_host.take(),
                 http_port: self.http_port,
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
@@ -275,6 +283,7 @@ impl LocalModelBuilder {
             full_path,
             endpoint_id,
             template,
+            http_host: self.http_host.take(),
             http_port: self.http_port,
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
@@ -290,6 +299,7 @@ pub struct LocalModel {
     card: ModelDeploymentCard,
     endpoint_id: EndpointId,
     template: Option<RequestTemplate>,
+    http_host: Option<String>,
     http_port: u16,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
@@ -319,6 +329,10 @@ impl LocalModel {
 
     pub fn request_template(&self) -> Option<RequestTemplate> {
         self.template.clone()
+    }
+
+    pub fn http_host(&self) -> Option<String> {
+        self.http_host.clone()
     }
 
     pub fn http_port(&self) -> u16 {

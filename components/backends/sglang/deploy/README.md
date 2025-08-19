@@ -66,7 +66,7 @@ extraPodSpec:
     args:
       - "python3"
       - "-m"
-      - "dynamo.sglang.worker"
+      - "dynamo.sglang"
       # Model-specific arguments
 ```
 
