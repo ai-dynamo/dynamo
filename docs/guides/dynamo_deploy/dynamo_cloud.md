@@ -15,102 +15,167 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo Cloud Kubernetes Platform
+# Dynamo Kubernetes Platform
 
-The Dynamo Cloud platform is a comprehensive solution for deploying and managing Dynamo inference graphs (also referred to as pipelines) in Kubernetes environments. It provides a streamlined experience for deploying, scaling, and monitoring your inference services.
+Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestration and scaling, using the Dynamo Kubernetes Platform.
 
-## Overview
+## Quick Start Paths
 
-The Dynamo cloud platform consists of several key components:
+**Path A: Production Install**
+Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see [Dynamo Kubernetes Operator Documentation](../dynamo_deploy/dynamo_operator.md)
-- **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
+**Path B: Local Development**
+Set up Minikube first → [Minikube Setup](minikube.md) → Then follow Path A
 
-
-## Deployment Prerequisites
-
-Before getting started with the Dynamo cloud platform, ensure you have:
-
-- A Kubernetes cluster (version 1.24 or later)
-- [Earthly](https://earthly.dev/) installed for building components
-- Docker installed and running
-- Access to a container registry (e.g., Docker Hub, NVIDIA NGC, etc.)
-- `kubectl` configured to access your cluster
-- Helm installed (version 3.0 or later)
-
-
-> [!TIP]
-> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
-
-#### 🏗️ Build Dynamo inference runtime.
-
-[One-time Action]
-Before you could use Dynamo make sure you have setup the Inference Runtime Image.
-For basic cases you could use the prebuilt image for the Dynamo Inference Runtime.
-Just export the environment variable. This will be the image used by your individual components. You pick whatever dynamo version you want or use the latest (default)
-
-```bash
-export DYNAMO_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
-```
-
-For a custom setup build and push to your registry Dynamo Base Image for Dynamo inference runtime. This is a one-time operation.
-
-```bash
-# Run the script to build the default dynamo:latest-vllm image.
-./container/build.sh
-export IMAGE_TAG=<TAG>
-# Tag the image
-docker tag dynamo:latest-vllm <your-registry>/dynamo:${IMAGE_TAG}
-docker push <your-registry>/dynamo:${IMAGE_TAG}
-```
-
-## 🚀 Deploying the Dynamo Cloud Platform
+**Path C: Custom Development**
+Build from source for customization → [Jump to Path C](#path-c-custom-development)
 
 ## Prerequisites
 
-Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
-
-#### 1. 🛡️ Istio Installation
-Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
-
 ```bash
-# Check if Istio is installed
-kubectl get pods -n istio-system
+# Required tools
+kubectl version --client  # v1.24+
+helm version             # v3.0+
+docker version           # Running daemon
 
-# Expected output should show running Istio pods
-# istiod-* pods should be in Running state
+# Set your inference runtime image
+export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+# Also available: sglang-runtime, tensorrtllm-runtime
 ```
 
-#### 2. 💾 PVC Support with Default Storage Class
-Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
+> [!TIP]
+> No cluster? See [Minikube Setup](minikube.md) for local development.
+
+## Path A: Production Install
+
+Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) in 3 steps.
 
 ```bash
-# Check if default storage class exists
-kubectl get storageclass
+# 1. Set environment
+export NAMESPACE=dynamo-kubernetes
+export RELEASE_VERSION=0.4.0 # any version of Dynamo 0.3.2+
 
-# Expected output should show at least one storage class marked as (default)
-# Example:
-# NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
-# standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
+# 2. Install CRDs
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
+helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
+
+# 3. Install Platform
+kubectl create namespace ${NAMESPACE}
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 
-## Installation
+→ [Verify Installation](#verify-installation)
 
-Follow [Quickstart Guide](./quickstart.md) to install the Dynamo Cloud
+## Path C: Custom Development
 
-⚠️ **Note:** that omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
+Build and deploy from source for customization.
 
-⚠️ **Note:** If you'd like to only generate the generated-values.yaml file without deploying to Kubernetes (e.g., for inspection, CI workflows, or dry-run testing), use:
+### Quick Deploy Script
 
 ```bash
-./deploy_dynamo_cloud.py --yaml-only
+# 1. Set environment
+export NAMESPACE=dynamo-cloud
+export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
+export DOCKER_USERNAME='$oauthtoken'
+export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
+export IMAGE_TAG=0.4.0
+
+# 2. Build operator
+cd deploy/cloud/operator
+earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+cd -
+
+# 3. Create namespace and secrets
+kubectl create namespace ${NAMESPACE}
+kubectl create secret docker-registry docker-imagepullsecret \
+  --docker-server=${DOCKER_SERVER} \
+  --docker-username=${DOCKER_USERNAME} \
+  --docker-password=${DOCKER_PASSWORD} \
+  --namespace=${NAMESPACE}
+
+# 4. Deploy
+helm repo add bitnami https://charts.bitnami.com/bitnami
+./deploy.sh --crds
 ```
 
+### Manual Steps (Alternative)
 
+<details>
+<summary>Click to expand manual installation steps</summary>
 
-### Cloud Provider-Specific deployment
+**Step 1: Install CRDs**
+```bash
+helm install dynamo-crds ./crds/ --namespace default
+```
 
-#### Google Kubernetes Engine (GKE) deployment
+**Step 2: Install Platform**
+```bash
+helm dep build ./platform/
+helm install dynamo-platform ./platform/ \
+  --namespace ${NAMESPACE} \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
+```
+</details>
 
-You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
+→ [Verify Installation](#verify-installation)
 
+## Verify Installation
+
+```bash
+# Check CRDs
+kubectl get crd | grep dynamo
+
+# Check operator and platform pods
+kubectl get pods -n ${NAMESPACE}
+# Expected: dynamo-operator-* and etcd-* pods Running
+```
+
+## Next Steps
+
+1. **Deploy Model/Workflow**
+   ```bash
+   # Example: Deploy a vLLM workflow with Qwen3-0.6B using aggregated serving
+   kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+
+   # Port forward and test
+   kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+   curl http://localhost:8000/v1/models
+   ```
+
+2. **Explore Backend Guides**
+   - [vLLM Deployments](../../../components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](../../../components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](../../../components/backends/trtllm/deploy/README.md)
+
+3. **Optional:**
+   - [Set up Prometheus & Grafana](k8s_metrics.md)
+   - [SLA Planner Deployment Guide](sla_planner_deployment.md) (for advanced SLA-aware scheduling and autoscaling)
+
+## Troubleshooting
+
+**Pods not starting?**
+```bash
+kubectl describe pod <pod-name> -n ${NAMESPACE}
+kubectl logs <pod-name> -n ${NAMESPACE}
+```
+
+**HuggingFace model access?**
+```bash
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
+```
+
+**Clean uninstall?**
+```bash
+./uninstall.sh  # Removes all CRDs and platform
+```
+
+## Advanced Options
+
+- [GKE-specific setup](gke_setup.md)
+- [Create custom deployments](create_deployment.md)
+- [Dynamo Operator details](dynamo_operator.md)

@@ -141,6 +141,12 @@ if __name__ == "__main__":
         default=SLAPlannerDefaults.prometheus_port,
         help="Prometheus port",
     )
+    parser.add_argument(
+        "--no-correction",
+        action="store_true",
+        default=SLAPlannerDefaults.no_correction,
+        help="Disable correction factor",
+    )
 
     args = parser.parse_args()
     asyncio.run(init_planner(args))

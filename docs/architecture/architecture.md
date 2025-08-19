@@ -48,7 +48,7 @@ There are multi-faceted challenges:
 
 To address the growing demands of distributed inference serving, NVIDIA introduces Dynamo. This innovative product tackles key challenges in scheduling, memory management, and data transfer. Dynamo employs KV-aware routing for optimized decoding, leveraging existing KV caches. For efficient global memory management at scale, it strategically stores and evicts KV caches across multiple memory tiers—GPU, CPU, SSD, and object storage—enhancing both time-to-first-token and overall throughput. Dynamo features NIXL (NVIDIA Inference tranXfer Library), a new data transfer engine designed for dynamic scaling and low-latency storage access.
 
-## High level architecture and key benefits
+## Key benefits
 
 The following diagram outlines Dynamo's high-level architecture. To enable large-scale distributed and disaggregated inference serving, Dynamo includes five key features:
 

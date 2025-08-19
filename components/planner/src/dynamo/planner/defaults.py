@@ -80,6 +80,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     itl = 0.05  # in seconds
     load_predictor = "arima"  # ["constant", "arima", "prophet"]
     load_prediction_window_size = 50  # predict load using how many recent load samples
+    no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
 
 
 class VllmComponentName:

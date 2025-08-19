@@ -49,7 +49,8 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["KVBM"]=5)
+
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -363,9 +364,9 @@ show_image_options() {
 
 show_help() {
     echo "usage: build.sh"
-    echo "  [--base base image]"
+    echo "  [--base-image base image]"
     echo "  [--base-image-tag base image tag]"
-    echo "  [--platform platform for docker build"
+    echo "  [--platform platform for docker build]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
@@ -382,6 +383,7 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
     exit 0
 }
@@ -413,6 +415,8 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+elif [[ $FRAMEWORK == "KVBM" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.kvbm
 fi
 
 # Add NIXL_REF as a build argument

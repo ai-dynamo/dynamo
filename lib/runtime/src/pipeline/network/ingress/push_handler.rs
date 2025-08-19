@@ -211,8 +211,21 @@ where
                 stream
             }
             Err(e) => {
-                tracing::error!("Failed to generate response stream: {:?}", e);
-                let _result = publisher.send_prologue(Some(e.to_string())).await;
+                let error_string = e.to_string();
+
+                #[cfg(debug_assertions)]
+                {
+                    tracing::debug!(
+                        "Failed to generate response stream (with debug backtrace): {:?}",
+                        e
+                    );
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    tracing::error!("Failed to generate response stream: {}", error_string);
+                }
+
+                let _result = publisher.send_prologue(Some(error_string)).await;
                 Err(e)?
             }
         };

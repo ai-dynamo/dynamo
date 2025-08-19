@@ -50,7 +50,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | **GB200 Support**   | ✅     |                                                              |
 
 
-## Quick Start
+## SGLang Quick Start
 
 Below we provide a guide that lets you run all of our common deployment patterns on a single node.
 

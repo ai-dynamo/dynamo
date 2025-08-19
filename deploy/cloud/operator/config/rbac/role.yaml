@@ -101,6 +101,15 @@ rules:
 - apiGroups:
   - grove.io
   resources:
+  - podcliques/scale
+  - podcliquescalinggroups/scale
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - grove.io
+  resources:
   - podgangsets
   verbs:
   - create

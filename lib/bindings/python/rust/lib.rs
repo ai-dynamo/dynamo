@@ -199,9 +199,16 @@ struct EtcdKvCache {
 
 #[pyclass]
 #[derive(Clone)]
-struct DistributedRuntime {
+pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
+}
+
+impl DistributedRuntime {
+    #[allow(dead_code)]
+    fn inner(&self) -> &rs::DistributedRuntime {
+        &self.inner
+    }
 }
 
 #[pyclass]
@@ -281,6 +288,21 @@ impl DistributedRuntime {
         let inner = inner.map_err(to_pyerr)?;
 
         Ok(DistributedRuntime { inner, event_loop })
+    }
+
+    #[staticmethod]
+    fn detached(py: Python) -> PyResult<Self> {
+        let rt = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
+        let handle = rt.primary();
+
+        let inner = handle
+            .block_on(rs::DistributedRuntime::from_settings(rt))
+            .map_err(to_pyerr)?;
+
+        Ok(DistributedRuntime {
+            inner,
+            event_loop: py.None(),
+        })
     }
 
     fn namespace(&self, name: String) -> PyResult<Namespace> {

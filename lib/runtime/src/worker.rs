@@ -88,6 +88,16 @@ impl Worker {
         Ok(Worker { runtime, config })
     }
 
+    pub fn runtime_from_existing() -> Result<Runtime> {
+        if let Some(rt) = RT.get() {
+            Ok(Runtime::from_handle(rt.handle().clone())?)
+        } else if let Some(rt) = RTHANDLE.get() {
+            Ok(Runtime::from_handle(rt.clone())?)
+        } else {
+            Runtime::from_settings()
+        }
+    }
+
     pub fn tokio_runtime(&self) -> Result<&'static tokio::runtime::Runtime> {
         RT.get().ok_or_else(|| error!("Worker not initialized"))
     }

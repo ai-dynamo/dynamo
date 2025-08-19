@@ -99,6 +99,28 @@ impl ToolCallConfig {
             },
         }
     }
+
+    pub fn mistral() -> Self {
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["[TOOL_CALLS]".to_string()],
+                tool_call_end_tokens: vec!["".to_string()],
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn phi4() -> Self {
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["functools".to_string()],
+                tool_call_end_tokens: vec!["".to_string()],
+                ..Default::default()
+            },
+        }
+    }
 }
 
 /// Configuration for parsing tool calls with different formats
@@ -142,6 +164,8 @@ pub fn detect_and_parse_tool_call(
     parser_map.insert("hermes", ToolCallConfig::hermes());
     parser_map.insert("nemotron_deci", ToolCallConfig::nemotron_deci());
     parser_map.insert("llama3_json", ToolCallConfig::llama3_json());
+    parser_map.insert("mistral", ToolCallConfig::mistral());
+    parser_map.insert("phi4", ToolCallConfig::phi4());
     parser_map.insert("default", ToolCallConfig::default()); // Add default key
 
     // Handle None or empty string by defaulting to "default"
@@ -306,6 +330,36 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[test]
+    fn test_nvidia_llama3_nemotron_super_49b_with_function_array_with_new_lines() {
+        let input = r#"<think>
+Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me check the tools available.
+</think>
+
+<TOOLCALL>
+[{"name": "get_weather",
+ "arguments": {"location": "San Francisco, CA",
+  "unit": "fahrenheit"}},
+  {"name": "get_weather",
+   "arguments":
+  {"location": "New York, NY",
+  "unit": "fahrenheit"}}]
+  </TOOLCALL>
+  "#;
+        let config = ToolCallConfig::nemotron_deci();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
     fn test_qwen_qwq_32b_simple() {
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
@@ -357,6 +411,33 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[test]
+    fn test_qwen_qwq_32b_multiple_tool_calls_with_new_lines() {
+        let input = r#"<tool_call>
+{"name": "get_weather",
+"arguments": {"location": "San Francisco, CA",
+"unit": "fahrenheit"}}
+</tool_call>
+<tool_call>
+{"name": "get_weather", "arguments":
+{"location": "New York, NY", "unit":
+"fahrenheit"}}
+</tool_call>
+"#;
+        let config = ToolCallConfig::hermes();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
     #[ignore]
     fn test_ibm_granite_40_tiny_preview_simple() {
         let input = r#"[{"arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}, "name": "get_weather"}]"#;
@@ -379,7 +460,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[test]
-    #[ignore]
     fn test_mistralai_mistral_7b_instruct_v03_simple() {
         let input = r#" [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
         let config = ToolCallConfig {
@@ -401,8 +481,163 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_simple_with_new_lines() {
+        let input = r#"
+        [{"name": "get_weather",
+        "arguments": {"location":
+        "San Francisco, CA",
+        "unit": "fahrenheit"}}]
+        "#;
+        let config = ToolCallConfig {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec![],
+                tool_call_end_tokens: vec![],
+                arguments_keys: vec!["arguments".to_string()],
+                ..Default::default()
+            },
+        };
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_multiple() {
+        let input = r#" [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
+        let config = ToolCallConfig::mistral();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_multiple_with_new_lines() {
+        let input = r#"
+        [{"name": "get_weather",
+        "arguments": {"location": "San Francisco, CA",
+        "unit": "fahrenheit"}}, {"name": "get_weather", "arguments":
+        {"location": "New York, NY", "unit": "fahrenheit"}}]
+        "#;
+        let config = ToolCallConfig::mistral();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token() {
+        let input = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]"#;
+        let config = ToolCallConfig::mistral();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_single_with_start_tokenwith_new_lines() {
+        let input = r#"
+        [TOOL_CALLS]
+        [{"name": "get_weather",
+        "arguments": {"location":
+        "San Francisco, CA",
+        "unit": "fahrenheit"}}]
+        "#;
+        let config = ToolCallConfig::mistral();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_multiple() {
+        let input = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
+        let config = ToolCallConfig::mistral();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_mistralai_mistral_7b_instruct_v03_single_with_start_token_multiple_with_new_lines() {
+        let input = r#"
+        [TOOL_CALLS]
+        [{"name": "get_weather",
+        "arguments": {"location":
+        "San Francisco, CA",
+        "unit": "fahrenheit"}},
+        {"name": "get_weather", "arguments":
+        {"location": "New York, NY", "unit":
+        "fahrenheit"}}]
+        "#;
+        let config = ToolCallConfig::mistral();
+        let result = try_tool_call_parse(input, &config).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
     fn test_meta_llama_llama31_8b_instruct_simple() {
         let input = r#"{"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+        let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_meta_llama_llama31_8b_instruct_with_new_lines() {
+        let input = r#"
+        {"name": "get_weather",
+        "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+        "#;
         let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -425,8 +660,28 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     }
 
     #[test]
-    fn test_meta_llama_llama31_8b_instruct_with_python_tag_multiple() {
-        let input = r#"<|python_tag|>{ "name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit" } }<|python_tag|>{ "name": "get_weather", "parameters": {"location": "New York, NY", "unit": "fahrenheit" } }"#;
+    fn test_meta_llama_llama31_8b_instruct_with_python_tag_with_new_lines() {
+        let input = r#"
+        <|python_tag|>
+        {"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+        "#;
+        let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_meta_llama_llama31_8b_instruct_with_python_tag_multiple_with_new_lines() {
+        let input = r#"
+        <|python_tag|>
+        {"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit" }}
+        <|python_tag|>
+        {"name": "get_weather", "parameters": {"location": "New York, NY", "unit": "fahrenheit" }}
+        "#;
         let result = detect_and_parse_tool_call(input, Some("llama3_json")).unwrap();
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -565,6 +820,42 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[test]
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_with_python_tag_with_new_lines() {
+        let input = r#"
+        <|python_tag|>
+        {"name":
+        "get_weather",
+         "arguments":
+          {"location": "San Francisco, CA",
+          "unit": "fahrenheit" }}
+        "#;
+        let result = detect_and_parse_tool_call(input, None).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag_multiple_with_new_lines(
+    ) {
+        let input = r#"
+        {"name": "get_weather", "arguments":
+         {"location": "San Francisco, CA",
+          "unit": "fahrenheit" }}
+        "#;
+        let result = detect_and_parse_tool_call(input, None).unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
     fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag() {
         let input = r#"{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
         let result = detect_and_parse_tool_call(input, None).unwrap();
@@ -574,5 +865,60 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_phi4_single_function_call() {
+        let input =
+            r#"functools[{"name": "get_country_capital", "arguments": {"country": "Poland"}}]"#;
+        let result = detect_and_parse_tool_call(input, Some("phi4")).unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_country_capital");
+        assert_eq!(args["country"], "Poland");
+    }
+
+    #[test]
+    fn test_phi4_multiple_function_calls_simple_arguments() {
+        let input = r#"functools[
+  {"name": "get_country_capital", "arguments": {"country": "Poland"}},
+  {"name": "get_population", "arguments": {"city": "Warsaw"}}
+]"#;
+        let result = detect_and_parse_tool_call(input, Some("phi4")).unwrap();
+        assert_eq!(result.len(), 2);
+
+        let (name1, args1) = extract_name_and_args(result[0].clone());
+        assert_eq!(name1, "get_country_capital");
+        assert_eq!(args1["country"], "Poland");
+
+        let (name2, args2) = extract_name_and_args(result[1].clone());
+        assert_eq!(name2, "get_population");
+        assert_eq!(args2["city"], "Warsaw");
+    }
+
+    #[test]
+    fn test_phi4_single_function_call_nested_json_arguments() {
+        let input = r#"functools[{"name": "get_weather_forecast", "arguments":
+        {"location": {"city": "San Francisco",
+        "state": "CA"}, "date": "2023-10-05"}}]"#;
+        let result = detect_and_parse_tool_call(input, Some("phi4")).unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather_forecast");
+        assert_eq!(args["date"], "2023-10-05");
+        assert_eq!(args["location"]["city"], "San Francisco");
+        assert_eq!(args["location"]["state"], "CA");
+    }
+
+    #[test]
+    fn test_phi4_function_call_with_parameters_instead_of_arguments() {
+        let input = r#"functools[{"name": "calculate_distance",
+         "parameters": {"from": "New York", "to": "Los Angeles"}}]"#;
+        let result = detect_and_parse_tool_call(input, Some("phi4")).unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "calculate_distance");
+        assert_eq!(args["from"], "New York");
+        assert_eq!(args["to"], "Los Angeles");
     }
 }

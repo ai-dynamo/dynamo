@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks). Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
-## Quick Start
+## KV Router Quick Start
 
 To launch the Dynamo frontend with the KV Router:
 
