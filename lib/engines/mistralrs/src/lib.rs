@@ -340,7 +340,7 @@ impl
             n_choices: 1,
             dry_params: det.dry_params,
         };
-        let mistralrs_request_id = ctx.id().parse().unwrap_or(0);
+        let mistralrs_request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
             id: mistralrs_request_id,
             model_id: Some(self.display_name.clone()),
@@ -541,7 +541,7 @@ impl
             dry_params: det.dry_params,
         };
 
-        let mistralrs_request_id = ctx.id().parse().unwrap_or(0);
+        let mistralrs_request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
             id: mistralrs_request_id,
             model_id: Some(self.display_name.clone()),
