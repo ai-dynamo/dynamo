@@ -27,7 +27,7 @@ helm install fluid fluid/fluid -n fluid-system
 ```
 For advanced configuration, see the [Fluid Installation Guide](https://fluid-cloudnative.github.io/docs/get-started/installation).
 
-## Quick Start
+## Pre-deployment Steps
 
 1. Install Fluid (see [Installation](#installation)).
 2. Create a Dataset and Runtime (see [the following example](#webufs-example)).

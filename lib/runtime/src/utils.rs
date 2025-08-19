@@ -19,5 +19,6 @@ pub mod leader_worker_barrier;
 pub mod pool;
 pub mod stream;
 pub mod task;
+pub mod tasks;
 pub mod typed_prefix_watcher;
 pub mod worker_monitor;

@@ -11,7 +11,7 @@ from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import KubernetesConnector, __version__
+from dynamo.planner import KubernetesConnector
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -19,7 +19,7 @@ from dynamo.planner.utils.perf_interpolation import (
     PrefillInterpolator,
 )
 from dynamo.planner.utils.prometheus import PrometheusAPIClient
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -92,9 +92,6 @@ class Planner:
             self.last_adjustment_time = time.time()
             self.last_metrics = Metrics()
 
-            self.p_correction_factor = 1.0
-            self.d_correction_factor = 1.0
-
             self.prometheus_port = args.prometheus_port
 
             # Initialize Prometheus metrics
@@ -111,6 +108,13 @@ class Planner:
                     )
                 except Exception as e:
                     logger.error(f"Failed to start Prometheus metrics server: {e}")
+
+        self.p_correction_factor = 1.0
+        self.d_correction_factor = 1.0
+        if self.dryrun:
+            self.no_correction = True
+        else:
+            self.no_correction = args.no_correction
 
     async def get_workers_info(self):
         try:
@@ -231,42 +235,54 @@ class Planner:
 
 
     async def make_adjustments(self):
-        try:
-            # Skip adjustment if no traffic
-            if not self.last_metrics.is_valid():
+        if not self.no_correction:
+            try:
+                # Skip adjustment if no traffic
+                if not self.last_metrics.is_valid():
+                    logger.info(
+                        "Metrics contain None or NaN values (no active requests), skipping adjustment"
+                    )
+                    return
+
+                self.p_endpoints, self.d_endpoints = await self.get_workers_info()
                 logger.info(
-                    "Metrics contain None or NaN values (no active requests), skipping adjustment"
+                    f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
                 )
+
+                # first correct the prediction correction factor
+                # for TTFT, we expect the correction factor to be << 1 due to queuing delay
+                expect_ttft = self.prefill_interpolator.interpolate_ttft(
+                    self.last_metrics.isl
+                )
+                self.p_correction_factor = self.last_metrics.ttft / expect_ttft
+                # for ITL, we expect the correction factor to be close to 1
+                expect_itl = self.decode_interpolator.interpolate_itl(
+                    concurrency=self.last_metrics.num_req  # type: ignore
+                    / len(self.d_endpoints)
+                    * self.last_metrics.request_duration  # type: ignore
+                    / self.args.adjustment_interval,
+                    context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
+                )
+                self.d_correction_factor = self.last_metrics.itl / expect_itl
+                logger.info(
+                    f"Correction factors: TTFT: {self.p_correction_factor:.3f}, ITL: {self.d_correction_factor:.3f}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to correct prediction factors: {e}")
                 return
 
-            self.p_endpoints, self.d_endpoints = await self.get_workers_info()
+        next_num_req, next_isl, next_osl = self.predict_load()
+        try:
+            # predict the next load
+            next_num_req = self.num_req_predictor.predict_next()
+            next_isl = self.isl_predictor.predict_next()
+            next_osl = self.osl_predictor.predict_next()
             logger.info(
-                f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
-            )
-
-            # first correct the prediction correction factor
-            # for TTFT, we expect the correction factor to be << 1 due to queuing delay
-            expect_ttft = self.prefill_interpolator.interpolate_ttft(
-                self.last_metrics.isl
-            )
-            self.p_correction_factor = self.last_metrics.ttft / expect_ttft
-            # for ITL, we expect the correction factor to be close to 1
-            expect_itl = self.decode_interpolator.interpolate_itl(
-                concurrency=self.last_metrics.num_req  # type: ignore
-                / len(self.d_endpoints)
-                * self.last_metrics.request_duration  # type: ignore
-                / self.args.adjustment_interval,
-                context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
-            )
-            self.d_correction_factor = self.last_metrics.itl / expect_itl
-            logger.info(
-                f"Correction factors: TTFT: {self.p_correction_factor:.3f}, ITL: {self.d_correction_factor:.3f}"
+                f"Predicted load: num_req={next_num_req:.2f}, isl={next_isl:.2f}, osl={next_osl:.2f}"
             )
         except Exception as e:
-            logger.error(f"Failed to correct prediction factors: {e}")
+            logger.error(f"Failed to predict load: {e}")
             return
-
-        next_num_req, next_isl, next_osl = self.predict_load()
 
         if next_num_req is not None and next_isl is not None and next_osl is not None:
             try:
@@ -378,116 +394,3 @@ class Planner:
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
     await planner.run()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    # Common planner arguments
-    parser.add_argument(
-        "--version", action="version", version=f"Dynamo Planner {__version__}"
-    )
-    parser.add_argument(
-        "--environment",
-        type=str,
-        default=SLAPlannerDefaults.environment,
-        help="Environment to run the planner in (local, kubernetes)",
-    )
-    parser.add_argument(
-        "--no-operation",
-        action="store_true",
-        default=SLAPlannerDefaults.no_operation,
-        help="Do not make any adjustments, just observe the metrics",
-    )
-    parser.add_argument(
-        "--log-dir",
-        type=str,
-        default=SLAPlannerDefaults.log_dir,
-        help="Tensorboard logging directory",
-    )
-    parser.add_argument(
-        "--adjustment-interval",
-        type=int,
-        default=SLAPlannerDefaults.adjustment_interval,
-        help="Interval in seconds between scaling adjustments",
-    )
-    parser.add_argument(
-        "--max-gpu-budget",
-        type=int,
-        default=SLAPlannerDefaults.max_gpu_budget,
-        help="Maximum number of GPUs to use",
-    )
-    parser.add_argument(
-        "--min-endpoint",
-        type=int,
-        default=SLAPlannerDefaults.min_endpoint,
-        help="Minimum number of endpoints to keep for prefill/decode workers",
-    )
-    parser.add_argument(
-        "--decode-engine-num-gpu",
-        type=int,
-        default=SLAPlannerDefaults.decode_engine_num_gpu,
-        help="Number of GPUs per decode engine",
-    )
-    parser.add_argument(
-        "--prefill-engine-num-gpu",
-        type=int,
-        default=SLAPlannerDefaults.prefill_engine_num_gpu,
-        help="Number of GPUs per prefill engine",
-    )
-    # SLA-planner specific arguments
-    parser.add_argument(
-        "--prometheus-endpoint",
-        type=str,
-        default=SLAPlannerDefaults.prometheus_endpoint,
-        help="Prometheus endpoint url",
-    )
-    parser.add_argument(
-        "--profile-results-dir",
-        type=str,
-        default=SLAPlannerDefaults.profile_results_dir,
-        help="Directory to pre-deployment profiling results",
-    )
-    parser.add_argument(
-        "--isl",
-        type=int,
-        default=SLAPlannerDefaults.isl,
-        help="Input sequence length",
-    )
-    parser.add_argument(
-        "--osl",
-        type=int,
-        default=SLAPlannerDefaults.osl,
-        help="Output sequence length",
-    )
-    parser.add_argument(
-        "--ttft",
-        type=float,
-        default=SLAPlannerDefaults.ttft,
-        help="Time to first token (in seconds)",
-    )
-    parser.add_argument(
-        "--itl",
-        type=float,
-        default=SLAPlannerDefaults.itl,
-        help="Inter-token latency (in seconds)",
-    )
-    parser.add_argument(
-        "--load-predictor",
-        type=str,
-        default=SLAPlannerDefaults.load_predictor,
-        help="Load predictor to use",
-    )
-    parser.add_argument(
-        "--load-prediction-window-size",
-        type=int,
-        default=SLAPlannerDefaults.load_prediction_window_size,
-        help="Window size for load prediction",
-    )
-    parser.add_argument(
-        "--prometheus-port",
-        type=int,
-        default=SLAPlannerDefaults.prometheus_port,
-        help="Prometheus port for metrics server (0 to disable)",
-    )
-    args = parser.parse_args()
-    asyncio.run(dynamo_worker()(start_sla_planner)(args))
