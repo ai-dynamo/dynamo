@@ -39,7 +39,7 @@ ARG ARCH_ALT=x86_64
 ########## Framework Development Image ################
 ########################################################
 
-# Use dynamo base image if provided, otherwise use original base image
+# Use dynamo base image (see /container/Dockerfile for more details)
 FROM ${DYNAMO_BASE_IMAGE} AS dev
 
 ARG ARCH
@@ -69,7 +69,6 @@ ENV LD_LIBRARY_PATH=\
 $LD_LIBRARY_PATH
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-
 CMD []
 
 #######################################
