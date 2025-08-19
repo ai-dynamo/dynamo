@@ -20,12 +20,12 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="ba81acbdc1eec643ba815a76628ae3e4b2263b76"
+VLLM_REF="77a6bf07aedf132aad2b6719f6d87abc5d3311ab"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="03d0be3"
+DEEPGEMM_REF="f85ec64"
 FLASHINF_REF="v0.2.8rc1"
 TORCH_BACKEND="cu128"
 
