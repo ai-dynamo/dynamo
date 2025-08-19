@@ -12,8 +12,7 @@ use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStrea
 
 use dynamo_async_openai::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
-    ChatCompletionTokenLogprob, CreateChatCompletionStreamResponse, FinishReason, Role,
-    TopLogprobs,
+    ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
 };
 
 // Type aliases to simplify complex test data structures
@@ -395,7 +394,7 @@ fn create_response_with_linear_probs(
         }),
     };
 
-    let inner = CreateChatCompletionStreamResponse {
+    NvCreateChatCompletionStreamResponse {
         id: "test_id".to_string(),
         choices: vec![choice],
         created: 1234567890,
@@ -404,9 +403,7 @@ fn create_response_with_linear_probs(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
-    };
-
-    NvCreateChatCompletionStreamResponse { inner }
+    }
 }
 
 fn create_multi_choice_response(
@@ -476,7 +473,7 @@ fn create_multi_choice_response(
         })
         .collect();
 
-    let inner = CreateChatCompletionStreamResponse {
+    NvCreateChatCompletionStreamResponse {
         id: "test_id".to_string(),
         choices,
         created: 1234567890,
@@ -485,7 +482,5 @@ fn create_multi_choice_response(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
-    };
-
-    NvCreateChatCompletionStreamResponse { inner }
+    }
 }
