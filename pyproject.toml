@@ -56,7 +56,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl<=0.4.1",
-    "vllm==0.10.0",
+    { git = "https://github.com/vllm-project/vllm.git", rev = "77a6bf07aedf132aad2b6719f6d87abc5d3311ab" },
 ]
 
 sglang = [

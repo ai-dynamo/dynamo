@@ -16,10 +16,8 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG VLLM_REF="77a6bf07aedf132aad2b6719f6d87abc5d3311ab"
 ARG TORCH_BACKEND="cu128"
 
-# Match 0.10.0 vLLM release
-# https://github.com/vllm-project/vllm/releases/tag/v0.10.0
-# Pinned to commit before https://github.com/deepseek-ai/DeepGEMM/pull/112 for DeepGEMM which seems to break on H100:
-# "RuntimeError: Failed: CUDA runtime error csrc/jit/kernel_runtime.hpp:108 '98'"
+# Match 0.10.1 vLLM release
+# https://github.com/vllm-project/vllm/releases/tag/v0.10.1
 ARG DEEPGEMM_REF="f85ec64"
 ARG FLASHINF_REF="v0.2.8rc1"
 
