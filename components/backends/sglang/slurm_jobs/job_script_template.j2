@@ -83,7 +83,7 @@ for worker_idx in $(seq 0 $((PREFILL_WORKERS - 1))); do
     leader_node=${nodes[$leader_idx]}
     
     # Get leader IP for this worker group
-    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
     echo "Prefill worker $worker_idx leader: $leader_node ($LEADER_IP)"
     
     # Launch all nodes for this worker
@@ -106,7 +106,7 @@ for worker_idx in $(seq 0 $((DECODE_WORKERS - 1))); do
     leader_node=${nodes[$leader_idx]}
     
     # Get leader IP for this worker group
-    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
     echo "Decode worker $worker_idx leader: $leader_node ($LEADER_IP)"
     
     # Launch all nodes for this worker
