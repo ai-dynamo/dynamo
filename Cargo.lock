@@ -1887,7 +1887,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "async_zmq",
- "axum 0.8.3",
+ "axum 0.8.4",
  "axum-server",
  "blake3",
  "bs62",
