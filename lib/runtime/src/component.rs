@@ -275,12 +275,12 @@ impl Component {
     ///
     /// Starts a background task that periodically requests service statistics from NATS
     /// and updates the corresponding Prometheus metrics. The scraping interval is set to
-    /// approximately 4.7 seconds to ensure fresh data is available for each Prometheus
-    /// polling cycle (which occurs every 6 seconds by default).
+    /// approximately 873ms (MAX_DELAY_MS), which is arbitrary but any value less than a second
+    /// is fair game. This frequent scraping provides real-time service statistics updates.
     pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
         const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
             std::time::Duration::from_millis(300);
-        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(777);
+        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(873);
 
         // If there is another component with the same service name, this will fail.
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;

@@ -90,7 +90,7 @@ impl SystemStatusState {
                 tracing::debug!(
                     "uptime_seconds metric already registered, retrieving existing metric"
                 );
-                // Create a dummy gauge since we can't retrieve the existing one easily
+                // Create a non-http gauge since we can't retrieve the existing one easily
                 // The important thing is that the metric is registered in the registry
                 prometheus::Gauge::new(
                     "uptime_seconds",

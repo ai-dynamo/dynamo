@@ -154,9 +154,9 @@ impl DistributedRuntime {
             )?;
 
             // Initialize the start time for uptime tracking
-            system_status_state
-                .initialize_start_time()
-                .map_err(|e| error!("Failed to initialize system status start time: {}", e))?;
+            if let Err(e) = system_status_state.initialize_start_time() {
+                tracing::warn!("Failed to initialize system status start time: {}", e);
+            }
 
             tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
         }

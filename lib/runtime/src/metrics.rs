@@ -584,7 +584,7 @@ mod test_helpers {
     pub fn create_test_drt() -> crate::DistributedRuntime {
         // Create a single-threaded runtime for test isolation
         // This avoids conflicts when tests run in parallel
-        let rt = crate::Runtime::single_threaded().unwrap();
+        let rt = crate::Runtime::from_current().unwrap();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             crate::DistributedRuntime::from_settings_without_discovery(rt)
                 .await
@@ -939,9 +939,9 @@ mod test_metricsregistry_prefixes {
     use super::*;
     use prometheus::core::Collector;
 
-    #[test]
-    fn test_hierarchical_prefixes_and_parent_hierarchies() {
-        let drt = super::test_helpers::create_test_drt();
+    #[tokio::test]
+    async fn test_hierarchical_prefixes_and_parent_hierarchies() {
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         const DRT_NAME: &str = "";
         const NAMESPACE_NAME: &str = "ns901";
@@ -1013,10 +1013,10 @@ mod test_metricsregistry_prefixes {
             .is_ok());
     }
 
-    #[test]
-    fn test_recursive_namespace() {
+    #[tokio::test]
+    async fn test_recursive_namespace() {
         // Create a distributed runtime for testing
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Create a deeply chained namespace: ns1.ns2.ns3
         let ns1 = drt.namespace("ns1").unwrap();
@@ -1071,10 +1071,10 @@ mod test_metricsregistry_prometheus_fmt_outputs {
     use prometheus::Counter;
     use std::sync::Arc;
 
-    #[test]
-    fn test_prometheusfactory_using_metrics_registry_trait() {
+    #[tokio::test]
+    async fn test_prometheusfactory_using_metrics_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Use a simple constant namespace name
         let namespace_name = "ns345";
@@ -1329,10 +1329,10 @@ mod test_metricsregistry_nats {
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
     use tokio::time::{sleep, Duration};
-    #[test]
-    fn test_drt_nats_metrics() {
+    #[tokio::test]
+    async fn test_drt_nats_metrics() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Get DRT output which should include NATS client metrics
         let drt_output = drt.prometheus_metrics_fmt().unwrap();
@@ -1390,13 +1390,13 @@ mod test_metricsregistry_nats {
         println!("✓ DistributedRuntime NATS metrics integration test passed!");
     }
 
-    #[test]
-    fn test_nats_metric_names() {
+    #[tokio::test]
+    async fn test_nats_metric_names() {
         // This test only tests the existence of the NATS metrics. It does not check
         // the values of the metrics.
 
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt();
+        let drt = super::test_helpers::create_test_drt_async().await;
 
         // Create a namespace and components from the DRT
         let namespace = drt.namespace("ns789").unwrap();

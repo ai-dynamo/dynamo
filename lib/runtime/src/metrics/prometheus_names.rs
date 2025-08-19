@@ -37,23 +37,30 @@ pub mod nats_client {
     /// Prefix for all NATS client metrics
     pub const PREFIX: &str = "nats_client_";
 
+    /// Macro to generate NATS client metric names with the prefix
+    macro_rules! nats_client_prefix {
+        ($name:expr) => {
+            concat!("nats_client_", $name)
+        };
+    }
+
     /// Total number of bytes received by NATS client
-    pub const IN_TOTAL_BYTES: &str = "nats_client_in_total_bytes";
+    pub const IN_TOTAL_BYTES: &str = nats_client_prefix!("in_total_bytes");
 
     /// Total number of bytes sent by NATS client
-    pub const OUT_OVERHEAD_BYTES: &str = "nats_client_out_overhead_bytes";
+    pub const OUT_OVERHEAD_BYTES: &str = nats_client_prefix!("out_overhead_bytes");
 
     /// Total number of messages received by NATS client
-    pub const IN_MESSAGES: &str = "nats_client_in_messages";
+    pub const IN_MESSAGES: &str = nats_client_prefix!("in_messages");
 
     /// Total number of messages sent by NATS client
-    pub const OUT_MESSAGES: &str = "nats_client_out_messages";
+    pub const OUT_MESSAGES: &str = nats_client_prefix!("out_messages");
 
     /// Total number of connections established by NATS client
-    pub const CONNECTS: &str = "nats_client_connects";
+    pub const CONNECTS: &str = nats_client_prefix!("connects");
 
     /// Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
-    pub const CONNECTION_STATE: &str = "nats_client_connection_state";
+    pub const CONNECTION_STATE: &str = nats_client_prefix!("connection_state");
 }
 
 /// NATS service metrics, from the $SRV.STATS.<service_name> requests on NATS server
@@ -61,23 +68,30 @@ pub mod nats_service {
     /// Prefix for all NATS service metrics
     pub const PREFIX: &str = "nats_service_";
 
+    /// Macro to generate NATS service metric names with the prefix
+    macro_rules! nats_service_prefix {
+        ($name:expr) => {
+            concat!("nats_service_", $name)
+        };
+    }
+
     /// Average processing time in milliseconds (maps to: average_processing_time in ms)
-    pub const AVG_PROCESSING_MS: &str = "nats_service_avg_processing_time_ms";
+    pub const AVG_PROCESSING_MS: &str = nats_service_prefix!("avg_processing_time_ms");
 
     /// Total errors across all endpoints (maps to: num_errors)
-    pub const TOTAL_ERRORS: &str = "nats_service_total_errors";
+    pub const TOTAL_ERRORS: &str = nats_service_prefix!("total_errors");
 
     /// Total requests across all endpoints (maps to: num_requests)
-    pub const TOTAL_REQUESTS: &str = "nats_service_total_requests";
+    pub const TOTAL_REQUESTS: &str = nats_service_prefix!("total_requests");
 
     /// Total processing time in milliseconds (maps to: processing_time in ms)
-    pub const TOTAL_PROCESSING_MS: &str = "nats_service_total_processing_time_ms";
+    pub const TOTAL_PROCESSING_MS: &str = nats_service_prefix!("total_processing_time_ms");
 
     /// Number of active services (derived from ServiceSet.services)
-    pub const ACTIVE_SERVICES: &str = "nats_service_active_services";
+    pub const ACTIVE_SERVICES: &str = nats_service_prefix!("active_services");
 
     /// Number of active endpoints (derived from ServiceInfo.endpoints)
-    pub const ACTIVE_ENDPOINTS: &str = "nats_service_active_endpoints";
+    pub const ACTIVE_ENDPOINTS: &str = nats_service_prefix!("active_endpoints");
 }
 
 /// All NATS client Prometheus metric names as an array for iteration/validation
