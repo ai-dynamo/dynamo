@@ -578,20 +578,6 @@ mod test_helpers {
     use super::prometheus_names::{nats_client, nats_service};
     use super::*;
 
-    /// Creates a test DistributedRuntime for integration tests.
-    /// Uses NATS; requires #[cfg(feature = "integration")].
-    #[cfg(feature = "integration")]
-    pub fn create_test_drt() -> crate::DistributedRuntime {
-        // Create a single-threaded runtime for test isolation
-        // This avoids conflicts when tests run in parallel
-        let rt = crate::Runtime::from_current().unwrap();
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            crate::DistributedRuntime::from_settings_without_discovery(rt)
-                .await
-                .unwrap()
-        })
-    }
-
     /// Helper function to create a DRT instance for testing in async contexts
     #[cfg(feature = "integration")]
     pub async fn create_test_drt_async() -> crate::DistributedRuntime {
