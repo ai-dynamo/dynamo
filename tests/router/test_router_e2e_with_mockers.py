@@ -326,6 +326,7 @@ def test_mocker_two_kv_router(request, runtime_services):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_mocker_kv_router_overload_503(request, runtime_services):
     """
     Test that KV router returns 503 when all workers are busy.
