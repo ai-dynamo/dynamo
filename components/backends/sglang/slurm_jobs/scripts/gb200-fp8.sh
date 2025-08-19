@@ -60,6 +60,7 @@ fi
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
+    DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
@@ -110,6 +111,7 @@ if [ "$mode" = "prefill" ]; then
 
 elif [ "$mode" = "decode" ]; then
     # GB200 dynamo decode command
+    DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
