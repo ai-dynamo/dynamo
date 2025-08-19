@@ -31,9 +31,11 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -322,8 +324,22 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
-	// Create scale client using manager's config
-	scalesGetter, err := scale.NewForConfig(mgr.GetConfig(), nil, nil, nil)
+	// Create scale client for Grove resource scaling
+	config := mgr.GetConfig()
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes client for scale operations")
+		os.Exit(1)
+	}
+
+	// Create cached discovery client
+	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
+
+	// Create REST mapper for discovery
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
+
+	// Create scale client with proper parameters
+	scalesGetter, err := scale.NewForConfig(config, restMapper, nil, scale.NewDiscoveryScaleKindResolver(cachedDiscovery))
 	if err != nil {
 		setupLog.Error(err, "unable to create scale client")
 		os.Exit(1)
