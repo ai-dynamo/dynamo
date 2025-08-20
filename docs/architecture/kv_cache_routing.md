@@ -4,25 +4,26 @@ SPDX-License-Identifier: Apache-2.0
 -->
 
 # KV Cache Routing
-This documentation explains how Key-Value (KV) cache routing works in Dynamo, providing optimized inference for large language models by intelligently directing requests to workers with the most relevant cached data while simultaneously load balancing based on utilization metrics sent by the workers.
+This document explains how Dynamo's Key-Value (KV) cache routing optimizes large language model inference by intelligently directing requests to workers with the most relevant cached data, while maintaining load balance through worker utilization metrics.
 
 To enable KV cache aware routing start the frontend node like this:
 ```
 python -m dynamo.frontend --router-mode kv
 ```
 
-The engine announces when a KV block is created or removed. The Dynamo router run finds the worker with the best match for those KV blocks and directs the traffic to that node.
+When KV blocks are created or removed, the engine notifies the Dynamo router, which then identifies the worker with the best matching blocks and routes traffic accordingly.
 
-For performance testing, compare a typical workload with `--router-mode random|round-robin` to see if it can benefit from KV-aware routing.
+To evaluate the benefits of KV-aware routing, compare your workload's performance using `--router-mode random|round-robin` against KV-aware routing.
 
 The KV-aware routing arguments:
 
-- `--kv-overlap-score-weight`: Sets the amount of weighting on overlaps with prefix caches, which directly contributes to the prefill cost. A large weight is expected to yield a better TTFT (at the expense of worse ITL). When set to 0, prefix caches are not considered at all (falling back to pure load balancing behavior on the active blocks).
+- `--kv-overlap-score-weight`: Controls the importance of prefix cache overlaps in prefill cost calculations. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and uses pure load balancing. Defaults to 1.
 
-- `--router-temperature`: Sets the temperature when randomly selecting workers to route to via softmax sampling on the router cost logits. Setting it to 0 recovers the deterministic behavior where the min logit is picked.
+- `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 
-- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
+- `--use-kv-events`/`--no-kv-events`: Determines how the router tracks cached blocks. When enabled (default), uses `KvIndexer` to monitor block creation and deletion events. When disabled, uses `ApproxKvIndexer`, which estimates cache hits based on a fixed time window (120s). Disable this if your backend doesn't support KV events.
 
+- `--router-replica-sync`: Enables NATS-based state synchronization between router replicas. When enabled, routers share their KV cache distribution and active sequence information, ensuring optimal routing decisions across multiple router instances. This improves fault tolerance and routing accuracy in distributed deployments. Disabled by default.
 
 ## Architecture
 
@@ -44,6 +45,22 @@ We can then use the default routing methods exposed by the client class to send 
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
+
+## Serving Two Router Replicas
+
+For improved fault tolerance, you can launch two frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use two different HTTP ports for each instance.
+
+To enable state sharing between the router replicas (which provides more accurate routing decisions), use the `--router-replica-sync` flag when starting the frontend:
+
+```bash
+# Router replica 1
+python -m dynamo.frontend --router-mode kv --port 8000 --router-replica-sync
+
+# Router replica 2
+python -m dynamo.frontend --router-mode kv --port 8001 --router-replica-sync
+```
+
+When `--router-replica-sync` is enabled, the router replicas will communicate with each other via NATS to maintain consistent state across instances. This allows both routers to have a complete view of the KV cache distribution and make optimal routing decisions, even when requests are distributed across multiple router instances.
 
 ## Understanding KV Cache
 The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
@@ -88,30 +105,44 @@ Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/in
                              |
           +------------------+------------------+
           |                  |                  |
-          | KV match: 15%    | KV match: 50%    | KV match: 75%
+          | Cached: 2 blocks | Cached: 5 blocks | Cached: 8 blocks
+          | Prefill: 8 blks  | Prefill: 5 blks  | Prefill: 2 blks
+          | Decode: 10 blks  | Decode: 5 blks   | Decode: 9 blks
           v                  v                  v
    +----------------+  +----------------+  +----------------+
    |   Worker 1     |  |   Worker 2     |  |   Worker 3     |
-   |  (Load: 30%)   |  |  (Load: 50%)   |  |  (Load: 80%)   |
    +----------------+  +----------------+  +----------------+
 ```
 
-Load balancing in LLM serving becomes complex when enabling KV Cache reuse. While KV Cache reuse can save significant computation, if the routing strategy is not aware of the unique KV states of each worker we can:
-- miss opportunities for KV Cache reuse if routing to the “wrong” node
-- get into an imbalanced state where a few workers are processing many requests, lowering throughput of entire system
+KV Cache reuse introduces complexity to LLM serving load balancing. While it can significantly reduce computation costs, routing strategies that ignore worker-specific KV states can lead to:
+- Missed cache reuse opportunities due to suboptimal worker selection
+- System throughput degradation from uneven request distribution across workers
 
-The best way to solve these issues is for the router to have a global view of KV Cache and load. With this view, the router can use a cost function to score the workers and make decisions to maximize cache hits while keeping the system balanced and throughput high.
+The router uses a cost function that considers both the prefill cost (influenced by cached blocks) and the decode load to make optimal routing decisions:
 
-In the above image, our cost function is (KV match - Load) so we select Worker 2 even though Worker 3 would offer the best KV match.
-- Worker 1 = (0.15 - 0.30) = -0.15
-- **Worker 2 = (0.50 - 0.50) = 0**
-- Worker 3 = (0.75 - 0.80) = -0.05
+### Cost Calculation
+
+1. **Prefill blocks**: Calculated by dividing the number of tokens requiring prefill processing by the block size. The system predicts this based on input tokens and available cached blocks per worker, updating the count when the first output token signals prefill completion.
+
+2. **Decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
+
+3. **Cost formula**: `cost = overlap_score_weight * prefill_blocks + decode_blocks`
+   - Lower costs indicate better routing choices
+   - `overlap_score_weight` balances cache hit optimization against load distribution
+   - Higher weights favor cache reuse (improving TTFT), while lower weights prioritize even load distribution (improving ITL)
+
+### Worker Selection
+
+The router selects the worker with the lowest cost. When `router_temperature` is set to a non-zero value, the router uses softmax sampling on the normalized cost logits to introduce randomness in the selection, which can help with load distribution.
+
+Example calculation with `overlap_score_weight = 1.0`:
+- Worker 1: cost = 1.0 * 8 + 10 = 18
+- **Worker 2: cost = 1.0 * 5 + 5 = 10** (selected - lowest cost)
+- Worker 3: cost = 1.0 * 2 + 9 = 11
 
 ## Events
 
-In Dynamo, we want to support KV Cache Routing and load balancing for many backends that have different implementations of KV Cache and record different metrics. To that end, we built a KVPublisher that can be plugged into any framework to publish KV Events and a WorkerMetricsPublisher that can publish Metric Events.
-
-On the receiving side we have a KVIndexer which accepts events from the KVPublisher and puts them into a global prefix tree and a KvMetricsAggregator which aggregates metric events by worker.
+Dynamo supports KV Cache Routing across multiple backend implementations through a flexible event system. The KVPublisher component integrates with any framework to emit KV events, while the KVIndexer component maintains a global prefix tree of cached blocks by processing these events from all workers.
 
 ```text
 +----------------+                         +-----------------+
@@ -121,13 +152,8 @@ On the receiving side we have a KVIndexer which accepts events from the KVPublis
 | +------------+ | remove_kv_block()       | |  KVIndexer  | |
 | |KVPublisher | |------------------------>| +-------------+ |
 | +------------+ |                         |                 |
-|                | num_request_waiting     | +--------------+|
-| +------------+ | gpu_cache_usage_perc    | |KvMetricsAggre||
-| |KvMetrics   | |------------------------>| |    gator     ||
-| |Publisher   | |        ...              | +--------------+|
-| +------------+ |                         +-----------------+
-+----------------+
-
+|                |                         |                 |
++----------------+                         +-----------------+
 ```
 
 ### KVPublisher
@@ -144,18 +170,15 @@ The KVIndexer builds and maintains a global view of cached blocks in a prefix tr
 
 The KVIndexer has a method `find_matches_for_request`, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
 
-### WorkerMetricsPublisher
-We added a KvMetrics Publisher which sends the following metrics to the KvMetricsAggregator:
-- num_requests_waiting
-- gpu_cache_usage_perc
-- gpu_prefix_cache_hit_rate
-- request_active_slots
-- request_total_slots
-- kv_active_blocks
-- kv_total_blocks
+### Inter-Router Communication
 
-Currently, the WorkerMetricsPublisher exists as a Python binding.
+In distributed deployments with multiple routers, each router maintains visibility over only a portion of the total requests. To ensure consistent routing decisions, routers synchronize their states through three event types:
 
-### KvMetricsAggregator
-The KvMetricsAggregator receives these metrics and aggregates them. It has a method `get_metrics` which returns an object of `AggregatedMetrics`.
+1. **AddRequest**: Notifies other routers when a request is assigned to a worker. Includes request ID, worker ID, token sequence blocks, and overlap score to track block usage across the system.
+
+2. **MarkPrefillCompleted**: Signals when a request moves from prefill to decode phase, allowing routers to update their worker load calculations by excluding completed prefill tokens.
+
+3. **Free**: Indicates request completion and resource release, enabling accurate block reference counting across all routers.
+
+Each event carries a unique router ID to prevent self-event processing. This asynchronous communication system ensures optimal routing decisions by maintaining consistent KV cache state across all routers, even as they handle different request streams.
 

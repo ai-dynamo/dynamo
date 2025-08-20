@@ -102,6 +102,7 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
         text: None,
         cum_log_probs: None,
         log_probs: None,
+        top_logprobs: None,
         finish_reason: None,
         index: None,
     };
@@ -187,11 +188,11 @@ impl
         let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {
-            async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
                 match user_msg.content {
-                    async_openai::types::ChatCompletionRequestUserMessageContent::Text(prompt) => {
-                        prompt
-                    }
+                    dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        prompt,
+                    ) => prompt,
                     _ => anyhow::bail!("Invalid request content field, expected Content::Text"),
                 }
             }
@@ -203,18 +204,12 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let inner = deltas.create_choice(0, Some(c.to_string()), None, None);
-                let response = NvCreateChatCompletionStreamResponse {
-                    inner,
-                };
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
 
-            let inner = deltas.create_choice(0, None, Some(async_openai::types::FinishReason::Stop), None);
-            let response = NvCreateChatCompletionStreamResponse {
-                inner,
-            };
+            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
         };
 
@@ -242,11 +237,11 @@ impl
             let mut id = 1;
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop));
+            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::CompletionFinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
 
         };

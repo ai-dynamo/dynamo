@@ -14,6 +14,7 @@ pub mod backend;
 pub mod common;
 pub mod disagg_router;
 pub mod discovery;
+pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
 pub mod gguf;
@@ -37,6 +38,9 @@ pub mod types;
 
 #[cfg(feature = "block-manager")]
 pub mod block_manager;
+
+#[cfg(feature = "cuda")]
+pub mod cuda;
 
 /// Reads a JSON file, extracts a specific field, and deserializes it into type T.
 ///

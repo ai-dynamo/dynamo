@@ -95,7 +95,7 @@ fn handle_watch_event<T: DeserializeOwned>(
 /// Creates a key-value pair in etcd, returning a specific error if the key already exists
 async fn create_barrier_key<T: Serialize>(
     client: &Client,
-    key: String,
+    key: &str,
     data: T,
     lease_id: Option<i64>,
 ) -> Result<(), LeaderWorkerBarrierError> {
@@ -193,7 +193,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
         lease_id: i64,
     ) -> Result<(), LeaderWorkerBarrierError> {
         let key = barrier_key(&self.barrier_id, BARRIER_DATA);
-        create_barrier_key(client, key, data, Some(lease_id)).await
+        create_barrier_key(client, &key, data, Some(lease_id)).await
     }
 
     async fn wait_for_workers(
@@ -216,10 +216,10 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
 
             let workers = worker_result.keys().collect::<HashSet<_>>();
 
-            create_barrier_key(client, key, workers, Some(lease_id)).await?;
+            create_barrier_key(client, &key, workers, Some(lease_id)).await?;
         } else {
             let key = barrier_key(&self.barrier_id, BARRIER_ABORT);
-            create_barrier_key(client, key, (), Some(lease_id)).await?;
+            create_barrier_key(client, &key, (), Some(lease_id)).await?;
         }
 
         Ok(())
@@ -302,7 +302,7 @@ impl<LeaderData: Serialize + DeserializeOwned, WorkerData: Serialize + Deseriali
             &self.barrier_id,
             &format!("{}/{}", BARRIER_WORKER, self.worker_id),
         );
-        create_barrier_key(client, key.clone(), data, Some(lease_id)).await?;
+        create_barrier_key(client, &key, data, Some(lease_id)).await?;
         Ok(key)
     }
 

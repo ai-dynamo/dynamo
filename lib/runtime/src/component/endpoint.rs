@@ -121,7 +121,10 @@ impl EndpointConfigBuilder {
         // launch in primary runtime
         let task = tokio::spawn(push_endpoint.start(
             service_endpoint,
+            endpoint.component.namespace.name.clone(),
+            endpoint.component.name.clone(),
             endpoint.name.clone(),
+            lease_id,
             endpoint.drt().system_health.clone(),
         ));
 
@@ -141,7 +144,7 @@ impl EndpointConfigBuilder {
         if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
             if let Err(e) = etcd_client
                 .kv_create(
-                    endpoint.etcd_path_with_lease_id(lease_id),
+                    &endpoint.etcd_path_with_lease_id(lease_id),
                     info,
                     Some(lease_id),
                 )

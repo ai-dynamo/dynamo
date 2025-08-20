@@ -1,21 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 [project]
 name = "ai-dynamo"
-version = "0.4.0"
+version = "0.4.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -25,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.4.0",
+    "ai-dynamo-runtime==0.4.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -68,13 +56,13 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl<=0.4.1",
-    "vllm==0.10.0",
+    "vllm[flashinfer]==0.10.1",
 ]
 
 sglang = [
     "uvloop",
     "nixl<=0.4.1",
-    "sglang[all]==0.4.9.post6",
+    "sglang[all]==0.5.0rc2",
 ]
 
 llama_cpp = [
@@ -85,6 +73,9 @@ llama_cpp = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -144,10 +135,11 @@ addopts = [
     "--strict-config",
     "--mypy",
     "--ignore-glob=*model.py",
+    "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
-    "--ignore-glob=components/backends/sglang/src/dynamo/sglang/common/*",
+    "--ignore-glob=components/backends/sglang/src/dynamo/sglang/request_handlers/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -180,9 +172,11 @@ markers = [
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
     "vllm: marks tests as requiring vllm",
-    "tensorrtllm: marks tests as requiring tensorrtllm",
+    "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
-    "slow: marks tests as known to be slow"
+    "slow: marks tests as known to be slow",
+    "h100: marks tests to run on H100",
+    "kvbm: marks tests for KV behavior and model determinism"
 ]
 
 # Linting/formatting

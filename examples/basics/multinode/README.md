@@ -85,7 +85,7 @@ Install Dynamo with [SGLang](https://docs.sglang.ai/) support:
 pip install ai-dynamo[sglang]
 ```
 
-For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../components/backends/sglang/README.md).
+For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../../components/backends/sglang/README.md).
 
 ### 3. Network Requirements
 
@@ -210,7 +210,7 @@ The frontend will:
 - Enable KV-aware routing for intelligent request distribution
 - Monitor worker health and adjust routing accordingly
 
-For more details about frontend configuration options, see the [Frontend Component Documentation](../../../components/frontend/README).
+For more details about frontend configuration options, see the [Frontend Component Documentation](../../../components/frontend/README.md).
 
 ## Testing the Setup
 

@@ -12,6 +12,8 @@ from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from . import __version__
+
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 
 configure_dynamo_logging()
@@ -40,6 +42,9 @@ def cmd_line_args():
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Mocker {__version__}"
     )
     parser.add_argument(
         "--model-path",

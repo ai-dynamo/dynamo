@@ -442,6 +442,12 @@ class ModelDeploymentCard:
 
     ...
 
+class ModelRuntimeConfig:
+    """
+    A model runtime configuration is a collection of runtime information
+    """
+    ...
+
 class OAIChatPreprocessor:
     """
     A preprocessor for OpenAI chat completions
@@ -1122,6 +1128,23 @@ class BlockManager:
         BlockList
             List of allocated blocks
         """
+        ...
+
+class KvbmCacheManager:
+    """
+    A KV cache manager for VLLM
+    """
+
+    def __init__(self, block_manager: BlockManager) -> None:
+        ...
+
+
+class KvbmRequest:
+    """
+    A request for KV cache
+    """
+
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
 class ZmqKvEventListener:

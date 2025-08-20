@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-planner
+  annotations:
+    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
+spec:
+  envs:
+    - name: DYNAMO_SERVICE_CONFIG
+      value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["sglang-disagg-planner-frontend:8000"]}]}]}}'
+    - name: DYNAMO_NAMESPACE
+      value: "dynamo"
+  services:
+    Frontend:
+      dynamoNamespace: dynamo
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+    Planner:
+      dynamoNamespace: dynamo
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      pvc:
+        create: false
+        name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        mountPoint: /workspace/profiling_results
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          workingDir: /workspace/components/planner/src/dynamo/planner
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m planner_sla
+              --environment=kubernetes
+              --backend=sglang
+              --adjustment-interval=60
+              --profile-results-dir=/workspace/profiling_results
+    Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
+      dynamoNamespace: dynamo
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: PYTHONPATH
+          value: "/workspace/components/planner/src"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 30
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - "python3 -m dynamo.planner.prometheus"
+    SGLangDecodeWorker:
+      dynamoNamespace: dynamo
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+    SGLangPrefillWorker:
+      dynamoNamespace: dynamo
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --page-size 16
+              --tp 1
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl

@@ -20,24 +20,24 @@ limitations under the License.
 Core class for managing the connection between workers in a distributed environment.
 Use this class to create readable and writable operations, or read and write data to remote workers.
 
-This class is responsible for interfacing with the NIXL-based RDMA subsystem and providing a "Pythonic" interface
-with which to utilize GPU Direct RDMA accelerated data transfers between models hosted by different workers in a Dynamo pipeline.
+This class provides a "pythonic" interface using NIXL library to utilize GPU Direct RDMA accelerated, when available, data transfers between models hosted by different workers in a Dynamo graph.
 The connector provides two methods of moving data between workers:
 
   - Preparing local memory to be written to by a remote worker.
 
   - Preparing local memory to be read by a remote worker.
 
-In both cases, local memory is registered with the NIXL-based RDMA subsystem via the [`Descriptor`](#descriptor) class and provided to the connector.
-The connector then configures the RDMA subsystem to expose the memory for the requested operation and returns an operation control object.
+In both cases, local memory is registered with the NIXL-based I/O subsystem via the [`Descriptor`](#descriptor) class and provided to the connector.
+When RDMA is available, the connector then configures the RDMA subsystem to expose the memory for the requested operation and returns an operation control object;
+otherwise the connector will select the best available RDMA alternative.
 The operation control object, either a [`ReadableOperation`](readable_operation.md) or a [`WritableOperation`](writable_operation.md),
-provides RDMA metadata ([RdmaMetadata](rdma_metadata.md)) via its `.metadata()` method, functionality to query the operation's current state, as well as the ability to cancel the operation prior to its completion.
+provides NIXL metadata ([RdmaMetadata](rdma_metadata.md)) via its `.metadata()` method, functionality to query the operation's current state, as well as the ability to cancel the operation prior to its completion.
 
-The RDMA metadata must be provided to the remote worker expected to complete the operation.
+The NIXL metadata must be provided to the remote worker expected to complete the operation.
 The metadata contains required information (identifiers, keys, etc.) which enables the remote worker to interact with the provided memory.
 
 > [!Warning]
-> RDMA metadata contains a worker's address as well as security keys to access specific registered memory descriptors.
+> NIXL metadata contains a worker's address as well as security keys to access specific registered memory descriptors.
 > This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
 
 
@@ -79,7 +79,7 @@ The serialized request must be transferred from the remote to the local worker v
 
 Once created, data transfer will begin immediately.
 
-Disposal of the object will instruct the RDMA subsystem to cancel the operation,
+Disposal of the object will instruct the NIXL subsystem to cancel the operation,
 therefore the operation should be awaited until completed unless cancellation is intended.
 
 Use [`.wait_for_completion()`](read_operation.md#wait_for_completion) to block the caller until the operation has completed or encountered an error.
@@ -103,7 +103,7 @@ The serialized request must be transferred from the remote to the local worker v
 
 Once created, data transfer will begin immediately.
 
-Disposal of the object will instruct the RDMA subsystem to cancel the operation,
+Disposal of the object will instruct the NIXL subsystem to cancel the operation,
 therefore the operation should be awaited until completed unless cancellation is intended.
 
 Use [`.wait_for_completion()`](write_operation.md#wait_for_completion) to block the caller until the operation has completed or encountered an error.
@@ -124,7 +124,7 @@ Once created, the memory referenced by the provided descriptors becomes immediat
 The metadata required to access the memory referenced by the provided descriptors is accessible via the operation's `.metadata()` method.
 Once acquired, the metadata needs to be provided to a remote worker via a secondary channel, most likely HTTP or TCP+NATS.
 
-Disposal of the object will instruct the RDMA subsystem to cancel the operation,
+Disposal of the object will instruct the NIXL subsystem to cancel the operation,
 therefore the operation should be awaited until completed unless cancellation is intended.
 
 Use [`.wait_for_completion()`](readable_operation.md#wait_for_completion) to block the caller until the operation has completed or encountered an error.
@@ -145,7 +145,7 @@ Once created, the memory referenced by the provided descriptors becomes immediat
 The metadata required to access the memory referenced by the provided descriptors is accessible via the operation's `.metadata()` method.
 Once acquired, the metadata needs to be provided to a remote worker via a secondary channel, most likely HTTP or TCP+NATS.
 
-Disposal of the object will instruct the RDMA subsystem to cancel the operation,
+Disposal of the object will instruct the NIXL subsystem to cancel the operation,
 therefore the operation should be awaited until completed unless cancellation is intended.
 
 Use [`.wait_for_completion()`](writable_operation.md#wait_for_completion) to block the caller until the operation has completed or encountered an error.

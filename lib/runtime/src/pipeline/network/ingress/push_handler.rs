@@ -18,31 +18,33 @@ use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::info_span;
+use tracing::Instrument;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
 pub struct WorkHandlerMetrics {
-    pub request_counter: Arc<IntCounter>,
-    pub request_duration: Arc<Histogram>,
-    pub concurrent_requests: Arc<IntGauge>,
-    pub request_bytes: Arc<IntCounter>,
-    pub response_bytes: Arc<IntCounter>,
-    pub error_counter: Arc<IntCounterVec>,
+    pub request_counter: IntCounter,
+    pub request_duration: Histogram,
+    pub inflight_requests: IntGauge,
+    pub request_bytes: IntCounter,
+    pub response_bytes: IntCounter,
+    pub error_counter: IntCounterVec,
 }
 
 impl WorkHandlerMetrics {
     pub fn new(
-        request_counter: Arc<IntCounter>,
-        request_duration: Arc<Histogram>,
-        concurrent_requests: Arc<IntGauge>,
-        request_bytes: Arc<IntCounter>,
-        response_bytes: Arc<IntCounter>,
-        error_counter: Arc<IntCounterVec>,
+        request_counter: IntCounter,
+        request_duration: Histogram,
+        inflight_requests: IntGauge,
+        request_bytes: IntCounter,
+        response_bytes: IntCounter,
+        error_counter: IntCounterVec,
     ) -> Self {
         Self {
             request_counter,
             request_duration,
-            concurrent_requests,
+            inflight_requests,
             request_bytes,
             response_bytes,
             error_counter,
@@ -66,8 +68,8 @@ impl WorkHandlerMetrics {
             None,
         )?;
 
-        let concurrent_requests = endpoint.create_intgauge(
-            "concurrent_requests",
+        let inflight_requests = endpoint.create_intgauge(
+            "inflight_requests",
             "Number of requests currently being processed by work handler",
             &[],
         )?;
@@ -94,7 +96,7 @@ impl WorkHandlerMetrics {
         Ok(Self::new(
             request_counter,
             request_duration,
-            concurrent_requests,
+            inflight_requests,
             request_bytes,
             response_bytes,
             error_counter,
@@ -119,7 +121,7 @@ where
 
         if let Some(m) = self.metrics() {
             m.request_counter.inc();
-            m.concurrent_requests.inc();
+            m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
         }
 
@@ -209,8 +211,21 @@ where
                 stream
             }
             Err(e) => {
-                tracing::error!("Failed to generate response stream: {:?}", e);
-                let _result = publisher.send_prologue(Some(e.to_string())).await;
+                let error_string = e.to_string();
+
+                #[cfg(debug_assertions)]
+                {
+                    tracing::debug!(
+                        "Failed to generate response stream (with debug backtrace): {:?}",
+                        e
+                    );
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    tracing::error!("Failed to generate response stream: {}", error_string);
+                }
+
+                let _result = publisher.send_prologue(Some(error_string)).await;
                 Err(e)?
             }
         };
@@ -274,7 +289,7 @@ where
         if let Some(m) = self.metrics() {
             let duration = start_time.elapsed();
             m.request_duration.observe(duration.as_secs_f64());
-            m.concurrent_requests.dec();
+            m.inflight_requests.dec();
         }
 
         Ok(())

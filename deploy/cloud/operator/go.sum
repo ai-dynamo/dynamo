@@ -1,7 +1,7 @@
 emperror.dev/errors v0.8.1 h1:UavXZ5cSX/4u9iyvH6aDcuGkVjeexUGJ7Ij7G4VfQT0=
 emperror.dev/errors v0.8.1/go.mod h1:YcRvLPh626Ubn2xqtoprejnA5nFha+TJ+2vew48kWuE=
-github.com/NVIDIA/grove/operator/api v0.0.0-20250717114148-daac6e53774f h1:2ePSNDm7/Tep8F99yCQVH8/vmn86L1cUzTbVlyNopmQ=
-github.com/NVIDIA/grove/operator/api v0.0.0-20250717114148-daac6e53774f/go.mod h1:nJL33lsBe+9xCcZLYkNYg1wucE4hJfa4ZfHm1zamuG0=
+github.com/NVIDIA/grove/operator/api v0.0.0-20250801123021-8b42bac59ef2 h1:JLOj0GiubP3VlR0okIbuqljvl+e2Vccnu6LX6wL34G0=
+github.com/NVIDIA/grove/operator/api v0.0.0-20250801123021-8b42bac59ef2/go.mod h1:QlsR2wQLj9m/zVEqv5SsCPzyjN2ykYZ0r/NEnDf4WB4=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
@@ -242,5 +242,5 @@ sigs.k8s.io/structured-merge-diff/v4 v4.7.0 h1:qPeWmscJcXP0snki5IYF79Z8xrl8ETFxg
 sigs.k8s.io/structured-merge-diff/v4 v4.7.0/go.mod h1:dDy58f92j70zLsuZVuUX5Wp9vtxXpaZnkPGWeqDfCps=
 sigs.k8s.io/yaml v1.4.0 h1:Mk1wCc2gy/F0THH0TAp1QYyJNzRm2KCLy3o5ASXVI5E=
 sigs.k8s.io/yaml v1.4.0/go.mod h1:Ejl7/uTz7PSA4eKMyQCUTnhZYNmLIl+5c2lQPGR2BPY=
-volcano.sh/apis v1.11.0 h1:Z5ZXxxgUNfXv1OhfVXXfGPN7StoSsozQM+8CAPoNWY8=
-volcano.sh/apis v1.11.0/go.mod h1:FOdmG++9+8lgENJ9XXDh+O3Jcb9YVRnlMSpgIh3NSVI=
+volcano.sh/apis v1.12.2 h1:KvNyM/kMizFVlALiH/uFHPwYFHRtxuVnBL0upbFbDss=
+volcano.sh/apis v1.12.2/go.mod h1:0XNNnIOevJSYNiXRmwhXUrYCcCcWcBeTY0nxrlkk03A=

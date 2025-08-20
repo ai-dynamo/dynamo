@@ -14,13 +14,14 @@
 // limitations under the License.
 
 pub use crate::component::Component;
+use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
-    ErrorContext,
+    ErrorContext, RuntimeCallback,
 };
 
 use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
@@ -42,9 +43,14 @@ impl MetricsRegistry for DistributedRuntime {
     }
 }
 
+impl std::fmt::Debug for DistributedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DistributedRuntime")
+    }
+}
+
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let secondary = runtime.secondary();
         let (etcd_config, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
@@ -52,32 +58,12 @@ impl DistributedRuntime {
         let etcd_client = if is_static {
             None
         } else {
-            Some(
-                secondary
-                    .spawn(async move {
-                        let client = etcd::Client::new(etcd_config.clone(), runtime_clone)
-                            .await
-                            .context(format!(
-                                "Failed to connect to etcd server with config {:?}",
-                                etcd_config
-                            ))?;
-                        OK(client)
-                    })
-                    .await??,
-            )
+            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
         };
 
-        let nats_client = secondary
-            .spawn(async move {
-                let client = nats_config.clone().connect().await.context(format!(
-                    "Failed to connect to NATS server with config {:?}",
-                    nats_config
-                ))?;
-                anyhow::Ok(client)
-            })
-            .await??;
+        let nats_client = nats_config.clone().connect().await?;
 
-        // Start HTTP server for health and metrics if enabled in configuration
+        // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
         // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
@@ -97,29 +83,48 @@ impl DistributedRuntime {
             live_endpoint_path,
         )));
 
+        let nats_client_for_metrics = nats_client.clone();
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            http_server: Arc::new(OnceLock::new()),
+            system_status_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
                 String,
-                prometheus::Registry,
+                crate::MetricsRegistryEntry,
             >::new())),
             system_health,
         };
 
-        // Start HTTP server if enabled
+        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+            &distributed_runtime,
+            nats_client_for_metrics.client().clone(),
+        )?;
+        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
+        drt_hierarchies.push(distributed_runtime.hierarchy());
+        // Register a callback to update NATS client metrics
+        let nats_client_callback = Arc::new({
+            let nats_client_clone = nats_client_metrics.clone();
+            move || {
+                nats_client_clone.set_from_client_stats();
+                Ok(())
+            }
+        });
+        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+
+        // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
+            // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start HTTP server (it spawns its own task internally)
-            match crate::http_server::spawn_http_server(
+            // Start system status server (it creates SystemStatusState internally)
+            match crate::system_status_server::spawn_system_status_server(
                 &host,
                 port,
                 cancel_token,
@@ -128,24 +133,38 @@ impl DistributedRuntime {
             .await
             {
                 Ok((addr, handle)) => {
-                    tracing::info!("HTTP server started successfully on {}", addr);
+                    tracing::info!("System status server started successfully on {}", addr);
 
-                    // Store HTTP server information
-                    let http_server_info =
-                        crate::http_server::HttpServerInfo::new(addr, Some(handle));
+                    // Store system status server information
+                    let system_status_server_info =
+                        crate::system_status_server::SystemStatusServerInfo::new(
+                            addr,
+                            Some(handle),
+                        );
 
-                    // Initialize the http_server field
+                    // Initialize the system_status_server field
                     distributed_runtime
-                        .http_server
-                        .set(Arc::new(http_server_info))
-                        .expect("HTTP server info should only be set once");
+                        .system_status_server
+                        .set(Arc::new(system_status_server_info))
+                        .expect("System status server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("HTTP server startup failed: {}", e);
+                    tracing::error!("System status server startup failed: {}", e);
                 }
             }
         } else {
-            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
+            // System server HTTP is disabled, but still create the state for metrics
+            // This ensures uptime_seconds metric is always registered
+            let system_status_state = crate::system_status_server::SystemStatusState::new(
+                Arc::new(distributed_runtime.clone()),
+            )?;
+
+            // Initialize the start time for uptime tracking
+            if let Err(e) = system_status_state.initialize_start_time() {
+                tracing::warn!("Failed to initialize system status start time: {}", e);
+            }
+
+            tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
         }
 
         Ok(distributed_runtime)
@@ -226,9 +245,11 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
-    /// Get HTTP server information if available
-    pub fn http_server_info(&self) -> Option<Arc<crate::http_server::HttpServerInfo>> {
-        self.http_server.get().cloned()
+    /// Get system status server information if available
+    pub fn system_status_server_info(
+        &self,
+    ) -> Option<Arc<crate::system_status_server::SystemStatusServerInfo>> {
+        self.system_status_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
@@ -242,6 +263,67 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
+    }
+
+    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
+    /// to register the same metric name multiple times, as long as the labels are different.
+    pub fn add_prometheus_metric(
+        &self,
+        hierarchy: &str,
+        metric_name: &str,
+        prometheus_metric: Box<dyn prometheus::core::Collector>,
+    ) -> anyhow::Result<()> {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        let entry = registries.entry(hierarchy.to_string()).or_default();
+
+        // Try to register the metric and provide better error information
+        match entry.prometheus_registry.register(prometheus_metric) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let error_msg = e.to_string();
+                tracing::error!(
+                    hierarchy = ?hierarchy,
+                    error = ?error_msg,
+                    metric_name = ?metric_name,
+                    "Metric registration failed"
+                );
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Add a callback function to metrics registries for the given hierarchies
+    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        for hierarchy in hierarchies {
+            registries
+                .entry(hierarchy)
+                .or_default()
+                .add_callback(callback.clone());
+        }
+    }
+
+    /// Execute all callbacks for a given hierarchy key and return their results
+    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
+        // Clone callbacks while holding read lock (fast operation)
+        let callbacks = {
+            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
+            registries
+                .get(hierarchy)
+                .map(|entry| entry.runtime_callbacks.clone())
+        }; // Read lock released here
+
+        // Execute callbacks without holding the lock
+        match callbacks {
+            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Get all registered hierarchy keys. Private because it is only used for testing.
+    fn get_registered_hierarchies(&self) -> Vec<String> {
+        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
+        registries.keys().cloned().collect()
     }
 }
 

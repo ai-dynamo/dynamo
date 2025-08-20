@@ -68,7 +68,7 @@ Markers help control which tests run under different conditions. Add these decor
 ### Component-specific markers
 - `@pytest.mark.vllm` - Framework tests
 - `@pytest.mark.sglang` - Framework tests
-- `@pytest.mark.tensorrtllm` - Framework tests
+- `@pytest.mark.trtllm_marker` - Framework tests
 - `@pytest.mark.planner` - Planner component tests
 - `@pytest.mark.kv_router` - KV Router component tests
 - etc.
@@ -95,3 +95,11 @@ via ```./container/build.sh --framework X``` and run via
 The tests will automatically use a local cache at `~/.cache/huggingface` to avoid
 repeated downloads of model files. This cache is shared across test runs to improve performance.
 
+## Running tests locally outside of a container
+
+To run tests outside of the development container, ensure that you have properly setup your environment and have installed the following dependencies in your `venv`:
+
+```bash
+uv pip install pytest-mypy
+uv pip install pytest-asyncio
+```

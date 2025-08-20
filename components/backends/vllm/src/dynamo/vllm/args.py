@@ -12,6 +12,7 @@ from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+from . import __version__
 from .ports import (
     DEFAULT_DYNAMO_PORT_MAX,
     DEFAULT_DYNAMO_PORT_MIN,
@@ -28,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+
+# Global LMCache configuration - initialize once on module import
+ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
 
 
 class Config:
@@ -54,6 +58,9 @@ class Config:
 def parse_args() -> Config:
     parser = FlexibleArgumentParser(
         description="vLLM server integrated with Dynamo LLM."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend VLLM {__version__}"
     )
     parser.add_argument(
         "--endpoint",
@@ -163,7 +170,7 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
     # Allocate side channel ports
-    # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L372
+    # https://github.com/vllm-project/vllm/blob/releases/v0.10.1/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L443
     # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
     # For dp_rank, we need to reserve tp_size consecutive ports
     tp_size = config.engine_args.tensor_parallel_size or 1
@@ -209,6 +216,37 @@ def overwrite_args(config):
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
+    # Set kv_transfer_config based on LMCache setting
+    if ENABLE_LMCACHE:
+        if config.is_prefill_worker:
+            # Prefill worker use LMCache with disaggregated serving (MultiConnector) for disaggregated serving
+            kv_transfer_config = KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"},
+                        {
+                            "kv_connector": "NixlConnector",
+                            "kv_role": "kv_both",
+                        },
+                    ]
+                },
+            )
+            logger.info("Using LMCache with MultiConnector serving")
+        else:
+            # If enable lmcache, single node in default uses single connector serving
+            kv_transfer_config = KVTransferConfig(
+                kv_connector="LMCacheConnectorV1", kv_role="kv_both"
+            )
+            logger.info("Using LMCache with LMCacheConnector serving")
+
+    else:
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both"
+        )
+        logger.info("Using NixlConnector configuration")
+
     defaults = {
         "task": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
@@ -219,9 +257,7 @@ def overwrite_args(config):
         "disable_log_requests": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
-        "kv_transfer_config": KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
-        ),
+        "kv_transfer_config": kv_transfer_config,
     }
 
     if config.engine_args.enable_prefix_caching:

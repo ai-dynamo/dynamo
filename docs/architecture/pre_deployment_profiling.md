@@ -4,6 +4,16 @@
 
 To ensure Dynamo deployments comply with the SLA, we provide a pre-deployment script to profile the model performance with different parallelization mappings and recommend the parallelization mapping for prefill and decode workers and planner configurations. To use this script, the user needs to provide the target ISL, OSL, TTFT SLA, and ITL SLA.
 
+Support matrix:
+| Backends | Model Types | Supported |
+| --- | --- | --- |
+| vLLM | Dense | ✅ |
+| vLLM | MoE | 🚧 |
+| SGLang | Dense | ✅ |
+| SGLang | MoE | 🚧 |
+| TensorRT-LLM | Dense | 🚧 |
+| TensorRT-LLM | MoE | 🚧 |
+
 > [!NOTE]
 > The script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
 
@@ -76,23 +86,59 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
   -n $NAMESPACE
 ```
 
-**Step 1: Build your own vLLM image for profiling**
+**Step 1: Configure container image**
 
+You have two options for configuring your profiling setup:
+
+**Option A: Use pre-built image with custom config injection (recommended)**
+
+Use the default pre-built image and inject custom configurations via PVC:
+
+1. **Set the container image:**
+   ```bash
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0 # or any existing image tag
+   ```
+
+2. **Inject your custom disagg configuration:**
+   ```bash
+   # Use default disagg.yaml config
+   python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE
+
+   # Or use a custom disagg config file
+   python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE --disagg-config my-custom-disagg.yaml
+
+   # Or specify a custom target path in the PVC
+   python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE --target-path /profiling_results/my-disagg.yaml
+   ```
+
+3. **Set the config path for the profiling job:**
+   ```bash
+   export DGD_CONFIG_FILE=/workspace/profiling_results/disagg.yaml # or your custom path
+   ```
+
+This approach allows you to:
+- Customize DGD configurations without rebuilding container images
+- Test different model configurations easily
+- Version control your DGD configs alongside your code
+
+> **Important**: For profiling, disagg configs should be run with Grove disabled by adding the annotation `nvidia.com/enable-grove: "false"` to avoid alpha Grove status issues.
+
+> **Note**: The default location in the PVC is `/profiling_results/disagg.yaml`. If you don't inject a config, the profiler will fall back to the built-in config at `/workspace/components/backends/vllm/deploy/disagg.yaml`.
+
+**Option B: Build custom image (only if you need code changes)**
+
+Only needed if you require custom code modifications beyond configuration changes:
 ```bash
 # in the project's root folder
-./container/build.sh --framework VLLM
+./container/build.sh --framework <VLLM/sglang>
 # Tag and push to your container registry
-export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2 # or your own dynamoimage
-# NOTE: DGD_CONFIG_FILE is pointing to the location of the config file inside DOCKER_IMAGE
-# Modify this yaml to profile different models
-export DGD_CONFIG_FILE=/workspace/components/backends/vllm/deploy/disagg.yaml # or your own disagg config file
+export DOCKER_IMAGE=<your docker tag>
+export DGD_CONFIG_FILE=<disagg config path> # path to your disagg.yaml file within the DOCKER_IMAGE
 ```
-
-Replace the `image` within `profile_sla_job.yaml` with the tag of the image you pushed.
 
 **Step 2: Set SLA target**
 
-Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL.
+Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
 
 ```yaml
 spec:
@@ -109,6 +155,8 @@ spec:
             - "200" # target TTFT is 200ms
             - --itl
             - "20" # target ITL is 20ms
+            - --backend
+            - <vllm/sglang>
 ```
 
 **Step 3: Run profiling (required)**
@@ -149,19 +197,19 @@ After the profiling job completes successfully, the results are stored in the pe
 
 The profiling results are stored in a PVC named `profiling-pvc`. To access the results:
 
-1. **Create a temporary pod to access the PVC:**
+1. **Deploy the PVC access pod (if not already running):**
    ```bash
-   kubectl run temp-access --image=alpine:latest --restart=Never \
-     --overrides='{"spec":{"containers":[{"name":"temp-access","image":"alpine:latest","command":["tail","-f","/dev/null"],"volumeMounts":[{"name":"results","mountPath":"/workspace/profiling_results"}]}],"volumes":[{"name":"results","persistentVolumeClaim":{"claimName":"profiling-pvc"}}]}}' \
-     -n $NAMESPACE
+   kubectl apply -f benchmarks/profiler/deploy/pvc-access-pod.yaml -n $NAMESPACE
    ```
 
-2. **Inside the temporary pod, navigate to the results directory:**
+2. **Access the PVC through the pod:**
    ```bash
-   kubectl exec -it temp-access -n $NAMESPACE -- sh
-   cd /workspace/profiling_results
+   kubectl exec -it pvc-access-pod -n $NAMESPACE -- /bin/bash
+   cd /profiling_results
    ls -la
    ```
+
+> **Note**: The same `pvc-access-pod` is used for both injecting disagg configs and accessing results. If you used the `inject_disagg_config.py` script earlier, the pod may already be running. The pod auto-deletes after 5 minutes of activity.
 
 #### File Structure
 
@@ -185,7 +233,33 @@ The profiling results directory contains the following structure:
 
 #### Downloading Results Locally
 
-To download the profiling results to your local machine:
+You can download the profiling results using the automated download script or manually:
+
+**Option 1: Automated Download (Recommended)**
+
+Use the provided download script to automatically fetch all relevant files:
+
+```bash
+# Download to ./results directory
+python3 benchmarks/profiler/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results
+
+# Download to specific directory
+python3 benchmarks/profiler/download_pvc_results.py --namespace $NAMESPACE --output-dir /path/to/my/results
+
+# Download without any of the auto-created config.yaml files used in profiling
+python3 benchmarks/profiler/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --no-config
+```
+
+The script will:
+- Deploy a temporary access pod (auto-deletes after 5 minutes)
+- Scan for relevant files (*.png, *.npz, *.yaml)
+- Download all files maintaining directory structure
+- Generate a README.md with file descriptions
+- Clean up automatically
+
+**Option 2: Manual Download**
+
+To download the profiling results manually:
 
 1. **Download performance plots and data files:**
    ```bash
@@ -193,21 +267,21 @@ To download the profiling results to your local machine:
    mkdir -p ./profiling_results
 
    # Copy main performance plots
-   kubectl cp temp-access:/workspace/profiling_results/prefill_performance.png ./profiling_results/ -n $NAMESPACE
-   kubectl cp temp-access:/workspace/profiling_results/decode_performance.png ./profiling_results/ -n $NAMESPACE
+   kubectl cp pvc-access-pod:/profiling_results/prefill_performance.png ./profiling_results/ -n $NAMESPACE
+   kubectl cp pvc-access-pod:/profiling_results/decode_performance.png ./profiling_results/ -n $NAMESPACE
 
    # Copy interpolation directories (includes additional plots and data)
-   kubectl cp temp-access:/workspace/profiling_results/selected_prefill_interpolation/ ./profiling_results/ -n $NAMESPACE -r
-   kubectl cp temp-access:/workspace/profiling_results/selected_decode_interpolation/ ./profiling_results/ -n $NAMESPACE -r
+   kubectl cp pvc-access-pod:/profiling_results/selected_prefill_interpolation/ ./profiling_results/ -n $NAMESPACE -r
+   kubectl cp pvc-access-pod:/profiling_results/selected_decode_interpolation/ ./profiling_results/ -n $NAMESPACE -r
    ```
 
 2. **Alternative: Tar and download entire results directory:**
    ```bash
-   # Inside the temporary pod, create a tar archive
-   tar -czf /workspace/profiling_results/profiling_results.tar.gz -C /workspace/profiling_results .
+   # Inside the access pod, create a tar archive
+   tar -czf /profiling_results/profiling_results.tar.gz -C /profiling_results .
 
    # Download the archive to your local machine
-   kubectl cp temp-access:/workspace/profiling_results/profiling_results.tar.gz ./profiling_results.tar.gz -n $NAMESPACE
+   kubectl cp pvc-access-pod:/profiling_results/profiling_results.tar.gz ./profiling_results.tar.gz -n $NAMESPACE
 
    # Extract locally
    tar -xzf profiling_results.tar.gz -C ./profiling_results/
@@ -244,14 +318,17 @@ print("Decode data keys:", list(decode_data.keys()))
 
 #### Cleaning Up
 
-Once you've downloaded your results, clean up the temporary pod:
+The access pod automatically deletes after 5 minutes of activity, but you can also clean it up manually:
+
 ```bash
-# Exit the temporary pod (if still inside)
+# Exit the access pod (if still inside)
 exit
 
-# The pod should auto-delete due to --rm flag, but if needed:
-kubectl delete pod temp-access -n $NAMESPACE
+# Delete the access pod immediately (optional - it will auto-delete)
+kubectl delete pod pvc-access-pod -n $NAMESPACE
 ```
+
+> **Note**: The access pod has `activeDeadlineSeconds: 300` and will auto-delete after 5 minutes to prevent resource waste.
 
 ### Troubleshooting
 
