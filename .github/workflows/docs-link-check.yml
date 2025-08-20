@@ -50,7 +50,6 @@ jobs:
           # Set GITHUB_TOKEN to avoid github rate limits on URL checks
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd docs
           set -euo pipefail
 
           # Set offline mode for pull requests, full check for pushes to main
