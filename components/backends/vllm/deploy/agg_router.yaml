@@ -5,8 +5,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-router
-  annotations:
-    nvidia.com/enable-grove: "false"
 spec:
   services:
     Frontend:
