@@ -17,6 +17,7 @@ use anyhow::Result;
 use async_nats::jetstream::stream;
 use async_openai::types::CompletionFinishReason;
 use async_openai::types::CreateCompletionRequest;
+use async_openai::types::Model;
 use async_openai::types::Stop;
 use derive_builder::Builder;
 use dynamo_runtime::transports::etcd;
@@ -25,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 
 use tonic::{transport::Server, Request, Response, Status};
-use crate::grpc::service::openai::model_infer_completions;
+use crate::grpc::service::openai::{model_infer_completions, completion_response_stream};
 
 use crate::protocols::openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 
@@ -296,6 +297,27 @@ impl TryFrom<NvCreateCompletionResponse> for ModelInferResponse {
     }
 }
 
+impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
+        match ModelInferResponse::try_from(response) {
+            Ok(response) => {
+                Ok(ModelStreamInferResponse {
+                    infer_response: Some(response),
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                Ok(ModelStreamInferResponse {
+                    infer_response: None,
+                    error_message: format!("Failed to convert response: {}", e).into(),
+                })
+            }
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl GrpcInferenceService for GrpcService {
     async fn model_infer(
@@ -324,9 +346,37 @@ impl GrpcInferenceService for GrpcService {
 
     async fn model_stream_infer(
         &self,
-        _request: Request<tonic::Streaming<ModelInferRequest>>,
+        request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
-        unimplemented!()
+        let mut stream = request.into_inner();
+        let state = self.state_clone();
+        let output = async_stream::try_stream! {
+            // [gluo FIXME] should be able to demux request / response streaming 
+            while let Some(request) = stream.next().await {
+                // [gluo FIXME] request error handling
+                let completion_request: NvCreateCompletionRequest = request.unwrap().try_into().map_err(|e| {
+                    Status::invalid_argument(format!("Failed to parse request: {}", e))
+                })?;
+
+                let mut stream = completion_response_stream(state.clone(), completion_request).await?;
+
+                while let Some(response) = stream.next().await {
+                    match response.data {
+                        Some(data) => {
+                            let reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                Status::invalid_argument(format!("Failed to parse response: {}", e))
+                            })?;
+                            yield reply;
+                        },
+                        None => {
+                            // Handle the case where there is no data
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(output) as Self::ModelStreamInferStream))
     }
 
     async fn model_metadata(
