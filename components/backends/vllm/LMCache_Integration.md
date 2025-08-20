@@ -11,6 +11,10 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 - **Memory Offloading**: Intelligent KV cache placement across CPU/GPU/storage tiers
 - **Improved Throughput**: Reduced GPU memory pressure enables higher batch sizes
 
+## Platform Support
+
+**Important Note**: LMCache integration currently only supports x86 architecture. ARM64 is not supported at this time.
+
 ## Aggregated Serving
 
 
@@ -166,5 +170,5 @@ lmcache_config = {
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference
-- [Configuration Reference](https://docs.lmcache.ai/api_reference/config.html) - Detailed configuration options
+- [Configuration Reference](https://docs.lmcache.ai/api_reference/configurations.html) - Detailed configuration options
 

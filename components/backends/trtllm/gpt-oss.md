@@ -211,7 +211,27 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --expert-parallel-size 4
 ```
 
-### 6. Test the Deployment
+### 6. Verify the Deployment is Ready
+
+Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
+```
+curl http://localhost:8000/health
+```
+
+Make sure that both of the endpoints are available before sending an inference request:
+```
+{
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm_next.generate"
+  ],
+  "status": "healthy"
+}
+```
+
+If only one worker endpoint is listed, the other may still be starting up. Monitor the worker logs to track startup progress.
+
+### 7. Test the Deployment
 
 Send a test request to verify the deployment:
 
@@ -345,7 +365,7 @@ flowchart TD
 
 ## Next Steps
 
-- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../examples/basics/multinode/README.md)
+- **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../../examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
 - **Performance Benchmarking**: Use GenAI-Perf to measure and optimize your deployment performance

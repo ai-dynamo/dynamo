@@ -70,7 +70,7 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
-    port = os.environ.get("DYNAMO_PORT", "8000")
+    port = os.environ.get("PROMETHEUS_PORT", "9090")
     namespace = os.environ.get("DYNAMO_NAMESPACE", "vllm-disagg-planner")
     prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
     profile_results_dir = "profiling_results"
@@ -80,6 +80,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     itl = 0.05  # in seconds
     load_predictor = "arima"  # ["constant", "arima", "prophet"]
     load_prediction_window_size = 50  # predict load using how many recent load samples
+    no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
 
 
 class VllmComponentName:

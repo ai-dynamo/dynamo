@@ -224,15 +224,15 @@ pub fn validate_user(user: Option<&str>) -> Result<(), anyhow::Error> {
 }
 
 /// Validates stop sequences
-pub fn validate_stop(stop: &Option<async_openai::types::Stop>) -> Result<(), anyhow::Error> {
+pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<(), anyhow::Error> {
     if let Some(stop_value) = stop {
         match stop_value {
-            async_openai::types::Stop::String(s) => {
+            dynamo_async_openai::types::Stop::String(s) => {
                 if s.is_empty() {
                     anyhow::bail!("Stop sequence cannot be empty");
                 }
             }
-            async_openai::types::Stop::StringArray(sequences) => {
+            dynamo_async_openai::types::Stop::StringArray(sequences) => {
                 if sequences.is_empty() {
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
@@ -260,7 +260,7 @@ pub fn validate_stop(stop: &Option<async_openai::types::Stop>) -> Result<(), any
 
 /// Validates messages array
 pub fn validate_messages(
-    messages: &[async_openai::types::ChatCompletionRequestMessage],
+    messages: &[dynamo_async_openai::types::ChatCompletionRequestMessage],
 ) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
@@ -284,7 +284,7 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
 
 /// Validates tools array
 pub fn validate_tools(
-    tools: &Option<&[async_openai::types::ChatCompletionTool]>,
+    tools: &Option<&[dynamo_async_openai::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
     let tools = match tools {
         Some(val) => val,
@@ -356,7 +356,7 @@ pub fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), any
 
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
-    _reasoning_effort: &Option<async_openai::types::ReasoningEffort>,
+    _reasoning_effort: &Option<dynamo_async_openai::types::ReasoningEffort>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ReasoningEffort is an enum, so if it exists, it's valid by definition
@@ -366,7 +366,7 @@ pub fn validate_reasoning_effort(
 
 /// Validates service tier parameter
 pub fn validate_service_tier(
-    _service_tier: &Option<async_openai::types::ServiceTier>,
+    _service_tier: &Option<dynamo_async_openai::types::ServiceTier>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ServiceTier is an enum, so if it exists, it's valid by definition
@@ -379,14 +379,14 @@ pub fn validate_service_tier(
 //
 
 /// Validates prompt
-pub fn validate_prompt(prompt: &async_openai::types::Prompt) -> Result<(), anyhow::Error> {
+pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<(), anyhow::Error> {
     match prompt {
-        async_openai::types::Prompt::String(s) => {
+        dynamo_async_openai::types::Prompt::String(s) => {
             if s.is_empty() {
                 anyhow::bail!("Prompt string cannot be empty");
             }
         }
-        async_openai::types::Prompt::StringArray(arr) => {
+        dynamo_async_openai::types::Prompt::StringArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt string array cannot be empty");
             }
@@ -396,7 +396,7 @@ pub fn validate_prompt(prompt: &async_openai::types::Prompt) -> Result<(), anyho
                 }
             }
         }
-        async_openai::types::Prompt::IntegerArray(arr) => {
+        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
@@ -411,7 +411,7 @@ pub fn validate_prompt(prompt: &async_openai::types::Prompt) -> Result<(), anyho
                 }
             }
         }
-        async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt array of integer arrays cannot be empty");
             }

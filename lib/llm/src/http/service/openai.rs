@@ -31,6 +31,7 @@ use super::{
     service_v2, RouteDoc,
 };
 use crate::preprocessor::LLMMetricAnnotation;
+use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -108,6 +109,24 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        // First check for PipelineError::ServiceOverloaded
+        if let Some(pipeline_err) =
+            err.downcast_ref::<dynamo_runtime::pipeline::error::PipelineError>()
+        {
+            if matches!(
+                pipeline_err,
+                dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
+            ) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorMessage {
+                        error: pipeline_err.to_string(),
+                    }),
+                );
+            }
+        }
+
+        // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
             Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
@@ -745,7 +764,7 @@ pub fn validate_response_input_is_text_only(
     request: &NvCreateResponse,
 ) -> Option<impl IntoResponse> {
     match &request.inner.input {
-        async_openai::types::responses::Input::Text(_) => None,
+        dynamo_async_openai::types::responses::Input::Text(_) => None,
         _ => Some(ErrorMessage::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
     }
 }
@@ -1051,12 +1070,12 @@ pub fn responses_router(
 mod tests {
     use std::collections::HashMap;
 
-    use async_openai::types::responses::{
+    use dynamo_async_openai::types::responses::{
         CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
         Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
         ToolChoiceMode, Truncation,
     };
-    use async_openai::types::{
+    use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };
@@ -1147,6 +1166,22 @@ mod tests {
                 BACKUP_ERROR_MESSAGE,
                 other_error_from_engine().unwrap_err()
             )
+        );
+    }
+
+    #[test]
+    fn test_service_overloaded_error_response_from_anyhow() {
+        use dynamo_runtime::pipeline::error::PipelineError;
+
+        let err: anyhow::Error = PipelineError::ServiceOverloaded(
+            "All workers are busy, please retry later".to_string(),
+        )
+        .into();
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.error,
+            "Service temporarily unavailable: All workers are busy, please retry later"
         );
     }
 

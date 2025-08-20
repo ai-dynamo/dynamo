@@ -9,13 +9,15 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/tokens",
+    "lib/async-openai",
+    "lib/parsers",
     "lib/bindings/c",
     "lib/engines/*",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.0+post0"
+version = "0.4.1"
 edition = "2021"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -26,14 +28,15 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.4.0" }
-dynamo-llm = { path = "lib/llm", version = "0.4.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.4.0" }
+dynamo-runtime = { path = "lib/runtime", version = "0.4.1" }
+dynamo-llm = { path = "lib/llm", version = "0.4.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.4.1" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.4.1", features = ["byot", "rustls"]}
+dynamo-parsers = { path = "lib/parsers", version = "0.4.1" }
 
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.40", features = ["service"] }
-async-openai = { version = "0.29.0", features = ["rustls", "byot"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
@@ -59,7 +62,7 @@ tempfile = "3"
 thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
-tokio-util = { version = "0.7", features = ["codec", "net"] }
+tokio-util = { version = "0.7", features = ["codec", "net", "rt"] }
 tower-http = {version = "0.6", features=["trace"]}
 axum = { version = "0.8" , features = ["macros"]}
 tracing = { version = "0.1" }

@@ -14,25 +14,16 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
-          workingDir: /workspace/components/backends/trtllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg-router
       componentType: worker
       replicas: 2
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

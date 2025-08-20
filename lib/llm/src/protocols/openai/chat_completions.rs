@@ -27,7 +27,7 @@ use super::{
     OpenAIStopConditionsProvider,
 };
 
-mod aggregator;
+pub mod aggregator;
 mod delta;
 
 pub use aggregator::DeltaAggregator;
@@ -44,7 +44,7 @@ pub use delta::DeltaGenerator;
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateChatCompletionRequest,
+    pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
     pub common: CommonExt,
@@ -59,11 +59,7 @@ pub struct NvCreateChatCompletionRequest {
 /// # Fields
 /// - `inner`: The base OpenAI unary chat completion response, embedded
 ///   using `serde(flatten)`.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
-pub struct NvCreateChatCompletionResponse {
-    #[serde(flatten)]
-    pub inner: async_openai::types::CreateChatCompletionResponse,
-}
+pub type NvCreateChatCompletionResponse = dynamo_async_openai::types::CreateChatCompletionResponse;
 
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse`.
@@ -71,11 +67,8 @@ pub struct NvCreateChatCompletionResponse {
 /// # Fields
 /// - `inner`: The base OpenAI streaming chat completion response, embedded
 ///   using `serde(flatten)`.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
-pub struct NvCreateChatCompletionStreamResponse {
-    #[serde(flatten)]
-    pub inner: async_openai::types::CreateChatCompletionStreamResponse,
-}
+pub type NvCreateChatCompletionStreamResponse =
+    dynamo_async_openai::types::CreateChatCompletionStreamResponse;
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
@@ -217,8 +210,8 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
         self.inner.stop.as_ref().map(|stop| match stop {
-            async_openai::types::Stop::String(s) => vec![s.clone()],
-            async_openai::types::Stop::StringArray(arr) => arr.clone(),
+            dynamo_async_openai::types::Stop::String(s) => vec![s.clone()],
+            dynamo_async_openai::types::Stop::StringArray(arr) => arr.clone(),
         })
     }
 

@@ -705,7 +705,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Memory: "500Mi",
 									},
 									Limits: &common.ResourceItem{
-										GPU: "1",
+										GPU:    "1",
+										Memory: "20Gi",
+										CPU:    "10",
 									},
 								},
 								ExtraPodMetadata: &common.ExtraPodMetadata{
@@ -796,6 +798,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 									},
 								},
+								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
@@ -895,6 +898,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 									},
 								},
+								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
 									{
 										Name:    "main",

@@ -260,9 +260,33 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
     ),
+    "deepep": VLLMConfig(
+        name="deepep",
+        directory="/workspace/components/backends/vllm",
+        script_name="dsr1_dep.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.vllm, pytest.mark.h100],
+        endpoints=["v1/chat/completions", "v1/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+            completions_response_handler,
+        ],
+        model="deepseek-ai/DeepSeek-V2-Lite",
+        delayed_start=45,
+        args=[
+            "--model",
+            "deepseek-ai/DeepSeek-V2-Lite",
+            "--num-nodes",
+            "1",
+            "--node-rank",
+            "0",
+            "--gpus-per-node",
+            "2",
+        ],
+        timeout=300,
+    ),
     "multimodal_agg": VLLMConfig(
         name="multimodal_agg",
-        directory="/workspace/examples/multimodal_v1",
+        directory="/workspace/examples/multimodal",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         endpoints=["v1/chat/completions"],
@@ -276,7 +300,7 @@ vllm_configs = {
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
-    #     directory="/workspace/examples/multimodal_v1",
+    #     directory="/workspace/examples/multimodal",
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
     #     endpoints=["v1/chat/completions"],

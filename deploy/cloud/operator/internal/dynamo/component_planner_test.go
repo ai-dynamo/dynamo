@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
@@ -46,16 +45,6 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 				Command: []string{
 					"/bin/sh",
 					"-c",
-				},
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("2"),
-						corev1.ResourceMemory: resource.MustParse("2Gi"),
-					},
-					Limits: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("2"),
-						corev1.ResourceMemory: resource.MustParse("2Gi"),
-					},
 				},
 				Env: []corev1.EnvVar{
 					{Name: "DYN_NAMESPACE", Value: "dynamo-namespace"},

@@ -66,7 +66,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | **DP Rank Routing**| ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |
 
-## Quick Start
+## TensorRT-LLM Quick Start
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
@@ -193,7 +193,7 @@ For complete Kubernetes deployment instructions, configurations, and troubleshoo
 
 ### Client
 
-See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+See [client](../sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
@@ -218,7 +218,7 @@ DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
 
 ## KV Cache Transfer in Disaggregated Serving
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-tranfer.md).
+Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
 
 
 ## Request Migration
@@ -233,7 +233,7 @@ This allows a request to be migrated up to 3 times before failing. See the [Requ
 
 ## Client
 
-See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+See [client](../sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 

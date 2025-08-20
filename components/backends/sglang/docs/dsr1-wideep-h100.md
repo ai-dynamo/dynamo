@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Running DeepSeek-R1 Disaggregated with WideEP on H100s
 
-Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 4 H100 nodes and 1 decode worker on 9 H100 nodes (104 total GPUs).
+Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://lmsys.org/blog/2025-05-05-large-scale-ep/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-wideep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 4 H100 nodes and 1 decode worker on 9 H100 nodes (104 total GPUs).
 
 ## Instructions
 
@@ -55,7 +55,7 @@ python3 -m dynamo.frontend --http-port=8000 &
 # optionally run the http server that allows you to flush the kv cache for all workers (see benchmarking section below)
 python3 utils/sgl_http_server.py --ns dynamo &
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
@@ -90,7 +90,7 @@ On the other prefill node (since this example has 4 total prefill nodes), run th
 5. Run the decode worker on the head decode node
 
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
