@@ -44,7 +44,7 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 ### Step 1: Build the Development Container Image
 
 Build `dynamo:latest-vllm-local-dev` from scratch from the source:
-- Note that currently, `local-dev` is only implemented for --framework VLLM
+- Note that currently, `local-dev` are only implemented for `--framework VLLM` and `--framework SGLANG`, for now.
 
 ```bash
 ./container/build.sh --target local-dev
@@ -67,14 +67,15 @@ The container will be built and give certain file permissions to your local uid 
 2. Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
 3. Select "Dev Containers: Open Folder in Container", select your `dynamo` folder and open.
 
-### Step 4: Optional - Mount Hugging Face Cache
+### Step 4: Optional - Custom Hugging Face Cache
 
-If you want to mount your Hugging Face cache for faster model loading:
+If you want to mount a different Hugging Face cache directory than the default ~/.cache/huggingface, you can do something like below:
 
 1. Go to `.devcontainer` folder
 2. Add this line in the mounts section:
    ```json
-   "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
+   "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind",
+   // Mount from your custom HF_HOME to the container.
    ```
 3. Make sure HF_HOME is sourced in your .bashrc or .zshenv and your IDE default terminal is set properly
 
@@ -99,7 +100,12 @@ cd /home/ubuntu/dynamo && cargo build --locked --profile dev
 Verify that builds are in the pre-defined `dynamo/.build/target` and not `dynamo/workspace`:
 ```bash
 $ cargo metadata --format-version=1 | jq -r '.target_directory'
-/home/ubuntu/dynamo/.build/target
+/home/ubuntu/dynamo/.build/target  <-- this is the target path
+```
+
+If cargo is not installed and configured property, you will see an error, such as the following:
+```
+error: could not find `Cargo.toml` in $HOME or any parent directory
 ```
 
 Before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
@@ -166,32 +172,20 @@ git config --local gpg.program gpg1
 
 ### Custom devcontainer.json Configuration
 
-You can create a custom devcontainer configuration by copying the main configuration to another directory:
+You can create a custom devcontainer configuration by copying the main configuration to another directory inside the `.devcontainer` directory. Below is an example where the custom name is `jensen_dev`, but feel free to name the directory whatever you want:
 
 ```bash
 # Copy the main devcontainer configuration and then edit the new json file
-mkdir -p .devcontainer/my_custom
-cp .devcontainer/devcontainer.json .devcontainer/my_custom/devcontainer.json
+mkdir -p .devcontainer/jensen_dev
+cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 ```
 
 Common customizations include additional mounts, environment variables, VS Code extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/*/devcontainer.json` files available.
 
 ### SSH Keys for Git Operations
 
-To use `git push` commands in the devcontainer, you need SSH keys set up inside the container. This is not done automatically for security reasons - it's up to you to decide whether you want to copy your SSH keys from the host.
+If you have ssh-agent running on the host, then `git push` should just work. If not, you may need to set up ssh-agent, or have SSH keys set up inside the container (more hassle).
 
-#### Manual SSH Key Setup
-```bash
-# Copy SSH keys from host to container (run from host)
-docker cp ~/.ssh/id_rsa <container_id>:/home/ubuntu/.ssh/
-docker cp ~/.ssh/id_rsa.pub <container_id>:/home/ubuntu/.ssh/
-
-# Set proper permissions (run inside container)
-chmod 600 ~/.ssh/id_rsa
-chmod 644 ~/.ssh/id_rsa.pub
-```
-
-Test the connection with: `ssh -T git@github.com`
 
 ## Troubleshooting
 

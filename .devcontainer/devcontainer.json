@@ -13,7 +13,7 @@
         "See the License for the specific language governing permissions and",
         "limitations under the License."
     ],
-    "name": "NVIDIA Dynamo Development",
+    "name": "NVIDIA Dynamo Dev Container Development",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
     "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM local dev image
@@ -36,6 +36,8 @@
                 "rust-lang.rust-analyzer"
             ],
             "settings": {
+                // Disable automatic copying of .gitconfig to avoid errors
+                "dev.containers.copyGitConfig": false,
                 "terminal.integrated.defaultProfile.linux": "bash",
                 "terminal.integrated.cwd": "/home/ubuntu/dynamo",
 
@@ -69,24 +71,23 @@
     "userEnvProbe": "interactiveShell",
     "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
     "containerEnv": {
-        "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
-        "HF_TOKEN": "${localEnv:HF_TOKEN}",
+        "DYNAMO_HOME": "/home/ubuntu/dynamo",
         "CARGO_HOME": "/home/ubuntu/dynamo/.build/.cargo",
         "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup",
         "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target",
-        "DYNAMO_HOME": "/home/ubuntu/dynamo"
+    },
+    "remoteEnv": {
+        // These are optional, but are convenient to have, especially the SSH_AUTH_SOCK.
+        "SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}",
+        "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+        "HF_TOKEN": "${localEnv:HF_TOKEN}"
     },
     "mounts": [
+        // These are for convenience, so that the history and pre-commit cache are persisted between sessions
+        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume",
+        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume",
         // Default mounts
         "source=/tmp/,target=/tmp/,type=bind",
-        "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume", // For bash history
-        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume",  // For pre-commit cache
-        "source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind",
-        // The following line is needed. Otherwise, you will get an very weirderror below:
-        // 2025-08-05 17:53:52.049 [info] Shutdown action is supported only for local exec servers or wsl
-        // 2025-08-05 17:53:52.049 [info] Installing remote server in container...
-        // 2025-08-05 17:53:52.049 [error] Failed to read .gitconfig: TypeError [ERR_INVALID_ARG_TYPE]: The "path" argument must be of type string. Received undefined
-        // 2025-08-05 17:53:52.050 [error] Error resolving dev container authority The "path" argument must be of type string. Received undefined
-        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind"
+        "source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind"
     ]
 }
