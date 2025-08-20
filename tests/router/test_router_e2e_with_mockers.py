@@ -11,6 +11,7 @@ from typing import Any, Dict
 import aiohttp
 import pytest
 
+from dynamo._core import DistributedRuntime
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
@@ -131,6 +132,44 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4)
     return False
 
 
+# Global runtime instance to avoid "Worker already initialized" errors
+_runtime_instance = None
+
+
+async def check_registration_in_etcd(expected_count: int):
+    """Check that the expected number of KV routers are registered in etcd.
+
+    Args:
+        expected_count: The number of KV routers expected to be registered
+
+    Returns:
+        List of registered KV router entries from etcd
+    """
+    global _runtime_instance
+
+    # Reuse existing runtime instance or create new one
+    if _runtime_instance is None:
+        loop = asyncio.get_running_loop()
+        _runtime_instance = DistributedRuntime(loop, False)
+
+    etcd = _runtime_instance.etcd_client()
+
+    # Wait a bit for registration to complete
+    await asyncio.sleep(2)
+
+    # Check for kv_routers in etcd
+    # The KV router registers itself with key format: kv_routers/{model_name}/{uuid}
+    kv_routers = await etcd.kv_get_prefix("kv_routers/")
+    logger.info(f"Found {len(kv_routers)} KV router(s) registered in etcd")
+
+    # Assert we have the expected number of KV routers registered
+    assert (
+        len(kv_routers) == expected_count
+    ), f"Expected {expected_count} KV router(s) in etcd, found {len(kv_routers)}"
+
+    return kv_routers
+
+
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     """Send multiple requests concurrently, alternating between URLs if multiple provided"""
 
@@ -226,6 +265,9 @@ def test_mocker_kv_router(request, runtime_services):
         for mocker in mocker_processes:
             mocker.__enter__()
 
+        # Check etcd registration - expect 1 KV router
+        asyncio.run(check_registration_in_etcd(expected_count=1))
+
         # Use async to send requests concurrently for better performance
         asyncio.run(
             send_inflight_requests(
@@ -293,6 +335,9 @@ def test_mocker_two_kv_router(request, runtime_services):
         # Start all mockers
         for mocker in mocker_processes:
             mocker.__enter__()
+
+        # Check etcd registration - expect 2 KV routers
+        asyncio.run(check_registration_in_etcd(expected_count=2))
 
         # Build URLs for both routers
         router_urls = [
