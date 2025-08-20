@@ -195,7 +195,28 @@ impl OpenAIPreprocessor {
                                 self.formatter.render(request)?
                             };
 
-                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                            // Check if backend_instance_id is present and token_data is provided
+                            let has_backend_instance_id = request
+                                .nvext()
+                                .and_then(|ext| ext.backend_instance_id)
+                                .is_some();
+
+                            let token_data =
+                                request.nvext().and_then(|ext| ext.token_data.as_ref());
+
+                            let (encoding, skip_token_annotation) = if has_backend_instance_id
+                                && token_data.is_some()
+                            {
+                                // Use provided tokens, skip tokenization
+                                let tokens = token_data.unwrap().clone();
+                                // Create a dummy encoding with the provided tokens
+                                let passthrough_encoding = crate::tokenizers::Encoding::Sp(tokens);
+                                (passthrough_encoding, true)
+                            } else {
+                                // Normal tokenization
+                                let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                (encoding, false)
+                            };
 
                             if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
                                 annotations.insert(
@@ -204,7 +225,9 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
-                            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                            if request.has_annotation(ANNOTATION_TOKEN_IDS)
+                                && !skip_token_annotation
+                            {
                                 annotations.insert(
                                     ANNOTATION_TOKEN_IDS.to_string(),
                                     serde_json::to_string(encoding.token_ids())?,
