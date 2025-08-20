@@ -243,7 +243,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
                 refusal: None,
                 function_call: None,
                 audio: None,
-                reasoning_content: None,
+                reasoning_content: delta.reasoning_content,
             },
             index: delta.index,
             finish_reason: delta.finish_reason,

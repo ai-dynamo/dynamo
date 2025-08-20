@@ -4,7 +4,7 @@ use tracing as log;
 
 use crate::{ParserResult, ReasoningParser};
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct BasicReasoningParser {
     think_start_token: String,
     think_end_token: String,

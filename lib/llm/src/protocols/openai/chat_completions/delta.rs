@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_parsers::{reasoning, ReasoningParserType};
+use dynamo_parsers::{ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -44,7 +44,6 @@ pub struct DeltaGenerator {
     object: String,
     /// Timestamp (Unix epoch) when the response was created.
     created: u32,
-    /// Model name used for generating responses.
     model: String,
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
@@ -59,7 +58,7 @@ pub struct DeltaGenerator {
 
     /// Reasoning Parser object
     /// This is used to parse reasoning content in the response.
-    reasoning_parser_type: ReasoningParserType,
+    reasoning_parser: ReasoningParserWrapper,
 }
 
 impl DeltaGenerator {
@@ -90,7 +89,9 @@ impl DeltaGenerator {
         };
 
         // Reasoning parser
-        let reasoning_parser_type = reasoning::ReasoningParserType::Basic;
+        let reasoning_parser_type = ReasoningParserType::Basic;
+
+        let reasoning_parser = reasoning_parser_type.get_reasoning_parser();
 
         Self {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -102,7 +103,7 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
-            reasoning_parser_type,
+            reasoning_parser,
         }
     }
 
@@ -186,11 +187,9 @@ impl DeltaGenerator {
         if text.is_none() {
             return (None, None);
         }
-        let mut reasoning_parser =
-            ReasoningParserType::get_reasoning_parser(self.reasoning_parser_type);
-        let parser_result = reasoning_parser.parse_reasoning_streaming_incremental(
-            text.as_deref().expect("Text should not be None"),
-        );
+        let parser_result = self
+            .reasoning_parser
+            .parse_reasoning_streaming_incremental(text.as_deref().unwrap());
 
         let reasoning_content = if parser_result.reasoning_text.is_empty() {
             None

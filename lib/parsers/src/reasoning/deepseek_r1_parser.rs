@@ -5,7 +5,7 @@ use super::base_parser::BasicReasoningParser;
 use crate::ParserResult;
 use crate::ReasoningParser;
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct DeepseekR1ReasoningParser {
     base: BasicReasoningParser,
 }
