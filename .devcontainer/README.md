@@ -228,7 +228,7 @@ In order to ensure your host environment variables are available to the Dev Cont
 - Put variables in `~/.zprofile` (for login shells)
 - Some users report that variables in `~/.zshrc` aren't picked up by dev containers, so try moving them to `~/.zprofile` to see if that solves the problem
 
-#### Method 2: Environment File
+#### Method 3: Environment File
 Create a `.env` file in your project root and reference it in devcontainer.json:
 
 **Example .env file:**
