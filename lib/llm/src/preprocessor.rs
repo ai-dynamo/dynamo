@@ -209,7 +209,7 @@ impl OpenAIPreprocessor {
                             {
                                 // Use provided tokens, skip tokenization
                                 let tokens = token_data.unwrap().clone();
-                                // Create a dummy encoding with the provided tokens
+                                // Create a passthrough encoding with the provided tokens
                                 let passthrough_encoding = crate::tokenizers::Encoding::Sp(tokens);
                                 (passthrough_encoding, true)
                             } else {
