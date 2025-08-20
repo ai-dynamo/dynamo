@@ -82,8 +82,6 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # ModelExpress client for model downloading
-model_express_client = { path = "../../../model-express/model_express_client" }
-model_express_common = { path = "../../../model-express/model_express_common" }
 
 akin = "0.4.0"
 blake3 = "1"
