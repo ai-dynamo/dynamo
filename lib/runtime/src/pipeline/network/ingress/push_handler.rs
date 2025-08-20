@@ -18,6 +18,7 @@ use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::info_span;
 use tracing::Instrument;
 
@@ -104,6 +105,20 @@ impl WorkHandlerMetrics {
     }
 }
 
+// RAII guard to ensure inflight gauge is decremented and request duration is observed on all code paths.
+struct RequestMetricsGuard {
+    inflight_requests: prometheus::IntGauge,
+    request_duration: prometheus::Histogram,
+    start_time: Instant,
+}
+impl Drop for RequestMetricsGuard {
+    fn drop(&mut self) {
+        self.inflight_requests.dec();
+        self.request_duration
+            .observe(self.start_time.elapsed().as_secs_f64());
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
 where
@@ -119,11 +134,17 @@ where
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 
-        if let Some(m) = self.metrics() {
+        // Increment inflight and ensure it's decremented on all exits via RAII guard
+        let _inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
-        }
+            RequestMetricsGuard {
+                inflight_requests: m.inflight_requests.clone(),
+                request_duration: m.request_duration.clone(),
+                start_time,
+            }
+        });
 
         // decode the control message and the request
         let msg = TwoPartCodec::default()
@@ -284,12 +305,6 @@ where
                     m.error_counter.with_label_values(&["publish_final"]).inc();
                 }
             }
-        }
-
-        if let Some(m) = self.metrics() {
-            let duration = start_time.elapsed();
-            m.request_duration.observe(duration.as_secs_f64());
-            m.inflight_requests.dec();
         }
 
         Ok(())
