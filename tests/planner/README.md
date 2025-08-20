@@ -51,7 +51,7 @@ python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
 > ISL=3000, OSL=300
 > TTFT=0.1s, ITL=0.01s
 > Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
-> 
+>
 > Interpolating prefill performance ...
 >     Estimated TTFT=0.027s <= target TTFT=0.100s. Requests can queue 0.073s maximally while meeting TTFT SLA.
 >     Estimated throughput: 110893.48 tokens/s/gpu. Request rate at 36.96 requests/s will saturate one GPU.
@@ -64,11 +64,11 @@ Interpolating decode performance ...
 
 ## Generating Load Dataset
 
-We provide a tool to generate load dataset with varying request rate. More details can be found in [sin_load_generator](../../benchmarks/sin_load_generator/README.md). 
+We provide a tool to generate load dataset with varying request rate. More details can be found in [sin_load_generator](../../benchmarks/sin_load_generator/README.md).
 
-From previous interpolator testing, ISL 3000 and OSL 300 can handle ~30 request/s/gpu for both prefill and decode. 
+From previous interpolator testing, ISL 3000 and OSL 300 can handle ~30 request/s/gpu for both prefill and decode.
 To test planner's performance for different request rates, we can generate a load dataset with request rate varying between 20 to 80 request/s.
-For TP1 H200 engine, planner should scale between 1P1D and 3P3D. 
+For TP1 H200 engine, planner should scale between 1P1D and 3P3D.
 
 ```bash
 python benchmarks/sin_load_generator/sin_synth.py \
@@ -83,7 +83,7 @@ python benchmarks/sin_load_generator/sin_synth.py \
   --output-file rr-20-80_i3000o300.jsonl
 ```
 
-The dataset will start with 20 request/s, increase to 80 request/s at t=300s, decrease back to 20 request/s at t=600s, and repeat. 
+The dataset will start with 20 request/s, increase to 80 request/s at t=300s, decrease back to 20 request/s at t=600s, and repeat.
 The total duration is 30 minutes or 1800 seconds.
 
 ## Planner Dry Run

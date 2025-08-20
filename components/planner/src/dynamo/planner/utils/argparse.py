@@ -20,7 +20,7 @@ from dynamo.planner.defaults import SLAPlannerDefaults
 
 def create_sla_planner_parser() -> argparse.ArgumentParser:
     """Create and configure the argument parser for SLA Planner.
-    
+
     Returns:
         argparse.ArgumentParser: Configured argument parser for SLA Planner
     """
