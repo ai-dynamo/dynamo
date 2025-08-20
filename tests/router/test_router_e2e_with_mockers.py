@@ -132,8 +132,23 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4)
     return False
 
 
-# Global runtime instance to avoid "Worker already initialized" errors
-_runtime_instance = None
+def get_runtime():
+    """Get or create a DistributedRuntime instance.
+
+    This handles the case where a worker is already initialized (common in CI)
+    by using the detached() method to reuse the existing runtime.
+    """
+    try:
+        # Try to use existing runtime (common in CI where tests run in same process)
+        _runtime_instance = DistributedRuntime.detached()
+        logger.info("Using detached runtime (worker already initialized)")
+    except Exception as e:
+        # If no existing runtime, create a new one
+        logger.info(f"Creating new runtime (detached failed: {e})")
+        loop = asyncio.get_running_loop()
+        _runtime_instance = DistributedRuntime(loop, False)
+
+    return _runtime_instance
 
 
 async def check_registration_in_etcd(expected_count: int):
@@ -145,14 +160,8 @@ async def check_registration_in_etcd(expected_count: int):
     Returns:
         List of registered KV router entries from etcd
     """
-    global _runtime_instance
-
-    # Reuse existing runtime instance or create new one
-    if _runtime_instance is None:
-        loop = asyncio.get_running_loop()
-        _runtime_instance = DistributedRuntime(loop, False)
-
-    etcd = _runtime_instance.etcd_client()
+    runtime = get_runtime()
+    etcd = runtime.etcd_client()
 
     # Wait a bit for registration to complete
     await asyncio.sleep(2)
