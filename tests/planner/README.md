@@ -96,7 +96,7 @@ With custom namespace:
 
 The main test scenario validates scaling for **H200 with 1P1D configuration**:
 - **Phase 1**: 10 req/s (maintains 1P1D)
-- **Phase 2**: 20 req/s (scales to 1P2D - 1 prefill, 2 decode workers)
+- **Phase 2**: 20 req/s (scales to 2P1D - 2 prefill workers, 1 decode worker)
 - **ISL/OSL**: 3000/150 tokens
 
 ### Prerequisites for E2E Tests

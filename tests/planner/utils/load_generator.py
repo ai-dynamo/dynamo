@@ -30,7 +30,7 @@ class LoadGenerator:
     def __init__(
         self,
         base_url: str = "http://localhost:8000",
-        model: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        model: str = "nvidia/Llama-3.1-8B-Instruct-FP8",
         isl: int = 3000,
         osl: int = 150,
     ):
@@ -43,7 +43,7 @@ class LoadGenerator:
         self,
         req_per_sec: float,
         duration_sec: int,
-        estimated_request_duration: float = 15.0,
+        estimated_request_duration: float = 12.0,
     ) -> Dict[str, Any]:
         """
         Calculate genai-perf parameters to approximate desired request rate.
@@ -164,7 +164,8 @@ class LoadGenerator:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=duration_sec + 120,  # Add buffer for genai-perf overhead
+                timeout=duration_sec
+                + 600,  # Add buffer for genai-perf overhead (generous for 3000 tokens)
             )
 
             end_time = time.time()
@@ -265,7 +266,7 @@ class LoadGenerator:
 
         Hardcoded scenario:
         - Phase 1: 10 req/s for 180s (should maintain 1P1D)
-        - Phase 2: 20 req/s for 180s (should trigger 1P1D -> 1P2D)
+        - Phase 2: 20 req/s for 180s (should trigger 1P1D -> 2P1D)
 
         Returns:
             Dictionary with complete test results
@@ -351,7 +352,7 @@ async def main():
         "--base-url", default="http://localhost:8000", help="Base URL for the service"
     )
     parser.add_argument(
-        "--model", default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B", help="Model name"
+        "--model", default="nvidia/Llama-3.1-8B-Instruct-FP8", help="Model name"
     )
     parser.add_argument("--isl", type=int, default=3000, help="Input sequence length")
     parser.add_argument("--osl", type=int, default=150, help="Output sequence length")

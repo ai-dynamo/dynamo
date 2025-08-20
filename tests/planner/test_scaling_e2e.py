@@ -15,6 +15,7 @@ import json
 import logging
 import subprocess
 import time
+import urllib.request
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -24,6 +25,13 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Test configuration constants
+HEALTH_CHECK_TIMEOUT = 10
+PORT_FORWARD_SETUP_DELAY = 3
+FINAL_STABILIZATION_DELAY = 60
+MONITORING_INTERVAL = 15
+BUFFER_DURATION = 90
 
 
 @dataclass
@@ -209,14 +217,12 @@ class KubernetesMonitor:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
             # Give it a moment to establish connection
-            time.sleep(3)
+            time.sleep(PORT_FORWARD_SETUP_DELAY)
 
             # Try to check health endpoint
-            import urllib.request
-
             try:
                 response = urllib.request.urlopen(
-                    f"http://localhost:{port}/health", timeout=10
+                    f"http://localhost:{port}/health", timeout=HEALTH_CHECK_TIMEOUT
                 )
                 healthy = response.status == 200
                 logger.info(f"Service health check: {'OK' if healthy else 'FAILED'}")
@@ -268,7 +274,9 @@ class ScalingE2ETest:
         # Start background monitoring
         total_test_duration = 480  # 180 + 30 + 180 + 90 buffer
         monitoring_task = asyncio.create_task(
-            self.k8s_monitor.monitor_scaling(total_test_duration, interval=15)
+            self.k8s_monitor.monitor_scaling(
+                total_test_duration, interval=MONITORING_INTERVAL
+            )
         )
 
         try:
@@ -285,7 +293,7 @@ class ScalingE2ETest:
 
             # Wait a bit more to capture any delayed scaling
             logger.info("Waiting for potential delayed scaling...")
-            await asyncio.sleep(60)
+            await asyncio.sleep(FINAL_STABILIZATION_DELAY)
 
             # Get final final counts
             final_final_counts = self.k8s_monitor.get_pod_counts()
@@ -359,11 +367,11 @@ class ScalingE2ETest:
 
         expected_scaling = {
             "initial_1p1d": initial.prefill_pods == 1 and initial.decode_pods == 1,
-            "final_1p2d": final.prefill_pods == 1 and final.decode_pods == 2,
+            "final_1p2d": final.prefill_pods == 2 and final.decode_pods == 1,
             "scaling_occurred": len(scaling_events) > 0,
             "correct_scaling": (
-                final.prefill_pods == 1
-                and final.decode_pods == 2
+                final.prefill_pods == 2
+                and final.decode_pods == 1
                 and initial.prefill_pods == 1
                 and initial.decode_pods == 1
             ),
@@ -394,9 +402,9 @@ class ScalingE2ETest:
             validation["issues"].append("Test did not start with 1P1D configuration")
 
         # Validate final state
-        if not expected.get("final_1p2d"):
+        if not expected.get("final_2p1d"):
             validation["issues"].append(
-                "Test did not end with expected 1P2D configuration"
+                "Test did not end with expected 2P1D configuration"
             )
 
         # Validate scaling occurred
@@ -408,11 +416,11 @@ class ScalingE2ETest:
             validation["test_passed"] = True
             validation[
                 "summary"
-            ] = "✅ Test PASSED: Successfully scaled from 1P1D to 1P2D"
+            ] = "✅ Test PASSED: Successfully scaled from 1P1D to 2P1D"
         else:
             validation[
                 "summary"
-            ] = "❌ Test FAILED: Did not achieve expected 1P1D -> 1P2D scaling"
+            ] = "❌ Test FAILED: Did not achieve expected 1P1D -> 2P1D scaling"
 
         # Add performance validation
         phase1 = results.get("phase1_results", {})

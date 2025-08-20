@@ -171,15 +171,17 @@ setup_port_forward() {
         sleep 2
     fi
 
-    # Start port forwarding to frontend pod directly
-    local frontend_pod=$(kubectl get pods -n "$NAMESPACE" -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=vllm-disagg-planner" | awk 'NR==2 {print $1}')
-    if [ -z "$frontend_pod" ]; then
-        log_error "Frontend pod not found"
+    # Start port forwarding to frontend service directly
+    local frontend_service="vllm-disagg-planner-frontend"
+
+    # Check if the frontend service exists
+    if ! kubectl get service "$frontend_service" -n "$NAMESPACE" &> /dev/null; then
+        log_error "Frontend service '$frontend_service' not found"
         return 1
     fi
 
-    log_info "Port forwarding to pod: $frontend_pod"
-    kubectl port-forward pod/"$frontend_pod" "$LOCAL_PORT:$FRONTEND_PORT" -n "$NAMESPACE" &
+    log_info "Port forwarding to service: $frontend_service"
+    kubectl port-forward service/"$frontend_service" "$LOCAL_PORT:$FRONTEND_PORT" -n "$NAMESPACE" >/dev/null 2>&1 &
     PORT_FORWARD_PID=$!
 
     # Wait for port forwarding to be established
@@ -264,7 +266,7 @@ main() {
 
     log_info "SLA Planner Scaling Test"
     log_info "Namespace: $NAMESPACE"
-    log_info "Scenario: 10 req/s -> 20 req/s (1P1D -> 1P2D)"
+    log_info "Scenario: 10 req/s -> 20 req/s (1P1D -> 2P1D)"
 
     # Check prerequisites
     check_prerequisites
@@ -290,7 +292,7 @@ main() {
     fi
 
     # Always cleanup deployment
-    cleanup_deployment
+    # cleanup_deployment
 
     if [ $test_result -eq 0 ]; then
         log_success "Test completed successfully!"
