@@ -62,8 +62,6 @@ pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 pub const PREFILL_SUBJECT: &str = "prefill_events";
 pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 
-// for returning the tokens when the routing is short circuited to just return the worker-instance-id
-
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
     fn select_worker(
