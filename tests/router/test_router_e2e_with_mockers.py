@@ -274,9 +274,6 @@ def test_mocker_kv_router(request, runtime_services):
         for mocker in mocker_processes:
             mocker.__enter__()
 
-        # Check etcd registration - expect 1 KV router
-        asyncio.run(check_registration_in_etcd(expected_count=1))
-
         # Use async to send requests concurrently for better performance
         asyncio.run(
             send_inflight_requests(
@@ -289,6 +286,9 @@ def test_mocker_kv_router(request, runtime_services):
         )
 
         logger.info(f"Successfully completed {NUM_REQUESTS} requests")
+
+        # Check etcd registration - expect 1 KV router
+        asyncio.run(check_registration_in_etcd(expected_count=1))
 
     finally:
         # Clean up
@@ -345,9 +345,6 @@ def test_mocker_two_kv_router(request, runtime_services):
         for mocker in mocker_processes:
             mocker.__enter__()
 
-        # Check etcd registration - expect 2 KV routers
-        asyncio.run(check_registration_in_etcd(expected_count=2))
-
         # Build URLs for both routers
         router_urls = [
             f"http://localhost:{port}/v1/chat/completions" for port in router_ports
@@ -365,6 +362,9 @@ def test_mocker_two_kv_router(request, runtime_services):
         logger.info(
             f"Successfully completed {NUM_REQUESTS} requests across {len(router_ports)} routers"
         )
+
+        # Check etcd registration - expect 2 KV routers
+        asyncio.run(check_registration_in_etcd(expected_count=2))
 
     finally:
         # Clean up routers
