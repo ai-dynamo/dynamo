@@ -414,6 +414,7 @@ class Planner:
         )
 
         def compute_safe_p_thpt(num_p: int, isl: float, ttft: float):
+            """safe throughput is maximum throughput that the engine can handle given the TTFT SLA"""
             actual_ttft = self.prefill_interpolator.interpolate_ttft(isl)
             if actual_ttft > ttft:
                 return 0
@@ -421,6 +422,7 @@ class Planner:
                 return num_p * self.prefill_interpolator.interpolate_thpt_per_gpu(isl)
 
         def compute_safe_d_thpt(num_d: int, isl: float, osl: float, itl: float):
+            """safe throughput is maximum throughput that the engine can handle given the ITL SLA"""
             (
                 pred_decode_thpt_per_gpu,
                 actual_itl,
@@ -503,79 +505,24 @@ class Planner:
             )
 
         # plot the results
-        import matplotlib.pyplot as plt
+        from dynamo.planner.utils.dryrun_plot_utils import create_dryrun_plot
 
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-
-        # Plot 1: Request Rate
-        ax1.plot(time, rr, "b-", label="Actual Request Rate", linewidth=2)
-        ax1.plot(time, est_rr, "r--", label="Predicted Request Rate", linewidth=2)
-        ax1.set_xlabel("Time (s)")
-        ax1.set_ylabel("Request Rate")
-        ax1.set_ylim(bottom=0)
-        ax1.set_title("Request Rate Over Time")
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-
-        # Plot 2: Sequence Lengths
-        ax2.plot(time, isl, "g-", label="Actual ISL", linewidth=2)
-        ax2.plot(time, est_isl, "g--", label="Predicted ISL", linewidth=2)
-        ax2.plot(time, osl, "m-", label="Actual OSL", linewidth=2)
-        ax2.plot(time, est_osl, "m--", label="Predicted OSL", linewidth=2)
-        ax2.set_xlabel("Time (s)")
-        ax2.set_ylabel("Num Tokens")
-        ax2.set_ylim(bottom=0)
-        ax2.set_title("Input/Output Sequence Lengths Over Time")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-
-        # Plot 3: Worker Counts
-        ax3.plot(time, p_thpt, "b-", label="Actual Prefill Throughput", linewidth=2)
-        ax3.plot(
-            time, safe_p_thpt, "b--", label="Safe Prefill Throughput Limit", linewidth=2
+        create_dryrun_plot(
+            time=time,
+            rr=rr,
+            est_rr=est_rr,
+            isl=isl,
+            est_isl=est_isl,
+            osl=osl,
+            est_osl=est_osl,
+            num_p=num_p,
+            p_thpt=p_thpt,
+            safe_p_thpt=safe_p_thpt,
+            num_d=num_d,
+            d_thpt=d_thpt,
+            safe_d_thpt=safe_d_thpt,
+            output_path=self.args.output_plot,
         )
-        ax3_right = ax3.twinx()
-        ax3_right.plot(
-            time, num_p, "c-", label="Prefill Workers", linewidth=2, marker="o"
-        )
-        ax3_right.set_ylabel("Number of Workers")
-        lines1, labels1 = ax3.get_legend_handles_labels()
-        lines2, labels2 = ax3_right.get_legend_handles_labels()
-        ax3.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
-        ax3.set_xlabel("Time (s)")
-        ax3.set_ylabel("Throughput (tok/adjustment_interval)")
-        ax3.set_ylim(bottom=0)
-        ax3_right.set_ylabel("Number of Workers")
-        ax3_right.set_ylim(bottom=0)
-        ax3.set_title("Prefill Load and Workers")
-        ax3.grid(True, alpha=0.3)
-
-        # Plot 4: Throughput Comparison
-        ax4.plot(time, d_thpt, "r-", label="Actual Decode Throughput", linewidth=2)
-        ax4.plot(
-            time, safe_d_thpt, "r--", label="Safe Decode Throughput Limit", linewidth=2
-        )
-        ax4_right = ax4.twinx()
-        ax4_right.plot(
-            time, num_d, "orange", label="Decode Workers", linewidth=2, marker="o"
-        )
-        ax4_right.set_ylabel("Number of Workers")
-        lines1, labels1 = ax4.get_legend_handles_labels()
-        lines2, labels2 = ax4_right.get_legend_handles_labels()
-        ax4.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
-        ax4.set_xlabel("Time (s)")
-        ax4.set_ylabel("Throughput (tok/adjustment_interval)")
-        ax4.set_ylim(bottom=0)
-        ax4_right.set_ylabel("Number of Workers")
-        ax4_right.set_ylim(bottom=0)
-        ax4.set_title("Decode Load and Workers")
-        ax4.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(self.args.output_plot, dpi=300, bbox_inches="tight")
-        plt.close()
-
-        logger.info(f"Dryrun plot saved to {self.args.output_plot}")
 
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
