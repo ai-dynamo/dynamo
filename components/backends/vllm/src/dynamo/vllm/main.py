@@ -150,8 +150,14 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             #     (temp reason): we don't support re-routing prefill requests
             #     (long-term reason): prefill engine should pull from a global queue so there is
             #                         only a few in-flight requests that can be quickly finished
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True, labels=[("model", config.model)]),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks, labels=[("model", config.model)]),
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", config.model)],
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
@@ -241,8 +247,14 @@ async def init(runtime: DistributedRuntime, config: Config):
         await asyncio.gather(
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False, labels=[("model", config.model)]),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks, labels=[("model", config.model)]),
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=False,
+                metrics_labels=[("model", config.model)],
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")

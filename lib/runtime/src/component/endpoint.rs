@@ -78,11 +78,11 @@ impl EndpointConfigBuilder {
         // acquire the registry lock
         let registry = endpoint.drt().component_registry.inner.lock().await;
 
-        let labels: Option<Vec<(&str, &str)>> = metrics_labels
+        let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
         // Add metrics to the handler. The endpoint provides additional information to the handler.
-        handler.add_metrics(&endpoint, labels.as_deref())?;
+        handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
         // get the group
         let group = registry

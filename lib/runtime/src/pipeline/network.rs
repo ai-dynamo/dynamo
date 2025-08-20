@@ -303,9 +303,9 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
-        labels: Option<&[(&str, &str)]>,
+        metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        let metrics = WorkHandlerMetrics::from_endpoint(endpoint, labels)
+        let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
         self.metrics
@@ -352,7 +352,7 @@ pub trait PushWorkHandler: Send + Sync {
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
-        labels: Option<&[(&str, &str)]>,
+        metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
 }
 

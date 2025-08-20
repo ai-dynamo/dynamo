@@ -40,12 +40,12 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self,
         component: Component,
         dp_rank: int,
-        labels: Optional[List[Tuple[str, str]]] = None,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
         # Use labels directly for the new create_endpoint signature
-        labels = labels or []
-        self.inner.create_endpoint(component, labels)
+        metrics_labels = metrics_labels or []
+        self.inner.create_endpoint(component, metrics_labels)
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
         self.request_total_slots = 1

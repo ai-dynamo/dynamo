@@ -501,24 +501,24 @@ impl WorkerMetricsPublisher {
     pub async fn create_endpoint(
         &self,
         component: Component,
-        labels: Option<&[(&str, &str)]>,
+        metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
         let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
 
         let worker_id = component
-        .drt()
-        .primary_lease()
-        .map(|lease| lease.id())
-        .unwrap_or_else(|| {
-            tracing::warn!("Component is static, assuming worker_id of 0");
-            0
-        });
+            .drt()
+            .primary_lease()
+            .map(|lease| lease.id())
+            .unwrap_or_else(|| {
+                tracing::warn!("Component is static, assuming worker_id of 0");
+                0
+            });
 
-        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id); 
+        self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
 
-        let labels = labels.map(|v| {
+        let metrics_labels = metrics_labels.map(|v| {
             v.iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<Vec<_>>()
@@ -531,7 +531,7 @@ impl WorkerMetricsPublisher {
                 let metrics = metrics_rx.borrow_and_update().clone();
                 serde_json::to_value(&*metrics).unwrap()
             })
-            .metrics_labels(labels)
+            .metrics_labels(metrics_labels)
             .handler(handler)
             .start()
             .await
