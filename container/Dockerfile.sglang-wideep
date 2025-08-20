@@ -15,7 +15,7 @@
 
 ARG SGLANG_IMAGE_TAG="v0.5.0rc2-cu126"
 
-FROM ${SGLANG_IMAGE}
+FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
 ARG MODE="hopper"
 ARG ARCH="amd64"
