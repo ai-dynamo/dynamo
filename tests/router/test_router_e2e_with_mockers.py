@@ -163,9 +163,6 @@ async def check_registration_in_etcd(expected_count: int):
     runtime = get_runtime()
     etcd = runtime.etcd_client()
 
-    # Wait a bit for registration to complete
-    await asyncio.sleep(2)
-
     # Check for kv_routers in etcd
     # The KV router registers itself with key format: kv_routers/{model_name}/{uuid}
     kv_routers = await etcd.kv_get_prefix("kv_routers/")
