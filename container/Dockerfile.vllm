@@ -200,7 +200,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         # Should be able to select how you want your build to go
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND;
+        /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND;
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\

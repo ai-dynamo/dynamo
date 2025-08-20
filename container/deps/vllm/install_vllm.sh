@@ -142,7 +142,8 @@ else
         exit 1
     fi
 
-    export VLLM_PRECOMPILED_WHEEL_LOCATION=https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    uv pip install -r requirements/build.txt
+    export VLLM_PRECOMPILED_WHEEL_LOCATION=https://vllm-wheels.s3.us-west-2.amazonaws.com/0.10.0/vllm-0.10.0-cp38-abi3-manylinux1_x86_64.whl
 
     if [ "$EDITABLE" = "true" ]; then
 	uv pip install -e . --torch-backend=$TORCH_BACKEND
