@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
+use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -180,30 +180,15 @@ impl DeltaGenerator {
         })
     }
 
-    fn create_reasoning_content(
-        &mut self,
-        text: Option<String>,
-    ) -> (Option<String>, Option<String>) {
+    fn create_reasoning_content(&mut self, text: Option<String>) -> Option<ParserResult> {
         if text.is_none() {
-            return (None, None);
+            return None;
         }
         let parser_result = self
             .reasoning_parser
             .parse_reasoning_streaming_incremental(text.as_deref().unwrap());
 
-        let reasoning_content = if parser_result.reasoning_text.is_empty() {
-            None
-        } else {
-            Some(parser_result.reasoning_text)
-        };
-
-        let normal_text = if parser_result.normal_text.is_empty() {
-            None
-        } else {
-            Some(parser_result.normal_text)
-        };
-
-        (reasoning_content, normal_text)
+        return Some(parser_result);
     }
 
     /// Creates a choice within a chat completion response.
@@ -224,7 +209,12 @@ impl DeltaGenerator {
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     ) -> NvCreateChatCompletionStreamResponse {
-        let (reasoning_content, normal_text) = self.create_reasoning_content(text);
+        let reasoning_parser_result = self.create_reasoning_content(text).unwrap_or_default();
+
+        let (normal_text, reasoning_content) = (
+            reasoning_parser_result.get_some_normal_text(),
+            reasoning_parser_result.get_some_reasoning(),
+        );
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: normal_text,
             function_call: None,

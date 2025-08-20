@@ -155,7 +155,7 @@ impl DeltaAggregator {
                             state_choice
                                 .reasoning_content
                                 .as_mut()
-                                .expect("Reason Content")
+                                .unwrap()
                                 .push_str(reasoning_content);
                         }
 

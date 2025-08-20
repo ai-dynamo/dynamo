@@ -19,6 +19,24 @@ pub struct ParserResult {
     pub reasoning_text: String,
 }
 
+impl ParserResult {
+    pub fn get_some_reasoning(&self) -> Option<String> {
+        if self.reasoning_text.is_empty() {
+            None
+        } else {
+            Some(self.reasoning_text.clone())
+        }
+    }
+
+    pub fn get_some_normal_text(&self) -> Option<String> {
+        if self.normal_text.is_empty() {
+            None
+        } else {
+            Some(self.normal_text.clone())
+        }
+    }
+}
+
 pub trait ReasoningParser: Send + std::fmt::Debug {
     /// Parses a standalone, non-streaming input chunk. Implementations may reset or ignore
     /// internal streaming state and should return the split of normal vs reasoning text for
