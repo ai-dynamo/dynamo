@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::base_parser::ReasoningParser;
 use super::base_parser::BaseReasoningParser;
 use super::base_parser::ParserResult;
+use super::base_parser::ReasoningParser;
 
 #[derive(Default)]
 pub struct DeepseekR1ReasoningParser {
