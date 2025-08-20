@@ -156,7 +156,7 @@ elif [ "$mode" = "decode" ]; then
             --deepep-mode low_latency \
             --mem-fraction-static 0.835 \
             --ep-num-redundant-experts 32 \
-            --cuda-graph-bs 256
+            --cuda-graph-bs 128
     elif [ "$cmd" = "sglang" ]; then
         # H100 sglang decode command
         python3 -m sglang.launch_server \

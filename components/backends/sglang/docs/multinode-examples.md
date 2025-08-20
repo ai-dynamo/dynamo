@@ -78,7 +78,7 @@ python3 -m dynamo.sglang \
 
 Node 4: Run the remaining 8 shards of the decode worker
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
