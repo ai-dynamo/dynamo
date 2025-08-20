@@ -15,6 +15,7 @@
 
 import matplotlib.pyplot as plt
 
+
 def create_dryrun_plot(
     time: list,
     rr: list,
@@ -33,7 +34,7 @@ def create_dryrun_plot(
 ) -> None:
     """
     Create a comprehensive dryrun plot with 4 subplots showing various metrics over time.
-    
+
     Args:
         time: List of time points
         rr: List of actual request rates
@@ -80,9 +81,7 @@ def create_dryrun_plot(
         time, safe_p_thpt, "b--", label="Safe Prefill Throughput Limit", linewidth=2
     )
     ax3_right = ax3.twinx()
-    ax3_right.plot(
-        time, num_p, "c-", label="Prefill Workers", linewidth=2, marker="o"
-    )
+    ax3_right.plot(time, num_p, "c-", label="Prefill Workers", linewidth=2, marker="o")
     ax3_right.set_ylabel("Number of Workers")
     lines1, labels1 = ax3.get_legend_handles_labels()
     lines2, labels2 = ax3_right.get_legend_handles_labels()
