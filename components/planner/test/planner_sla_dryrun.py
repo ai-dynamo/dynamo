@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     parser = create_sla_planner_parser()
+    parser.add_argument("--dataset", type=str, required=True, help="Path to the jsonl dataset file")
+    parser.add_argument("--start-num-p", type=int, default=1, help="Number of prefill workers to start with")
+    parser.add_argument("--start-num-d", type=int, default=1, help="Number of decode workers to start with")
+    parser.add_argument("--output-plot", type=str, default="dryrun_plot.png", help="Path to the output plot file")
     args = parser.parse_args()
 
-
+    planner = Planner(None, args, dryrun=True)
+    planner.dryrun_run()

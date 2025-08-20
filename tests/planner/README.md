@@ -67,23 +67,23 @@ Interpolating decode performance ...
 We provide a tool to generate load dataset with varying request rate. More details can be found in [sin_load_generator](../../benchmarks/sin_load_generator/README.md). 
 
 From previous interpolator testing, ISL 3000 and OSL 300 can handle ~30 request/s/gpu for both prefill and decode. 
-To test planner's performance for different request rates, we can generate a load dataset with request rate varying between 30 to 90 request/s.
+To test planner's performance for different request rates, we can generate a load dataset with request rate varying between 20 to 80 request/s.
 For TP1 H200 engine, planner should scale between 1P1D and 3P3D. 
 
 ```bash
 python benchmarks/sin_load_generator/sin_synth.py \
   --time-duration 1800 \
-  --request-rate-min 30 \
-  --request-rate-max 90 \
+  --request-rate-min 20 \
+  --request-rate-max 80 \
   --request-rate-period 600 \
   --isl1 3000 \
   --osl1 300 \
   --isl2 3000 \
   --osl2 300 \
-  --output-file rr-30-90_i3000o300.jsonl
+  --output-file rr-20-80_i3000o300.jsonl
 ```
 
-The dataset will start with 30 request/s, increase to 90 request/s at t=300s, decrease back to 30 request/s at t=600s, and repeat. 
+The dataset will start with 20 request/s, increase to 80 request/s at t=300s, decrease back to 20 request/s at t=600s, and repeat. 
 The total duration is 30 minutes or 1800 seconds.
 
 ## Planner Dry Run
