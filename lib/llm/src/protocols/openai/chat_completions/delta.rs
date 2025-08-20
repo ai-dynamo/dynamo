@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_parsers::{reasoning, ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{reasoning, ReasoningParserType};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -186,7 +186,8 @@ impl DeltaGenerator {
         if text.is_none() {
             return (None, None);
         }
-        let mut reasoning_parser = ReasoningParserType::get_reasoning_parser(self.reasoning_parser_type);
+        let mut reasoning_parser =
+            ReasoningParserType::get_reasoning_parser(self.reasoning_parser_type);
         let parser_result = reasoning_parser.parse_reasoning_streaming_incremental(
             text.as_deref().expect("Text should not be None"),
         );
