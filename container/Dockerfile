@@ -114,8 +114,8 @@ RUN rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
     cd /usr/local/src && \
-    git clone --depth 1 --branch $NIXL_UCX_REF https://github.com/openucx/ucx.git && \
-    cd ucx && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx && git checkout $NIXL_UCX_REF && \
     ./autogen.sh && \
     ./configure \
       --prefix=/usr/local/ucx \
