@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::component::Component;
+use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
 use crate::discovery::ModelEntry;
 
@@ -225,6 +226,20 @@ impl ModelManager {
             .lock()
             .unwrap()
             .insert(model_name.to_string(), new_kv_chooser.clone());
+
+        let etcd_client = component
+            .drt()
+            .etcd_client()
+            .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
+        let router_key = format!("kv_routers/{}/{}", model_name, uuid::Uuid::new_v4());
+        etcd_client
+            .kv_create(
+                &router_key,
+                serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?,
+                None, // use primary lease
+            )
+            .await?;
+
         Ok(new_kv_chooser)
     }
 }
