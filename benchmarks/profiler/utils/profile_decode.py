@@ -42,6 +42,13 @@ def profile_decode(
         (max_context_length - osl) // interpolation_granularity,
     ):
         max_concurrency = max_kv_tokens // (isl + osl)
+        if max_concurrency // interpolation_granularity == 0:
+            logger.warning(
+                f"max_concurrency {max_concurrency} is too small for"
+                f" interpolation granularity {interpolation_granularity}."
+                f" max_kv_tokens {max_kv_tokens}, isl {isl}, osl {osl}"
+            )
+            break
         sweep_num_request = range(
             1,
             max_concurrency,
