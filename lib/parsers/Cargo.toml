@@ -17,7 +17,7 @@
 name = "dynamo-parsers"
 version.workspace = true
 edition.workspace = true
-description = "Dynamo Parser Library for Tool Calling"
+description = "Dynamo Parser Library for Tool Calling and Reasoning"
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -26,7 +26,7 @@ keywords.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-async-openai = { workspace = true }
+dynamo-async-openai = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

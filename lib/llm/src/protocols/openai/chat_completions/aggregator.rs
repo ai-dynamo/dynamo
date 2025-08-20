@@ -23,6 +23,7 @@ use crate::protocols::{
 };
 
 use dynamo_runtime::engine::DataStream;
+use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
@@ -164,7 +165,7 @@ impl DeltaAggregator {
         for choice in aggregator.choices.values_mut() {
             if choice.tool_calls.is_none() {
                 if let Ok(tool_calls) =
-                    crate::postprocessor::tool_calling::tools::try_tool_call_parse_aggregate(
+                    try_tool_call_parse_aggregate(
                         &choice.text,
                         None,
                     )

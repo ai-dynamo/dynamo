@@ -1919,6 +1919,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-parsers",
  "dynamo-runtime",
  "either",
  "erased-serde",
@@ -1978,7 +1979,7 @@ name = "dynamo-parsers"
 version = "0.4.0+post0"
 dependencies = [
  "anyhow",
- "async-openai",
+ "dynamo-async-openai",
  "regex",
  "serde",
  "serde_json",

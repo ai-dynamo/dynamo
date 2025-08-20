@@ -48,6 +48,7 @@ dynamo-runtime = { workspace = true }
 # workspace
 anyhow = { workspace = true }
 dynamo-async-openai = { workspace = true }
+dynamo-parsers = { workspace = true}
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true }

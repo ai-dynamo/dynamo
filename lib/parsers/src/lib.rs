@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod json_parser;
-pub mod parsers;
-pub mod response;
-pub mod tools;
+pub mod tool_calling;
+pub mod reasoning;
 
-// Re-export main types and functions for convenience
-pub use response::{CalledFunction, ToolCallResponse, ToolCallType};
-pub use parsers::{detect_and_parse_tool_call, ToolCallConfig, ToolCallParserType, JsonParserConfig};
-pub use json_parser::{try_tool_call_parse_json, CalledFunctionParameters, CalledFunctionArguments};
-pub use tools::{try_tool_call_parse_aggregate, try_tool_call_parse_stream};
+// Re-export everything from tool_calling for convenience
+pub use tool_calling::*;
+pub use reasoning::*;
