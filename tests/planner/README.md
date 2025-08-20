@@ -83,9 +83,8 @@ python benchmarks/sin_load_generator/sin_synth.py \
   --output-file rr-20-80_i3000o300.jsonl
 ```
 
-The dataset will start with 20 request/s, increase to 80 request/s at t=300s, decrease back to 20 request/s at t=600s, and repeat.
+The dataset starts at 20 requests/s, increases to 80 requests/s at t=300s, decreases back to 20 requests/s at t=600s, and repeats.
 The total duration is 30 minutes or 1800 seconds.
-
 ## Planner Dry Run
 
 Before testing SLA planner on real deployments, we provide a dry run feature to test the autoscaling behavior on a given dataset. Specifically, in dry run mode,
