@@ -261,7 +261,7 @@ def setup_head_prefill_node(prefill_host_ip: str) -> None:
 
     logging.info(f"Starting ingress server on node {prefill_host_ip}")
     ingress_process = run_command(
-        "dynamo run in=http out=dyn --http-port=8000", background=True
+        "python3 -m dynamo.frontend --http-port=8000", background=True
     )
     if not ingress_process:
         raise RuntimeError("Failed to start ingress")
