@@ -81,19 +81,19 @@ WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE} --master_ip
 for worker_idx in $(seq 0 $((PREFILL_WORKERS - 1))); do
     leader_idx=${prefill_leaders[$worker_idx]}
     leader_node=${nodes[$leader_idx]}
-    
+
     # Get leader IP for this worker group
     LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
     echo "Prefill worker $worker_idx leader: $leader_node ($LEADER_IP)"
-    
+
     # Launch all nodes for this worker
     for node_idx in $(seq 0 $((PREFILL_NODES_PER_WORKER - 1))); do
         global_node_idx=$((leader_idx + node_idx))
         node=${nodes[$global_node_idx]}
         local_rank=$node_idx
-        
+
         echo "Launching prefill worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
-        
+
         cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill_w${worker_idx}.out --error=${LOG_DIR}/${node}_prefill_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${PREFILL_NODES_PER_WORKER} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
         echo "$cmd"
         $cmd &
@@ -104,19 +104,19 @@ done
 for worker_idx in $(seq 0 $((DECODE_WORKERS - 1))); do
     leader_idx=${decode_leaders[$worker_idx]}
     leader_node=${nodes[$leader_idx]}
-    
+
     # Get leader IP for this worker group
     LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
     echo "Decode worker $worker_idx leader: $leader_node ($LEADER_IP)"
-    
+
     # Launch all nodes for this worker
     for node_idx in $(seq 0 $((DECODE_NODES_PER_WORKER - 1))); do
         global_node_idx=$((leader_idx + node_idx))
         node=${nodes[$global_node_idx]}
         local_rank=$node_idx
-        
+
         echo "Launching decode worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
-        
+
         cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode_w${worker_idx}.out --error=${LOG_DIR}/${node}_decode_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${DECODE_NODES_PER_WORKER} --worker_type decode --gpu_utilization_log /logs/${node}_decode_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
         echo "$cmd"
         $cmd &
