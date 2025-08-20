@@ -66,20 +66,21 @@ impl WorkerMetricsPublisher {
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // Convert Python labels to Option<&[(&str, &str)]> expected by Rust API
-            let metrics_labels_ref: Option<Vec<(&str, &str)>> = if let Some(metrics_labels) = metrics_labels.as_ref() {
-                if metrics_labels.is_empty() {
-                    None
+            let metrics_labels_ref: Option<Vec<(&str, &str)>> =
+                if let Some(metrics_labels) = metrics_labels.as_ref() {
+                    if metrics_labels.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            metrics_labels
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.as_str()))
+                                .collect(),
+                        )
+                    }
                 } else {
-                    Some(
-                        metrics_labels
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.as_str()))
-                            .collect(),
-                    )
-                }
-            } else {
-                None
-            };
+                    None
+                };
 
             rs_publisher
                 .create_endpoint(rs_component, metrics_labels_ref.as_deref())
