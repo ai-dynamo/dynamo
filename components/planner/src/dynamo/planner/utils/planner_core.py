@@ -129,7 +129,7 @@ class Planner:
     async def get_workers_info(self):
         if self.runtime is None:
             raise RuntimeError("Runtime is not initialized")
-        
+
         try:
             if self.prefill_client is None:
                 self.prefill_client = (
