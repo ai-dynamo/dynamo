@@ -211,7 +211,28 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --expert-parallel-size 4
 ```
 
-### 6. Test the Deployment
+### 6. Verify the Deployment is Ready
+
+Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
+```
+curl http://localhost:8000/health
+```
+
+Make sure that both of the endpoints are available before sending an inference request:
+```
+{
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm_next.generate"
+  ],
+  "status": "healthy"
+}
+```
+
+If only one is listed, the other one may still be starting up. You can watch the
+worker logs to see the progress of worker startup.
+
+### 7. Test the Deployment
 
 Send a test request to verify the deployment:
 
