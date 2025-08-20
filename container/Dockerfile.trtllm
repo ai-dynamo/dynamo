@@ -402,18 +402,18 @@ COPY --from=build /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv venv $VIRTUAL_ENV --python 3.12 && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+# RUN uv venv $VIRTUAL_ENV --python 3.12 && \
+#     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
 # TODO: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+    uv pip install --system --break-system-packages --requirement /tmp/requirements.txt
 
 # Install test dependencies
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+    uv pip install --system --break-system-packages --requirement /tmp/requirements.txt
 
 # Copy CUDA toolkit components needed for nvcc, cudafe, cicc etc.
 COPY --from=build /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
@@ -478,19 +478,22 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 # NOTE: locking cuda-python version to <13 to avoid breaks with tensorrt-llm 1.0.0rc4. This
 #       can be removed after https://github.com/NVIDIA/TensorRT-LLM/pull/6703 is merged
 #       we upgrade to a published pip wheel containing this change.
-RUN uv pip install "cuda-python>=12,<13" && \
-    uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
+RUN uv pip install --system --break-system-packages "cuda-python>=12,<13" && \
+    uv pip install --system --break-system-packages --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
     if [ "$ARCH" = "amd64" ]; then \
-        pip install "triton==3.3.1"; \
+        uv pip install --system --break-system-packages "triton==3.3.1"; \
     fi; \
-    uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl /workspace/wheelhouse/ai_dynamo*any.whl /workspace/wheelhouse/nixl*.whl
+    uv pip install --system --break-system-packages \
+        /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+        /workspace/wheelhouse/ai_dynamo*any.whl \
+        /workspace/wheelhouse/nixl*.whl
 
 # Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
 COPY components/backends/trtllm /workspace/components/backends/trtllm
-RUN uv pip install /workspace/benchmarks
+RUN uv pip install --system --break-system-packages /workspace/benchmarks
 
 # Copy files for legal compliance
 COPY ATTRIBUTION* LICENSE /workspace/
