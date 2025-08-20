@@ -45,6 +45,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let api = ApiBuilder::new()
         .with_progress(true)
         .with_token(token)
+        .high()
         .build()?;
     let model_name = name.display().to_string();
 
