@@ -17,7 +17,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.4.0+post0"
+version = "0.4.1"
 edition = "2021"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -28,10 +28,10 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.4.0" }
-dynamo-llm = { path = "lib/llm", version = "0.4.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.4.0" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.4.0", features = ["byot", "rustls"]}
+dynamo-runtime = { path = "lib/runtime", version = "0.4.1" }
+dynamo-llm = { path = "lib/llm", version = "0.4.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.4.1" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.4.1", features = ["byot", "rustls"]}
 
 # External dependencies
 anyhow = { version = "1" }

@@ -58,17 +58,17 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version**   | glibc version                        | CUDA Version |
 | :----------------- | :------------ | :----------------------------------- | :----------- |
-| ai-dynamo          | 0.4.0         | >=2.28                               |              |
-| ai-dynamo-runtime  | 0.4.0         | >=2.28 (Python 3.12 has known issues)|              |
-| NIXL               | 0.5.0         | >=2.27                               | >=11.8       |
+| ai-dynamo          | 0.4.1         | >=2.28                               |              |
+| ai-dynamo-runtime  | 0.4.1         | >=2.28 (Python 3.12 has known issues)|              |
+| NIXL               | 0.4.1         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
 
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
-| **TensorRT-LLM**     | 1.0.0rc²                                                                         |
-| **NIXL**             | 0.4.0                                                                            |
+| **TensorRT-LLM**     | 1.0.0rc4                                                                         |
+| **NIXL**             | 0.4.1                                                                            |
 
 > [!Important]
 > ² Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
