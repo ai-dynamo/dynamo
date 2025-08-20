@@ -84,7 +84,7 @@ impl OAIChatPreprocessor {
             .await
             .map_err(to_pyerr)?;
             network.attach(Arc::new(router)).map_err(to_pyerr)?;
-            builder.start(None).await.map_err(to_pyerr)?;
+            builder.start().await.map_err(to_pyerr)?;
             Ok(())
         })
     }

@@ -502,15 +502,12 @@ impl Endpoint {
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self.inner.endpoint_builder().handler(ingress);
+        let builder = self.inner.endpoint_builder().metrics_labels(labels).handler(ingress);
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let labels_ref: Option<Vec<(&str, &str)>> = labels.as_ref().map(|v| {
-                v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
-            });
             builder
                 .graceful_shutdown(graceful_shutdown)
-                .start(labels_ref.as_deref())
+                .start()
                 .await
                 .map_err(to_pyerr)?;
             Ok(())

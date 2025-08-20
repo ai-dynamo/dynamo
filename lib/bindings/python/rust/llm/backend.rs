@@ -67,7 +67,7 @@ impl Backend {
         let ingress = Ingress::for_engine(pipeline).map_err(to_pyerr)?;
         let builder = self.endpoint.inner.endpoint_builder().handler(ingress);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            builder.start(None).await.map_err(to_pyerr)?;
+            builder.start().await.map_err(to_pyerr)?;
             Ok(())
         })
     }

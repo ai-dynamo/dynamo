@@ -77,7 +77,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .endpoint("generate")
         .endpoint_builder()
         .handler(router)
-        .start(None)
+        .start()
         .await
 }
 

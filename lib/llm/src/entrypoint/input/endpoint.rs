@@ -57,10 +57,7 @@ pub async fn run(
             if !is_static {
                 model.attach(&endpoint, ModelType::Chat).await?;
             }
-            let fut_chat = endpoint
-                .endpoint_builder()
-                .handler(ingress_chat)
-                .start(None);
+            let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
             (Box::pin(fut_chat), Some(model.card().clone()))
         }
@@ -88,7 +85,7 @@ pub async fn run(
             if !is_static {
                 model.attach(&endpoint, ModelType::Backend).await?;
             }
-            let fut = endpoint.endpoint_builder().handler(ingress).start(None);
+            let fut = endpoint.endpoint_builder().handler(ingress).start();
 
             (Box::pin(fut), Some(model.card().clone()))
         }

@@ -1496,7 +1496,7 @@ mod test_metricsregistry_nats {
         let _backend_handle = tokio::spawn(async move {
             let service = component.service_builder().create().await.unwrap();
             let endpoint = service.endpoint("echo").endpoint_builder().handler(ingress);
-            endpoint.start(None).await.unwrap();
+            endpoint.start().await.unwrap();
         });
 
         sleep(Duration::from_millis(500)).await;
