@@ -26,9 +26,10 @@ System info (hostname: jensen-linux):
       ├─ Release: $HOME/dynamo/.build/target/release (modified: 2025-08-14 15:38:39 PDT)
       └─ Binary:  $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so (modified: 2025-08-14 16:45:31 PDT)
 ├─ Maturin (/opt/dynamo/venv/bin/maturin, maturin 1.9.3)
-├─ Python: 3.12.3 (/opt/dynamo/venv/bin/python3); PYTHONPATH=:/home/ubuntu/dynamo/components/planner/src:
-   └─ Torch: 2.7.1+cu126 (✅torch.cuda.is_available())
-└─ Dynamo ($HOME/dynamo):
+├─ Python: 3.12.3 (/opt/dynamo/venv/bin/python3)
+   ├─ Torch: 2.7.1+cu126 (✅torch.cuda.is_available())
+   └─ PYTHONPATH: /home/ubuntu/dynamo/components/planner/src
+└─ Dynamo ($HOME/dynamo, SHA: b0d4499f2a8c, Date: 2025-08-18 11:55:00 PDT):
    └─ Runtime components (ai-dynamo-runtime 0.4.0):
       ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.0.dist-info (created: 2025-08-14 16:47:15 PDT)
       ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth (modified: 2025-08-14 16:47:15 PDT)
@@ -521,6 +522,51 @@ class DynamoChecker:
 
         return target_directory, cargo_home
 
+    def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
+        """Get git commit SHA and date for the workspace.
+
+        Args:
+            workspace_dir: Path to the workspace directory
+
+        Returns:
+            Tuple of (short_sha, commit_date) or (None, None) if not a git repo
+            Example: ('a1b2c3d4e5f6', '2025-08-14 16:45:31 PDT')
+        """
+        if not workspace_dir or not os.path.exists(workspace_dir):
+            return None, None
+
+        try:
+            # Get the longer SHA (12 characters)
+            sha_result = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                cwd=workspace_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if sha_result.returncode != 0:
+                return None, None
+            short_sha = sha_result.stdout.strip()
+
+            # Get the commit timestamp
+            date_result = subprocess.run(
+                ["git", "show", "-s", "--format=%ct", "HEAD"],
+                cwd=workspace_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if date_result.returncode != 0:
+                return None, None
+
+            # Convert timestamp to PST/PDT
+            timestamp = int(date_result.stdout.strip())
+            commit_date = self._format_timestamp_pdt(timestamp)
+
+            return short_sha, commit_date
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            return None, None
+
     def _print_system_info(self) -> bool:
         """Print concise system information as a top-level section.
 
@@ -531,6 +577,8 @@ class DynamoChecker:
         ├─ Cargo: ...
         ├─ Maturin: ...
         └─ Python: ...
+           ├─ Torch: ...
+           └─ PYTHONPATH: ...
         """
         # OS info
         distro = ""
@@ -608,7 +656,7 @@ class DynamoChecker:
         py_exec = sys.executable or "python"
         py_path_env = os.environ.get("PYTHONPATH")
         py_path_str = py_path_env if py_path_env else "unset"
-        python_line = f"Python: {py_ver} ({py_exec}); PYTHONPATH={py_path_str}"
+        python_line = f"Python: {py_ver} ({py_exec})"
         if not os.path.exists(py_exec):
             python_line = "❌ Python: not found"
 
@@ -803,7 +851,8 @@ class DynamoChecker:
         # Determine if more top-level entries come after Python
         more_after_python = bool(has_cargo)
         print(f"{'├─' if more_after_python else '└─'} {python_line}")
-        # Torch version as a child under Python
+
+        # Torch version as a child under Python (before PYTHONPATH)
         if torch_version:
             cuda_status = ""
             if torch_cuda_available is not None:
@@ -812,10 +861,13 @@ class DynamoChecker:
                     if torch_cuda_available
                     else " (❌torch.cuda.is_available())"
                 )
-            print("   └─ Torch: " + str(torch_version) + cuda_status)
+            print("   ├─ Torch: " + str(torch_version) + cuda_status)
         else:
             # Show as a child under Python
-            print("   └─ ❌ Torch: not installed")
+            print("   ├─ ❌ Torch: not installed")
+
+        # PYTHONPATH as the last child under Python
+        print(f"   └─ PYTHONPATH: {py_path_str}")
         # Determine if any errors were printed in system info
         system_errors_found = False
         if isinstance(python_line, str) and python_line.startswith("❌"):
@@ -1283,7 +1335,13 @@ class DynamoChecker:
         ):
             workspace_path = os.path.abspath(self.workspace_dir)
             display_workspace = self._replace_home_with_var(workspace_path)
-            print(f"└─ Dynamo ({display_workspace}):")
+
+            # Get git info
+            sha, date = self._get_git_info(self.workspace_dir)
+            if sha and date:
+                print(f"└─ Dynamo ({display_workspace}, SHA: {sha}, Date: {date}):")
+            else:
+                print(f"└─ Dynamo ({display_workspace}):")
             # Backend components directory warning after the Dynamo line
             backend_path = f"{self.workspace_dir}/components/backends"
             if not os.path.exists(backend_path):
@@ -1301,7 +1359,16 @@ class DynamoChecker:
             elif self.workspace_dir and not self._is_dynamo_workspace(
                 self.workspace_dir
             ):
-                print(f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}):")
+                # Still try to get git info even if it's not a valid workspace
+                sha, date = self._get_git_info(self.workspace_dir)
+                if sha and date:
+                    print(
+                        f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}, SHA: {sha}, Date: {date}):"
+                    )
+                else:
+                    print(
+                        f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}):"
+                    )
                 print("   ❌ Invalid dynamo workspace (missing expected files)")
             else:
                 print("└─ Dynamo (workspace not found):")
