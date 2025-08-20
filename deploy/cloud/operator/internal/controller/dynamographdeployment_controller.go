@@ -180,7 +180,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
 	}
 	if hasMultinode && !r.Config.LWS.Enabled {
-		return FailedState, "NoOrchestratorAvailable", "Multinode requires LWS when Grove is disabled or unavailable", fmt.Errorf("no multinode orchestrator available")
+		return "", "", "", fmt.Errorf("no multinode orchestrator available")
 	}
 	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
 
@@ -285,7 +285,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	// Handle Grove scaling operations after structural changes
 	if err := r.reconcileGroveScaling(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return FailedState, "grove_scaling_failed", Message(err.Error()), err
+		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	resources := []Resource{groveGangSetAsResource}

@@ -155,7 +155,6 @@ func main() {
 		"The name of the ingress controller TLS secret to use")
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
-	// LWS enable flag removed; LWS will be auto-detected
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
 		"The termination delay for Grove PodGangSets")
 	opts := zap.Options{
