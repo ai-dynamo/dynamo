@@ -16,7 +16,7 @@ Usage:
     dynamo_check.py --help                 # Show help
 
 Outputs:
-System info:
+System info (hostname: jensen-linux):
 ├─ OS: Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64); Memory: 30.9/125.5 GiB; Cores: 32
 ├─ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation (driver 570.133.07, CUDA 12.8); Power: 28.20/300.00 W; Memory: 2/49140 MiB
 ├─ Cargo (/usr/local/cargo/bin/cargo, cargo 1.87.0 (99624be96 2025-05-06))
@@ -525,7 +525,7 @@ class DynamoChecker:
         """Print concise system information as a top-level section.
 
         Tree structure:
-        System info:
+        System info (hostname: ...):
         ├─ OS: ...
         ├─ NVIDIA GPU: ...
         ├─ Cargo: ...
@@ -650,7 +650,8 @@ class DynamoChecker:
         has_cargo = bool(cargo_path or cargo_home or cargo_target)
 
         # Build system info output
-        system_output = ["System info:", f"├─ {linux_line}"]
+        hostname = platform.node()
+        system_output = [f"System info (hostname: {hostname}):", f"├─ {linux_line}"]
 
         # Add GPU lines - handle single or multiple GPUs
         if len(gpu_lines) == 1:
