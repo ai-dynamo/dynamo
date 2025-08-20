@@ -21,6 +21,7 @@ logger.addHandler(console_handler)
 def profile_decode(
     work_dir,
     model_name,
+    tokenizer,
     url,
     num_gpus,
     max_kv_tokens,
@@ -54,6 +55,7 @@ def profile_decode(
                 num_request,
                 genai_perf_artifact_dir,
                 model_name,
+                tokenizer,
                 base_url=url,
             )
             if gap_result is not None:

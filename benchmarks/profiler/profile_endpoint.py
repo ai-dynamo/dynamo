@@ -36,6 +36,13 @@ if __name__ == "__main__":
         help="model name",
     )
     parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        required=False,
+        default="",
+        help="tokenizer path",
+    )
+    parser.add_argument(
         "--url",
         type=str,
         required=True,
@@ -75,10 +82,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     os.makedirs(args.work_dir, exist_ok=True)
+    if args.tokenizer_path == "":
+        args.tokenizer_path = args.model_name
     if args.mode == "prefill":
         profile_prefill(
             args.work_dir,
             args.model_name,
+            args.tokenizer_path,
             args.url,
             args.num_gpus,
             args.max_context_length,
@@ -89,6 +99,7 @@ if __name__ == "__main__":
         profile_decode(
             args.work_dir,
             args.model_name,
+            args.tokenizer_path,
             args.url,
             args.num_gpus,
             args.max_kv_tokens,
