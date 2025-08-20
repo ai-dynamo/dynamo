@@ -201,7 +201,10 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 ### Install prerequisites
 ```
 # Optional step: Only required for Blackwell and Grace Hopper
-pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# Required until the trtllm version is bumped to include this pinned dependency itself
+uv pip install "cuda-python>=12,<13"
 
 sudo apt-get -y install libopenmpi-dev
 ```
