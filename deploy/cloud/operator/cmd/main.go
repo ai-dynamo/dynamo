@@ -129,7 +129,6 @@ func main() {
 	var ingressControllerClassName string
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
-	var enableLWS bool
 	var groveTerminationDelay time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -156,8 +155,6 @@ func main() {
 		"The name of the ingress controller TLS secret to use")
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
-	flag.BoolVar(&enableLWS, "enable-lws", false,
-		"If set, enable leader worker set")
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
 		"The termination delay for Grove PodGangSets")
 	opts := zap.Options{
@@ -168,10 +165,12 @@ func main() {
 
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
-		EnableLWS:           enableLWS,
 		Grove: commonController.GroveConfig{
 			Enabled:          false, // Will be set after Grove discovery
 			TerminationDelay: groveTerminationDelay,
+		},
+		LWS: commonController.LWSConfig{
+			Enabled: false, // Will be set after LWS discovery
 		},
 		EtcdAddress: etcdAddr,
 		NatsAddress: natsAddr,
@@ -240,10 +239,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Detect Grove availability using discovery client
+	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")
 	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
 	ctrlConfig.Grove.Enabled = groveEnabled
+	setupLog.Info("Detecting LWS availability...")
+	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
+	ctrlConfig.LWS.Enabled = lwsEnabled
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{

@@ -425,7 +425,6 @@ rules:
   - patch
   - update
   - watch
-{{- if .Values.dynamo.enableLWS }}
 - apiGroups:
   - leaderworkerset.x-k8s.io
   resources:
@@ -450,7 +449,6 @@ rules:
   - patch
   - update
   - watch
-{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}

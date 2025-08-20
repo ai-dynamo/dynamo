@@ -82,7 +82,6 @@ dynamo:
     serviceAccount:
       annotations: {}
 
-  enableLWS: false
   groveTerminationDelay: 15m
 
   internalImages:
