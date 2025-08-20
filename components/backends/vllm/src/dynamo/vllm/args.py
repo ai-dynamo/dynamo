@@ -5,8 +5,7 @@
 import logging
 import os
 import sys
-from enum import Enum
-from typing import NamedTuple, Optional
+from typing import Optional
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
@@ -31,6 +30,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
+VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
+
 # Global LMCache configuration - initialize once on module import
 ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
 
@@ -54,8 +55,8 @@ class Config:
     # rest vLLM args
     engine_args: AsyncEngineArgs
 
-    # Decision for KV transfer configuration
-    kv_transfer_decision: Optional["KVTransferDecision"] = None
+    # Connector list from CLI
+    connector_list: Optional[list] = None
 
 
 def parse_args() -> Config:
@@ -95,9 +96,11 @@ def parse_args() -> Config:
         help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MAX}). Must be in registered ports range (1024-49151).",
     )
     parser.add_argument(
-        "--no-kv-transfer-config",
-        action="store_true",
-        help="Disable Dynamo's kv_transfer_config defaults. vLLM will use its own defaults instead.",
+        "--connector",
+        nargs="*",
+        default=["nixl"],
+        help="List of connectors to use (e.g., --connector nixl lmcache). "
+        "Options: nixl, lmcache, kvbm, null, none. Default: nixl",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -149,10 +152,35 @@ def parse_args() -> Config:
         min=args.dynamo_port_min, max=args.dynamo_port_max
     )
 
-    # Build KV decision based on CLI flag and engine args
-    config.kv_decision = compute_kv_transfer_decision(
-        args.no_kv_transfer_config, bool(args.kv_transfer_config), config
+    # Check for conflicting flags
+    has_kv_transfer_config = (
+        hasattr(engine_args, "kv_transfer_config")
+        and engine_args.kv_transfer_config is not None
     )
+    has_connector_flag = args.connector is not None
+
+    if has_kv_transfer_config and has_connector_flag:
+        raise ValueError(
+            "Cannot specify both --kv-transfer-config and --connector flags"
+        )
+
+    if has_connector_flag:
+        normalized = [c.lower() for c in args.connector]
+
+        invalid = [c for c in normalized if c not in VALID_CONNECTORS]
+        if invalid:
+            raise ValueError(
+                f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+            )
+
+        if "none" in normalized or "null" in normalized:
+            if len(normalized) > 1:
+                raise ValueError(
+                    "'none' and 'null' cannot be combined with other connectors"
+                )
+            config.connector_list = []
+        else:
+            config.connector_list = normalized
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -182,11 +210,15 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         config.kv_port = kv_port
         logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
-    # Allocate side channel ports
-    # https://github.com/vllm-project/vllm/blob/releases/v0.10.1/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L443
-    # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
-    # For dp_rank, we need to reserve tp_size consecutive ports
-    tp_size = config.engine_args.tensor_parallel_size or 1
+        # Check if NIXL is needed based on connector list
+    needs_nixl = config.connector_list and "nixl" in config.connector_list
+
+    if needs_nixl:
+        # Allocate side channel ports
+        # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L372
+        # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
+        # For dp_rank, we need to reserve tp_size consecutive ports
+        tp_size = config.engine_args.tensor_parallel_size or 1
 
         # The first port for this dp_rank will be at: base_port + (dp_rank * tp_size)
         # We need to allocate tp_size consecutive ports starting from there
@@ -222,84 +254,75 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         set_side_channel_host_and_port(base_side_channel_port)
 
 
-class KVDecisionReason(str, Enum):
-    DISABLED = "disabled"
-    USER = "user"
-    DEFAULT = "default"
+def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
+    """Create KVTransferConfig based on user config or connector list.
 
-
-class KVTransferDecision(NamedTuple):
-    kv_transfer_config: Optional[KVTransferConfig]
-    reason: KVDecisionReason
-    kind: Optional[str]
-    is_nixl: bool = False
-
-
-def compute_kv_transfer_decision(
-    no_kv_transfer_config: bool, usr_kv_transfer_config: bool, config: Config
-) -> KVTransferDecision:
-    """Decide how to set kv_transfer_config.
-
-    - If disabled via flag, return (None, 'disabled', None)
-    - If user supplied a config, return (None, 'user', None)
-    - Else return (default_cfg, 'default', kind)
+    Handles logging and returns the appropriate config or None.
     """
-    if no_kv_transfer_config:
-        return KVTransferDecision(None, KVDecisionReason.DISABLED, None)
+    has_user_kv_config = (
+        hasattr(config.engine_args, "kv_transfer_config")
+        and config.engine_args.kv_transfer_config is not None
+    )
 
-    if usr_kv_transfer_config:
-        return KVTransferDecision(None, KVDecisionReason.USER, None)
+    if has_user_kv_config:
+        logger.info("Using user-provided kv_transfer_config from --kv-transfer-config")
+        return None  # Let vLLM use the user's config
 
-    if ENABLE_LMCACHE:
-        if config.is_prefill_worker:
-            kv_transfer_config = KVTransferConfig(
-                kv_connector="MultiConnector",
-                kv_role="kv_both",
-                kv_connector_extra_config={
-                    "connectors": [
-                        {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"},
-                        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
-                    ]
-                },
-            )
-            return KVTransferDecision(
-                kv_transfer_config,
-                KVDecisionReason.DEFAULT,
-                "MultiConnector (LMCacheConnectorV1 + NixlConnector)",
-                True,
-            )
-        else:
-            kv_transfer_config = KVTransferConfig(
+    # No connector list or empty list means no config
+    if not config.connector_list:
+        logger.info("Using vLLM defaults for kv_transfer_config")
+        return None
+
+    logger.info(f"Creating kv_transfer_config from --connector {config.connector_list}")
+
+    # Check which connectors are present
+    has_nixl = "nixl" in config.connector_list
+    has_lmcache = "lmcache" in config.connector_list
+    has_kvbm = "kvbm" in config.connector_list
+
+    # Single connector case
+    if len(config.connector_list) == 1:
+        if has_nixl:
+            return KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
+        elif has_lmcache:
+            return KVTransferConfig(
                 kv_connector="LMCacheConnectorV1", kv_role="kv_both"
             )
-            return KVTransferDecision(
-                kv_transfer_config, KVDecisionReason.DEFAULT, "LMCacheConnectorV1"
+        elif has_kvbm:
+            return KVTransferConfig(
+                kv_connector="DynamoConnector",
+                kv_connector_module_path="dynamo.llm.vllm_integration.connector",
+                kv_role="kv_both",
             )
+    # Multiple connectors - use MultiConnector
     else:
-        kv_transfer_config = KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
-        )
-        return KVTransferDecision(
-            kv_transfer_config, KVDecisionReason.DEFAULT, "NixlConnector", True
+        multi_connectors = []
+        if has_lmcache:
+            multi_connectors.append(
+                {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+            )
+        if has_nixl:
+            multi_connectors.append(
+                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+            )
+        if has_kvbm:
+            multi_connectors.append(
+                {
+                    "kv_connector": "DynamoConnector",
+                    "kv_connector_module_path": "dynamo.llm.vllm_integration.connector",
+                    "kv_role": "kv_both",
+                }
+            )
+
+        return KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": multi_connectors},
         )
 
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
-    dp_rank = config.engine_args.data_parallel_rank or 0
-    decision = config.kv_decision
-
-    if decision.reason == KVDecisionReason.DISABLED:
-        logger.info(
-            "kv_transfer_config disabled via --no-kv-transfer-config; vLLM will use its own defaults."
-        )
-    elif decision.reason == KVDecisionReason.USER:
-        logger.info("User-provided kv_transfer_config; skipping Dynamo defaults.")
-    else:
-        logger.info(
-            "Applying Dynamo default kv_transfer_config: %s. To customize, pass --kv-transfer-config '<JSON>' or --no-kv-transfer-config.",
-            decision.kind,
-        )
     defaults = {
         "task": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
@@ -312,12 +335,12 @@ def overwrite_args(config):
         "disable_log_stats": False,
     }
 
-    # Only set kv_transfer_config if we computed a default (non-None)
-    if decision.kv_transfer_config is not None:
-        defaults["kv_transfer_config"] = decision.kv_transfer_config
+    kv_config = create_kv_transfer_config(config)
+    if kv_config:
+        defaults["kv_transfer_config"] = kv_config
 
     if config.engine_args.enable_prefix_caching:
-        # If caching, send events
+        dp_rank = config.engine_args.data_parallel_rank or 0
         defaults |= {
             # Always setting up kv events if enable prefix cache.
             "kv_events_config": KVEventsConfig(
