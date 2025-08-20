@@ -149,13 +149,9 @@ impl DeltaAggregator {
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
-                            if state_choice.reasoning_content.is_none() {
-                                state_choice.reasoning_content = Some("".to_string());
-                            }
                             state_choice
                                 .reasoning_content
-                                .as_mut()
-                                .unwrap()
+                                .get_or_insert_with(String::new)
                                 .push_str(reasoning_content);
                         }
 
