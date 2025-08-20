@@ -119,6 +119,11 @@ NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
 
 NO_CACHE=""
 
+# sccache configuration for S3
+USE_SCCACHE=""
+SCCACHE_BUCKET=""
+SCCACHE_REGION=""
+
 get_options() {
     while :; do
         case $1 in
@@ -280,9 +285,25 @@ get_options() {
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
-        --)
-            shift
-            break
+        --use-sccache)
+            USE_SCCACHE=true
+            ;;
+        --sccache-bucket)
+            if [ "$2" ]; then
+                SCCACHE_BUCKET=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+
+        --sccache-region)
+            if [ "$2" ]; then
+                SCCACHE_REGION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
             ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
@@ -343,6 +364,19 @@ get_options() {
     else
         TARGET_STR="--target dev"
     fi
+
+    # Validate sccache configuration
+    if [ "$USE_SCCACHE" = true ]; then
+        if [ -z "$SCCACHE_BUCKET" ]; then
+            error "ERROR: --sccache-bucket is required when --use-sccache is specified"
+        fi
+        if [ -z "$SCCACHE_REGION" ]; then
+            error "ERROR: --sccache-region is required when --use-sccache is specified"
+        fi
+        if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            error "ERROR: AWS credentials (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) must be set when using --use-sccache"
+        fi
+    fi
 }
 
 
@@ -358,6 +392,15 @@ show_image_options() {
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
+    if [ "$USE_SCCACHE" = true ]; then
+        echo "   sccache: Enabled"
+        echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
+        echo "   sccache Region: '${SCCACHE_REGION}'"
+
+        if [ -n "$SCCACHE_S3_KEY_PREFIX" ]; then
+            echo "   sccache S3 Key Prefix: '${SCCACHE_S3_KEY_PREFIX}'"
+        fi
+    fi
     echo ""
 }
 
@@ -383,6 +426,13 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
+    echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
+    echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
+    echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo ""
+    echo "  Note: When using --use-sccache, AWS credentials must be set:"
+    echo "        export AWS_ACCESS_KEY_ID=your_access_key"
+    echo "        export AWS_SECRET_ACCESS_KEY=your_secret_key"
     exit 0
 }
 
@@ -566,6 +616,21 @@ fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# Add sccache build arguments
+if [ "$USE_SCCACHE" = true ]; then
+    BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
+    BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
+    BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
+
+    # Pass AWS credentials
+    if [ -n "${AWS_ACCESS_KEY_ID}" ]; then
+        BUILD_ARGS+=" --build-arg AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+    fi
+    if [ -n "${AWS_SECRET_ACCESS_KEY}" ]; then
+        BUILD_ARGS+=" --build-arg AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+    fi
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
