@@ -62,6 +62,8 @@ pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 pub const PREFILL_SUBJECT: &str = "prefill_events";
 pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 
+// for returning the tokens when the routing is short circuited to just return the worker-instance-id
+
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
     fn select_worker(
@@ -363,6 +365,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();
+                let tokens: Vec<u32> = request.token_ids.clone();
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
@@ -375,7 +378,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let instance_id_str = instance_id.to_string();
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
-                    let stream = stream::iter(vec![response]);
+
+                    // Return the tokens in nvext.token_data format
+                    let tokens_json = serde_json::to_string(&tokens)?;
+                    let response_tokens = Annotated::from_annotation("token_data", &tokens_json)?;
+                    let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
 
