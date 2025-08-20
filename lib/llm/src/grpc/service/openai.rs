@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashSet,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    collections::HashSet, pin::Pin, sync::Arc, time::{SystemTime, UNIX_EPOCH}
 };
 
 use anyhow::Error;
+use async_openai::types::CreateCompletionResponse;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -20,8 +19,7 @@ use axum::{
 };
 use chrono::format::format;
 use dynamo_runtime::{
-    pipeline::{AsyncEngineContextProvider, Context},
-    protocols::annotated::AnnotationsProvider,
+    engine::AsyncEngineStream, pipeline::{AsyncEngineContextProvider, Context}, protocols::annotated::AnnotationsProvider
 };
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -170,6 +168,78 @@ pub async fn model_infer_completions(
         connection_handle.disarm();
         return Ok(response);
     }
+}
+
+pub async fn completion_response_stream(
+    state: Arc<kserve::State>,
+    request: NvCreateCompletionRequest,
+) -> Result<Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateCompletionResponse>>>>, Status> {
+    // create the context for the request
+    // [WIP] from request id.
+    let request_id = get_or_create_request_id(request.inner.user.as_deref());
+    let request = Context::with_id(request, request_id.clone());
+    let context = request.context();
+
+    let streaming = request.inner.stream.unwrap_or(false);
+
+    // create the connection handles
+    let (mut connection_handle, _) = create_connection_monitor(context.clone()).await;
+
+    // update the request to always stream
+    let request = request.map(|mut req| {
+        req.inner.stream = Some(true);
+        req
+    });
+
+    // todo - make the protocols be optional for model name
+    // todo - when optional, if none, apply a default
+    let model = &request.inner.model;
+
+    // todo - error handling should be more robust
+    let engine = state
+        .manager()
+        .get_completions_engine(model)
+        .map_err(|_| Status::not_found("model not found"))?;
+
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Completions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
+
+    // prepare to process any annotations
+    let annotations = request.annotations();
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to generate completions: {}", e)))?;
+
+    // capture the context to cancel the stream if the client disconnects
+    let ctx = stream.context();
+
+    inflight_guard.mark_ok();
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
+
+    Ok(stream)
+
+    // Replace with your actual logic
+    // Ok(stream::iter(vec![
+    //     NvCreateCompletionResponse { inner: CreateCompletionResponse {
+    //         id: "response_id".into(),
+    //         object: "text_completion".into(),
+    //         created: 1234567890,
+    //         model: "model_name".into(),
+    //         choices: vec![],
+    //         system_fingerprint: None,
+    //         usage: None,
+    //     } },
+    //     // ... more responses
+    // ]))
 }
 
 // #[tracing::instrument(skip_all)]
