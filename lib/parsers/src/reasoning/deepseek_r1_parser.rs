@@ -1,19 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::base_parser::BaseReasoningParser;
-use super::base_parser::ParserResult;
-use super::base_parser::ReasoningParser;
+use super::base_parser::BasicReasoningParser;
+use crate::ParserResult;
+use crate::ReasoningParser;
 
 #[derive(Default)]
 pub struct DeepseekR1ReasoningParser {
-    base: BaseReasoningParser,
+    base: BasicReasoningParser,
 }
 
 impl DeepseekR1ReasoningParser {
     pub fn new() -> Self {
         Self {
-            base: BaseReasoningParser::new(
+            base: BasicReasoningParser::new(
                 "<think>".to_string(),
                 "</think>".to_string(),
                 true,
