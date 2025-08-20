@@ -99,8 +99,8 @@ def parse_args() -> Config:
         "--connector",
         nargs="*",
         default=["nixl"],
-        help="List of connectors to use (e.g., --connector nixl lmcache). "
-        "Options: nixl, lmcache, kvbm, null, none. Default: nixl",
+        help="List of connectors to use in order (e.g., --connector nixl lmcache). "
+        "Options: nixl, lmcache, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -275,50 +275,32 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
 
     logger.info(f"Creating kv_transfer_config from --connector {config.connector_list}")
 
-    # Check which connectors are present
-    has_nixl = "nixl" in config.connector_list
-    has_lmcache = "lmcache" in config.connector_list
-    has_kvbm = "kvbm" in config.connector_list
+    # Create connector configs in specified order
+    multi_connectors = []
+    for connector in config.connector_list:
+        if connector == "lmcache":
+            connector_cfg = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+        elif connector == "nixl":
+            connector_cfg = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+        elif connector == "kvbm":
+            connector_cfg = {
+                "kv_connector": "DynamoConnector",
+                "kv_connector_module_path": "dynamo.llm.vllm_integration.connector",
+                "kv_role": "kv_both",
+            }
+        multi_connectors.append(connector_cfg)
 
-    # Single connector case
-    if len(config.connector_list) == 1:
-        if has_nixl:
-            return KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
-        elif has_lmcache:
-            return KVTransferConfig(
-                kv_connector="LMCacheConnectorV1", kv_role="kv_both"
-            )
-        elif has_kvbm:
-            return KVTransferConfig(
-                kv_connector="DynamoConnector",
-                kv_connector_module_path="dynamo.llm.vllm_integration.connector",
-                kv_role="kv_both",
-            )
-    # Multiple connectors - use MultiConnector
-    else:
-        multi_connectors = []
-        if has_lmcache:
-            multi_connectors.append(
-                {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
-            )
-        if has_nixl:
-            multi_connectors.append(
-                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
-            )
-        if has_kvbm:
-            multi_connectors.append(
-                {
-                    "kv_connector": "DynamoConnector",
-                    "kv_connector_module_path": "dynamo.llm.vllm_integration.connector",
-                    "kv_role": "kv_both",
-                }
-            )
+    # For single connector, return direct config
+    if len(multi_connectors) == 1:
+        cfg = multi_connectors[0]
+        return KVTransferConfig(**cfg)
 
-        return KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"connectors": multi_connectors},
-        )
+    # For multiple connectors, use MultiConnector
+    return KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": multi_connectors},
+    )
 
 
 def overwrite_args(config):
