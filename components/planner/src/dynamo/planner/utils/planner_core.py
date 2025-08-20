@@ -233,7 +233,7 @@ class Planner:
             return next_num_req, next_isl, next_osl
         except Exception as e:
             logger.error(f"Failed to predict load: {e}")
-            return None, None, None, None
+            return None, None, None
 
     def dryrun_observe_metrics(self, num_req: int, isl_avg: float, osl_avg: float):
         self.num_req_predictor.add_data_point(num_req)
