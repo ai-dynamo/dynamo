@@ -15,18 +15,14 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
-use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
 
 /// System status server information containing socket address and handle
@@ -296,29 +292,10 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 }
 
 // Regular tests: cargo test system_status_server --lib
-// Integration tests: cargo test system_status_server --lib --features integration
-
-#[cfg(test)]
-use crate::distributed::test_helpers::create_test_drt_async;
-
-#[cfg(all(test, feature = "integration"))]
-use crate::distributed::test_helpers::create_test_drt_with_settings_async;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::tests::load_log;
-    use crate::metrics::MetricsRegistry;
-    use anyhow::{anyhow, Result};
-    use chrono::{DateTime, Utc};
-    use jsonschema::{Draft, JSONSchema};
-    use rstest::rstest;
-    use serde_json::Value;
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-    use std::sync::Arc;
-    use stdio_override::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
@@ -349,8 +326,28 @@ mod tests {
             "HTTP server should shut down when cancel token is cancelled"
         );
     }
+}
 
-    #[cfg(feature = "integration")]
+// Integration tests: cargo test system_status_server --lib --features integration
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use super::*;
+    use crate::distributed::test_helpers::{
+        create_test_drt_async, create_test_drt_with_settings_async,
+    };
+    use crate::logging::tests::load_log;
+    use crate::metrics::MetricsRegistry;
+    use anyhow::{anyhow, Result};
+    use chrono::{DateTime, Utc};
+    use jsonschema::{Draft, JSONSchema};
+    use rstest::rstest;
+    use serde_json::Value;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::sync::Arc;
+    use stdio_override::*;
+    use tokio::time::{sleep, Duration};
+
     #[tokio::test]
     async fn test_uptime_without_initialization() {
         // Test that uptime returns an error if start time is not initialized
@@ -366,7 +363,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
@@ -407,7 +403,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
@@ -543,7 +538,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "integration")]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
 
@@ -599,7 +593,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_health_endpoint_with_changing_health_status() {
         // Test health endpoint starts in not ready status, then becomes ready
@@ -713,7 +706,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_spawn_system_status_server_endpoints() {
         // use reqwest for HTTP requests

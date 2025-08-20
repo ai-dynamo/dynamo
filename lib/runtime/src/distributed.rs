@@ -359,9 +359,11 @@ impl DistributedConfig {
 #[cfg(test)]
 pub mod test_helpers {
     //! Common test helper functions for DistributedRuntime tests
+    // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
     /// Helper function to create a DRT instance for basic unit tests
     /// Uses from_current to leverage existing tokio runtime without environment configuration
+    #[cfg(feature = "integration")]
     pub async fn create_test_drt_async() -> crate::DistributedRuntime {
         let rt = crate::Runtime::from_current().unwrap();
         crate::DistributedRuntime::from_settings_without_discovery(rt)
