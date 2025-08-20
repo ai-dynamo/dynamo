@@ -181,14 +181,12 @@ impl DeltaGenerator {
     }
 
     fn create_reasoning_content(&mut self, text: Option<String>) -> Option<ParserResult> {
-        if text.is_none() {
-            return None;
-        }
+        text.as_ref()?;
         let parser_result = self
             .reasoning_parser
             .parse_reasoning_streaming_incremental(text.as_deref().unwrap());
 
-        return Some(parser_result);
+        Some(parser_result)
     }
 
     /// Creates a choice within a chat completion response.
