@@ -233,7 +233,7 @@ async fn evaluate(
         match (item.data.as_ref(), item.event.as_deref()) {
             (Some(data), _) => {
                 // Normal case
-                let choice = data.inner.choices.first();
+                let choice = data.choices.first();
                 let chat_comp = choice.as_ref().unwrap();
                 if let Some(c) = &chat_comp.delta.content {
                     output += c;

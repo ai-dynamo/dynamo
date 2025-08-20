@@ -26,7 +26,7 @@ use tracing::Instrument;
 pub struct WorkHandlerMetrics {
     pub request_counter: IntCounter,
     pub request_duration: Histogram,
-    pub concurrent_requests: IntGauge,
+    pub inflight_requests: IntGauge,
     pub request_bytes: IntCounter,
     pub response_bytes: IntCounter,
     pub error_counter: IntCounterVec,
@@ -36,7 +36,7 @@ impl WorkHandlerMetrics {
     pub fn new(
         request_counter: IntCounter,
         request_duration: Histogram,
-        concurrent_requests: IntGauge,
+        inflight_requests: IntGauge,
         request_bytes: IntCounter,
         response_bytes: IntCounter,
         error_counter: IntCounterVec,
@@ -44,7 +44,7 @@ impl WorkHandlerMetrics {
         Self {
             request_counter,
             request_duration,
-            concurrent_requests,
+            inflight_requests,
             request_bytes,
             response_bytes,
             error_counter,
@@ -68,8 +68,8 @@ impl WorkHandlerMetrics {
             None,
         )?;
 
-        let concurrent_requests = endpoint.create_intgauge(
-            "concurrent_requests",
+        let inflight_requests = endpoint.create_intgauge(
+            "inflight_requests",
             "Number of requests currently being processed by work handler",
             &[],
         )?;
@@ -96,7 +96,7 @@ impl WorkHandlerMetrics {
         Ok(Self::new(
             request_counter,
             request_duration,
-            concurrent_requests,
+            inflight_requests,
             request_bytes,
             response_bytes,
             error_counter,
@@ -121,7 +121,7 @@ where
 
         if let Some(m) = self.metrics() {
             m.request_counter.inc();
-            m.concurrent_requests.inc();
+            m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
         }
 
@@ -289,7 +289,7 @@ where
         if let Some(m) = self.metrics() {
             let duration = start_time.elapsed();
             m.request_duration.observe(duration.as_secs_f64());
-            m.concurrent_requests.dec();
+            m.inflight_requests.dec();
         }
 
         Ok(())

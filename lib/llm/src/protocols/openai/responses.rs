@@ -199,7 +199,7 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
     type Error = anyhow::Error;
 
     fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
-        let chat_resp = nv_resp.inner;
+        let chat_resp = nv_resp;
         let content_text = chat_resp
             .choices
             .into_iter()
@@ -341,28 +341,27 @@ mod tests {
     fn test_into_nvresponse_from_chat_response() {
         let now = 1_726_000_000;
         let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_async_openai::types::CreateChatCompletionResponse {
-                id: "chatcmpl-xyz".into(),
-                choices: vec![dynamo_async_openai::types::ChatChoice {
-                    index: 0,
-                    message: dynamo_async_openai::types::ChatCompletionResponseMessage {
-                        content: Some("This is a reply".into()),
-                        refusal: None,
-                        tool_calls: None,
-                        role: dynamo_async_openai::types::Role::Assistant,
-                        function_call: None,
-                        audio: None,
-                    },
-                    finish_reason: None,
-                    logprobs: None,
-                }],
-                created: now,
-                model: "llama-3.1-8b-instruct".into(),
-                service_tier: None,
-                system_fingerprint: None,
-                object: "chat.completion".to_string(),
-                usage: None,
-            },
+            id: "chatcmpl-xyz".into(),
+            choices: vec![dynamo_async_openai::types::ChatChoice {
+                index: 0,
+                message: dynamo_async_openai::types::ChatCompletionResponseMessage {
+                    content: Some("This is a reply".into()),
+                    refusal: None,
+                    tool_calls: None,
+                    role: dynamo_async_openai::types::Role::Assistant,
+                    function_call: None,
+                    audio: None,
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+                logprobs: None,
+            }],
+            created: now,
+            model: "llama-3.1-8b-instruct".into(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion".to_string(),
+            usage: None,
         };
 
         let wrapped: NvResponse = chat_resp.try_into().unwrap();

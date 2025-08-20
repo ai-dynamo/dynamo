@@ -50,6 +50,7 @@ jobs:
           # Set GITHUB_TOKEN to avoid github rate limits on URL checks
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cd docs
           set -euo pipefail
           # Run lychee against all files in repo
           lychee \

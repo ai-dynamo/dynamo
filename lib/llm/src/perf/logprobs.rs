@@ -128,7 +128,7 @@ impl LogprobExtractor for NvCreateChatCompletionStreamResponse {
     fn extract_logprobs_by_choice(&self) -> HashMap<u32, Vec<TokenLogProbs>> {
         let mut result = HashMap::new();
 
-        for choice in &self.inner.choices {
+        for choice in &self.choices {
             let choice_index = choice.index;
 
             let choice_logprobs = choice
@@ -574,8 +574,7 @@ mod tests {
     use approx::assert_abs_diff_eq;
     use dynamo_async_openai::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
-        ChatCompletionTokenLogprob, CreateChatCompletionStreamResponse, FinishReason, Role,
-        TopLogprobs,
+        ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
     };
     use futures::StreamExt;
     use std::sync::Arc;
@@ -949,7 +948,7 @@ mod tests {
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
         #[expect(deprecated)]
-        let inner = CreateChatCompletionStreamResponse {
+        NvCreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices: vec![ChatChoiceStream {
                 index: 0,
@@ -959,6 +958,7 @@ mod tests {
                     tool_calls: None,
                     role: Some(Role::Assistant),
                     refusal: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
                 logprobs: Some(ChatChoiceLogprobs {
@@ -972,9 +972,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
-        };
-
-        NvCreateChatCompletionStreamResponse { inner }
+        }
     }
 
     fn create_mock_response_with_multiple_choices(
@@ -992,6 +990,7 @@ mod tests {
                     tool_calls: None,
                     role: Some(Role::Assistant),
                     refusal: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
                 logprobs: Some(ChatChoiceLogprobs {
@@ -1001,7 +1000,7 @@ mod tests {
             })
             .collect();
 
-        let inner = CreateChatCompletionStreamResponse {
+        NvCreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices,
             created: 1234567890,
@@ -1010,9 +1009,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
-        };
-
-        NvCreateChatCompletionStreamResponse { inner }
+        }
     }
 
     #[test]
@@ -1331,7 +1328,7 @@ mod tests {
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
         #[expect(deprecated)]
-        let inner = CreateChatCompletionStreamResponse {
+        let response = NvCreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices: vec![ChatChoiceStream {
                 index: 0,
@@ -1341,6 +1338,7 @@ mod tests {
                     tool_calls: None,
                     role: Some(Role::Assistant),
                     refusal: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
                 logprobs: None, // No logprobs
@@ -1353,7 +1351,6 @@ mod tests {
             usage: None,
         };
 
-        let response = NvCreateChatCompletionStreamResponse { inner };
         let logprobs = response.extract_logprobs_by_choice();
         assert_eq!(logprobs.len(), 1);
         assert!(logprobs.values().any(|v| v.is_empty()));
@@ -1556,9 +1553,8 @@ mod tests {
     fn create_mock_response() -> NvCreateChatCompletionStreamResponse {
         // Create a mock response for testing
         // In practice, this would have real logprobs data
-        use dynamo_async_openai::types::CreateChatCompletionStreamResponse;
 
-        let inner = CreateChatCompletionStreamResponse {
+        NvCreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices: vec![],
             created: 1234567890,
@@ -1567,9 +1563,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion.chunk".to_string(),
             usage: None,
-        };
-
-        NvCreateChatCompletionStreamResponse { inner }
+        }
     }
 
     // Mock context for testing

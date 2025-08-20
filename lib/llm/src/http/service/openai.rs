@@ -31,6 +31,7 @@ use super::{
     service_v2, RouteDoc,
 };
 use crate::preprocessor::LLMMetricAnnotation;
+use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},

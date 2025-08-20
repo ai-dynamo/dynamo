@@ -396,7 +396,7 @@ impl
                         //tracing::trace!("from_assistant: {from_assistant}");
 
                         #[allow(deprecated)]
-                        let inner = dynamo_async_openai::types::CreateChatCompletionStreamResponse{
+                        let delta = NvCreateChatCompletionStreamResponse {
                             id: c.id,
                             choices: vec![dynamo_async_openai::types::ChatChoiceStream{
                                 index: 0,
@@ -407,6 +407,7 @@ impl
                                     tool_calls: None,
                                     refusal: None,
                                     function_call: None,
+                                    reasoning_content: None,
                                 },
                                 logprobs: None,
                                 finish_reason,
@@ -418,7 +419,6 @@ impl
                             system_fingerprint: Some(c.system_fingerprint),
                             service_tier: None,
                         };
-                        let delta = NvCreateChatCompletionStreamResponse{inner};
                         let ann = Annotated{
                             id: None,
                             data: Some(delta),

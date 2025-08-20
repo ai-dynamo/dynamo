@@ -209,6 +209,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
+            reasoning_content: None,
         };
 
         let choice = dynamo_async_openai::types::ChatChoiceStream {
@@ -304,9 +305,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let index = 0;
         let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
-        Ok(NvCreateChatCompletionStreamResponse {
-            inner: stream_response,
-        })
+        Ok(stream_response)
     }
 
     fn get_isl(&self) -> Option<u32> {
