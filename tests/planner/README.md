@@ -88,6 +88,44 @@ The total duration is 30 minutes or 1800 seconds.
 
 ## Planner Dry Run
 
-Before testing SLA planner on real deployments, we provide a dry run feature to estimate the performance on the given dataset. Specifically, in dry run mode,
+Before testing SLA planner on real deployments, we provide a dry run feature to test the autoscaling behavior on a given dataset. Specifically, in dry run mode,
 - The load predictor will be tested. However, the load metrics will be different from the real deployment because the actual OSL is only known after the requests are processed.
-- The correction factor will be disabled because there is no real performance metrics as reference.
+- There will be no SLA predictions. Instead, sla planner will show the safe throughput limit that will ensure the requests can be processed within the SLA.
+- The correction factor will be disabled because there is no SLA metrics as reference.
+
+To dry run SLA planner,
+
+```bash
+python components/planner/test/planner_sla_dryrun.py \
+    --<SLA planner arguments> \
+    --dry-run \
+    --start-num-p <num_prefill_workers_to_start_with> \
+    --start-num-d <num_decode_workers_to_start_with> \
+    --output-plot <path_to_output_plot>
+```
+
+For example, to dry run SLA planner for the previous FP8 8B on H200 using the generated `rr-20-80_i3000o300.jsonl` dataset,
+
+```bash
+python components/planner/test/planner_sla_dryrun.py \
+    --ttft 0.1 \
+    --itl 0.01 \
+    --adjustment-interval 60 \
+    --profile-results-dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
+    --dataset rr-20-80_i3000o300.jsonl \
+    --start-num-p 1 \
+    --start-num-d 1 \
+    --output-plot dryrun_plot.png
+```
+
+Below is the dryrun result:
+
+![Dryrun Plot](./figures/dryrun_plot.png)
+
+The first plot shows the actual request rate and the predicted request rate (in the unit of requests/adjustment_interval).
+
+The second plot shows the actual ISL/OSL and the predicted ISL/OSL. The first two plots are useful when tuning the performance of the load predictor.
+
+The third plot shows the actual prefill throughput, number of prefill workers that planner scales, and the safe throughput limit with the number of prefill workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the TTFT SLA. Note that in the real deployment, due to other factors such as queueing, load balancing, KV cache transfer latency, and ISL variance, it is not guaranteed that the actual deployment can adhere the TTFT SLA.
+
+The fourth plot, similar to the third plot, shows the actual decode throughput, number of decode workers that planner scales, and the safe throughput limit with the number of decode workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the ITL SLA. Note that in the real deployment, due to other factors such as load balancing and OSL variance, it is not guaranteed that the actual deployment can adhere the ITL SLA.
