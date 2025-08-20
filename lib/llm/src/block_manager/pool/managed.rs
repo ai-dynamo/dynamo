@@ -456,6 +456,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        tracing::debug!("find matching for sequence_hashes: {:?}", sequence_hashes);
         self._match_sequence_hashes(sequence_hashes)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?

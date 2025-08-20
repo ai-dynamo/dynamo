@@ -7,6 +7,8 @@ use dynamo_llm::block_manager::{
 };
 
 pub mod leader;
+pub mod trtllm_leader;
+pub mod trtllm_worker;
 pub mod worker;
 
 use pyo3::prelude::*;
