@@ -5,6 +5,8 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-router
+  annotations:
+    nvidia.com/enable-grove: "false"
 spec:
   services:
     Frontend:
@@ -22,11 +24,11 @@ spec:
       dynamoNamespace: vllm-agg-router
       componentType: worker
       replicas: 2
+      resources:
+        limits:
+          gpu: "1"
       extraPodSpec:
         mainContainer:
-          resources:
-            limits:
-              gpu: "1"
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
