@@ -229,8 +229,7 @@ Make sure that both of the endpoints are available before sending an inference r
 }
 ```
 
-If only one is listed, the other one may still be starting up. You can watch the
-worker logs to see the progress of worker startup.
+If only one worker endpoint is listed, the other may still be starting up. Monitor the worker logs to track startup progress.
 
 ### 7. Test the Deployment
 
