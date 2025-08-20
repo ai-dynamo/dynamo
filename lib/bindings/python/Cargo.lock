@@ -200,7 +200,7 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai-macros"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "akin",
@@ -1254,6 +1254,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-parsers",
  "dynamo-runtime",
  "either",
  "erased-serde",
@@ -1302,8 +1303,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-parsers"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "dynamo-async-openai",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-py3"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1334,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "arc-swap",

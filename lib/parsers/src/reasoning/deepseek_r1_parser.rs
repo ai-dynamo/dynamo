@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::postprocessor::reasoning_parser::parsers::base_reasoning_parser::BaseReasoningParser;
-
-use crate::postprocessor::reasoning_parser::{ParserResult, ReasoningParser};
+use super::base_parser::BaseReasoningParser;
+use super::base_parser::ParserResult;
+use super::base_parser::ReasoningParser;
 
 #[derive(Default)]
 pub struct DeepseekR1ReasoningParser {

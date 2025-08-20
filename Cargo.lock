@@ -240,7 +240,7 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai-macros"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "akin",
@@ -1928,6 +1928,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-async-openai",
+ "dynamo-parsers",
  "dynamo-runtime",
  "either",
  "erased-serde",
@@ -1983,8 +1984,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-parsers"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "dynamo-async-openai",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid 1.17.0",
+]
+
+[[package]]
 name = "dynamo-run"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2013,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2071,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -3828,7 +3842,7 @@ checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4140,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "axum 0.8.4",
  "clap 4.5.42",
@@ -6047,7 +6061,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.4.0+post0"
+version = "0.4.1"
 dependencies = [
  "clap 4.5.42",
  "dynamo-llm",

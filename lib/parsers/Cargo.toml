@@ -13,24 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = [
-    "hello_world",
-    "service_metrics",
-    "system_metrics",
-]
-resolver = "3"
+[package]
+name = "dynamo-parsers"
+version.workspace = true
+edition.workspace = true
+description = "Dynamo Parser Library for Tool Calling and Reasoning"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
 
-[workspace.package]
-version = "0.4.1"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
+[dependencies]
+anyhow = { workspace = true }
+dynamo-async-openai = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
-
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../" }
-prometheus = { version = "0.14" }
+regex = "1"
