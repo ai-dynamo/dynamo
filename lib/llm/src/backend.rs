@@ -130,7 +130,12 @@ impl
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
         let stop_conditions = request.stop_conditions.clone();
 
-        let prompt_token_ids = request.token_ids.clone();
+        // Take the first sequence from the batch, or empty if none exist
+        let prompt_token_ids = if request.token_ids.is_empty() {
+            vec![]
+        } else {
+            request.token_ids[0].clone()
+        };
 
         let next_stream = next.generate(request).await?;
 
