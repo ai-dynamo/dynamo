@@ -299,42 +299,10 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 // Integration tests: cargo test system_status_server --lib --features integration
 
 #[cfg(test)]
-/// Helper function to create a DRT instance for basic unit tests
-/// Uses from_current to leverage existing tokio runtime without environment configuration
-async fn create_test_drt_async() -> crate::DistributedRuntime {
-    let rt = crate::Runtime::from_current().unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
+use crate::distributed::test_helpers::create_test_drt_async;
 
-#[cfg(test)]
-/// Helper function to create a DRT instance for integration tests
-/// Uses spawn_blocking to create runtime safely without ownership issues
-/// Enables system status server for integration testing
-/// Note: This function uses environment variables to configure and create the DistributedRuntime.
-async fn create_test_drt_with_settings_async() -> crate::DistributedRuntime {
-    // Create runtime in blocking context where it can be safely dropped
-    let handle = tokio::task::spawn_blocking(|| {
-        // Load configuration from environment/settings
-        let config = crate::config::RuntimeConfig::from_settings().unwrap();
-
-        // Create runtime with the configuration and extract handle
-        let runtime = config.create_runtime().unwrap();
-        let handle = runtime.handle().clone();
-
-        // Runtime will be automatically dropped when it goes out of scope
-        handle
-    })
-    .await
-    .unwrap();
-
-    // Create Runtime using external handle (no ownership)
-    let rt = crate::Runtime::from_handle(handle).unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
+#[cfg(all(test, feature = "integration"))]
+use crate::distributed::test_helpers::create_test_drt_with_settings_async;
 
 #[cfg(test)]
 mod tests {

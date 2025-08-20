@@ -355,3 +355,45 @@ impl DistributedConfig {
         config
     }
 }
+
+#[cfg(test)]
+pub mod test_helpers {
+    //! Common test helper functions for DistributedRuntime tests
+
+    /// Helper function to create a DRT instance for basic unit tests
+    /// Uses from_current to leverage existing tokio runtime without environment configuration
+    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
+        let rt = crate::Runtime::from_current().unwrap();
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
+            .await
+            .unwrap()
+    }
+
+    /// Helper function to create a DRT instance for integration tests
+    /// Uses spawn_blocking to create runtime safely without ownership issues
+    /// Enables system status server for integration testing
+    /// Note: This function uses environment variables to configure and create the DistributedRuntime.
+    #[cfg(feature = "integration")]
+    pub async fn create_test_drt_with_settings_async() -> crate::DistributedRuntime {
+        // Create runtime in blocking context where it can be safely dropped
+        let handle = tokio::task::spawn_blocking(|| {
+            // Load configuration from environment/settings
+            let config = crate::config::RuntimeConfig::from_settings().unwrap();
+
+            // Create runtime with the configuration and extract handle
+            let runtime = config.create_runtime().unwrap();
+            let handle = runtime.handle().clone();
+
+            // Runtime will be automatically dropped when it goes out of scope
+            handle
+        })
+        .await
+        .unwrap();
+
+        // Create Runtime using external handle (no ownership)
+        let rt = crate::Runtime::from_handle(handle).unwrap();
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
+            .await
+            .unwrap()
+    }
+}
