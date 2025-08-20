@@ -15,7 +15,7 @@ python -m dynamo.sglang \
   --host 0.0.0.0 --port 8000 \
   --page-size 64 \
   --enable-hierarchical-cache \
-  --hicache-size 30 \
+  --hicache-ratio 2 \
   --hicache-write-policy write_through \
   --hicache-storage-backend nixl \
   --log-level debug \
@@ -23,7 +23,7 @@ python -m dynamo.sglang \
 ```
 
 - **--enable-hierarchical-cache**: Enables hierarchical KV cache/offload
-- **--hicache-size**: HiCache capacity in GB of pinned host memory (upper bound of offloaded KV to CPU)
+- **--hicache-ratio**: The ratio of the size of host KV cache memory pool to the size of device pool. Lower this number if your machine has less CPU memory.
 - **--hicache-write-policy**: Write policy (e.g., `write_through` for synchronous host writes)
 - **--hicache-storage-backend**: Host storage backend for HiCache (e.g., `nixl`). NIXL selects the concrete store automatically; see [PR #8488](https://github.com/sgl-project/sglang/pull/8488)
 
