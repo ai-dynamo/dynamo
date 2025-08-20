@@ -213,20 +213,6 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
-        let chooser = KvRouter::new(
-            component.clone(),
-            kv_cache_block_size,
-            Some(selector),
-            kv_router_config,
-        )
-        .await?;
-        let new_kv_chooser = Arc::new(chooser);
-        self.kv_choosers
-            .lock()
-            .unwrap()
-            .insert(model_name.to_string(), new_kv_chooser.clone());
-
         let etcd_client = component
             .drt()
             .etcd_client()
@@ -240,6 +226,19 @@ impl ModelManager {
             )
             .await?;
 
+        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
+        let chooser = KvRouter::new(
+            component.clone(),
+            kv_cache_block_size,
+            Some(selector),
+            kv_router_config,
+        )
+        .await?;
+        let new_kv_chooser = Arc::new(chooser);
+        self.kv_choosers
+            .lock()
+            .unwrap()
+            .insert(model_name.to_string(), new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 }
