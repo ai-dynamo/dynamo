@@ -193,7 +193,7 @@ Send a test request to verify your deployment:
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
         "role": "user",

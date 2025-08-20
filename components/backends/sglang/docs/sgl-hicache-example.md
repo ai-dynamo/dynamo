@@ -11,7 +11,7 @@ This guide shows how to enable SGLang's Hierarchical Cache (HiCache) inside Dyna
 
 ```bash
 python -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
   --host 0.0.0.0 --port 8000 \
   --page-size 64 \
   --enable-hierarchical-cache \
@@ -39,7 +39,7 @@ python -m dynamo.frontend --http-port 8000
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
       {
         "role": "user",
@@ -56,7 +56,7 @@ curl localhost:8000/v1/chat/completions \
 Run the perf script:
 ```bash
 bash -x /workspace/benchmarks/llm/perf.sh \
-  --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model Qwen/Qwen3-0.6B \
   --tensor-parallelism 1 \
   --data-parallelism 1 \
   --concurrency "2,4,8" \
