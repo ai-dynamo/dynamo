@@ -72,7 +72,7 @@ For the best development experience, we recommend configuring the following:
 
 #### Git Configuration
 - **Personal `.gitconfig`**: If not done already, make your own `~/.gitconfig` file with your name, email, and preferred Git settings
-- **Dev Container Integration**: Enable the `Copy the .gitconfig file to the devcontainer` setting by going to VS Code Settings → Extensions → Dev Containers → **☑ Copy the .gitconfig file to the devcontainer**
+- **Dev Container Integration**: Enable the `Copy the .gitconfig file to the devcontainer` setting by going to IDE Settings → Extensions → Dev Containers → **☑ Copy the .gitconfig file to the devcontainer**
 
 #### SSH Authentication
 To enable seamless Git operations (push/pull) via SSH:
@@ -191,7 +191,7 @@ mkdir -p .devcontainer/jensen_dev
 cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 ```
 
-Common customizations include additional mounts, environment variables, VS Code extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
+Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
 
 ### SSH Keys for Git Operations
 
@@ -339,7 +339,7 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker ps -a --filter "label=devcontainer.local_folder=$(pwd)" -q | xargs docker rm -f
    docker images | grep "^vsc-" | awk '{print $3}' | xargs docker rmi
    ```
-  Then rebuild without cache. In VS Code or Cursor command:
+  Then rebuild without cache. In your IDE:
   *Dev Containers: Rebuild Without Cache and Reopen in Container*
 
 ### devcontainer.json Changes Not Being Picked Up
@@ -349,11 +349,11 @@ If you've made changes to `devcontainer.json`, `post-create.sh`, or other devcon
 **Solution: Force Devcontainer Rebuild**
 
 1. **Rebuild Container (Recommended):**
-   In VS Code or Cursor Command Palette (Ctrl+Shift+P):
+   In your IDE Command Palette (Ctrl+Shift+P):
    *Dev Containers: Rebuild Container*
 
 2. **If that doesn't work, rebuild without cache:**
-   In VS Code or Cursor Command Palette (Ctrl+Shift+P):
+   In your IDE Command Palette (Ctrl+Shift+P):
    *Dev Containers: Rebuild Without Cache and Reopen Container*
 
 3. **For persistent issues, manually remove the devcontainer image:**
@@ -361,10 +361,10 @@ If you've made changes to `devcontainer.json`, `post-create.sh`, or other devcon
    # List devcontainer images
    docker images | grep devcontainer
 
-   # And remove all VS Code devcontainer images (more thorough)
+   # And remove all IDE devcontainer images (more thorough)
    docker images | grep "^vsc-" | awk '{print $3}' | xargs docker rmi
 
-   # Then rebuild in VS Code
+   # Then rebuild in your IDE
    Dev Containers: Rebuild Container
    ```
 
