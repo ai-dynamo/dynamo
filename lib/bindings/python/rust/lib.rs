@@ -45,6 +45,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod async_stream;
 mod engine;
 mod http;
 mod llm;
