@@ -282,7 +282,7 @@ vllm_configs = {
             "--gpus-per-node",
             "2",
         ],
-        timeout=300,
+        timeout=500,
     ),
     "multimodal_agg": VLLMConfig(
         name="multimodal_agg",
