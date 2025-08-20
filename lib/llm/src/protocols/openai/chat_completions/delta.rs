@@ -209,6 +209,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
+            reasoning_content: None,
         };
 
         let choice = dynamo_async_openai::types::ChatChoiceStream {

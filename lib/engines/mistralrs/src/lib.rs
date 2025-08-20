@@ -407,6 +407,7 @@ impl
                                     tool_calls: None,
                                     refusal: None,
                                     function_call: None,
+                                    reasoning_content: None,
                                 },
                                 logprobs: None,
                                 finish_reason,

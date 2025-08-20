@@ -305,6 +305,7 @@ mod tests {
             tool_calls: None,
             role,
             refusal: None,
+            reasoning_content: None,
         };
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
@@ -452,6 +453,7 @@ mod tests {
                         function_call: None,
                         tool_calls: None,
                         refusal: None,
+                        reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
                     logprobs: None,
@@ -464,6 +466,7 @@ mod tests {
                         function_call: None,
                         tool_calls: None,
                         refusal: None,
+                        reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
                     logprobs: None,
