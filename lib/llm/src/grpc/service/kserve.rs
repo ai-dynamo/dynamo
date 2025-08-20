@@ -11,8 +11,13 @@ use crate::http::service::Metrics;
 use crate::http::service::RouteDoc;
 
 use crate::discovery::ModelManager;
+use crate::preprocessor::prompt;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
+use async_nats::jetstream::stream;
+use async_openai::types::CompletionFinishReason;
+use async_openai::types::CreateCompletionRequest;
+use async_openai::types::Stop;
 use derive_builder::Builder;
 use dynamo_runtime::transports::etcd;
 use tokio::task::JoinHandle;
@@ -20,6 +25,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 
 use tonic::{transport::Server, Request, Response, Status};
+use crate::grpc::service::openai::model_infer_completions;
+
+use crate::protocols::openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 
 pub mod inference {
     tonic::include_proto!("inference");
@@ -29,7 +37,8 @@ use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStre
 
 /// [WIP] Understand the State, central piece for dynamo logic
 /// gRPC service shared state
-/// [TODO] 'metrics' are not being shared
+/// [TODO] 'metrics' are for HTTP service, how to port to gRPC?
+/// Or should we always have HTTP service up for non-inference?
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
@@ -97,8 +106,9 @@ pub struct GrpcServiceConfig {
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     host: String,
 
+     // [WIP] should apply to all request type.
     #[builder(default = "None")]
-    request_template: Option<RequestTemplate>, // [WIP] should this be required?
+    request_template: Option<RequestTemplate>,
 
     #[builder(default = "None")]
     etcd_client: Option<etcd::Client>,
@@ -130,24 +140,12 @@ impl GrpcService {
         let address = format!("{}:{}", self.host, self.port);
         tracing::info!(address, "Starting KServe gRPC service on: {address}");
 
-        // Part of the builder untill serve()
+        let observer = cancel_token.child_token();
         Server::builder()
             .add_service(GrpcInferenceServiceServer::new(self.clone()))
-            .serve(address.parse()?)
-            .await?;
-
-        // [WIP] Start tonic gRPC server here
-        // let listener = tokio::net::TcpListener::bind(address.as_str())
-        //     .await
-        //     .unwrap_or_else(|_| panic!("could not bind to address: {address}"));
-
-        // let router = self.router.clone();
-        // let observer = cancel_token.child_token();
-
-        // axum::serve(listener, router)
-        //     .with_graceful_shutdown(observer.cancelled_owned())
-        //     .await
-        //     .inspect_err(|_| cancel_token.cancel())?;
+            .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
+            .await
+            .inspect_err(|_| cancel_token.cancel())?;
 
         Ok(())
     }
@@ -158,22 +156,166 @@ impl GrpcService {
     // }
 }
 
+impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
+    type Error = Status;
+
+    fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
+        // iterate through inputs
+        let mut text_input = None;
+        let mut stream = false;
+        for input in request.inputs.iter() {
+            match input.name.as_str() {
+                "text_input" => {
+                    if input.datatype != "BYTES" {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'text_input' to be of type BYTES for string input, got {:?}",
+                            input.datatype
+                        )));
+                    }
+                    if input.shape != vec![1] {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'text_input' to have shape [1], got {:?}",
+                            input.shape
+                        )));
+                    }
+                    match &input.contents {
+                        Some(content) => {
+                            let bytes = &content.bytes_contents[0];
+                            text_input = Some(String::from_utf8_lossy(&bytes).to_string());
+                        }
+                        _ => {
+                            // [gluo WIP] look for 'raw_input_contents'
+                            return Err(Status::invalid_argument(format!(
+                                "[gluo WIP] Currently expecting 'text_input' contents to be of type BYTES"
+                            )));
+                        }
+                    }
+                }
+                "streaming" | "stream" => {
+                    if input.datatype != "BOOL" {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected '{}' to be of type BOOL, got {:?}",
+                            input.name,
+                            input.datatype
+                        )));
+                    }
+                    if input.shape != vec![1] {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'stream' to have shape [1], got {:?}",
+                            input.shape
+                        )));
+                    }
+                    match &input.contents {
+                        Some(content) => {
+                            stream = content.bool_contents[0];
+                        }
+                        _ => {
+                            return Err(Status::invalid_argument(format!(
+                                "expected 'stream' contents to be of type BOOL"
+                            )));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Status::invalid_argument(format!("Invalid input name: {}, supported inputs are 'text_input', 'stream'", input.name)));
+                }
+            }
+        }
+
+        // return error if text_input is None
+        let text_input = match text_input {
+            Some(input) => input,
+            None => {
+                return Err(Status::invalid_argument(
+                    "Missing required input: 'text_input'"
+                ));
+            }
+        };
+        
+
+        // [gluo FIXME] directly construct the object
+        Ok(NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: request.model_name,
+                prompt: async_openai::types::Prompt::String(text_input),
+                stream: Some(stream),
+                ..Default::default()
+            },
+            nvext: None,
+        })
+    }
+}
+
+impl TryFrom<NvCreateCompletionResponse> for ModelInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
+        let mut outputs = vec![];
+        let mut text_output = vec![];
+        let mut finish_reason = vec![];
+        for choice in &response.inner.choices {
+            text_output.push(choice.text.clone());
+            if let Some(reason) = choice.finish_reason.as_ref() {
+                match reason {
+                    CompletionFinishReason::Stop => { finish_reason.push("stop".to_string()); }
+                    CompletionFinishReason::Length => { finish_reason.push("length".to_string()); }
+                    CompletionFinishReason::ContentFilter => { finish_reason.push("content_filter".to_string()); }
+                }
+            }
+        }
+        outputs.push(inference::model_infer_response::InferOutputTensor {
+                    name: "text_output".to_string(),
+                    datatype: "BYTES".to_string(),
+                    shape: vec![text_output.len() as i64],
+                contents: Some(inference::InferTensorContents {
+                    bytes_contents: text_output.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        outputs.push(inference::model_infer_response::InferOutputTensor {
+                    name: "finish_reason".to_string(),
+                    datatype: "BYTES".to_string(),
+                    shape: vec![finish_reason.len() as i64],
+                contents: Some(inference::InferTensorContents {
+                    bytes_contents: finish_reason.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        
+
+        Ok(ModelInferResponse {
+            model_name: response.inner.model,
+            model_version: "1".to_string(),
+            id: response.inner.id,
+            outputs,
+            parameters: ::std::collections::HashMap::<String, InferParameter>::new(),
+            raw_output_contents: vec![],
+        })
+    }
+}
+
 #[tonic::async_trait]
 impl GrpcInferenceService for GrpcService {
     async fn model_infer(
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
-        println!("Got a request: {:?}", request);
+        let completion_request: NvCreateCompletionRequest = request.into_inner().try_into().map_err(|e| {
+            Status::invalid_argument(format!("Failed to parse request: {}", e))
+        })?;
 
-        let reply = ModelInferResponse {
-            model_version: "1".to_string(),
-            model_name: "mock".to_string(),
-            id: "1234".to_string(),
-            outputs: vec![],
-            parameters: ::std::collections::HashMap::<String, InferParameter>::new(),
-            raw_output_contents: vec![],
-        };
+        if completion_request.inner.stream.unwrap_or(false) {
+            // return error that streaming is not supported
+            return Err(Status::invalid_argument("Streaming is not supported for this endpoint"));
+        }
+
+        let completion_response = model_infer_completions(self.state_clone(), completion_request).await?;
+
+        let reply = completion_response.try_into().map_err(|e| {
+            Status::invalid_argument(format!("Failed to parse response: {}", e))
+        })?;
 
         Ok(Response::new(reply))
     }
@@ -212,58 +354,6 @@ impl GrpcServiceConfigBuilder {
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
-
-        // let mut router = axum::Router::new();
-
-        // let mut all_docs = Vec::new();
-
-        // [WIP] add gRPC endpoints here
-        // let mut routes = vec![
-        //     metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
-        //     super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
-        //     super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
-        //     super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
-        // ];
-
-        // if config.enable_chat_endpoints {
-        //     routes.push(super::openai::chat_completions_router(
-        //         state.clone(),
-        //         config.request_template.clone(), // TODO clone()? reference?
-        //         var(HTTP_SVC_CHAT_PATH_ENV).ok(),
-        //     ));
-        // }
-
-        // if config.enable_cmpl_endpoints {
-        //     routes.push(super::openai::completions_router(
-        //         state.clone(),
-        //         var(HTTP_SVC_CMP_PATH_ENV).ok(),
-        //     ));
-        // }
-
-        // if config.enable_embeddings_endpoints {
-        //     routes.push(super::openai::embeddings_router(
-        //         state.clone(),
-        //         var(HTTP_SVC_EMB_PATH_ENV).ok(),
-        //     ));
-        // }
-
-        // if config.enable_responses_endpoints {
-        //     routes.push(super::openai::responses_router(
-        //         state.clone(),
-        //         config.request_template,
-        //         var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
-        //     ));
-        // }
-
-        // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
-        //     router = router.merge(route);
-        //     all_docs.extend(route_docs);
-        // }
-
-        // for (route_docs, route) in routes.into_iter() {
-        //     router = router.merge(route);
-        //     all_docs.extend(route_docs);
-        // }
 
         Ok(GrpcService {
             state,
