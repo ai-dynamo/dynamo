@@ -88,9 +88,12 @@ impl DeltaGenerator {
             completion_tokens_details: None,
         };
 
-        // Reasoning parser
+        // Reasoning parser type
+        // This is hardcoded for now, but can be made configurable later.
+        // TODO: Make parser type configurable once front-end integration is determined
         let reasoning_parser_type = ReasoningParserType::Basic;
 
+        // Reasoning parser wrapper
         let reasoning_parser = reasoning_parser_type.get_reasoning_parser();
 
         Self {
@@ -181,10 +184,10 @@ impl DeltaGenerator {
     }
 
     fn create_reasoning_content(&mut self, text: Option<String>) -> Option<ParserResult> {
-        text.as_ref()?;
+        let text = text?;
         let parser_result = self
             .reasoning_parser
-            .parse_reasoning_streaming_incremental(text.as_deref().unwrap());
+            .parse_reasoning_streaming_incremental(&text);
 
         Some(parser_result)
     }

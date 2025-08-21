@@ -28,7 +28,7 @@ impl ReasoningParser for DeepseekR1ReasoningParser {
         self.base.parse_reasoning_streaming_incremental(text)
     }
 
-    fn detect_and_parse_reasoning(&mut self, text: &str) -> ParserResult {
+    fn detect_and_parse_reasoning(&self, text: &str) -> ParserResult {
         self.base.detect_and_parse_reasoning(text)
     }
 }
