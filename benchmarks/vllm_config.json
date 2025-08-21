@@ -1,0 +1,9 @@
+{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "tensor_parallel_size": 1,
+    "enforce_eager": true,
+    "enable_prefix_caching": true,
+    "max_num_batched_tokens": 16384,
+    "max_model_len": 16384,
+    "block_size": 64
+}
