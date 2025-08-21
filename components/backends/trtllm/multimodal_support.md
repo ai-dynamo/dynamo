@@ -18,7 +18,7 @@ limitations under the License.
 # Multimodal Support
 
 > [!Important]
-> There are some known issues in tensorrt_llm==1.0.0rc6 version for multimodal support
+> There are some known issues in tensorrt_llm==1.0.0rc6 version for multimodal support.
 > It is important to rebuild the dynamo container with a specific version of tensorrt_llm
 > commit to use multimodal feature.
 
