@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-use serde_json;
 
 #[test]
 fn test_request_json_structure() -> Result<()> {
