@@ -27,8 +27,6 @@ ARG ARCH_ALT=x86_64
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
-ARG AWS_ACCESS_KEY_ID=""
-ARG AWS_SECRET_ACCESS_KEY=""
 
 
 ##################################
@@ -120,8 +118,6 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         SCCACHE_VERSION="v0.8.2" && \
         wget --tries=3 --waitretry=5 "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" && \
@@ -134,14 +130,13 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
-    AWS_ACCESS_KEY_ID=${USE_SCCACHE:+${AWS_ACCESS_KEY_ID}} \
-    AWS_SECRET_ACCESS_KEY=${USE_SCCACHE:+${AWS_SECRET_ACCESS_KEY}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
     CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
 
 ### UCX EFA Setup ###
+# Keep CC and CXX environment variables set to sccache if USE_SCCACHE is set to true for UCX build since this requirement is specific to UCX
 RUN rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
@@ -258,6 +253,7 @@ COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
+
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH:/usr/local/bin/sccache
 
 # Copy sccache from base stage if it was installed
@@ -274,15 +270,11 @@ COPY components/ /opt/dynamo/components/
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
-ARG AWS_ACCESS_KEY_ID
-ARG AWS_SECRET_ACCESS_KEY
 
 # Set sccache environment variables if USE_SCCACHE is set
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
-    AWS_ACCESS_KEY_ID=${USE_SCCACHE:+${AWS_ACCESS_KEY_ID}} \
-    AWS_SECRET_ACCESS_KEY=${USE_SCCACHE:+${AWS_SECRET_ACCESS_KEY}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
 # Build dynamo wheel

@@ -374,9 +374,6 @@ get_options() {
         if [ -z "$SCCACHE_REGION" ]; then
             error "ERROR: --sccache-region is required when --use-sccache is specified"
         fi
-        if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
-            error "ERROR: AWS credentials (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) must be set when using --use-sccache"
-        fi
     fi
 }
 
@@ -431,10 +428,6 @@ show_help() {
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
-    echo ""
-    echo "  Note: When using --use-sccache, AWS credentials must be set:"
-    echo "        export AWS_ACCESS_KEY_ID=your_access_key"
-    echo "        export AWS_SECRET_ACCESS_KEY=your_secret_key"
     exit 0
 }
 
@@ -603,13 +596,7 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
 
-    # Pass AWS credentials
-    if [ -n "${AWS_ACCESS_KEY_ID}" ]; then
-        BUILD_ARGS+=" --build-arg AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
-    fi
-    if [ -n "${AWS_SECRET_ACCESS_KEY}" ]; then
-        BUILD_ARGS+=" --build-arg AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
-    fi
+
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
