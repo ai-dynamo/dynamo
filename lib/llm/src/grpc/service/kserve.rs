@@ -177,7 +177,9 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
-        let mut completion_request: NvCreateCompletionRequest = request.into_inner().try_into().map_err(|e| {
+        let request = request.into_inner();
+        let request_id = request.id.clone();
+        let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
             Status::invalid_argument(format!("Failed to parse request: {}", e))
         })?;
 
@@ -211,9 +213,11 @@ impl GrpcInferenceService for KserveService {
                 Status::internal("Failed to fold completions stream")
             })?;
 
-        let reply = completion_response.try_into().map_err(|e| {
+        let mut reply: ModelInferResponse = completion_response.try_into().map_err(|e| {
             Status::invalid_argument(format!("Failed to parse response: {}", e))
         })?;
+
+        reply.id = request_id;
 
         Ok(Response::new(reply))
     }
@@ -233,9 +237,20 @@ impl GrpcInferenceService for KserveService {
             // and passing AsyncEngineStream for each request to the response stream
             // which will be collectively polling.
             while let Some(request) = request_stream.next().await {
-                let mut completion_request: NvCreateCompletionRequest = request.unwrap().try_into().map_err(|e| {
-                    Status::invalid_argument(format!("Failed to parse request: {}", e))
-                })?;
+                // Must keep track of 'request_id' which will be returned in corresponding response
+                let request_id: String;
+                let mut completion_request: NvCreateCompletionRequest = match request {
+                    Err(e) => {
+                        tracing::error!("Failed to read request: {}", e);
+                        continue;
+                    }
+                    Ok(request) => {
+                        request_id = request.id.clone();
+                        request.try_into().map_err(|e| {
+                            Status::invalid_argument(format!("Failed to parse request: {}", e))
+                        })?
+                    }
+                };
 
                 // Apply template values if present
                 if let Some(template) = &template {
@@ -259,9 +274,12 @@ impl GrpcInferenceService for KserveService {
                     while let Some(response) = stream.next().await {
                         match response.data {
                             Some(data) => {
-                                let reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
                                     Status::invalid_argument(format!("Failed to parse response: {}", e))
                                 })?;
+                                if reply.infer_response.is_some() {
+                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                }
                                 yield reply;
                             },
                             None => {
@@ -280,9 +298,13 @@ impl GrpcInferenceService for KserveService {
                             Status::internal("Failed to fold completions stream")
                         })?;
 
-                    yield completion_response.try_into().map_err(|e| {
+                    let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
                         Status::invalid_argument(format!("Failed to parse response: {}", e))
                     })?;
+                    if response.infer_response.is_some() {
+                        response.infer_response.as_mut().unwrap().id = request_id.clone();
+                    }
+                    yield response;
                 }
             }
         };
@@ -469,6 +491,11 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                 model: request.model_name,
                 prompt: async_openai::types::Prompt::String(text_input),
                 stream: Some(stream),
+                user: if request.id.is_empty() {
+                    None
+                } else {
+                    Some(request.id.clone())
+                },
                 ..Default::default()
             },
             nvext: None,
