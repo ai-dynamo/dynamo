@@ -55,7 +55,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target runtime --framework vllm --use-sccache --sccache-bucket ai-dynamo-sccache-artifacts --sccache-region "$AWS_DEFAULT_REGION"
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target runtime --framework vllm --use-sccache --sccache-bucket ai-dynamo-sccache --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
         env:
           PYTEST_MARKS: "e2e and vllm and gpu_1 and not slow"

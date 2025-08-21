@@ -449,31 +449,6 @@ error() {
 
 get_options "$@"
 
-# Function to build base image first
-build_base_image() {
-    local base_tag="dynamo-base:${VERSION}"
-    echo ""
-    echo "======================================"
-    echo "Building Base Image: ${base_tag}"
-    echo "======================================"
-    echo ""
-    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" \
-        --target dev \
-        $PLATFORM \
-        $BUILD_ARGS \
-        $CACHE_FROM \
-        $CACHE_TO \
-        --tag "$base_tag" \
-        $BUILD_CONTEXT_ARG \
-        $BUILD_CONTEXT \
-        $NO_CACHE
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to build base image"
-        exit 1
-    fi
-    echo "Base image built successfully: $base_tag"
-    return 0
-}
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
