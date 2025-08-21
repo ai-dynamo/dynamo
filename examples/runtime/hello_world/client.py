@@ -31,10 +31,15 @@ async def worker(runtime: DistributedRuntime):
     client = await endpoint.client()
     await client.wait_for_instances()
 
-    # Issue request and process the stream
-    stream = await client.generate("world,sun,moon,star")
-    async for response in stream:
-        print(response.data())
+    idx = 0
+    while True:
+        # Issue request and process the stream
+        idx += 1
+        stream = await client.generate(f"Query[{idx}] world,sun,moon,star")
+        async for response in stream:
+            print(response.data())
+        # Sleep for 1 second
+        await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
