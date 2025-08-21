@@ -160,7 +160,9 @@ RUN apt-get update && \
         libnuma1 librdmacm1 ibverbs-providers \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
-        g++ && \
+        g++ \
+        # prometheus dependencies
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
@@ -179,9 +181,19 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
-# FIXME @tushar: latest changes from main, fails to copy with new changes
-# Copy prometheus from base image
-# COPY --from=dev /usr/local/bin/prometheus /usr/local/bin/prometheus
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
 
 # Copy UCX from dev image as plugin for NIXL
 # Copy NIXL source from devr image

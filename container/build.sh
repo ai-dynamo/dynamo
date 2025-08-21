@@ -667,8 +667,6 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
     
     echo ""
     echo "Both builds started in parallel!"
-    echo "Base image build PID: $BASE_PID"
-    echo "Framework build PID: $FRAMEWORK_PID"
     echo "Waiting for both to complete..."
     echo ""
     
