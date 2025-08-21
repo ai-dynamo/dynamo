@@ -4,8 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-use crate::pipeline::PipelineError;
-
 pub mod annotated;
 pub mod maybe_error;
 
@@ -31,7 +29,7 @@ pub struct Component {
 
 /// Represents an endpoint with a namespace, component, and name.
 ///
-/// An `Endpoint` is defined by a three-part string separated by `/` or a '.':
+/// An [EndpointId] is defined by a three-part string separated by `/` or a '.':
 /// - **namespace**
 /// - **component**
 /// - **name**
@@ -55,6 +53,18 @@ impl PartialEq<Vec<&str>> for EndpointId {
     }
 }
 
+impl PartialEq<[&str; 3]> for EndpointId {
+    fn eq(&self, other: &[&str; 3]) -> bool {
+        self.namespace == other[0] && self.component == other[1] && self.name == other[2]
+    }
+}
+
+impl PartialEq<EndpointId> for [&str; 3] {
+    fn eq(&self, other: &EndpointId) -> bool {
+        other == self
+    }
+}
+
 impl PartialEq<EndpointId> for Vec<&str> {
     fn eq(&self, other: &EndpointId) -> bool {
         other == self
@@ -72,7 +82,7 @@ impl Default for EndpointId {
 }
 
 impl From<&str> for EndpointId {
-    /// Creates an `Endpoint` from a string.
+    /// Creates an [EndpointId] from a string.
     ///
     /// # Arguments
     /// - `path`: A string in the format `"namespace/component/endpoint"`.
@@ -82,17 +92,17 @@ impl From<&str> for EndpointId {
     /// Default values are used for missing parts.
     ///
     /// # Examples:
-    /// - "component" -> ["DEFAULT_NS", "component", "DEFAULT_E"]
-    /// - "namespace.component" -> ["namespace", "component", "DEFAULT_E"]
+    /// - "component" -> ["DEFAULT_NAMESPACE", "component", "DEFAULT_ENDPOINT"]
+    /// - "namespace.component" -> ["namespace", "component", "DEFAULT_ENDPOINT"]
     /// - "namespace.component.endpoint" -> ["namespace", "component", "endpoint"]
-    /// - "namespace/component" -> ["namespace", "component", "DEFAULT_E"]
+    /// - "namespace/component" -> ["namespace", "component", "DEFAULT_ENDPOINT"]
     /// - "namespace.component.endpoint.other.parts" -> ["namespace", "component", "endpoint_other_parts"]
     ///
     /// # Examples
-    /// ```ignore
-    /// use dynamo_runtime:protocols::Endpoint;
+    /// ```
+    /// use dynamo_runtime::protocols::EndpointId;
     ///
-    /// let endpoint = Endpoint::from("namespace/component/endpoint");
+    /// let endpoint = EndpointId::from("namespace/component/endpoint");
     /// assert_eq!(endpoint.namespace, "namespace");
     /// assert_eq!(endpoint.component, "component");
     /// assert_eq!(endpoint.name, "endpoint");
@@ -133,7 +143,7 @@ impl From<&str> for EndpointId {
 }
 
 impl FromStr for EndpointId {
-    type Err = PipelineError;
+    type Err = core::convert::Infallible;
 
     /// Parses an `EndpointId` from a string using the standard Rust `.parse::<T>()` pattern.
     ///
@@ -143,9 +153,9 @@ impl FromStr for EndpointId {
     /// Does not fail
     ///
     /// # Examples
-    /// ```ignore
+    /// ```
     /// use std::str::FromStr;
-    /// use dynamo_runtime:protocols::EndpointId;
+    /// use dynamo_runtime::protocols::EndpointId;
     ///
     /// let endpoint: EndpointId = "namespace/component/endpoint".parse().unwrap();
     /// assert_eq!(endpoint.namespace, "namespace");
@@ -258,5 +268,13 @@ mod tests {
             result,
             vec![DEFAULT_NAMESPACE, DEFAULT_COMPONENT, DEFAULT_ENDPOINT]
         );
+    }
+
+    #[test]
+    fn test_parse_with_scheme_and_url_roundtrip() {
+        let input = "dyn://ns/cp/ep";
+        let endpoint: EndpointId = input.parse().unwrap();
+        assert_eq!(endpoint, vec!["ns", "cp", "ep"]);
+        assert_eq!(endpoint.as_url(), "dyn://ns.cp.ep");
     }
 }

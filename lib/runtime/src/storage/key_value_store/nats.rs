@@ -79,8 +79,10 @@ impl NATSStorage {
                 },
             )
             .await;
+        let nats_store = create_result
+            .map_err(|err| StorageError::KeyValueError(err.to_string(), bucket_name.clone()))?;
         tracing::debug!("Created bucket {bucket_name}");
-        create_result.map_err(|err| StorageError::KeyValueError(err.to_string(), bucket_name))
+        Ok(nats_store)
     }
 
     async fn get_key_value(
