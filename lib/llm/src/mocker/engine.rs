@@ -189,11 +189,7 @@ impl MockVllmEngine {
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
-                    let metrics_labels = Some(&[("model", "mock_model")][..]);
-                    if let Err(e) = publisher
-                        .create_endpoint(comp.clone(), metrics_labels)
-                        .await
-                    {
+                    if let Err(e) = publisher.create_endpoint(comp.clone(), None).await {
                         tracing::error!("Metrics endpoint failed: {e}");
                     }
                 }

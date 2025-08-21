@@ -216,7 +216,7 @@ def test_mocker_kv_router(request, runtime_services):
 
         for i in range(NUM_MOCKERS):
             # Use unique endpoints for each mocker
-            endpoint = f"dyn://test-namespace.mocker-{i}.generate"
+            endpoint = f"dyn://test-namespace.mocker.generate"
             logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
 
             mocker = MockerProcess(request, endpoint, mocker_args_file)
@@ -284,7 +284,7 @@ def test_mocker_two_kv_router(request, runtime_services):
 
         for i in range(NUM_MOCKERS):
             # Use unique endpoints for each mocker
-            endpoint = f"dyn://test-namespace.mocker-{i}.generate"
+            endpoint = f"dyn://test-namespace.mocker.generate"
             logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
 
             mocker = MockerProcess(request, endpoint, mocker_args_file)
