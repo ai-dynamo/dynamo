@@ -142,7 +142,7 @@ class VllmBaseWorker:
         self.stats_logger = StatLoggerFactory(
             component,
             self.engine_args.data_parallel_rank or 0,
-            metrics_labels = [("model", self.engine_args.model)],
+            metrics_labels=[("model", self.engine_args.model)],
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
@@ -344,9 +344,9 @@ class VllmPDWorker(VllmBaseWorker):
                 # Update the prompt token id in the decode request to the one
                 # in response, which has image templated filled in. So that
                 # the decode worker will fetch correct amount of KV blocks.
-                decode_request.engine_prompt[
-                    "prompt_token_ids"
-                ] = prefill_response.prompt_token_ids
+                decode_request.engine_prompt["prompt_token_ids"] = (
+                    prefill_response.prompt_token_ids
+                )
                 logger.debug(
                     f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
                 )
@@ -355,7 +355,9 @@ class VllmPDWorker(VllmBaseWorker):
                 extra_args.pop("serialized_request", None)
                 decode_request.sampling_params.extra_args = extra_args
                 logger.debug("Decode request: %s", decode_request)
-                async for decode_response in await self.decode_worker_client.round_robin(
+                async for (
+                    decode_response
+                ) in await self.decode_worker_client.round_robin(
                     decode_request.model_dump_json()
                 ):
                     output = MyRequestOutput.model_validate_json(decode_response.data())
