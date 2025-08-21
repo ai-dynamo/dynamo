@@ -80,7 +80,7 @@ async def worker(runtime: DistributedRuntime):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logging.info("Signal handlers set up for graceful shutdown")
+    logging.debug("Signal handlers set up for graceful shutdown")
 
     if config.is_prefill_worker:
         await init_prefill(runtime, config)
@@ -99,7 +99,7 @@ def setup_vllm_engine(config, stat_logger=None):
         setup_lmcache_environment()
         logger.info("LMCache enabled for VllmWorker")
     else:
-        logger.info("LMCache is disabled")
+        logger.debug("LMCache is disabled")
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (

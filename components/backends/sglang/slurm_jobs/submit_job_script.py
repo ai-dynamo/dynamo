@@ -95,20 +95,24 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         "--decode-nodes", type=int, default=2, help="Number of decode nodes"
     )
     parser.add_argument(
+        "--prefill-workers", type=int, default=1, help="Number of prefill workers"
+    )
+    parser.add_argument(
+        "--decode-workers", type=int, default=1, help="Number of decode workers"
+    )
+    parser.add_argument(
         "--gpus-per-node", type=int, default=8, help="Number of GPUs per node"
     )
     parser.add_argument(
         "--network-interface", default="eth3", help="Network interface to use"
     )
     parser.add_argument(
-        "--gpu-type", choices=["h100", "gb200"], default="h100", help="GPU type to use"
+        "--gpu-type",
+        choices=["h100", "gb200-fp8"],
+        default="h100",
+        help="GPU type to use",
     )
-    parser.add_argument(
-        "--use-sglang-commands",
-        action="store_true",
-        default=False,
-        help="Use SGLang commands instead of Dynamo",
-    )
+
     parser.add_argument(
         "--partition",
         default="batch",
@@ -121,6 +125,17 @@ def main(input_args: list[str] | None = None):
     setup_logging()
     args = _parse_command_line_args(input_args)
 
+    # Validation
+    if args.prefill_nodes % args.prefill_workers != 0:
+        raise ValueError(
+            f"Prefill nodes ({args.prefill_nodes}) must be divisible by prefill workers ({args.prefill_workers})"
+        )
+
+    if args.decode_nodes % args.decode_workers != 0:
+        raise ValueError(
+            f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})"
+        )
+
     total_nodes = args.prefill_nodes + args.decode_nodes
     template_vars = {
         "job_name": args.job_name,
@@ -129,13 +144,14 @@ def main(input_args: list[str] | None = None):
         "time_limit": args.time_limit,
         "prefill_nodes": args.prefill_nodes,
         "decode_nodes": args.decode_nodes,
+        "prefill_workers": args.prefill_workers,
+        "decode_workers": args.decode_workers,
         "model_dir": args.model_dir,
         "config_dir": args.config_dir,
         "container_image": args.container_image,
         "gpus_per_node": args.gpus_per_node,
         "network_interface": args.network_interface,
         "gpu_type": args.gpu_type,
-        "use_sglang_commands": args.use_sglang_commands,
         "partition": args.partition,
     }
 
