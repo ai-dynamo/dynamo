@@ -778,9 +778,10 @@ func GenerateBasePodSpec(
 			MountPath: *component.PVC.MountPoint,
 		})
 	}
-	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(&container.Resources)
-	volumes = append(volumes, shmVolume)
-	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
+	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
+		volumes = append(volumes, *shmVol)
+		container.VolumeMounts = append(container.VolumeMounts, *shmMount)
+	}
 
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
@@ -1179,30 +1180,23 @@ func GenerateBasePodSpecForController(
 	return podSpec, nil
 }
 
-func generateSharedMemoryVolumeAndMount(resources *corev1.ResourceRequirements) (corev1.Volume, corev1.VolumeMount) {
-	sharedMemorySizeLimit := resource.MustParse("512Mi")
-	// Check if we have memory limits to work with
-	memoryLimit := resources.Limits[corev1.ResourceMemory]
-	if !memoryLimit.IsZero() {
-		// Use 1/4 of memory limit
-		calculatedSize := resource.NewQuantity(memoryLimit.Value()/4, resource.BinarySI)
-		// Apply bounds: minimum 512Mi, maximum 8Gi
-		minSize := resource.MustParse("512Mi")
-		maxSize := resource.MustParse("8Gi")
-
-		if calculatedSize.Cmp(minSize) > 0 && calculatedSize.Cmp(maxSize) < 0 {
-			sharedMemorySizeLimit = *calculatedSize
-		} else if calculatedSize.Cmp(maxSize) >= 0 {
-			sharedMemorySizeLimit = maxSize // Cap at maximum
+func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
+	// default: enabled=true, size=8Gi
+	size := resource.MustParse("8Gi")
+	if spec != nil {
+		if spec.Disabled {
+			return nil, nil
 		}
-		// If calculatedSize < minSize, keep the 512Mi base
+		if !spec.Size.IsZero() {
+			size = spec.Size
+		}
 	}
 	volume := corev1.Volume{
 		Name: commonconsts.KubeValueNameSharedMemory,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
 				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &sharedMemorySizeLimit,
+				SizeLimit: &size,
 			},
 		},
 	}
@@ -1210,5 +1204,5 @@ func generateSharedMemoryVolumeAndMount(resources *corev1.ResourceRequirements) 
 		Name:      commonconsts.KubeValueNameSharedMemory,
 		MountPath: "/dev/shm",
 	}
-	return volume, volumeMount
+	return &volume, &volumeMount
 }

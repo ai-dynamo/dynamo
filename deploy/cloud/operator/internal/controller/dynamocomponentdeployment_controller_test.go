@@ -793,7 +793,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeSource: corev1.VolumeSource{
 											EmptyDir: &corev1.EmptyDirVolumeSource{
 												Medium:    corev1.StorageMediumMemory,
-												SizeLimit: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5gi (calculated from memory limit / 4)
+												SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 											},
 										},
 									},
@@ -893,7 +893,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeSource: corev1.VolumeSource{
 											EmptyDir: &corev1.EmptyDirVolumeSource{
 												Medium:    corev1.StorageMediumMemory,
-												SizeLimit: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5gi (calculated from memory limit / 4)
+												SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 											},
 										},
 									},

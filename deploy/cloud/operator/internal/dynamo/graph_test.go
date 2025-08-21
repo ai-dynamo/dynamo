@@ -1235,7 +1235,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(536870912, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -1378,7 +1378,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(536870912, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -1733,7 +1733,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -1883,7 +1883,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -1989,7 +1989,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2134,7 +2134,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2509,7 +2509,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2648,7 +2648,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2755,7 +2755,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2899,7 +2899,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: resource.NewQuantity(8*1024*1024*1024, resource.BinarySI),
 													},
 												},
 											},
