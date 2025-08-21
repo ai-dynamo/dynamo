@@ -1,5 +1,5 @@
 {
-    "$schema": "https://json-schema.org/draft-07/schema#",
+    "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
     "copyright": [
         "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
@@ -18,7 +18,6 @@
         "--ulimit=stack=67108864",
         "--ulimit=nofile=65536:65536"
     ],
-    "service": "dynamo",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -68,9 +67,10 @@
         "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target"
     },
     "remoteEnv": {
-        // These are optional, but are convenient to have, especially the SSH_AUTH_SOCK.
+        // Optional convenience tokens passed from host. SSH agent is forwarded via your IDE setting, not here by default.
         "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
         "HF_TOKEN": "${localEnv:HF_TOKEN}"
+        // "SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}" // Optional: only if you also bind-mount the socket path
     },
     "mounts": [
         // These are for convenience, so that the history and pre-commit cache are persisted between sessions
