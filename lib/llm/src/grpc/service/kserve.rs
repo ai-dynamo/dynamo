@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_stream::{Stream, StreamExt};
 
 use tonic::{transport::Server, Request, Response, Status};
-use crate::grpc::service::openai::{model_infer_completions, completion_response_stream};
+use crate::grpc::service::openai::completion_response_stream;
 
 use crate::protocols::openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 
@@ -33,10 +33,9 @@ pub mod inference {
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
 use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStreamInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelConfigRequest, ModelConfigResponse, ModelConfig};
 
-/// [WIP] Understand the State, central piece for dynamo logic
-/// gRPC service shared state
-/// [TODO] 'metrics' are for HTTP service, how to port to gRPC?
-/// Or should we always have HTTP service up for non-inference?
+/// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
+/// for it as part of HTTP service. Should we always start HTTP service up
+/// for non-inference?
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
@@ -78,9 +77,8 @@ impl State {
     }
 }
 
-// [WIP] rename to Kserve?
 #[derive(Clone)]
-pub struct GrpcService {
+pub struct KserveService {
     // The state we share with every request handler
     state: Arc<State>,
 
@@ -90,7 +88,7 @@ pub struct GrpcService {
 
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
-pub struct GrpcServiceConfig {
+pub struct KserveServiceConfig {
     #[builder(default = "8787")]
     port: u16,
 
@@ -105,9 +103,9 @@ pub struct GrpcServiceConfig {
     etcd_client: Option<etcd::Client>,
 }
 
-impl GrpcService {
-    pub fn builder() -> GrpcServiceConfigBuilder {
-        GrpcServiceConfigBuilder::default()
+impl KserveService {
+    pub fn builder() -> KserveServiceConfigBuilder {
+        KserveServiceConfigBuilder::default()
     }
 
     pub fn state_clone(&self) -> Arc<State> {
@@ -304,7 +302,7 @@ impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
 }
 
 #[tonic::async_trait]
-impl GrpcInferenceService for GrpcService {
+impl GrpcInferenceService for KserveService {
     async fn model_infer(
         &self,
         request: Request<ModelInferRequest>,
@@ -318,7 +316,6 @@ impl GrpcInferenceService for GrpcService {
             return Err(Status::invalid_argument("Streaming is not supported for this endpoint"));
         }
 
-        // let completion_response = model_infer_completions(self.state_clone(), completion_request).await?;
         let stream = completion_response_stream(self.state_clone(), completion_request).await?;
 
         let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream)
@@ -344,14 +341,14 @@ impl GrpcInferenceService for GrpcService {
         &self,
         request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
-        let mut stream = request.into_inner();
+        let mut request_stream = request.into_inner();
         let state = self.state_clone();
         let output = async_stream::try_stream! {
             // [gluo FIXME] should be able to demux request / response streaming
             // await requests in a separate task until cancellation / completion,
             // and passing AsyncEngineStream for each request to the response stream
             // which will be collectively polling.
-            while let Some(request) = stream.next().await {
+            while let Some(request) = request_stream.next().await {
                 // [gluo FIXME] request error handling
                 let completion_request: NvCreateCompletionRequest = request.unwrap().try_into().map_err(|e| {
                     Status::invalid_argument(format!("Failed to parse request: {}", e))
@@ -478,9 +475,9 @@ impl GrpcInferenceService for GrpcService {
     }
 }
 
-impl GrpcServiceConfigBuilder {
-    pub fn build(self) -> Result<GrpcService, anyhow::Error> {
-        let config: GrpcServiceConfig = self.build_internal()?;
+impl KserveServiceConfigBuilder {
+    pub fn build(self) -> Result<KserveService, anyhow::Error> {
+        let config: KserveServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
         let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
@@ -489,12 +486,10 @@ impl GrpcServiceConfigBuilder {
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
 
-        Ok(GrpcService {
+        Ok(KserveService {
             state,
-            // router,
             port: config.port,
             host: config.host,
-            // route_docs: all_docs,
         })
     }
 
