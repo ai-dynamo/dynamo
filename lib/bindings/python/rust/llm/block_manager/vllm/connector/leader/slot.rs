@@ -196,7 +196,9 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
-                xfer_engine.execute(cancellation_token, drt_for_task, kvbm_metrics).await
+                xfer_engine
+                    .execute(cancellation_token, drt_for_task, kvbm_metrics)
+                    .await
             },
             primary_token,
             "LocalTransferEngine",
@@ -1065,8 +1067,13 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOffloadTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) =
-                        process_offload_request(req, &block_manager_offload, &leader_offload, kvbm_metrics.clone()).await
+                    if let Err(e) = process_offload_request(
+                        req,
+                        &block_manager_offload,
+                        &leader_offload,
+                        kvbm_metrics.clone(),
+                    )
+                    .await
                     {
                         tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
                     }
