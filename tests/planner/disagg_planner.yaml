@@ -71,8 +71,9 @@ spec:
               --adjustment-interval=60
               --profile-results-dir=/pvc-data/workspace/tests/planner/profiling_results/H200_TP1P_TP1D/profiling_results
               --prometheus-port=9085
-              --ttft=0.2
-              --itl=0.008
+              --ttft=0.1
+              --itl=0.01
+              --load-predictor=constant
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
