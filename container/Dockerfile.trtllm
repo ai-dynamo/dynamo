@@ -443,6 +443,8 @@ ARG FLASH_ATTN_VER=2.7.3
 ARG MPMATH_VER=1.3.0
 RUN python3 -m pip list # TODO remove this line
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
+# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
+COPY --from=build /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchgen /usr/local/lib/python3.12/dist-packages/torchgen
