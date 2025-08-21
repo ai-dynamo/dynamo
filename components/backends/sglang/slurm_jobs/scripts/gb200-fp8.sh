@@ -87,7 +87,7 @@ if [ "$mode" = "prefill" ]; then
         --dp-size "$TOTAL_GPUS" \
         --enable-dp-attention \
         --host 0.0.0.0 \
-        --decode-log-interval 1 \
+        --decode-log-interval 1000 \
         --max-running-requests 12288 \
         --context-length 9600 \
         --disable-radix-cache \
@@ -139,7 +139,7 @@ elif [ "$mode" = "decode" ]; then
         --dp-size "$TOTAL_GPUS" \
         --enable-dp-attention \
         --host 0.0.0.0 \
-        --decode-log-interval 1 \
+        --decode-log-interval 1000 \
         --max-running-requests 36864 \
         --context-length 9600 \
         --disable-radix-cache \
