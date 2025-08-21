@@ -192,7 +192,7 @@ COPY --from=dev /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Copy prometheus from base image
-COPY --from=base /usr/local/bin/prometheus /usr/local/bin/prometheus
+COPY --from=dev /usr/local/bin/prometheus /usr/local/bin/prometheus
 
 # Copy UCX from dev image as plugin for NIXL
 # Copy NIXL source from devr image
