@@ -160,4 +160,4 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 
 ## Supported Multimodal Models
 
-Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by dynamo.
+Multimodal models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by dynamo.
