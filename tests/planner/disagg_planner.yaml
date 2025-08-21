@@ -13,6 +13,8 @@ spec:
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
     - name: DYNAMO_NAMESPACE
       value: "vllm-disagg-planner"
+    - name: PROMETHEUS_PORT
+      value: "8000"
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
@@ -20,7 +22,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.5
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
     Planner:
@@ -53,7 +55,7 @@ spec:
         mountPoint: /pvc-data
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.5
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -69,6 +71,8 @@ spec:
               --adjustment-interval=60
               --profile-results-dir=/pvc-data/workspace/tests/planner/profiling_results/H200_TP1P_TP1D/profiling_results
               --prometheus-port=9085
+              --ttft=0.2
+              --itl=0.008
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
@@ -97,7 +101,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.5
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -120,13 +124,13 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.5
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --migration-limit=3"
+            - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --migration-limit=3 --max-model-len=8192"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -143,10 +147,10 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.5
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --is-prefill-worker --migration-limit=3
+            - python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --is-prefill-worker --migration-limit=3 --max-model-len=8192

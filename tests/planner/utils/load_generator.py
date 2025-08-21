@@ -56,8 +56,10 @@ class LoadGenerator:
         Returns:
             Dictionary with concurrency and request_rate parameters
         """
-        # Use request rate for planner testing as suggested
+        concurrency = max(1, int(req_per_sec * 3))
+
         return {
+            "concurrency": concurrency,
             "request_rate": req_per_sec,
         }
 
@@ -79,18 +81,11 @@ class LoadGenerator:
 
         # Calculate genai-perf parameters
         params = self._calculate_genai_perf_params(req_per_sec, duration_sec)
-        logger.info(
-            f"Using request_rate={params['request_rate']} req/s for {duration_sec}s"
-        )
+        logger.info(f"Using request_rate={params['request_rate']} req/s")
 
         # Create artifact directory if not provided
         if artifact_dir is None:
-            # Store artifacts in tests/planner/artifacts for easier access
-            base_artifacts_dir = "/home/hannahz/dev/ai-dynamo/tests/planner/artifacts"
-            os.makedirs(base_artifacts_dir, exist_ok=True)
-            artifact_dir = tempfile.mkdtemp(
-                prefix="scaling_test_", dir=base_artifacts_dir
-            )
+            artifact_dir = tempfile.mkdtemp(prefix="scaling_test_")
 
         os.makedirs(artifact_dir, exist_ok=True)
 
@@ -113,12 +108,10 @@ class LoadGenerator:
             str(self.osl),
             "--request-rate",
             str(params["request_rate"]),
-            "--measurement-interval",
-            str(min(30000, duration_sec * 1000)),  # Cap at 30s to avoid timeouts
             "--num-dataset-entries",
             str(
-                max(100, int(req_per_sec * min(30, duration_sec)))
-            ),  # Match measurement interval
+                max(20, int(params["request_rate"] * 10))
+            ),  # Generate reasonable dataset size
             "--artifact-dir",
             artifact_dir,
         ]
