@@ -20,8 +20,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
-    tracing::info!("********* DEBUG **********");
-    let mut grpc_service_builder = kserve::GrpcService::builder()
+    let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
 
@@ -130,14 +129,6 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             grpc_service
         }
     };
-    // tracing::debug!(
-    //     "Supported routes: {:?}",
-    //     grpc_service
-    //         .route_docs()
-    //         .iter()
-    //         .map(|rd| rd.to_string())
-    //         .collect::<Vec<String>>()
-    // );
     grpc_service.run(runtime.primary_token()).await?;
     runtime.shutdown(); // Cancel primary token
     Ok(())

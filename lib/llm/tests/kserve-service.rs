@@ -35,7 +35,7 @@ pub mod kserve_test {
             Metrics,
         },
     };
-    use dynamo_llm::grpc::service::kserve::GrpcService;
+    use dynamo_llm::grpc::service::kserve::KserveService;
     use dynamo_llm::protocols::{
         codec::SseLineCodec,
         convert_sse_stream,
@@ -81,6 +81,12 @@ pub mod kserve_test {
         fn was_cancelled(&self) -> bool {
             self.cancelled.load(std::sync::atomic::Ordering::Acquire)
         }
+
+        // Wait for the duration of generation delay to ensure the generate stream
+        // has been terminated early (`was_cancelled` remains true).
+        async fn wait_for_delay(&self) {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        }
     }
 
     #[async_trait]
@@ -119,15 +125,15 @@ pub mod kserve_test {
     #[async_trait]
     impl
         AsyncEngine<
-            SingleIn<NvCreateChatCompletionRequest>,
-            ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+            SingleIn<NvCreateCompletionRequest>,
+            ManyOut<Annotated<NvCreateCompletionResponse>>,
             Error,
         > for LongRunningEngine
     {
         async fn generate(
             &self,
-            request: SingleIn<NvCreateChatCompletionRequest>,
-        ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+            request: SingleIn<NvCreateCompletionRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
             let (_request, context) = request.transfer(());
             let ctx = context.context();
 
@@ -157,7 +163,7 @@ pub mod kserve_test {
                     }
                 }
 
-                yield Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation("event.dynamo.test.sentinel", &"DONE".to_string()).expect("Failed to create annotated response");
+                yield Annotated::<NvCreateCompletionResponse>::from_annotation("event.dynamo.test.sentinel", &"DONE".to_string()).expect("Failed to create annotated response");
             };
 
             Ok(ResponseStream::new(Box::pin(stream), ctx))
@@ -223,55 +229,6 @@ pub mod kserve_test {
         );
     }
 
-    fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Status) -> usize {
-        let endpoint = match endpoint {
-            Endpoint::Completions => 0,
-            Endpoint::ChatCompletions => 1,
-            Endpoint::Embeddings => todo!(),
-            Endpoint::Responses => todo!(),
-        };
-
-        let request_type = match request_type {
-            RequestType::Unary => 0,
-            RequestType::Stream => 1,
-        };
-
-        let status = match status {
-            Status::Success => 0,
-            Status::Error => 1,
-        };
-
-        endpoint * 4 + request_type * 2 + status
-    }
-
-    fn compare_counters(metrics: &Metrics, model: &str, expected: &[u64; 8]) {
-        for endpoint in &[Endpoint::Completions, Endpoint::ChatCompletions] {
-            for request_type in &[RequestType::Unary, RequestType::Stream] {
-                for status in &[Status::Success, Status::Error] {
-                    let index = compute_index(endpoint, request_type, status);
-                    compare_counter(
-                        metrics,
-                        model,
-                        endpoint,
-                        request_type,
-                        status,
-                        expected[index],
-                    );
-                }
-            }
-        }
-    }
-
-    fn inc_counter(
-        endpoint: Endpoint,
-        request_type: RequestType,
-        status: Status,
-        expected: &mut [u64; 8],
-    ) {
-        let index = compute_index(&endpoint, &request_type, &status);
-        expected[index] += 1;
-    }
-
     /// Wait for the HTTP service to be ready by checking its health endpoint
     async fn get_ready_client(port: u16, timeout_secs: u64) -> GrpcInferenceServiceClient<Channel> {
         let start = tokio::time::Instant::now();
@@ -307,12 +264,13 @@ pub mod kserve_test {
     #[fixture]
     fn service_with_engines(
         #[default(8990)] port: u16,
-    ) -> (GrpcService, Arc<CounterEngine>, Arc<AlwaysFailEngine>) {
-        let service = GrpcService::builder().port(8989).build().unwrap();
+    ) -> (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>) {
+        let service = KserveService::builder().port(port).build().unwrap();
         let manager = service.model_manager();
 
         let counter = Arc::new(CounterEngine {});
         let failure = Arc::new(AlwaysFailEngine {});
+        let long_running = Arc::new(LongRunningEngine::new(1_000));
 
         manager
             .add_completions_model("counter", counter.clone())
@@ -323,14 +281,28 @@ pub mod kserve_test {
         manager
             .add_completions_model("failure", failure.clone())
             .unwrap();
+        manager
+            .add_completions_model("long_running", long_running.clone())
+            .unwrap();
 
-        (service, counter, failure)
+        (service, counter, failure, long_running)
+    }
+
+    // Tests may run in parallel, use this enum to keep track of port used for different
+    // test cases
+    enum TestPort {
+        InferFailure=8988,
+        InferSuccess=8989,
+        StreamInferFailure=8990,
+        StreamInferSuccess=8991,
+        InferCancellation=8992,
+        StreamInferCancellation=8993
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_infer_failure(
-        service_with_engines: (GrpcService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+        #[with(TestPort::InferFailure as u16)] service_with_engines: (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
         text_input: inference::model_infer_request::InferInputTensor) {
         // start server
         let service = service_with_engines.0;
@@ -339,7 +311,7 @@ pub mod kserve_test {
         let task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
-        let mut client = get_ready_client(8989, 5).await;
+        let mut client = get_ready_client(TestPort::InferFailure as u16, 5).await;
 
         // unknown_model
         let request = tonic::Request::new(ModelInferRequest {
@@ -438,25 +410,21 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_infer_sucess(text_input: inference::model_infer_request::InferInputTensor) {
+    async fn test_infer_success(#[with(TestPort::InferSuccess as u16)] service_with_engines: (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
+        text_input: inference::model_infer_request::InferInputTensor) {
         // start server
-        let service = GrpcService::builder().port(8989).build().unwrap();
+        let service = service_with_engines.0;
         let state = service.state_clone();
         let manager = state.manager();
 
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
-
-        // register model
-        let counter = Arc::new(CounterEngine {});
-        let result = manager.add_completions_model("foo", counter);
-        assert!(result.is_ok());
+        let task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
-        let mut client = get_ready_client(8989, 5).await;
+        let mut client = get_ready_client(TestPort::InferSuccess as u16, 5).await;
 
-        let model_name = "foo";
+        let model_name = "counter";
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
@@ -506,7 +474,57 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_stream_infer_sucess(service_with_engines: (GrpcService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+    async fn test_infer_cancellation(#[with(TestPort::InferCancellation as u16)] service_with_engines: (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
+        text_input: inference::model_infer_request::InferInputTensor) {
+        // start server
+        let service = service_with_engines.0;
+        let long_running = service_with_engines.3;
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { service.run(token.clone()).await });
+
+        // create client and send request to unregistered model
+        let mut client = get_ready_client(TestPort::InferCancellation as u16, 5).await;
+
+        let model_name = "long_running";
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: model_name.into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: vec![text_input],
+            ..Default::default()
+        });
+
+        assert!(
+            !long_running.was_cancelled(),
+            "Expected long running engine is not cancelled"
+        );
+
+        // Cancelling the request by dropping the request future after 1 second
+        let response = match timeout(Duration::from_millis(500), client.model_infer(request)).await {
+            Ok(_) => Err("Expect request timed out"),
+            Err(_) => {
+                println!("Cancelled request after 500ms");
+                Ok("timed out")
+            }
+        };
+        assert!(
+            response.is_ok(),
+            "Expected client timed out",
+        );
+        long_running.wait_for_delay().await;
+        assert!(
+            long_running.was_cancelled(),
+            "Expected long running engine to be cancelled"
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_stream_infer_success(#[with(TestPort::StreamInferSuccess as u16)] service_with_engines: (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
         text_input: inference::model_infer_request::InferInputTensor) {
         // start server
         let service = service_with_engines.0;
@@ -516,7 +534,7 @@ pub mod kserve_test {
         let task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
-        let mut client = get_ready_client(8989, 5).await;
+        let mut client = get_ready_client(TestPort::StreamInferSuccess as u16, 5).await;
 
         let model_name = "counter";
 
@@ -583,11 +601,15 @@ pub mod kserve_test {
             }
             response_idx += 1;
         }
+        assert_eq!(response_idx,
+            10,
+            "Expected 10 responses"
+        )
     }
 
     #[rstest]
     #[tokio::test]
-    async fn test_stream_infer_failure(service_with_engines: (GrpcService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+    async fn test_stream_infer_failure(#[with(TestPort::StreamInferFailure as u16)] service_with_engines: (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
         text_input: inference::model_infer_request::InferInputTensor) {
         // start server
         let service = service_with_engines.0;
@@ -597,7 +619,7 @@ pub mod kserve_test {
         let task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
-        let mut client = get_ready_client(8989, 5).await;
+        let mut client = get_ready_client(TestPort::StreamInferFailure as u16, 5).await;
 
         let model_name = "failure";
 
@@ -642,5 +664,59 @@ pub mod kserve_test {
                 }
             }
         }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_stream_infer_cancellation(#[with(TestPort::StreamInferCancellation as u16)] service_with_engines: (KserveService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
+        text_input: inference::model_infer_request::InferInputTensor) {
+        // start server
+        let service = service_with_engines.0;
+        let long_running = service_with_engines.3;
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { service.run(token.clone()).await });
+
+        // create client and send request to unregistered model
+        let mut client = get_ready_client(TestPort::StreamInferCancellation as u16, 5).await;
+
+        let model_name = "long_running";
+        let outbound = async_stream::stream! {
+            let request_count = 1;
+            for _ in 0..request_count {
+                let request = ModelInferRequest {
+                    model_name: model_name.into(),
+                    model_version: "1".into(),
+                    id: "1234".into(),
+                    inputs: vec![text_input.clone()],
+                    ..Default::default()
+                };
+
+                yield request;
+            }
+        };
+
+        assert!(
+            !long_running.was_cancelled(),
+            "Expected long running engine is still running"
+        );
+
+        // Cancelling the request by dropping the request future after 1 second
+        let response = match timeout(Duration::from_millis(500), client.model_stream_infer(Request::new(outbound))).await {
+            Ok(response) => response.unwrap(),
+            Err(_) => {
+                panic!("Expected response stream is returned immediately");
+            }
+        };
+        std::mem::drop(response); // Drop the response to cancel the stream
+
+        long_running.wait_for_delay().await;
+        assert!(
+            long_running.was_cancelled(),
+            "Expected long running engine to be cancelled"
+        );
     }
 }
