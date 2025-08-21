@@ -16,11 +16,13 @@
 import logging
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
+import torch
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 
+from dynamo.nixl_connect import Connector
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
@@ -37,6 +39,7 @@ class DisaggregationMode(Enum):
     AGGREGATED = "prefill_and_decode"
     PREFILL = "prefill"
     DECODE = "decode"
+    ENCODE = "encode"
 
 
 class DisaggregationStrategy(Enum):
@@ -57,9 +60,11 @@ class RequestHandlerConfig:
     disaggregation_mode: DisaggregationMode
     disaggregation_strategy: DisaggregationStrategy
     next_client: object
+    encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
     ] = None  # for multimodal support
+    connector: Optional[Connector] = None
 
 
 class HandlerBase:
@@ -75,8 +80,10 @@ class HandlerBase:
         self.disaggregation_mode = config.disaggregation_mode
         self.disaggregation_strategy = config.disaggregation_strategy
         self.next_client = config.next_client
+        self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
+        self.connector = config.connector
 
     def check_error(self, result: dict):
         """
@@ -89,9 +96,15 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
-    async def generate_locally(self, request: dict):
+    async def generate_locally(
+        self, request: dict, embeddings: Optional[Union[torch.Tensor, dict]] = None
+    ):
         """
         Generate responses based on the disaggregation mode in the request.
+
+        Args:
+            request: The request dictionary containing generation parameters
+            embeddings: Optional tensor or dict containing embeddings for multimodal processing
         """
         logging.debug(f"Request: {request}")
 
@@ -102,7 +115,7 @@ class HandlerBase:
         # Check for multimodal request and process it
         if self.multimodal_processor:
             processed_input = await self.multimodal_processor.process_openai_request(
-                request
+                request, embeddings
             )
 
         else:

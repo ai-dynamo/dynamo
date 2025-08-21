@@ -16,6 +16,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
+DEFAULT_ENCODE_ENDPOINT = "dyn://dynamo.tensorrt_llm_encode.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
@@ -47,7 +48,9 @@ class Config:
             DEFAULT_DISAGGREGATION_STRATEGY
         )
         self.next_endpoint: str = ""
+        self.encode_endpoint: str = ""
         self.modality: str = "text"
+        self.use_nixl_connect: bool = False
 
     def __str__(self) -> str:
         return (
@@ -72,7 +75,9 @@ class Config:
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"disaggregation_strategy={self.disaggregation_strategy}, "
             f"next_endpoint={self.next_endpoint}, "
-            f"modality={self.modality})"
+            f"encode_endpoint={self.encode_endpoint}, "
+            f"modality={self.modality}, "
+            f"use_nixl_connect={self.use_nixl_connect})"
         )
 
 
@@ -215,6 +220,12 @@ def cmd_line_args():
         help=f"Mode to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_MODE}",
     )
     parser.add_argument(
+        "--use-nixl-connect",
+        type=bool,
+        default=False,
+        help="Use NIXL Connect for communication between workers.",
+    )
+    parser.add_argument(
         "--disaggregation-strategy",
         type=str,
         default=DEFAULT_DISAGGREGATION_STRATEGY,
@@ -233,6 +244,12 @@ def cmd_line_args():
         type=str,
         default="",
         help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) to send requests to when running in disaggregation mode. Default: {DEFAULT_NEXT_ENDPOINT} if first worker, empty if next worker",
+    )
+    parser.add_argument(
+        "--encode-endpoint",
+        type=str,
+        default="",
+        help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) for the encode worker. Default: {DEFAULT_ENCODE_ENDPOINT}",
     )
     args = parser.parse_args()
 
@@ -260,6 +277,9 @@ def cmd_line_args():
             and config.disaggregation_mode != DisaggregationMode.AGGREGATED
         ):
             args.next_endpoint = DEFAULT_NEXT_ENDPOINT
+    elif config.disaggregation_mode == DisaggregationMode.ENCODE:
+        if args.endpoint == "":
+            args.endpoint = DEFAULT_ENCODE_ENDPOINT
     else:
         if args.endpoint == "":
             args.endpoint = DEFAULT_NEXT_ENDPOINT
@@ -274,6 +294,7 @@ def cmd_line_args():
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
     config.next_endpoint = args.next_endpoint
+    config.encode_endpoint = args.encode_endpoint
 
     config.tensor_parallel_size = args.tensor_parallel_size
     if args.pipeline_parallel_size is not None:
@@ -293,5 +314,6 @@ def cmd_line_args():
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
     config.modality = args.modality
+    config.use_nixl_connect = args.use_nixl_connect
 
     return config

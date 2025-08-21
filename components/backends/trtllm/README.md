@@ -375,6 +375,76 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
 }'
 ```
 
+### Encode-Prefill-Decode (EPD) Flow with NIXL
+
+For high-performance multimodal inference with large embeddings, Dynamo supports a specialized **Encode-Prefill-Decode (EPD)** flow using **NIXL (RDMA)** for zero-copy tensor transfer.
+
+#### Enabling the Feature
+
+This is an experimental feature that requires using a specific TensorRT-LLM commit.
+To enable it build the dynamo container with the `--tensorrtllm-commit` flag, followed by the commit hash:
+
+```bash
+./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
+```
+
+#### Key Features
+
+- **🚀 High Performance**: Zero-copy RDMA transfer for embeddings
+- **🔄 Dynamic Shape Allocation**: Automatically handles variable embedding shapes per image
+- **📦 Multi-Format Support**: Works with tensor files (`.pt`) and dictionary-based embeddings
+- **⚡ Hybrid Transfer**: Large tensors via NIXL, small metadata via JSON
+
+#### How to use
+
+```bash
+cd $DYNAMO_HOME/components/backends/trtllm
+
+# Launch 3-worker EPD flow with NIXL
+./launch/epd_disagg.sh
+```
+
+#### Configuration
+
+The EPD flow uses a dedicated **Encode Worker** that runs separately from the Prefill and Decode workers. The `ENCODE_ENDPOINT` environment variable specifies how the Prefill worker communicates with the Encode worker:
+
+```bash
+export ENCODE_ENDPOINT="dyn://dynamo.tensorrt_llm_encode.generate"
+```
+
+This endpoint follows Dynamo's standard format: `dyn://namespace.component.endpoint` where the Encode worker registers itself as `dynamo.tensorrt_llm_encode.generate`.
+
+#### How It Works
+
+1. **EncodeHandler** loads embeddings and creates NIXL readable operation
+2. **Dynamic allocation** based on actual embedding shape received from EncodeHandler
+3. **Zero-copy transfer** of main embeddings tensor via RDMA
+4. **JSON transfer** of small auxiliary data (tokens, offsets)
+5. **Automatic reconstruction** of original format (tensor or dictionary)
+
+#### Example Request
+
+The request format is identical to regular multimodal requests:
+
+```bash
+curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+    "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe the image"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "/path/to/embeddings.pt"}
+                }
+            ]
+        }
+    ],
+    "max_tokens": 160
+}'
+```
+
 ### Supported Multimodal Models
 
 Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/inputs/utils.py#L221) are supported by dynamo.
