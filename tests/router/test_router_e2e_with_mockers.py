@@ -11,6 +11,7 @@ from typing import Any, Dict
 import aiohttp
 import pytest
 
+from dynamo._core import DistributedRuntime
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
@@ -131,6 +132,50 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4)
     return False
 
 
+def get_runtime():
+    """Get or create a DistributedRuntime instance.
+
+    This handles the case where a worker is already initialized (common in CI)
+    by using the detached() method to reuse the existing runtime.
+    """
+    try:
+        # Try to use existing runtime (common in CI where tests run in same process)
+        _runtime_instance = DistributedRuntime.detached()
+        logger.info("Using detached runtime (worker already initialized)")
+    except Exception as e:
+        # If no existing runtime, create a new one
+        logger.info(f"Creating new runtime (detached failed: {e})")
+        loop = asyncio.get_running_loop()
+        _runtime_instance = DistributedRuntime(loop, False)
+
+    return _runtime_instance
+
+
+async def check_registration_in_etcd(expected_count: int):
+    """Check that the expected number of KV routers are registered in etcd.
+
+    Args:
+        expected_count: The number of KV routers expected to be registered
+
+    Returns:
+        List of registered KV router entries from etcd
+    """
+    runtime = get_runtime()
+    etcd = runtime.etcd_client()
+
+    # Check for kv_routers in etcd
+    # The KV router registers itself with key format: kv_routers/{model_name}/{uuid}
+    kv_routers = await etcd.kv_get_prefix("kv_routers/")
+    logger.info(f"Found {len(kv_routers)} KV router(s) registered in etcd")
+
+    # Assert we have the expected number of KV routers registered
+    assert (
+        len(kv_routers) == expected_count
+    ), f"Expected {expected_count} KV router(s) in etcd, found {len(kv_routers)}"
+
+    return kv_routers
+
+
 async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     """Send multiple requests concurrently, alternating between URLs if multiple provided"""
 
@@ -239,6 +284,9 @@ def test_mocker_kv_router(request, runtime_services):
 
         logger.info(f"Successfully completed {NUM_REQUESTS} requests")
 
+        # Check etcd registration - expect 1 KV router
+        asyncio.run(check_registration_in_etcd(expected_count=1))
+
     finally:
         # Clean up
         if "kv_router" in locals():
@@ -311,6 +359,9 @@ def test_mocker_two_kv_router(request, runtime_services):
         logger.info(
             f"Successfully completed {NUM_REQUESTS} requests across {len(router_ports)} routers"
         )
+
+        # Check etcd registration - expect 2 KV routers
+        asyncio.run(check_registration_in_etcd(expected_count=2))
 
     finally:
         # Clean up routers

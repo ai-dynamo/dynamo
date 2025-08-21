@@ -578,15 +578,6 @@ mod test_helpers {
     use super::prometheus_names::{nats_client, nats_service};
     use super::*;
 
-    /// Helper function to create a DRT instance for testing in async contexts
-    #[cfg(feature = "integration")]
-    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
-        let rt = crate::Runtime::from_current().unwrap();
-        crate::DistributedRuntime::from_settings_without_discovery(rt)
-            .await
-            .unwrap()
-    }
-
     /// Base function to filter Prometheus output lines based on a predicate.
     /// Returns lines that match the predicate, converted to String.
     fn filter_prometheus_lines<F>(input: &str, mut predicate: F) -> Vec<String>
@@ -822,7 +813,6 @@ mod test_metricsregistry_units {
         println!("✓ Prometheus metric parsing works correctly!");
     }
 
-    #[cfg(feature = "integration")]
     #[test]
     fn test_metrics_registry_entry_callbacks() {
         use crate::MetricsRegistryEntry;
@@ -923,11 +913,12 @@ mod test_metricsregistry_units {
 #[cfg(test)]
 mod test_metricsregistry_prefixes {
     use super::*;
+    use crate::distributed::test_helpers::create_test_drt_async;
     use prometheus::core::Collector;
 
     #[tokio::test]
     async fn test_hierarchical_prefixes_and_parent_hierarchies() {
-        let drt = super::test_helpers::create_test_drt_async().await;
+        let drt = create_test_drt_async().await;
 
         const DRT_NAME: &str = "";
         const NAMESPACE_NAME: &str = "ns901";
@@ -1002,7 +993,7 @@ mod test_metricsregistry_prefixes {
     #[tokio::test]
     async fn test_recursive_namespace() {
         // Create a distributed runtime for testing
-        let drt = super::test_helpers::create_test_drt_async().await;
+        let drt = create_test_drt_async().await;
 
         // Create a deeply chained namespace: ns1.ns2.ns3
         let ns1 = drt.namespace("ns1").unwrap();
@@ -1054,13 +1045,14 @@ mod test_metricsregistry_prometheus_fmt_outputs {
     use super::prometheus_names::{nats_client, nats_service};
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
     use super::*;
+    use crate::distributed::test_helpers::create_test_drt_async;
     use prometheus::Counter;
     use std::sync::Arc;
 
     #[tokio::test]
     async fn test_prometheusfactory_using_metrics_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt_async().await;
+        let drt = create_test_drt_async().await;
 
         // Use a simple constant namespace name
         let namespace_name = "ns345";
@@ -1312,13 +1304,14 @@ mod test_metricsregistry_nats {
     use super::prometheus_names::{nats_client, nats_service};
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
     use super::*;
+    use crate::distributed::test_helpers::create_test_drt_async;
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
     use tokio::time::{sleep, Duration};
     #[tokio::test]
     async fn test_drt_nats_metrics() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt_async().await;
+        let drt = create_test_drt_async().await;
 
         // Get DRT output which should include NATS client metrics
         let drt_output = drt.prometheus_metrics_fmt().unwrap();
@@ -1382,7 +1375,7 @@ mod test_metricsregistry_nats {
         // the values of the metrics.
 
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = super::test_helpers::create_test_drt_async().await;
+        let drt = create_test_drt_async().await;
 
         // Create a namespace and components from the DRT
         let namespace = drt.namespace("ns789").unwrap();

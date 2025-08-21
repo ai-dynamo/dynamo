@@ -34,6 +34,7 @@ def _get_common_genai_perf_cmd(
     artifact_dir,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
 ):
     return [
@@ -42,7 +43,7 @@ def _get_common_genai_perf_cmd(
         "--model",
         model,
         "--tokenizer",
-        model,
+        tokenizer,
         "--endpoint-type",
         "chat",
         "--endpoint",
@@ -68,6 +69,7 @@ def get_prefill_genai_perf_cmd(
     artifact_dir,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     osl=5,
     base_url="http://localhost:8000",
 ):
@@ -75,6 +77,7 @@ def get_prefill_genai_perf_cmd(
         artifact_dir,
         seed,
         model,
+        tokenizer,
         base_url,
     ) + [
         "--synthetic-input-tokens-mean",
@@ -103,12 +106,14 @@ def get_decode_genai_perf_cmd(
     num_request,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    tokenizer="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
 ):
     return _get_common_genai_perf_cmd(
         artifact_dir,
         seed,
         model,
+        tokenizer,
         base_url,
     ) + [
         "--synthetic-input-tokens-mean",
@@ -147,11 +152,19 @@ def get_gap_result(artifact_dir: str) -> dict:
 
 
 def benchmark_prefill(
-    isl, genai_perf_artifact_dir, model_name, base_url="http://localhost:8000"
+    isl,
+    genai_perf_artifact_dir,
+    model_name,
+    tokenizer,
+    base_url="http://localhost:8000",
 ):
     logger.info(f"Running genai-perf with isl {isl}")
     genai_perf_cmd = get_prefill_genai_perf_cmd(
-        isl, genai_perf_artifact_dir, model=model_name, base_url=base_url
+        isl,
+        genai_perf_artifact_dir,
+        model=model_name,
+        tokenizer=tokenizer,
+        base_url=base_url,
     )
     print(f"genai-perf cmd: {genai_perf_cmd}")
     # import pdb; pdb.set_trace()
@@ -179,6 +192,7 @@ def benchmark_decode(
     num_request,
     genai_perf_artifact_dir,
     model_name,
+    tokenizer,
     base_url="http://localhost:8000",
 ):
     logger.info(f"Profiling decode with num_request {num_request}...")
@@ -194,6 +208,7 @@ def benchmark_decode(
         num_request,
         seed=seed,
         model=model_name,
+        tokenizer=tokenizer,
         base_url=base_url,
     )
     gap_process = subprocess.Popen(
@@ -211,6 +226,7 @@ def benchmark_decode(
         num_request,
         seed=seed,
         model=model_name,
+        tokenizer=tokenizer,
         base_url=base_url,
     )
     gap_process = subprocess.Popen(

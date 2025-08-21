@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from data_generator.cli import main as cli_main
+from prefix_data_generator.cli import main as cli_main
 
 
 def main():

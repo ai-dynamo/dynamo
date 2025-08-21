@@ -54,43 +54,45 @@ impl WorkHandlerMetrics {
     /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
     pub fn from_endpoint(
         endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let metrics_labels = metrics_labels.unwrap_or(&[]);
         let request_counter = endpoint.create_intcounter(
             "requests_total",
             "Total number of requests processed by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let request_duration = endpoint.create_histogram(
             "request_duration_seconds",
             "Time spent processing requests by work handler",
-            &[],
+            metrics_labels,
             None,
         )?;
 
         let inflight_requests = endpoint.create_intgauge(
             "inflight_requests",
             "Number of requests currently being processed by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let request_bytes = endpoint.create_intcounter(
             "request_bytes_total",
             "Total number of bytes received in requests by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let response_bytes = endpoint.create_intcounter(
             "response_bytes_total",
             "Total number of bytes sent in responses by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let error_counter = endpoint.create_intcountervec(
             "errors_total",
             "Total number of errors in work handler processing",
             &["error_type"],
-            &[],
+            metrics_labels,
         )?;
 
         Ok(Self::new(
@@ -110,10 +112,14 @@ where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
 {
-    fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
         // Call the Ingress-specific add_metrics implementation
         use crate::pipeline::network::Ingress;
-        Ingress::add_metrics(self, endpoint)
+        Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {

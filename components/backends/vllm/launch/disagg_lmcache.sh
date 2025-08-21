@@ -21,4 +21,5 @@ LMCACHE_MAX_LOCAL_CPU_SIZE=20 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
-    --is-prefill-worker
+    --is-prefill-worker \
+    --connector lmcache nixl

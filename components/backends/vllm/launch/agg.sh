@@ -9,4 +9,4 @@ python -m dynamo.frontend &
 
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --connector none

@@ -33,7 +33,7 @@ realtime = ["dep:tokio-tungstenite"]
 byot = []
 
 [dependencies]
-async-openai-macros = { path = "../async-openai-macros" }
+async-openai-macros = "0.1.0"
 backoff = { version = "0.4.0", features = ["tokio"] }
 base64 = "0.22.1"
 futures = "0.3.31"

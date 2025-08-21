@@ -18,7 +18,7 @@ import logging
 
 import uvloop
 
-from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
+from dynamo.runtime import DistributedRuntime, PyContext, dynamo_endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 logger = logging.getLogger(__name__)
@@ -26,10 +26,13 @@ configure_dynamo_logging(service_name="backend")
 
 
 @dynamo_endpoint(str, str)
-async def content_generator(request: str):
-    logger.info(f"Received request: {request}")
+async def content_generator(request: str, context: PyContext):
+    logger.info(f"Received request: {request} with `id={context.id()}`")
     for word in request.split(","):
         await asyncio.sleep(1)
+        if context.is_stopped() or context.is_killed():
+            print("request got cancelled.")
+            return
         yield f"Hello {word}!"
 
 

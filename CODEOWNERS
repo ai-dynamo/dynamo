@@ -26,6 +26,11 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /.github/workflows/*.ps1 @ai-dynamo/Devops @whoisj
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
+# Planner
+/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou
+/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou
+/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou
+
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops
 /ATTRIBUTIONS.md @ai-dynamo/Devops

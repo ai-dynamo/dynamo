@@ -50,13 +50,24 @@ jobs:
           # Set GITHUB_TOKEN to avoid github rate limits on URL checks
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd docs
           set -euo pipefail
+
+          # Set offline mode for pull requests, full check for pushes to main
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "Running lychee in offline mode (internal links only) for PR check"
+            OFFLINE_FLAG="--offline"
+          else
+            echo "Running lychee in full mode (all links) for main branch"
+            OFFLINE_FLAG=""
+          fi
+
           # Run lychee against all files in repo
           lychee \
             --cache \
             --no-progress \
-            --exclude-path "ATTRIBUTIONS.*" \
+            --root-dir "${{ github.workspace }}" \
+            --exclude-path ".*ATTRIBUTIONS.*" \
             --accept "200..=299, 403, 429" \
             --exclude-all-private --exclude 0.0.0.0 \
+            $OFFLINE_FLAG \
             .
