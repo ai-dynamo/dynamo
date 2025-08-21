@@ -37,7 +37,7 @@ pub use delta::DeltaGenerator;
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateCompletionRequest,
+    pub inner: dynamo_async_openai::types::CreateCompletionRequest,
 
     #[serde(flatten)]
     pub common: CommonExt,
@@ -49,25 +49,25 @@ pub struct NvCreateCompletionRequest {
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateCompletionResponse,
+    pub inner: dynamo_async_openai::types::CreateCompletionResponse,
 }
 
-impl ContentProvider for async_openai::types::Choice {
+impl ContentProvider for dynamo_async_openai::types::Choice {
     fn content(&self) -> String {
         self.text.clone()
     }
 }
 
-pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
+pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
     match prompt {
-        async_openai::types::Prompt::String(s) => s.clone(),
-        async_openai::types::Prompt::StringArray(arr) => arr.join(" "), // Join strings with spaces
-        async_openai::types::Prompt::IntegerArray(arr) => arr
+        dynamo_async_openai::types::Prompt::String(s) => s.clone(),
+        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.join(" "), // Join strings with spaces
+        dynamo_async_openai::types::Prompt::IntegerArray(arr) => arr
             .iter()
             .map(|&num| num.to_string())
             .collect::<Vec<_>>()
             .join(" "),
-        async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr
+        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr
             .iter()
             .map(|inner| {
                 inner
@@ -226,10 +226,10 @@ impl ResponseFactory {
 
     pub fn make_response(
         &self,
-        choice: async_openai::types::Choice,
-        usage: Option<async_openai::types::CompletionUsage>,
+        choice: dynamo_async_openai::types::Choice,
+        usage: Option<dynamo_async_openai::types::CompletionUsage>,
     ) -> NvCreateCompletionResponse {
-        let inner = async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -300,7 +300,7 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
     }
 }
 
-impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choice {
+impl TryFrom<common::StreamingCompletionResponse> for dynamo_async_openai::types::Choice {
     type Error = anyhow::Error;
 
     fn try_from(response: common::StreamingCompletionResponse) -> Result<Self, Self::Error> {
@@ -321,10 +321,10 @@ impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choic
         // TODO handle aggregating logprobs
         let logprobs = None;
 
-        let finish_reason: Option<async_openai::types::CompletionFinishReason> =
+        let finish_reason: Option<dynamo_async_openai::types::CompletionFinishReason> =
             response.delta.finish_reason.map(Into::into);
 
-        let choice = async_openai::types::Choice {
+        let choice = dynamo_async_openai::types::Choice {
             text,
             index,
             logprobs,

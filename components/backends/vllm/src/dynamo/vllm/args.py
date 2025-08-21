@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
+VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
+
 # Global LMCache configuration - initialize once on module import
 ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
 
@@ -44,7 +46,6 @@ class Config:
     is_prefill_worker: bool
     migration_limit: int = 0
     kv_port: Optional[int] = None
-    side_channel_port: Optional[int] = None
     port_range: DynamoPortRange
 
     # mirror vLLM
@@ -53,6 +54,9 @@ class Config:
 
     # rest vLLM args
     engine_args: AsyncEngineArgs
+
+    # Connector list from CLI
+    connector_list: Optional[list] = None
 
 
 def parse_args() -> Config:
@@ -90,6 +94,13 @@ def parse_args() -> Config:
         type=int,
         default=DEFAULT_DYNAMO_PORT_MAX,
         help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MAX}). Must be in registered ports range (1024-49151).",
+    )
+    parser.add_argument(
+        "--connector",
+        nargs="*",
+        default=["nixl"],
+        help="List of connectors to use in order (e.g., --connector nixl lmcache). "
+        "Options: nixl, lmcache, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -141,6 +152,36 @@ def parse_args() -> Config:
         min=args.dynamo_port_min, max=args.dynamo_port_max
     )
 
+    # Check for conflicting flags
+    has_kv_transfer_config = (
+        hasattr(engine_args, "kv_transfer_config")
+        and engine_args.kv_transfer_config is not None
+    )
+    has_connector_flag = args.connector is not None
+
+    if has_kv_transfer_config and has_connector_flag:
+        raise ValueError(
+            "Cannot specify both --kv-transfer-config and --connector flags"
+        )
+
+    if has_connector_flag:
+        normalized = [c.lower() for c in args.connector]
+
+        invalid = [c for c in normalized if c not in VALID_CONNECTORS]
+        if invalid:
+            raise ValueError(
+                f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+            )
+
+        if "none" in normalized or "null" in normalized:
+            if len(normalized) > 1:
+                raise ValueError(
+                    "'none' and 'null' cannot be combined with other connectors"
+                )
+            config.connector_list = []
+        else:
+            config.connector_list = normalized
+
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
         logger.debug(
@@ -169,84 +210,101 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         config.kv_port = kv_port
         logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
-    # Allocate side channel ports
-    # https://github.com/vllm-project/vllm/blob/releases/v0.10.1/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L443
-    # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
-    # For dp_rank, we need to reserve tp_size consecutive ports
-    tp_size = config.engine_args.tensor_parallel_size or 1
+        # Check if NIXL is needed based on connector list
+    needs_nixl = config.connector_list and "nixl" in config.connector_list
 
-    # The first port for this dp_rank will be at: base_port + (dp_rank * tp_size)
-    # We need to allocate tp_size consecutive ports starting from there
-    nixl_metadata = PortMetadata(worker_id=worker_id, reason="nixl_side_channel_port")
-    nixl_request = PortAllocationRequest(
-        etcd_context=etcd_context,
-        metadata=nixl_metadata,
-        port_range=config.port_range,
-        block_size=tp_size,
-    )
-    allocated_ports = await allocate_and_reserve_port_block(nixl_request)
-    first_port_for_dp_rank = allocated_ports[0]
+    if needs_nixl:
+        # Allocate side channel ports
+        # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L372
+        # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
+        # For dp_rank, we need to reserve tp_size consecutive ports
+        tp_size = config.engine_args.tensor_parallel_size or 1
 
-    # Calculate the base port that NIXL expects
-    # base_port = first_port_for_dp_rank - (dp_rank * tp_size)
-    nixl_offset = dp_rank * tp_size
-    base_side_channel_port = first_port_for_dp_rank - nixl_offset
-
-    if base_side_channel_port < 0:
-        raise ValueError(
-            f"NIXL base port calculation resulted in negative port: "
-            f"first_allocated_port={first_port_for_dp_rank}, offset={nixl_offset}, "
-            f"base_port={base_side_channel_port}. Current range: {config.port_range.min}-{config.port_range.max}. "
-            f"Consider using a higher port range."
+        # The first port for this dp_rank will be at: base_port + (dp_rank * tp_size)
+        # We need to allocate tp_size consecutive ports starting from there
+        nixl_metadata = PortMetadata(
+            worker_id=worker_id, reason="nixl_side_channel_port"
         )
+        nixl_request = PortAllocationRequest(
+            etcd_context=etcd_context,
+            metadata=nixl_metadata,
+            port_range=config.port_range,
+            block_size=tp_size,
+        )
+        allocated_ports = await allocate_and_reserve_port_block(nixl_request)
+        first_port_for_dp_rank = allocated_ports[0]
 
-    config.side_channel_port = base_side_channel_port
+        # Calculate the base port that NIXL expects
+        # base_port = first_port_for_dp_rank - (dp_rank * tp_size)
+        nixl_offset = dp_rank * tp_size
+        base_side_channel_port = first_port_for_dp_rank - nixl_offset
 
-    logger.info(
-        f"Allocated NIXL side channel ports: base={base_side_channel_port}, "
-        f"allocated_ports={allocated_ports} (worker_id={worker_id}, dp_rank={dp_rank}, tp_size={tp_size})"
+        if base_side_channel_port < 0:
+            raise ValueError(
+                f"NIXL base port calculation resulted in negative port: "
+                f"first_allocated_port={first_port_for_dp_rank}, offset={nixl_offset}, "
+                f"base_port={base_side_channel_port}. Current range: {config.port_range.min}-{config.port_range.max}. "
+                f"Consider using a higher port range."
+            )
+
+        logger.info(
+            f"Allocated NIXL side channel ports: base={base_side_channel_port}, "
+            f"allocated_ports={allocated_ports} (worker_id={worker_id}, dp_rank={dp_rank}, tp_size={tp_size})"
+        )
+        set_side_channel_host_and_port(base_side_channel_port)
+
+
+def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
+    """Create KVTransferConfig based on user config or connector list.
+
+    Handles logging and returns the appropriate config or None.
+    """
+    has_user_kv_config = (
+        hasattr(config.engine_args, "kv_transfer_config")
+        and config.engine_args.kv_transfer_config is not None
+    )
+
+    if has_user_kv_config:
+        logger.info("Using user-provided kv_transfer_config from --kv-transfer-config")
+        return None  # Let vLLM use the user's config
+
+    # No connector list or empty list means no config
+    if not config.connector_list:
+        logger.info("Using vLLM defaults for kv_transfer_config")
+        return None
+
+    logger.info(f"Creating kv_transfer_config from --connector {config.connector_list}")
+
+    # Create connector configs in specified order
+    multi_connectors = []
+    for connector in config.connector_list:
+        if connector == "lmcache":
+            connector_cfg = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+        elif connector == "nixl":
+            connector_cfg = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+        elif connector == "kvbm":
+            connector_cfg = {
+                "kv_connector": "DynamoConnector",
+                "kv_connector_module_path": "dynamo.llm.vllm_integration.connector",
+                "kv_role": "kv_both",
+            }
+        multi_connectors.append(connector_cfg)
+
+    # For single connector, return direct config
+    if len(multi_connectors) == 1:
+        cfg = multi_connectors[0]
+        return KVTransferConfig(**cfg)
+
+    # For multiple connectors, use MultiConnector
+    return KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": multi_connectors},
     )
 
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
-    assert (
-        config.side_channel_port is not None
-    ), "Must set the kv_port, use configure_ports_with_etcd"
-
-    dp_rank = config.engine_args.data_parallel_rank or 0
-
-    # Set kv_transfer_config based on LMCache setting
-    if ENABLE_LMCACHE:
-        if config.is_prefill_worker:
-            # Prefill worker use LMCache with disaggregated serving (MultiConnector) for disaggregated serving
-            kv_transfer_config = KVTransferConfig(
-                kv_connector="MultiConnector",
-                kv_role="kv_both",
-                kv_connector_extra_config={
-                    "connectors": [
-                        {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"},
-                        {
-                            "kv_connector": "NixlConnector",
-                            "kv_role": "kv_both",
-                        },
-                    ]
-                },
-            )
-            logger.info("Using LMCache with MultiConnector serving")
-        else:
-            # If enable lmcache, single node in default uses single connector serving
-            kv_transfer_config = KVTransferConfig(
-                kv_connector="LMCacheConnectorV1", kv_role="kv_both"
-            )
-            logger.info("Using LMCache with LMCacheConnector serving")
-
-    else:
-        kv_transfer_config = KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
-        )
-        logger.info("Using NixlConnector configuration")
-
     defaults = {
         "task": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
@@ -257,11 +315,14 @@ def overwrite_args(config):
         "disable_log_requests": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
-        "kv_transfer_config": kv_transfer_config,
     }
 
+    kv_config = create_kv_transfer_config(config)
+    if kv_config:
+        defaults["kv_transfer_config"] = kv_config
+
     if config.engine_args.enable_prefix_caching:
-        # If caching, send events
+        dp_rank = config.engine_args.data_parallel_rank or 0
         defaults |= {
             # Always setting up kv events if enable prefix cache.
             "kv_events_config": KVEventsConfig(
@@ -270,8 +331,6 @@ def overwrite_args(config):
                 endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
             )
         }
-
-    set_side_channel_host_and_port(config)
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
@@ -282,11 +341,11 @@ def overwrite_args(config):
             raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
 
 
-def set_side_channel_host_and_port(config: Config):
+def set_side_channel_host_and_port(side_channel_port: int):
     """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
     This sets the port number for the side channel.
     """
     host_ip = get_host_ip()
     os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(config.side_channel_port)
-    logger.debug(f"Set NIXL side channel to {host_ip}:{config.side_channel_port}")
+    os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_channel_port)
+    logger.debug(f"Set NIXL side channel to {host_ip}:{side_channel_port}")

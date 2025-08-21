@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_openai::types::CreateCompletionRequestArgs;
+use dynamo_async_openai::types::CreateCompletionRequestArgs;
 use dynamo_llm::protocols::openai::{completions::NvCreateCompletionRequest, validate};
 use serde::{Deserialize, Serialize};
 

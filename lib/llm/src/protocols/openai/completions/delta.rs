@@ -42,7 +42,7 @@ pub struct DeltaGenerator {
     created: u32,
     model: String,
     system_fingerprint: Option<String>,
-    usage: async_openai::types::CompletionUsage,
+    usage: dynamo_async_openai::types::CompletionUsage,
     options: DeltaGeneratorOptions,
 }
 
@@ -59,7 +59,7 @@ impl DeltaGenerator {
 
         // Previously, our home-rolled CompletionUsage impl'd Default
         // PR !387 - https://github.com/64bit/async-openai/pull/387
-        let usage = async_openai::types::CompletionUsage {
+        let usage = dynamo_async_openai::types::CompletionUsage {
             completion_tokens: 0,
             prompt_tokens: 0,
             total_tokens: 0,
@@ -88,7 +88,7 @@ impl DeltaGenerator {
         token_ids: Vec<TokenIdType>,
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) -> Option<async_openai::types::Logprobs> {
+    ) -> Option<dynamo_async_openai::types::Logprobs> {
         if !self.options.enable_logprobs || logprobs.is_none() {
             return None;
         }
@@ -116,16 +116,16 @@ impl DeltaGenerator {
                             let top_t = top_lp.token.clone().unwrap_or_default();
                             let top_tid = top_lp.token_id;
                             found_selected_token = found_selected_token || top_tid == *tid;
-                            async_openai::types::TopLogprobs {
+                            dynamo_async_openai::types::TopLogprobs {
                                 token: top_t,
                                 logprob: top_lp.logprob as f32,
                                 bytes: None,
                             }
                         })
-                        .collect::<Vec<async_openai::types::TopLogprobs>>();
+                        .collect::<Vec<dynamo_async_openai::types::TopLogprobs>>();
                     if !found_selected_token {
                         // If the selected token is not in the top logprobs, add it
-                        converted_top_lps.push(async_openai::types::TopLogprobs {
+                        converted_top_lps.push(dynamo_async_openai::types::TopLogprobs {
                             token: t.clone(),
                             logprob: *lp,
                             bytes: None,
@@ -136,7 +136,7 @@ impl DeltaGenerator {
                 .collect()
         });
 
-        Some(async_openai::types::Logprobs {
+        Some(dynamo_async_openai::types::Logprobs {
             tokens: toks.iter().map(|(t, _)| t.clone()).collect(),
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
             text_offset: vec![],
@@ -148,8 +148,8 @@ impl DeltaGenerator {
         &self,
         index: u32,
         text: Option<String>,
-        finish_reason: Option<async_openai::types::CompletionFinishReason>,
-        logprobs: Option<async_openai::types::Logprobs>,
+        finish_reason: Option<dynamo_async_openai::types::CompletionFinishReason>,
+        logprobs: Option<dynamo_async_openai::types::Logprobs>,
     ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
 
@@ -158,13 +158,13 @@ impl DeltaGenerator {
             usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
         }
 
-        let inner = async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![async_openai::types::Choice {
+            choices: vec![dynamo_async_openai::types::Choice {
                 text: text.unwrap_or_default(),
                 index,
                 finish_reason,

@@ -8,7 +8,7 @@
 Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
+*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane @hhzhang16
 
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
@@ -25,6 +25,11 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /.github/ @ai-dynamo/Devops @nnshah1
 /.github/workflows/*.ps1 @ai-dynamo/Devops @whoisj
 CODEOWNERS @ai-dynamo/Devops @nnshah1
+
+# Planner
+/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou
+/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou
+/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou
 
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops

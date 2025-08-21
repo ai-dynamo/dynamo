@@ -26,7 +26,7 @@ use tracing::Instrument;
 pub struct WorkHandlerMetrics {
     pub request_counter: IntCounter,
     pub request_duration: Histogram,
-    pub concurrent_requests: IntGauge,
+    pub inflight_requests: IntGauge,
     pub request_bytes: IntCounter,
     pub response_bytes: IntCounter,
     pub error_counter: IntCounterVec,
@@ -36,7 +36,7 @@ impl WorkHandlerMetrics {
     pub fn new(
         request_counter: IntCounter,
         request_duration: Histogram,
-        concurrent_requests: IntGauge,
+        inflight_requests: IntGauge,
         request_bytes: IntCounter,
         response_bytes: IntCounter,
         error_counter: IntCounterVec,
@@ -44,7 +44,7 @@ impl WorkHandlerMetrics {
         Self {
             request_counter,
             request_duration,
-            concurrent_requests,
+            inflight_requests,
             request_bytes,
             response_bytes,
             error_counter,
@@ -54,49 +54,51 @@ impl WorkHandlerMetrics {
     /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
     pub fn from_endpoint(
         endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let metrics_labels = metrics_labels.unwrap_or(&[]);
         let request_counter = endpoint.create_intcounter(
             "requests_total",
             "Total number of requests processed by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let request_duration = endpoint.create_histogram(
             "request_duration_seconds",
             "Time spent processing requests by work handler",
-            &[],
+            metrics_labels,
             None,
         )?;
 
-        let concurrent_requests = endpoint.create_intgauge(
-            "concurrent_requests",
+        let inflight_requests = endpoint.create_intgauge(
+            "inflight_requests",
             "Number of requests currently being processed by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let request_bytes = endpoint.create_intcounter(
             "request_bytes_total",
             "Total number of bytes received in requests by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let response_bytes = endpoint.create_intcounter(
             "response_bytes_total",
             "Total number of bytes sent in responses by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let error_counter = endpoint.create_intcountervec(
             "errors_total",
             "Total number of errors in work handler processing",
             &["error_type"],
-            &[],
+            metrics_labels,
         )?;
 
         Ok(Self::new(
             request_counter,
             request_duration,
-            concurrent_requests,
+            inflight_requests,
             request_bytes,
             response_bytes,
             error_counter,
@@ -110,10 +112,14 @@ where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
 {
-    fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
         // Call the Ingress-specific add_metrics implementation
         use crate::pipeline::network::Ingress;
-        Ingress::add_metrics(self, endpoint)
+        Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
@@ -121,7 +127,7 @@ where
 
         if let Some(m) = self.metrics() {
             m.request_counter.inc();
-            m.concurrent_requests.inc();
+            m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
         }
 
@@ -289,7 +295,7 @@ where
         if let Some(m) = self.metrics() {
             let duration = start_time.elapsed();
             m.request_duration.observe(duration.as_secs_f64());
-            m.concurrent_requests.dec();
+            m.inflight_requests.dec();
         }
 
         Ok(())

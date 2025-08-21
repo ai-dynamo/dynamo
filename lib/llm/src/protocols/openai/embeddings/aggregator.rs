@@ -145,16 +145,16 @@ mod tests {
     use futures::stream;
 
     fn create_test_embedding_response(
-        embeddings: Vec<async_openai::types::Embedding>,
+        embeddings: Vec<dynamo_async_openai::types::Embedding>,
         prompt_tokens: u32,
         total_tokens: u32,
     ) -> Annotated<NvCreateEmbeddingResponse> {
         let response = NvCreateEmbeddingResponse {
-            inner: async_openai::types::CreateEmbeddingResponse {
+            inner: dynamo_async_openai::types::CreateEmbeddingResponse {
                 object: "list".to_string(),
                 model: "test-model".to_string(),
                 data: embeddings,
-                usage: async_openai::types::EmbeddingUsage {
+                usage: dynamo_async_openai::types::EmbeddingUsage {
                     prompt_tokens,
                     total_tokens,
                 },
@@ -178,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_embedding() {
-        let embedding = async_openai::types::Embedding {
+        let embedding = dynamo_async_openai::types::Embedding {
             index: 0,
             object: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3],
@@ -200,13 +200,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_embeddings() {
-        let embedding1 = async_openai::types::Embedding {
+        let embedding1 = dynamo_async_openai::types::Embedding {
             index: 0,
             object: "embedding".to_string(),
             embedding: vec![0.1, 0.2, 0.3],
         };
 
-        let embedding2 = async_openai::types::Embedding {
+        let embedding2 = dynamo_async_openai::types::Embedding {
             index: 1,
             object: "embedding".to_string(),
             embedding: vec![0.4, 0.5, 0.6],

@@ -16,7 +16,8 @@
 use dynamo_llm::protocols::{
     codec::{create_message_stream, Message, SseCodecError},
     openai::{
-        chat_completions::NvCreateChatCompletionResponse, completions::NvCreateCompletionResponse,
+        chat_completions::{aggregator::ChatCompletionAggregator, NvCreateChatCompletionResponse},
+        completions::NvCreateCompletionResponse,
     },
     ContentProvider, DataStream,
 };
@@ -43,7 +44,6 @@ async fn test_openai_chat_stream() {
     // todo: provide a cleaner way to extract the content from choices
     assert_eq!(
         result
-            .inner
             .choices
             .first()
             .unwrap()
@@ -65,7 +65,6 @@ async fn test_openai_chat_edge_case_multi_line_data() {
 
     assert_eq!(
         result
-            .inner
             .choices
             .first()
             .unwrap()
@@ -86,7 +85,6 @@ async fn test_openai_chat_edge_case_comments_per_response() {
 
     assert_eq!(
         result
-            .inner
             .choices
             .first()
             .unwrap()

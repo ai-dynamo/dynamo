@@ -421,6 +421,7 @@ async def run_profile(args):
         profile_prefill(
             work_dir,
             model_name,
+            model_name,
             base_url,
             best_prefill_tp,
             args.max_context_length,
@@ -475,6 +476,7 @@ async def run_profile(args):
 
         profile_decode(
             work_dir,
+            model_name,
             model_name,
             base_url,
             best_decode_tp,

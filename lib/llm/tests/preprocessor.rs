@@ -231,31 +231,31 @@ const TOOLS: &str = r#"
 "#;
 
 // Notes:
-// protocols::openai::chat_completions::ChatCompletionMessage -> async_openai::types::ChatCompletionRequestMessage
-// protocols::openai::chat_completions::Tool -> async_openai::types::ChatCompletionTool
-// protocols::openai::chat_completions::ToolChoiceType -> async_openai::types::ChatCompletionToolChoiceOption
+// protocols::openai::chat_completions::ChatCompletionMessage -> dynamo_async_openai::types::ChatCompletionRequestMessage
+// protocols::openai::chat_completions::Tool -> dynamo_async_openai::types::ChatCompletionTool
+// protocols::openai::chat_completions::ToolChoiceType -> dynamo_async_openai::types::ChatCompletionToolChoiceOption
 #[derive(Serialize, Deserialize)]
 struct Request {
-    messages: Vec<async_openai::types::ChatCompletionRequestMessage>,
-    tools: Option<Vec<async_openai::types::ChatCompletionTool>>,
-    tool_choice: Option<async_openai::types::ChatCompletionToolChoiceOption>,
+    messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage>,
+    tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>>,
+    tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
 }
 
 impl Request {
     fn from(
         messages: &str,
         tools: Option<&str>,
-        tool_choice: Option<async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
         model: String,
     ) -> NvCreateChatCompletionRequest {
-        let messages: Vec<async_openai::types::ChatCompletionRequestMessage> =
+        let messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage> =
             serde_json::from_str(messages).unwrap();
-        let tools: Option<Vec<async_openai::types::ChatCompletionTool>> =
+        let tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>> =
             tools.map(|x| serde_json::from_str(x).unwrap());
         //let tools = tools.unwrap();
         //let tool_choice = tool_choice.unwrap();
 
-        let mut inner = async_openai::types::CreateChatCompletionRequestArgs::default();
+        let mut inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default();
         inner.model(model);
         inner.messages(messages);
         if let Some(tools) = tools {
@@ -326,7 +326,7 @@ async fn test_single_turn_with_tools() {
         let request = Request::from(
             SINGLE_CHAT_MESSAGE,
             Some(TOOLS),
-            Some(async_openai::types::ChatCompletionToolChoiceOption::Auto),
+            Some(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Auto),
             mdc.slug().to_string(),
         );
         let formatted_prompt = formatter.render(&request).unwrap();
@@ -433,7 +433,7 @@ async fn test_multi_turn_with_system_with_tools() {
         let request = Request::from(
             THREE_TURN_CHAT_MESSAGE_WITH_SYSTEM,
             Some(TOOLS),
-            Some(async_openai::types::ChatCompletionToolChoiceOption::Auto),
+            Some(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Auto),
             mdc.slug().to_string(),
         );
         let formatted_prompt = formatter.render(&request).unwrap();

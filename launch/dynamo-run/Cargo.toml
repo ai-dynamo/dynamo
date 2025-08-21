@@ -33,7 +33,7 @@ dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true 
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
 
 anyhow = { workspace = true }
-async-openai = { workspace = true }
+dynamo-async-openai = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 either = { workspace = true }

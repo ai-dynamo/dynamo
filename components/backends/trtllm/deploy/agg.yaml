@@ -32,6 +32,6 @@ spec:
           args:
             - >-
               python3 -m dynamo.trtllm
-              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              --model-path Qwen/Qwen3-0.6B
+              --served-model-name Qwen/Qwen3-0.6B
               --extra-engine-args engine_configs/agg.yaml
