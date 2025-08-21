@@ -552,5 +552,9 @@ pub mod tests {
         async fn killed(&self) {
             // No-op for testing
         }
+
+        fn link_child(&self, _: Arc<dyn AsyncEngineContext>) {
+            // No-op for testing
+        }
     }
 }

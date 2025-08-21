@@ -1613,5 +1613,9 @@ mod tests {
         async fn killed(&self) {
             // No-op for testing
         }
+
+        fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {
+            // No-op for testing
+        }
     }
 }
