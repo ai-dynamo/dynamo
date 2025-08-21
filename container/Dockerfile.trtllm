@@ -426,7 +426,7 @@ COPY --from=build /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 
 # Copy pytorch installation from NGC PyTorch
 ARG TORCH_VER=2.8.0a0+5228986c39.nv25.6
-ARG TORCHVISION_VER=0.22.0a0
+ARG TORCHVISION_VER=0.22.0a0+95f10a4e
 ARG SETUPTOOLS_VER=78.1.1
 ARG PYTORCH_TRITON_VER=3.3.0+git96316ce52.nvinternal
 ARG JINJA2_VER=3.1.6
