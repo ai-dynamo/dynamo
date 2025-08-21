@@ -333,18 +333,11 @@ mod tests {
 mod integration_tests {
     use super::*;
     use crate::distributed::test_helpers::create_test_drt_async;
-    use crate::logging::tests::load_log;
     use crate::metrics::MetricsRegistry;
-    use anyhow::{anyhow, Result};
-    use chrono::{DateTime, Utc};
-    use jsonschema::{Draft, JSONSchema};
+    use anyhow::Result;
     use rstest::rstest;
-    use serde_json::Value;
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
     use std::sync::Arc;
-    use stdio_override::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_uptime_without_initialization() {
