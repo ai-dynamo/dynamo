@@ -149,7 +149,7 @@ RUN rm -rf /opt/hpcx/ucx && \
     cd ucx && \
     CC=${USE_SCCACHE:+sccache gcc} && \
     CXX=${USE_SCCACHE:+sccache g++} && \
-    export CC=${CC} && \ 
+    export CC=${CC} && \
     export CXX=${CXX} && \
     ./autogen.sh && \
     ./configure \
