@@ -13,11 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-<<<<<<< HEAD
-ARG SGLANG_IMAGE="lmsysorg/sglang:v0.4.10-cu126"
-=======
 ARG SGLANG_IMAGE_TAG="v0.5.0rc2-cu126"
->>>>>>> main
 
 FROM ${SGLANG_IMAGE}
 
