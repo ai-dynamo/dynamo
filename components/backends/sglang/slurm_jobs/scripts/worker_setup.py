@@ -196,7 +196,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
     if args.gpus_per_node < 1:
         raise ValueError("GPUs per node must be at least 1")
-        
+
     if args.local_rank >= args.nodes_per_worker:
         raise ValueError(
             f"Local rank ({args.local_rank}) must be less than nodes per worker ({args.nodes_per_worker})"
