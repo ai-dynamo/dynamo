@@ -36,13 +36,13 @@ def main():
 
     if args.command == "analyze":
         # Import and run the analyzer main
-        from data_generator import prefix_analyzer
+        from prefix_data_generator import prefix_analyzer
 
         sys.argv = [sys.argv[0]] + remaining
         prefix_analyzer.main()
     elif args.command == "synthesize":
         # Import and run the synthesizer main
-        from data_generator import synthesizer
+        from prefix_data_generator import synthesizer
 
         sys.argv = [sys.argv[0]] + remaining
         synthesizer.main()

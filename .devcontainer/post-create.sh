@@ -1,19 +1,24 @@
 #!/bin/bash
-
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
+set -eu
+
+# Ensure we're not running as root
+if [ "$(id -u)" -eq 0 ]; then
+    echo "❌ ERROR: This script should not be run as root!"
+    echo "The script should run as the 'ubuntu' user, not root."
+    echo "Current user: $(whoami) (UID: $(id -u))"
+    exit 1
+fi
+
+# Verify we're running as the expected user
+if [ "$(whoami)" != "ubuntu" ]; then
+    echo "⚠️  WARNING: Expected to run as 'ubuntu' user, but running as '$(whoami)'"
+    echo "This might cause permission issues."
+fi
+
+echo "Running post-create script as user: $(whoami) (UID: $(id -u))"
 
 trap 'echo "❌ ERROR: Command failed at line $LINENO: $BASH_COMMAND"; echo "⚠️ This was unexpected and setup was not completed. Can try to resolve yourself and then manually run the rest of the commands in this file or file a bug."' ERR
 
@@ -35,36 +40,84 @@ retry() {
     return 0
 }
 
-set -xe
+set -x
 
 # Changing permission to match local user since volume mounts default to root ownership
-sudo chown -R ubuntu:ubuntu ~/.cache/pre-commit
+# Note: sudo is used here because the volume mount may have root ownership
+mkdir -p $HOME/.cache
+sudo chown -R ubuntu:ubuntu $HOME/.cache $HOME/dynamo
 
 # Pre-commit hooks
 cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks
 pre-commit run --all-files || true # don't fail the build if pre-commit hooks fail
 
 # Set build directory
-mkdir -p $HOME/dynamo/.build/target
-export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/dynamo/.build/target}
+mkdir -p $CARGO_TARGET_DIR
 
-# build project, it will be saved at $HOME/dynamo/.build/target
+uv pip uninstall --yes ai-dynamo ai-dynamo-runtime 2>/dev/null || true
+
+# Build project, with `dev` profile it will be saved at $CARGO_TARGET_DIR/debug
 cargo build --locked --profile dev --features mistralrs
-cargo doc --no-deps
 
 # install the python bindings
-cd $HOME/dynamo/lib/bindings/python && retry maturin develop
+(cd $HOME/dynamo/lib/bindings/python && retry maturin develop)
 
 # installs overall python packages, grabs binaries from .build/target/debug
-cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
+cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
-export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
-
-# TODO: Deprecated except vLLM v0
-if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
-    echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
+# Extract the PYTHONPATH line from README.md
+PYTHONPATH_LINE=$(grep "^export PYTHONPATH=" $DYNAMO_HOME/README.md | head -n1)
+if [ -n "$PYTHONPATH_LINE" ]; then
+    # Remove the ${PYTHONPATH}: prefix if it exists, then replace $(pwd) with the actual path
+    MODIFIED_LINE=$(echo "$PYTHONPATH_LINE" | sed 's/\${PYTHONPATH}://g' | sed "s|\$(pwd)|$DYNAMO_HOME|g")
+    eval "$MODIFIED_LINE"
+    # Also add to .bashrc for persistence (with expanded path)
+    if ! grep -q "export PYTHONPATH=" ~/.bashrc; then
+        # MODIFIED_LINE already has $DYNAMO_HOME expanded to /home/ubuntu/dynamo
+        echo "$MODIFIED_LINE" >> ~/.bashrc
+    fi
+else
+    # Back-up version if README.md changed. This is the version from 2025-08-19
+    export PYTHONPATH=$DYNAMO_HOME/components/frontend/src:$DYNAMO_HOME/components/planner/src:$DYNAMO_HOME/components/backends/vllm/src:$DYNAMO_HOME/components/backends/sglang/src:$DYNAMO_HOME/components/backends/trtllm/src:$DYNAMO_HOME/components/backends/llama_cpp/src:$DYNAMO_HOME/components/backends/mocker/src
 fi
 
 if ! grep -q "export GPG_TTY=" ~/.bashrc; then
     echo "export GPG_TTY=$(tty)" >> ~/.bashrc
 fi
+
+# Unset empty tokens/variables to avoid issues with authentication and SSH
+if ! grep -q "# Unset empty tokens" ~/.bashrc; then
+    echo -e "\n# Unset empty tokens and environment variables" >> ~/.bashrc
+    echo '[ -z "$HF_TOKEN" ] && unset HF_TOKEN' >> ~/.bashrc
+    echo '[ -z "$GITHUB_TOKEN" ] && unset GITHUB_TOKEN' >> ~/.bashrc
+    echo '[ -z "$SSH_AUTH_SOCK" ] && unset SSH_AUTH_SOCK' >> ~/.bashrc
+fi
+
+$HOME/dynamo/deploy/dynamo_check.py --import-check-only
+
+{ set +x; } 2>/dev/null
+
+# Check SSH agent forwarding status
+echo "🔍 Checking SSH agent forwarding status..."
+if [ -n "$SSH_AUTH_SOCK" ]; then
+    if ssh-add -l > /dev/null 2>&1; then
+        echo "SSH agent forwarding is working - found $(ssh-add -l | wc -l) key(s)"
+    else
+        echo "⚠️  SSH_AUTH_SOCK is set but ssh-add failed - agent may not be accessible"
+    fi
+else
+    echo "⚠️ SSH agent forwarding not configured - SSH_AUTH_SOCK is not set"
+fi
+
+cat <<EOF
+
+✅ SUCCESS: Built cargo project, installed Python bindings, configured pre-commit hooks
+
+Example commands:
+  cargo build --locked --profile dev              # Build Rust project in $CARGO_TARGET_DIR
+  cd lib/bindings/python && maturin develop --uv  # Update Python bindings (if you changed them)
+  cargo fmt && cargo clippy                       # Format and lint code before committing
+  cargo doc --no-deps                             # Generate documentation
+  uv pip install -e .                             # Install various Python packages Dynamo depends on
+EOF

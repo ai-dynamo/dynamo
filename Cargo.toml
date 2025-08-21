@@ -10,7 +10,6 @@ members = [
     "lib/runtime",
     "lib/tokens",
     "lib/async-openai",
-    "lib/async-openai-macros",
     "lib/parsers",
     "lib/bindings/c",
     "lib/engines/*",

@@ -300,8 +300,12 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             .map_err(|_| anyhow::anyhow!("Segment already set"))
     }
 
-    pub fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
-        let metrics = WorkHandlerMetrics::from_endpoint(endpoint)
+    pub fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
         self.metrics
@@ -345,7 +349,11 @@ pub trait PushWorkHandler: Send + Sync {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
 
     /// Add metrics to the handler
-    fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()>;
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()>;
 }
 
 /*

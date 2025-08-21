@@ -15,8 +15,8 @@
 
 import networkx as nx
 import numpy as np
-from data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
-from data_generator.sampler import get_cdf
+from prefix_data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
+from prefix_data_generator.sampler import get_cdf
 
 
 def _verify_tree(G: nx.DiGraph) -> None:

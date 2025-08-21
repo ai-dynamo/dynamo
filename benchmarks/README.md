@@ -28,6 +28,6 @@ pip install -e .
 Currently, this will install lightweight tools for:
 - Analyzing prefix-structured data (`datagen analyze`)
 - Synthesizing structured data customizable for testing purposes (`datagen synthesize`)
-Detailed information are provided in the `data_generator` directory.
+Detailed information are provided in the `prefix_data_generator` directory.
 
 The benchmarking scripts for the core dynamo components are to come soon (e.g. routing, disagg, Planner).

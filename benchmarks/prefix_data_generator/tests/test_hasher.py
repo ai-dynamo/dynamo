@@ -17,7 +17,7 @@ import math
 import random
 
 import pytest
-from data_generator.hasher import hashes_to_texts, texts_to_hashes
+from prefix_data_generator.hasher import hashes_to_texts, texts_to_hashes
 from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 

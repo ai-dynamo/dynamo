@@ -20,15 +20,15 @@ from typing import Any, Optional
 import networkx as nx
 import numpy as np
 import pandas as pd
-from data_generator.graph_utils import (
+from prefix_data_generator.graph_utils import (
     _mark_visited,
     _merge_chains,
     _precompute_transition_cdfs,
     _remove_leaves,
     _verify_tree,
 )
-from data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
-from data_generator.sampler import EmpiricalSampler, sample_from_cdf
+from prefix_data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
+from prefix_data_generator.sampler import EmpiricalSampler, sample_from_cdf
 
 
 class Synthesizer:
@@ -334,7 +334,7 @@ def main():
     import argparse
     from pathlib import Path
 
-    from data_generator.logging_utils import calculate_and_print_statistics
+    from prefix_data_generator.logging_utils import calculate_and_print_statistics
 
     parser = argparse.ArgumentParser(description="Synthesize Mooncake-Esque dataset")
     parser.add_argument(

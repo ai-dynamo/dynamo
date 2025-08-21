@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
@@ -36,9 +36,16 @@ class NullStatLogger(StatLoggerBase):
 class DynamoStatLoggerPublisher(StatLoggerBase):
     """Stat logger publisher. Wrapper for the WorkerMetricsPublisher to match the StatLoggerBase interface."""
 
-    def __init__(self, component: Component, dp_rank: int) -> None:
+    def __init__(
+        self,
+        component: Component,
+        dp_rank: int,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
         self.inner = WorkerMetricsPublisher()
-        self.inner.create_endpoint(component)
+        # Use labels directly for the new create_endpoint signature
+        metrics_labels = metrics_labels or []
+        self.inner.create_endpoint(component, metrics_labels)
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
         self.request_total_slots = 1
@@ -129,15 +136,23 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 class StatLoggerFactory:
     """Factory for creating stat logger publishers. Required by vLLM."""
 
-    def __init__(self, component: Component, dp_rank: int = 0) -> None:
+    def __init__(
+        self,
+        component: Component,
+        dp_rank: int = 0,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
         self.component = component
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
+        self.metrics_labels = metrics_labels or []
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
-        logger = DynamoStatLoggerPublisher(self.component, dp_rank)
+        logger = DynamoStatLoggerPublisher(
+            self.component, dp_rank, metrics_labels=self.metrics_labels
+        )
         self.created_logger = logger
 
         return logger

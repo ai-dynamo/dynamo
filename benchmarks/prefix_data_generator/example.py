@@ -17,8 +17,8 @@ import json
 import tempfile
 
 import requests
-from data_generator.hasher import hashes_to_texts
-from data_generator.synthesizer import Synthesizer
+from prefix_data_generator.hasher import hashes_to_texts
+from prefix_data_generator.synthesizer import Synthesizer
 
 # download the mooncake trace file
 mooncake_trace_permalink = "https://raw.githubusercontent.com/kvcache-ai/Mooncake/f09c501b2a5d73e4d60cdeb612d7d0d54e1ec228/mooncake_trace.jsonl"
