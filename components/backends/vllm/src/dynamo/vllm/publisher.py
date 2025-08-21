@@ -140,7 +140,7 @@ class StatLoggerFactory:
         self,
         component: Component,
         dp_rank: int = 0,
-        labels: Optional[List[Tuple[str, str]]] = None,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.component = component
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
