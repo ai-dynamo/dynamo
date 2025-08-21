@@ -97,7 +97,7 @@ RUN cd dynamo/lib/bindings/python && \
     cd /sgl-workspace/dynamo && \
     pip install --break-system-packages .
 
-RUN pip install --break-system-packages sglang-router==0.1.5
+RUN pip install --break-system-packages sglang-router==0.1.9
 
 RUN wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\
