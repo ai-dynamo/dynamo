@@ -131,7 +131,7 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4)
     return False
 
 
-async def send_concurrent_requests(urls: list, payload: dict, num_requests: int):
+async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
     """Send multiple requests concurrently, alternating between URLs if multiple provided"""
 
     # First, send test requests with retry to ensure all systems are ready
@@ -228,7 +228,7 @@ def test_mocker_kv_router(request, runtime_services):
 
         # Use async to send requests concurrently for better performance
         asyncio.run(
-            send_concurrent_requests(
+            send_inflight_requests(
                 [
                     f"http://localhost:{frontend_port}/v1/chat/completions"
                 ],  # Pass as list
@@ -301,7 +301,7 @@ def test_mocker_two_kv_router(request, runtime_services):
 
         # Use async to send requests concurrently, alternating between routers
         asyncio.run(
-            send_concurrent_requests(
+            send_inflight_requests(
                 router_urls,
                 TEST_PAYLOAD,
                 NUM_REQUESTS,
@@ -404,7 +404,7 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
 
         # First, send one request with retry to ensure system is ready
         logger.info("Sending initial request to ensure system is ready...")
-        asyncio.run(send_concurrent_requests([url], test_payload_503, 1))
+        asyncio.run(send_inflight_requests([url], test_payload_503, 1))
 
         # Now send 50 concurrent requests to exhaust resources, then verify 503
         logger.info("Sending 50 concurrent requests to exhaust resources...")

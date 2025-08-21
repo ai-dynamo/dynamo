@@ -1651,11 +1651,7 @@ mod test_metricsregistry_nats {
                 18000.0,
                 23000.0,
             ), // ~75-125% of 20660
-            (
-                build_metric_name(work_handler::CONCURRENT_REQUESTS),
-                0.0,
-                1.0,
-            ), // 0 or very low
+            (build_metric_name(work_handler::INFLIGHT_REQUESTS), 0.0, 1.0), // 0 or very low
             // Histograms have _{count,sum} suffixes
             (
                 format!(

@@ -25,7 +25,8 @@ jobs:
   mirror_repo:
     name: Mirror Repository to GitLab
     environment: GITLAB
-    runs-on: self-hosted
+    runs-on:
+      group: gitlab_ci_runners
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -36,7 +37,8 @@ jobs:
     name: Trigger CI Pipeline
     environment: GITLAB
     needs: mirror_repo
-    runs-on: self-hosted
+    runs-on:
+      group: gitlab_ci_runners
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
