@@ -15,18 +15,14 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
-use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
 
 /// System status server information containing socket address and handle
@@ -296,61 +292,10 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 }
 
 // Regular tests: cargo test system_status_server --lib
-// Integration tests: cargo test system_status_server --lib --features integration
-
-#[cfg(test)]
-/// Helper function to create a DRT instance for basic unit tests
-/// Uses from_current to leverage existing tokio runtime without environment configuration
-async fn create_test_drt_async() -> crate::DistributedRuntime {
-    let rt = crate::Runtime::from_current().unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
-
-#[cfg(test)]
-/// Helper function to create a DRT instance for integration tests
-/// Uses spawn_blocking to create runtime safely without ownership issues
-/// Enables system status server for integration testing
-/// Note: This function uses environment variables to configure and create the DistributedRuntime.
-async fn create_test_drt_with_settings_async() -> crate::DistributedRuntime {
-    // Create runtime in blocking context where it can be safely dropped
-    let handle = tokio::task::spawn_blocking(|| {
-        // Load configuration from environment/settings
-        let config = crate::config::RuntimeConfig::from_settings().unwrap();
-
-        // Create runtime with the configuration and extract handle
-        let runtime = config.create_runtime().unwrap();
-        let handle = runtime.handle().clone();
-
-        // Runtime will be automatically dropped when it goes out of scope
-        handle
-    })
-    .await
-    .unwrap();
-
-    // Create Runtime using external handle (no ownership)
-    let rt = crate::Runtime::from_handle(handle).unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::tests::load_log;
-    use crate::metrics::MetricsRegistry;
-    use anyhow::{anyhow, Result};
-    use chrono::{DateTime, Utc};
-    use jsonschema::{Draft, JSONSchema};
-    use rstest::rstest;
-    use serde_json::Value;
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-    use std::sync::Arc;
-    use stdio_override::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
@@ -381,8 +326,19 @@ mod tests {
             "HTTP server should shut down when cancel token is cancelled"
         );
     }
+}
 
-    #[cfg(feature = "integration")]
+// Integration tests: cargo test system_status_server --lib --features integration
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use super::*;
+    use crate::distributed::test_helpers::create_test_drt_async;
+    use crate::metrics::MetricsRegistry;
+    use anyhow::Result;
+    use rstest::rstest;
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
     #[tokio::test]
     async fn test_uptime_without_initialization() {
         // Test that uptime returns an error if start time is not initialized
@@ -398,7 +354,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
@@ -439,7 +394,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
@@ -516,7 +470,7 @@ mod tests {
                 ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
             ],
             (async || {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
@@ -575,7 +529,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "integration")]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
 
@@ -596,7 +549,7 @@ mod tests {
 
                 crate::logging::init();
 
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
@@ -631,7 +584,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_health_endpoint_with_changing_health_status() {
         // Test health endpoint starts in not ready status, then becomes ready
@@ -646,7 +598,7 @@ mod tests {
                 ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Check if system status server was started
                 let system_info_opt = drt.system_status_server_info();
@@ -745,7 +697,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_spawn_system_status_server_endpoints() {
         // use reqwest for HTTP requests
@@ -756,7 +707,7 @@ mod tests {
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
             ],
             async {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
