@@ -62,7 +62,8 @@
                     "launch/dynamo-run/Cargo.toml"
                 ],
                 "files.trimTrailingWhitespace": true,
-                "files.insertFinalNewline": true
+                "files.insertFinalNewline": true,
+                "rust-analyzer.cargo.allFeatures": true
             }
         }
     },
@@ -74,7 +75,7 @@
         "DYNAMO_HOME": "/home/ubuntu/dynamo",
         "CARGO_HOME": "/home/ubuntu/dynamo/.build/.cargo",
         "RUSTUP_HOME": "/home/ubuntu/dynamo/.build/.rustup",
-        "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target",
+        "CARGO_TARGET_DIR": "/home/ubuntu/dynamo/.build/target"
     },
     "remoteEnv": {
         // These are optional, but are convenient to have, especially the SSH_AUTH_SOCK.

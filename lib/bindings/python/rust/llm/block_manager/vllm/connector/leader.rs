@@ -7,6 +7,7 @@ pub mod slot;
 use super::*;
 use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
+use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 
 use crate::llm::block_manager::BlockManager as PyBlockManager;
 use crate::llm::block_manager::{
@@ -27,7 +28,7 @@ use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 use tokio;
 use tokio::sync::mpsc;
@@ -104,8 +105,12 @@ impl KvConnectorLeader {
         // if we need a drt, get it from here
         let drt = drt.inner().clone();
 
+        let ns = drt.namespace("kvbm_connector_leader").unwrap();
+
+        let kvbm_metrics = KvbmMetrics::new(&ns);
+
         Self {
-            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone()),
+            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone(), kvbm_metrics),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),

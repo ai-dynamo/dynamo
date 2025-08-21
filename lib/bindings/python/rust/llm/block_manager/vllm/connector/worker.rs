@@ -5,6 +5,7 @@ use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
+use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -68,6 +69,8 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorWorker {
@@ -88,6 +91,8 @@ impl KvConnectorWorker {
         )?
         .detach();
 
+        let kvbm_metrics = KvbmMetrics::new(&drt.namespace("kvbm_connector_worker").unwrap());
+
         tracing::info!(
             "KvConnectorWorker initialized with worker_id: {}",
             vllm_worker_id
@@ -106,6 +111,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            kvbm_metrics,
         })
     }
 }
@@ -255,6 +261,7 @@ impl Worker for KvConnectorWorker {
     /// Trigger layer-wise completion signals.
     /// Trigger block-wise completion signals afer last layer.
     fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
+        self.kvbm_metrics.save_kv_layer_requests.inc();
         self.layers_complete += 1;
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
