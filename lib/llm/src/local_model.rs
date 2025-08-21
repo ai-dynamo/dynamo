@@ -402,7 +402,7 @@ impl LocalModel {
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
-            endpoint: endpoint.id(),
+            endpoint_id: endpoint.id(),
             model_type,
             runtime_config: Some(self.runtime_config.clone()),
         };
