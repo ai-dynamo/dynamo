@@ -307,6 +307,9 @@ where
             }
         }
 
+        // Ensure the metrics guard is not dropped until the end of the function.
+        drop(_inflight_guard);
+
         Ok(())
     }
 }
