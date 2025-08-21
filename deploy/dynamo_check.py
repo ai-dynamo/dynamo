@@ -150,17 +150,32 @@ class NVIDIAGPUDetector:
                 if len(parts) >= 2:
                     cuda = parts[1].strip()
             else:
-                # Fallback: parse banner
+                # Fallback: parse banner using regex instead of structured query
+                #
+                # Why regex fallback instead of command line query:
+                # 1. Compatibility: Some older nvidia-smi versions don't support
+                #    --query-gpu with cuda_version field
+                # 2. Robustness: The banner output is more stable across different
+                #    nvidia-smi versions and driver releases
+                # 3. Error handling: If the structured query fails (e.g., due to
+                #    driver issues, permission problems, or unsupported fields),
+                #    the banner parsing provides a reliable alternative
+                # 4. Case variations: Different nvidia-smi versions may output
+                #    "Driver Version" vs "driver version" vs "DRIVER VERSION"
                 proc = subprocess.run(
                     [nvsmi], capture_output=True, text=True, timeout=10
                 )
                 if proc.returncode == 0 and proc.stdout:
                     import re
 
-                    m = re.search(r"Driver Version:\s*([0-9.]+)", proc.stdout)
+                    m = re.search(
+                        r"Driver Version:\s*([0-9.]+)", proc.stdout, re.IGNORECASE
+                    )
                     if m:
                         driver = m.group(1)
-                    m = re.search(r"CUDA Version:\s*([0-9.]+)", proc.stdout)
+                    m = re.search(
+                        r"CUDA Version:\s*([0-9.]+)", proc.stdout, re.IGNORECASE
+                    )
                     if m:
                         cuda = m.group(1)
         except Exception:
