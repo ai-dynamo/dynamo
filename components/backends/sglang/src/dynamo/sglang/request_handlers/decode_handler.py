@@ -109,7 +109,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         f"Missing 'output_ids' in response. This often happens when using skip_tokenizer_init=True. "
                         f"If you're using ModelType.CHAT or custom model configurations, you may need to modify "
                         f"the tokenization/detokenization logic in your handler. Response keys: {list(res.keys())}"
-                    ) from None
+                    )
                 out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
                 num_output_tokens_so_far = next_total_toks
 
