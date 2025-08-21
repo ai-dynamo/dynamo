@@ -59,7 +59,8 @@ jobs:
           PYTEST_MARKS: "e2e and vllm and gpu_1 and not slow"
         run: |
           docker run --gpus all -v ${{ github.workspace }}:/workspace -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
-      - name: Cleanup - Remove dynamo directory
+      - name: Cleanup
         if: always()
         run: |
+          docker system prune -af
           sudo rm -rf ~/actions-runner/_work/dynamo
