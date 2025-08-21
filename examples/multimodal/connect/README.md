@@ -49,7 +49,7 @@ Specifically, a read operation must be paired with a readable operation, and a w
 ### Generic Example
 
 In the diagram below, Local creates a [`WritableOperation`](#writableoperation) intended to receive data from Remote.
-Local then sends metadata about the requuested RDMA operation to Remote.
+Local then sends metadata about the requested RDMA operation to Remote.
 Remote then uses the metadata to create a [`WriteOperation`](#writeoperation) which will perform the GPU Direct RDMA memory transfer from Remote's GPU memory to Local's GPU memory.
 
 ```mermaid
@@ -115,7 +115,7 @@ flowchart LR
 
 #### Code Examples
 
-See [prefill_worker](../components/prefill_worker.py#L199) or [decode_worker](../components/decode_worker.py#L239),
+See [prefill_worker](../components/worker.py) or [decode_worker](../components/worker.py),
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](#writableoperation),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
@@ -213,7 +213,7 @@ There are four ways to create a descriptor:
 
   1. From a `torch.Tensor` object. Device information will be derived from the provided object.
 
-  2. From a `tuple` containing either a NumPy or CuPy `ndarray` and information desribing where the memory resides (Host/CPU vs GPU).
+  2. From a `tuple` containing either a NumPy or CuPy `ndarray` and information describing where the memory resides (Host/CPU vs GPU).
 
   3. From a Python `bytes` object. Memory is assumed to reside in CPU addressable host memory.
 
@@ -338,5 +338,5 @@ Use the [`.to_serialized()`](#to_serialized) method on either of the above types
 
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal)
+  - [Dynamo Multimodal Example](../../../examples/multimodal)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

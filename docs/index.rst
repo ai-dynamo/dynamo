@@ -27,12 +27,60 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    - `Dynamo README <https://github.com/ai-dynamo/dynamo/blob/main/README.md>`_
    - `Architecture and features doc <https://github.com/ai-dynamo/dynamo/blob/main/docs/architecture/>`_
    - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/guides>`_
-   - `Dynamo examples repo <https://github.com/ai-dynamo/examples>`_
+   - `Dynamo examples repo <https://github.com/ai-dynamo/dynamo/tree/main/examples>`_
 
 
 Quick Start
 -----------------
-Follow the :doc:`Quick Guide to install Dynamo Platform <guides/dynamo_deploy/quickstart>`.
+
+Local Deployment
+~~~~~~~~~~~~~~~~
+
+Get started with Dynamo locally in just a few commands:
+
+**1. Install Dynamo**
+
+.. code-block:: bash
+
+   # Install uv (recommended Python package manager)
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # Create virtual environment and install Dynamo
+   uv venv venv
+   source venv/bin/activate
+   uv pip install "ai-dynamo[sglang]"  # or [vllm], [trtllm]
+
+**2. Start etcd/NATS**
+
+.. code-block:: bash
+
+   # Start etcd and NATS using Docker Compose
+   docker compose -f deploy/docker-compose.yml up -d
+
+**3. Run Dynamo**
+
+.. code-block:: bash
+
+   # Start the OpenAI compatible frontend
+   python -m dynamo.frontend
+
+   # In another terminal, start an SGLang worker
+   python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+
+**4. Test your deployment**
+
+.. code-block:: bash
+
+   curl localhost:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+          "messages": [{"role": "user", "content": "Hello!"}],
+          "max_tokens": 50}'
+
+Kubernetes Deployment
+~~~~~~~~~~~~~~~~~~~~~
+
+For deployments on Kubernetes, follow the :doc:`Dynamo Platform Quickstart Guide <guides/dynamo_deploy/quickstart>`.
 
 
 Dive in: Examples
@@ -45,26 +93,26 @@ The examples below assume you build the latest image yourself from source. If us
     :margin: 0
     :padding: 3 4 0 0
 
-    .. grid-item-card:: :doc:`Hello World </examples/hello_world>`
-        :link: /examples/hello_world
+    .. grid-item-card:: :doc:`Hello World <examples/runtime/hello_world/README>`
+        :link: examples/runtime/hello_world/README
         :link-type: doc
 
-        Demonstrates the basic concepts of Dynamo by creating a simple multi-service pipeline.
+        Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph
 
-    .. grid-item-card:: :doc:`LLM Deployment </examples/llm_deployment>`
-        :link: /examples/llm_deployment
+    .. grid-item-card:: :doc:`LLM Serving with VLLM <components/backends/vllm/README>`
+        :link: components/backends/vllm/README
         :link-type: doc
 
-        Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
+        Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with VLLM.
 
-    .. grid-item-card:: :doc:`Multinode </examples/multinode>`
-        :link: /examples/multinode
+    .. grid-item-card:: :doc:`Multinode with SGLang <components/backends/sglang/docs/multinode-examples>`
+        :link: components/backends/sglang/docs/multinode-examples
         :link-type: doc
 
-        Demonstrates deployment for disaggregated serving on 3 nodes using `nvidia/Llama-3.1-405B-Instruct-FP8`.
+        Demonstrates disaggregated serving on several nodes.
 
-    .. grid-item-card:: :doc:`TensorRT-LLM </examples/trtllm>`
-        :link: /examples/trtllm
+    .. grid-item-card:: :doc:`TensorRT-LLM <components/backends/trtllm/README>`
+        :link: components/backends/trtllm/README
         :link-type: doc
 
         Presents TensorRT-LLM examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
@@ -75,7 +123,6 @@ The examples below assume you build the latest image yourself from source. If us
 
    Welcome to Dynamo <self>
    Support Matrix <support_matrix.md>
-   Getting Started <get_started.md>
 
 .. toctree::
    :hidden:
@@ -91,21 +138,10 @@ The examples below assume you build the latest image yourself from source. If us
 
 .. toctree::
    :hidden:
-   :caption: Dynamo Command Line Interface
-
-   CLI Overview <guides/cli_overview.md>
-   Running Dynamo (dynamo run) <guides/dynamo_run.md>
-   Serving Inference Graphs (dynamo serve) <guides/dynamo_serve.md>
-   Building Dynamo (dynamo build) <guides/dynamo_build.md>
-   Deploying Inference Graphs (dynamo deploy) <guides/dynamo_deploy/README.md>
-
-.. toctree::
-   :hidden:
-   :caption: Usage Guides
+   :caption: Using Dynamo
 
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
-   KV Cache Router Performance Tuning <guides/kv_router_perf_tuning.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
 
 .. toctree::
@@ -114,41 +150,28 @@ The examples below assume you build the latest image yourself from source. If us
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
-   Deploying Dynamo Inference Graphs to Kubernetes using the Dynamo Cloud Platform <guides/dynamo_deploy/operator_deployment.md>
-   Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>
-   GKE Setup Guide <guides/dynamo_deploy/gke_setup.md>
+   Manual Helm Deployment <guides/dynamo_deploy/helm_install.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
 
 .. toctree::
    :hidden:
-   :caption: Benchmarking
-
-   Planner Benchmark Example <guides/planner_benchmark/README.md>
-
-
-.. toctree::
-   :hidden:
-   :caption: API
-
-   SDK Reference <API/sdk.md>
-   Python API <API/python_bindings.md>
-
-.. toctree::
-   :hidden:
    :caption: Examples
 
-   Hello World Example: Basic <examples/hello_world.md>
-   Hello World Example: Aggregated and Disaggregated Deployment <examples/disagg_skeleton.md>
-   LLM Deployment Examples <examples/llm_deployment.md>
-   Multinode Examples <examples/multinode.md>
-   LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>
+   Hello World <examples/runtime/hello_world/README.md>
+   LLM Deployment Examples using VLLM <components/backends/vllm/README.md>
+   LLM Deployment Examples using SGLang <components/backends/sglang/README.md>
+   Multinode Examples using SGLang <components/backends/sglang/docs/multinode-examples.md>
+   Planner Benchmark Example <guides/planner_benchmark/README.md>
+   LLM Deployment Examples using TensorRT-LLM <components/backends/trtllm/README.md>
 
 .. toctree::
    :hidden:
    :caption: Reference
 
+
    Glossary <dynamo_glossary.md>
+   NIXL Connect API <API/nixl_connect/README.md>
    KVBM Reading <architecture/kvbm_reading.md>
 
 

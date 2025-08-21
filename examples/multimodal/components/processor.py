@@ -13,27 +13,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+import asyncio
 import json
 import logging
+import os
+import signal
+import sys
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
-from components.decode_worker import VllmDecodeWorker
+import uvloop
 from transformers import AutoTokenizer
-from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.logging import check_required_workers
-from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
-from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import FlexibleArgumentParser
 
-from dynamo.runtime import EtcdKvCache
-from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
+from dynamo.llm import ModelType, register_llm
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
+# To import example local module
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from utils.args import Config, base_parse_args, parse_endpoint
+from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
+from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
+
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+prompt_template = "USER: <image>\n<prompt> ASSISTANT:"
 
 
 class RequestType(Enum):
@@ -41,23 +53,53 @@ class RequestType(Enum):
     COMPLETION = "completion"
 
 
-@service(
-    dynamo={
-        "namespace": "dynamo",
-    },
-    resources={"cpu": "10", "memory": "20Gi"},
-    workers=1,
-)
 class Processor(ProcessMixIn):
     """
     vLLM pre and post processing
     """
 
-    worker = depends(VllmDecodeWorker)
+    @classmethod
+    def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
+        DEFAULT_ENDPOINT = "dyn://dynamo.processor.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.encoder.generate"
 
-    def __init__(self):
-        class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(class_name, "")
+        parser = FlexibleArgumentParser(
+            description="vLLM based processor for Dynamo LLM."
+        )
+        parser.add_argument(
+            "--prompt-template",
+            type=str,
+            required=True,
+            help=(
+                "Different multi-modal models expect the prompt to contain different special media prompts. "
+                "The processor will use this argument to construct the final prompt. "
+                "User prompt will replace '<prompt>' in the provided template. "
+                "For example, if the user prompt is 'please describe the image' and the prompt template is "
+                "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
+                "'USER: <image> please describe the image ASSISTANT:'."
+            ),
+        )
+        parser.add_argument(
+            "--endpoint",
+            type=str,
+            default=DEFAULT_ENDPOINT,
+            help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_ENDPOINT}'",
+        )
+        parser.add_argument(
+            "--downstream-endpoint",
+            type=str,
+            default=DEFAULT_DOWNSTREAM_ENDPOINT,
+            help=f"The endpoint string of the downstream encoder in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_DOWNSTREAM_ENDPOINT}'",
+        )
+
+        args, config = base_parse_args(parser)
+
+        return args, config
+
+    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
+        self.prompt_template = args.prompt_template
+        self.downstream_endpoint = args.downstream_endpoint
+        self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.tokenizer = self._create_tokenizer(self.engine_args)
@@ -65,7 +107,9 @@ class Processor(ProcessMixIn):
         self.completions_processor = CompletionsProcessor(
             self.tokenizer, self.model_config
         )
-        self.min_workers = 1
+
+    def cleanup(self):
+        pass
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -81,23 +125,15 @@ class Processor(ProcessMixIn):
         )
         return base_tokenizer
 
-    @async_on_start
-    async def async_init(self):
-        runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
-        self.worker_client = (
-            await runtime.namespace(comp_ns)
-            .component(comp_name)
-            .endpoint("generate")
-            .client()
+    async def async_init(self, runtime: DistributedRuntime):
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            self.downstream_endpoint
         )
-
-        await check_required_workers(self.worker_client, self.min_workers)
-
-        self.etcd_kv_cache = await EtcdKvCache.create(
-            runtime.etcd_client(),
-            "/dynamo/processor/",
-            {"router": self.engine_args.router},
+        self.encode_worker_client = (
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
+            .client()
         )
 
     # Main method to parse the request and send the request to the vllm worker.
@@ -107,7 +143,7 @@ class Processor(ProcessMixIn):
         image: str,
         request_type: RequestType,
     ):
-        request_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4().hex)
         logger.debug(f"Got raw request: {raw_request}")
         (
             request,
@@ -123,29 +159,18 @@ class Processor(ProcessMixIn):
             request_id=request_id,
             image_url=image,
         )
-        router_mode = (await self.etcd_kv_cache.get("router")).decode()
-        if router_mode == "kv":
-            # The current KV router does not support multimodal requests because
-            # it performs cache lookup based solely on prompt tokens. At this stage,
-            # multimodal data (e.g., image features) is not yet available, so the router
-            # cannot select the optimal worker using both prompt and image inputs.
-            raise NotImplementedError(
-                "Multimodal requests are not supported for kv router mode"
-            )
 
-        if router_mode == "random":
-            response_generator = await self.worker_client.generate(
-                worker_request.model_dump_json()
-            )
-        elif router_mode == "round-robin":
-            response_generator = await self.worker_client.round_robin(
-                worker_request.model_dump_json()
-            )
-        else:
-            raise NotImplementedError(f"Router mode {router_mode} not implemented")
+        # model_dump_json() serializes the request to JSON string
+        # This API could accept Pydantic class, but SamplingParams
+        # in vLLMMultimodalRequest is not a Pydantic class and will
+        # cause TypeError: unsupported type SamplingParams
+        response_generator = await self.encode_worker_client.round_robin(
+            worker_request.model_dump_json()
+        )
 
         output = self._generate_responses(response_generator, request_type)
 
+        # Stream the processed responses
         async for response in await self._stream_response(
             request, output, request_id, conversation
         ):
@@ -156,8 +181,7 @@ class Processor(ProcessMixIn):
         self,
         response_generator: AsyncIterator[RequestOutput],
         request_type: RequestType,
-    ) -> AsyncIterator[Union[RequestOutput, Tuple[int, RequestOutput]]]:
-        prompt_idx = 0
+    ):
         async for resp in response_generator:
             # Deserialize the response from the engine
             # Creates correct vLLM objects for each field
@@ -177,19 +201,20 @@ class Processor(ProcessMixIn):
             if request_type == RequestType.CHAT:
                 # For chat requests, yield the request_output directly.
                 yield request_output
-            elif request_type == RequestType.COMPLETION:
-                # Completion requests can have multiple prompts and stream generator requires the prompt index
-                yield (prompt_idx, request_output)
             else:
                 raise NotImplementedError(
                     f"Request type {request_type} not implemented"
                 )
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
-    @endpoint()
     async def generate(self, raw_request: MultiModalRequest):
+        logger.debug(f"Got raw request: {raw_request}")
+        if not isinstance(raw_request, MultiModalRequest):
+            # If the request is not MultiModalRequest, convert it to MultiModalRequest
+            raw_request = MultiModalRequest.model_validate(raw_request)
+
         # Ensure the configured template includes the placeholder
-        template = self.engine_args.prompt_template
+        template = self.prompt_template
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
@@ -224,4 +249,82 @@ class Processor(ProcessMixIn):
             raise ValueError("Image URL is required")
 
         async for response in self._generate(chat_request, image_url, RequestType.CHAT):
-            yield json.dumps(response)
+            logger.debug(
+                f"Generated response type {type(response)}, content: {response}"
+            )
+            # reconstructing back the OpenAI chat response as dynamo egress expects it
+            if response.startswith("data: [DONE]"):
+                break
+            response = json.loads(response.lstrip("data: "))
+            yield response
+
+
+async def graceful_shutdown(runtime):
+    """
+    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
+    However, in-flight requests will still be processed until they are finished.
+    After all in-flight requests are finished, the `serve_endpoint` functions will return
+    and the engine will be shutdown by Python's garbage collector.
+    """
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
+
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+    # Runtime setup
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
+    # worker setup
+    args, config = Processor.parse_args()
+    await init(runtime, args, config)
+
+
+async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Config):
+    """
+    Instantiate and serve
+    """
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    handler = Processor(args, config.engine_args)
+    await handler.async_init(runtime)
+
+    # Register the endpoint as entrypoint to a model
+    await register_llm(
+        ModelType.Chat,  # Custom processor is used and this type bypasses SDK processor
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info(f"Starting to serve the {args.endpoint} endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(handler.generate),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())

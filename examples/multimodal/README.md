@@ -17,7 +17,7 @@ limitations under the License.
 
 # Multimodal Deployment Examples
 
-This directory provides example workflows and reference implementations for deploying a multimodal model using Dynamo.
+This directory provides example workflows and reference implementations for deploying a multimodal model using Dynamo and vLLM v1.
 
 ## Use the Latest Release
 
@@ -35,45 +35,45 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Components
 
-- workers: For aggregated serving, we have two workers, [encode_worker](components/encode_worker.py) for encoding and [decode_worker](components/decode_worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the decode worker.
+- workers: For aggregated serving, we have two workers, [VllmEncodeWorker](components/encode_worker.py) for encoding and [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
 ### Graph
 
-In this graph, we have two workers, [encode_worker](components/encode_worker.py) and [decode_worker](components/decode_worker.py).
-The encode worker is responsible for encoding the image and passing the embeddings to the decode worker via a combination of NATS and RDMA.
+In this graph, we have two workers, [VllmEncodeWorker](components/encode_worker.py) and [VllmPDWorker](components/worker.py).
+The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the VllmPDWorker via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
-Its decode worker then prefills and decodes the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
-encode worker independently from the prefill and decode workers if needed.
+VllmEncodeWorker independently from the prefill and decode workers if needed.
 
 This figure shows the flow of the graph:
 ```mermaid
 flowchart LR
   HTTP --> processor
   processor --> HTTP
-  processor --> decode_worker
-  decode_worker --> processor
-  decode_worker --image_url--> encode_worker
-  encode_worker --embeddings--> decode_worker
+  processor --image_url--> encode_worker
+  encode_worker --> processor
+  encode_worker --embeddings--> pd_worker
+  pd_worker --> encode_worker
 ```
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
 # Serve a LLaVA 1.5 7B model:
-dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
+bash launch/agg.sh --model llava-hf/llava-1.5-7b-hf
 # Serve a Qwen2.5-VL model:
-# dynamo serve graphs.agg:Frontend -f ./configs/agg-qwen.yaml
+# bash launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct
 # Serve a Phi3V model:
-# dynamo serve graphs.agg:Frontend -f ./configs/agg-phi3v.yaml
+# bash launch/agg.sh --model microsoft/Phi-3.5-vision-instruct
 ```
 
 ### Client
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -111,42 +111,42 @@ You should see a response similar to this:
 
 ### Components
 
-- workers: For disaggregated serving, we have three workers, [encode_worker](components/encode_worker.py) for encoding, [decode_worker](components/decode_worker.py) for decoding, and [prefill_worker](components/prefill_worker.py) for prefilling.
-- processor: Tokenizes the prompt and passes it to the decode worker.
+- workers: For disaggregated serving, we have three workers, [VllmEncodeWorker](components/encode_worker.py) for encoding, [VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for prefilling.
+- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
 ### Graph
 
-In this graph, we have three workers, [encode_worker](components/encode_worker.py), [decode_worker](components/decode_worker.py), and [prefill_worker](components/prefill_worker.py).
-For the Llava model, embeddings are only required during the prefill stage. As such, the encode worker is connected directly to the prefill worker.
-The encode worker is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
+In this graph, we have three workers, [VllmEncodeWorker](components/encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+For the Llava model, embeddings are only required during the prefill stage. As such, the VllmEncodeWorker is connected directly to the prefill worker.
+The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
 Its work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../llm/README.md) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
 
 This figure shows the flow of the graph:
 ```mermaid
 flowchart LR
   HTTP --> processor
   processor --> HTTP
-  processor --> decode_worker
-  decode_worker --> processor
-  decode_worker --> prefill_worker
-  prefill_worker --> decode_worker
-  prefill_worker --image_url--> encode_worker
+  processor --image_url--> encode_worker
+  encode_worker --> processor
   encode_worker --embeddings--> prefill_worker
+  prefill_worker --> encode_worker
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
 ```
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
-dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
+bash launch/disagg.sh --model llava-hf/llava-1.5-7b-hf
 ```
 
 ### Client
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -180,301 +180,149 @@ You should see a response similar to this:
 
 ***Note***: disaggregation is currently only confirmed to work with LLaVA. Qwen VL and PhiV are not confirmed to be supported.
 
-## Deployment with Dynamo Operator
+## Llama 4 family Serving
 
-These multimodal examples can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
+The family of Llama 4 models is natively multimodal, however, different
+from Llava, they do not directly consume image embedding as input
+(see the [support metrics](https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation_1)
+from vLLM for the types of multi-modal inputs supported by the model).
+Therefore, encoder worker will not be used in the following example and the
+encoding will be done along side with prefill.
 
-### Prerequisites
+`meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` will be used as an example
+for the content below. And the system will be H100x8 which can hold one instance
+of the model per node.
 
-You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+### Multimodal Aggregated Serving
 
-**Note**: The `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
+#### Components
 
-### Deployment Steps
+- workers: For aggregated serving, we have one worker, [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the VllmPDWorker.
+- frontend: HTTP endpoint to handle incoming requests.
 
-For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the multimodal examples:
+#### Graph
 
-```bash
-# Set your project root directory
-export PROJECT_ROOT=$(pwd)
+In this graph, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
 
-# Configure environment variables (see operator_deployment.md for details)
-export KUBE_NS=dynamo-cloud
-export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
-# OR
-# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
-
-# Build the Dynamo base image (see operator_deployment.md for details)
-export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-
-# TODO: Apply Dynamo graph deployment for the example
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --image_url--> pd_worker
+  pd_worker --> processor
 ```
 
-**Note**: To avoid rate limiting from unauthenticated requests to HuggingFace (HF), you can provide your `HF_TOKEN` as a secret in your deployment. See the [operator deployment guide](../../docs/guides/dynamo_deploy/operator_deployment.md#referencing-secrets-in-your-deployment) for instructions on referencing secrets like `HF_TOKEN` in your deployment configuration.
-
-**Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.
-
-### Testing the Deployment
-
-Once the deployment is complete, you can test it. If you have ingress available for your deployment, you can directly call the url returned
-in `dynamo deployment get ${DEPLOYMENT_NAME}` and skip the steps to find and forward the frontend pod.
-
 ```bash
-# Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/agg_llama.sh
+```
 
-# Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+#### Client
 
-# Test the API endpoint
-curl localhost:8000/v1/chat/completions \
+In another terminal:
+```bash
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llava-hf/llava-1.5-7b-hf",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          { "type": "text", "text": "What is in this image?" },
-          { "type": "image_url", "image_url": { "url": "http://images.cocodataset.org/test2017/000000155781.jpg" } }
-        ]
-      }
-    ],
-    "max_tokens": 300,
-    "temperature": 0.0,
-    "stream": false
-  }'
+      "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "temperature": 0.0,
+      "stream": false
+    }'
 ```
 
-If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
+You should see a response similar to this:
+```json
+{"id": "b8f060fa95584e34b9204eaba7b105cc", "object": "chat.completion", "created": 1752706281, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": "The image depicts a street scene with a trolley bus as the central focus. The trolley bus is positioned on the left side of the road, facing the camera, and features a white and yellow color scheme. A prominent sign on the front of the bus reads \"OUT OF SERVICE\" in orange letters.\n\n**Key Elements:**\n\n* **Trolley Bus:** The bus is the main subject of the image, showcasing its distinctive design and color.\n* **Sign:** The \"OUT OF SERVICE\" sign is clearly visible on the front of the bus, indicating its current status.\n* **Street Scene:** The surrounding environment includes trees, buildings, and power lines, creating a sense of context and atmosphere.\n* **Lighting:** The image is characterized by a misty or foggy quality, with soft lighting that adds to the overall ambiance.\n\n**Overall Impression:**\n\nThe image presents a serene and somewhat melancholic scene, with the out-of-service trolley bus serving as a focal point. The misty atmosphere and soft lighting contribute to a dreamy or nostalgic feel, inviting the viewer to reflect on the scene."}, "finish_reason": "stop"}]}
+```
 
-For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
+### Multimodal Disaggregated Serving
 
-## Multimodal Aggregated Video Serving
+#### Components
 
-This example demonstrates deploying an aggregated multimodal model that can process video inputs.
-
-### Components
-
-- workers: For video serving, we have two workers, [video_encode_worker](components/video_encode_worker.py) for decoding video into frames, and [video_decode_worker](components/video_decode_worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the decode worker.
+- workers: For disaggregated serving, we have two workers, [VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for encoding and prefilling.
+- processor: Tokenizes the prompt and passes it to the VllmPDWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+#### Graph
 
-In this graph, we have two workers, `video_encode_worker` and `video_decode_worker`.
-The `video_encode_worker` is responsible for decoding the video into a series of frames. Unlike the image pipeline which generates embeddings, this pipeline passes the raw frames directly to the `video_decode_worker`. This transfer is done efficiently using RDMA.
-The `video_decode_worker` then receives these frames, and performs prefill and decode steps with the model. Separating the video processing from the language model inference allows for flexible scaling.
+In this graph, we have two workers, [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+The prefill worker performs the encoding and prefilling steps and forwards the KV cache to the decode worker for decoding.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
 
 This figure shows the flow of the graph:
 ```mermaid
 flowchart LR
   HTTP --> processor
   processor --> HTTP
-  processor --> video_decode_worker
-  video_decode_worker --> processor
-  video_decode_worker --video_url--> video_encode_worker
-  video_encode_worker --frames--> video_decode_worker
+  processor --image_url--> prefill_worker
+  prefill_worker --> processor
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
 ```
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
-# Serve a LLaVA-NeXT-Video-7B model:
-dynamo serve graphs.agg_video:Frontend -f ./configs/agg_video.yaml
-```
+bash launch/disagg_llama.sh --head-node
 
-### Client
-
-In another terminal:
-```bash
-curl -X 'POST'   'http://localhost:8000/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
-    "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "text",
-            "text": "Describe the video in detail"
-          },
-          {
-            "type": "video_url",
-            "video_url": {
-              "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-            }
-          }
-        ]
-      }
-    ],
-    "max_tokens": 300,
-    "stream": false
-  }' | jq
-```
-
-You should see a response describing the video's content similar to
-```json
-{
-  "id": "b5714626-5889-4bb7-8c51-f3bca65b4683",
-  "object": "chat.completion",
-  "created": 1749772533,
-  "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": " Sure! The video features a group of anthropomorphic animals who appear human-like. They're out in a meadow, which is a large, open area covered in grasses, and have given human qualities like speaking and a desire to go on adventures. The animals are seen play-fighting with each other clearly seen glancing at the camera when they sense it, blinking, and Roman the second can be directly heard by the camera reciting the line, \"When the challenge becomes insane, the behavior becomes erratic.\" A white rabbit is the first in shot and he winks the left eye and flips the right ear before shaking with the mouse and squirrel friends on a blurry rock ledge under the sky. At some point, the rabbit turns towards the camera and starts playing with the thing, and there's a distant mountain in the background. Furthermore, a little animal from a tree in the background flies with two rocks, and it's joined by the rest of the group of friends. That outro is an elder turtle in the Ramden musical style saturated with a horn-like thing pattern."
-      },
-      "finish_reason": "stop"
-    }
-  ]
-}
-```
-
-## Multimodal Disaggregated Video Serving
-
-This example demonstrates deploying a disaggregated multimodal model that can process video inputs.
-
-### Dependency
-
-Video example relies on `av` package for video preprocessing inside the encode_worker.
-Please install `av` inside the dynamo container to enable video example.
-
-`pip install av`
-
-### Components
-
-- workers: For disaggregated video serving, we have three workers, [video_encode_worker](components/video_encode_worker.py) for decoding video into frames, [video_decode_worker](components/video_decode_worker.py) for decoding, and [video_prefill_worker](components/video_prefill_worker.py) for prefilling.
-- processor: Tokenizes the prompt and passes it to the decode worker.
-- frontend: HTTP endpoint to handle incoming requests.
-
-### Graph
-
-In this graph, we have three workers, `video_encode_worker`, `video_decode_worker`, and `video_prefill_worker`.
-For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. As such, the `video_encode_worker` is connected directly to the `video_prefill_worker`.
-The `video_encode_worker` is responsible for decoding the video into a series of frames and passing them to the `video_prefill_worker` via RDMA.
-The `video_prefill_worker` performs the prefilling step and forwards the KV cache to the `video_decode_worker` for decoding.
-
-This figure shows the flow of the graph:
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --> video_decode_worker
-  video_decode_worker --> processor
-  video_decode_worker --> video_prefill_worker
-  video_prefill_worker --> video_decode_worker
-  video_prefill_worker --video_url--> video_encode_worker
-  video_encode_worker --frames--> video_prefill_worker
-```
-
-```bash
+# On a separate node that has finished standard dynamo setup, i.e.
+# the worker node needs NATS_SERVER and ETCD_ENDPOINTS environment variables
+# pointing to the head node's external IP address for distributed coordination
 cd $DYNAMO_HOME/examples/multimodal
-# Serve a LLaVA-NeXT-Video-7B model:
-dynamo serve graphs.disagg_video:Frontend -f ./configs/disagg_video.yaml
+bash launch/disagg_llama.sh
 ```
 
-### Client
+#### Client
 
 In another terminal:
 ```bash
-curl -X 'POST'   'http://localhost:8000/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
-    "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "text",
-            "text": "Describe the video in detail"
-          },
-          {
-            "type": "video_url",
-            "video_url": {
-              "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+              }
             }
-          }
-        ]
-      }
-    ],
-    "max_tokens": 300,
-    "stream": false
-  }' | jq
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "temperature": 0.0,
+      "stream": false
+    }'
 ```
 
-You should see a response describing the video's content similar to
+You should see a response similar to this:
 ```json
-{
-  "id": "d1d641b1-4daf-48d3-9d06-6a60743b5a42",
-  "object": "chat.completion",
-  "created": 1749775300,
-  "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": " The video features two animals in a lush, green outdoor environment. On the ground, there is a white rabbit with big brown eyes, a playful expression, and two antlers. The rabbit is accompanied by a uniquely colored bird with orange pupils, possibly a squirrel or a hamster, sitting on its head. These two animals seem to have embarked on an unlikely journey, flying together in the sky. The backdrop showcases rolling green hills and trees under the pleasant weather. The sky is clear, indicating a beautiful day. The colors and contrast suggest the landscape is during spring or summer, signifying the rabbit and bird could also be engaging in outdoor activities during those seasons. Overall, it's a charming scene depicting an unlikely yet harmonious pair, enjoying a surprise adventure in nature."
-      },
-      "finish_reason": "stop"
-    }
-  ]
-}
-```
-
-
-## Deploying Multimodal Examples on Kubernetes
-
-This guide will help you quickly deploy and clean up the multimodal example services in Kubernetes.
-
-### Prerequisites
-
-- **Dynamo Cloud** is already deployed in your target Kubernetes namespace.
-- You have `kubectl` access to your cluster and the correct namespace set in `$NAMESPACE`.
-
-
-### Create a secret with huggingface token
-
-```bash
-export HF_TOKEN="huggingfacehub token with read permission to models"
-kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=$HF_TOKEN -n $KUBE_NS || true
-```
-
----
-
-Choose the example you want to deploy or delete. The YAML files are located in `examples/multimodal/deploy/k8s/`.
-
-### Deploy the Multimodal Example
-
-```bash
-kubectl apply -f examples/multimodal/deploy/k8s/<Example yaml file> -n $NAMESPACE
-```
-
-### Uninstall the Multimodal Example
-
-
-```bash
-kubectl delete -f examples/multimodal/deploy/k8s/<Example yaml file> -n $NAMESPACE
-```
-
-### Using a different dynamo container
-
-To customize the container image used in your deployment, you will need to update the manifest before applying it.
-
-You can use [`yq`](https://github.com/mikefarah/yq?tab=readme-ov-file#install), a portable command-line YAML processor.
-
-Please follow the [installation instructions](https://github.com/mikefarah/yq?tab=readme-ov-file#install) for your platform if you do not already have `yq` installed. After installing `yq`, you can generate and apply your manifest as follows:
-
-
-```bash
-export DYNAMO_IMAGE=my-registry/my-image:tag
-
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(DYNAMO_IMAGE)' $EXAMPLE_FILE > my_example_manifest.yaml
-
-# install the dynamo example
-kubectl apply -f my_example_manifest.yaml -n $NAMESPACE
-
-# uninstall the dynamo example
-kubectl delete -f my_example_manifest.yaml -n $NAMESPACE
-
+{"id": "6cc99123ad6948d685b8695428238d4b", "object": "chat.completion", "created": 1752708043, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": "The image depicts a street scene with a trolley bus as the central focus. The trolley bus is positioned on the left side of the road, facing the camera, and features a white and yellow color scheme. A prominent sign on the front of the bus reads \"OUT OF SERVICE\" in orange letters.\n\n**Key Elements:**\n\n* **Trolley Bus:** The bus is the main subject of the image, showcasing its distinctive design and color.\n* **Sign:** The \"OUT OF SERVICE\" sign is clearly visible on the front of the bus, indicating its current status.\n* **Street Scene:** The surrounding environment includes trees, buildings, and power lines, creating a sense of context and atmosphere.\n* **Lighting:** The image is characterized by a misty or foggy quality, with soft lighting that adds to the overall mood.\n\n**Overall Impression:**\n\nThe image presents a serene and somewhat melancholic scene, with the out-of-service trolley bus serving as a focal point. The misty atmosphere and soft lighting contribute to a contemplative ambiance, inviting the viewer to reflect on the situation."}, "finish_reason": "stop"}]}
 ```

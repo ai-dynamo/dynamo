@@ -3,13 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Environment variables with defaults
-export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
+export MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-0.6B"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
 export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/decode.yaml"}
 export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
+export MODALITY=${MODALITY:-"text"}
+# If you want to use multimodal, set MODALITY to "multimodal"
+#export MODALITY=${MODALITY:-"multimodal"}
 
 # Setup cleanup trap
 cleanup() {
@@ -33,6 +36,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+  --modality "$MODALITY" \
   --disaggregation-mode prefill &
 PREFILL_PID=$!
 
@@ -42,4 +46,5 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+  --modality "$MODALITY" \
   --disaggregation-mode decode

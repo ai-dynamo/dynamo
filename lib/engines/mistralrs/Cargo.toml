@@ -34,12 +34,12 @@ dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
 
 anyhow = { workspace = true }
-async-openai = { workspace = true }
+dynamo-async-openai = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 either = { workspace = true }
 indexmap = { version = "2.9.0", features = ["serde"] }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0" }
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0", rev = "53ebc74" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

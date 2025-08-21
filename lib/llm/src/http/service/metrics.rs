@@ -12,6 +12,12 @@ pub use prometheus::Registry;
 
 use super::RouteDoc;
 
+// Default metric prefix
+pub const FRONTEND_METRIC_PREFIX: &str = "dynamo_frontend";
+
+// Environment variable that overrides the default metric prefix if provided
+pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
+
 /// Value for the `status` label in the request counter for successful requests
 pub const REQUEST_STATUS_SUCCESS: &str = "success";
 
@@ -23,6 +29,31 @@ pub const REQUEST_TYPE_STREAM: &str = "stream";
 
 /// Partial value for the `type` label in the request counter for unary requests
 pub const REQUEST_TYPE_UNARY: &str = "unary";
+
+fn sanitize_prometheus_prefix(raw: &str) -> String {
+    // Prometheus metric name pattern: [a-zA-Z_:][a-zA-Z0-9_:]*
+    let mut s: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == ':' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if s.is_empty() {
+        return FRONTEND_METRIC_PREFIX.to_string();
+    }
+
+    let first = s.as_bytes()[0];
+    let valid_first = first.is_ascii_alphabetic() || first == b'_' || first == b':';
+    if !valid_first {
+        s.insert(0, '_');
+    }
+    s
+}
 
 pub struct Metrics {
     request_counter: IntCounterVec,
@@ -94,24 +125,39 @@ pub struct ResponseMetricCollector {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new("nv_llm")
+        Self::new()
     }
 }
 
 impl Metrics {
-    /// Create Metrics with the given prefix
-    /// The following metrics will be created:
-    /// - `{prefix}_http_service_requests_total` - IntCounterVec for the total number of requests processed
-    /// - `{prefix}_http_service_inflight_requests` - IntGaugeVec for the number of inflight requests
-    /// - `{prefix}_http_service_request_duration_seconds` - HistogramVec for the duration of requests
-    /// - `{prefix}_http_service_input_sequence_tokens` - HistogramVec for input sequence length in tokens
-    /// - `{prefix}_http_service_output_sequence_tokens` - HistogramVec for output sequence length in tokens
-    /// - `{prefix}_http_service_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
-    /// - `{prefix}_http_service_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
-    pub fn new(prefix: &str) -> Self {
+    /// Create Metrics with the standard prefix defined by [`FRONTEND_METRIC_PREFIX`] or specify custom prefix via the following environment variable:
+    /// - `DYN_METRICS_PREFIX`: Override the default metrics prefix
+    ///
+    /// The following metrics will be created with the configured prefix:
+    /// - `{prefix}_requests_total` - IntCounterVec for the total number of requests processed
+    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight requests
+    /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
+    /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
+    /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
+    /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
+    pub fn new() -> Self {
+        let raw_prefix = std::env::var(METRICS_PREFIX_ENV)
+            .unwrap_or_else(|_| FRONTEND_METRIC_PREFIX.to_string());
+        let prefix = sanitize_prometheus_prefix(&raw_prefix);
+        if prefix != raw_prefix {
+            tracing::warn!(
+                raw=%raw_prefix,
+                sanitized=%prefix,
+                env=%METRICS_PREFIX_ENV,
+                "Sanitized HTTP metrics prefix"
+            );
+        }
+        let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
+
         let request_counter = IntCounterVec::new(
             Opts::new(
-                format!("{}_http_service_requests_total", prefix),
+                frontend_metric_name("requests_total"),
                 "Total number of LLM requests processed",
             ),
             &["model", "endpoint", "request_type", "status"],
@@ -120,7 +166,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                format!("{}_http_service_inflight_requests", prefix),
+                frontend_metric_name("inflight_requests"),
                 "Number of inflight requests",
             ),
             &["model"],
@@ -131,7 +177,7 @@ impl Metrics {
 
         let request_duration = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_request_duration_seconds", prefix),
+                frontend_metric_name("request_duration_seconds"),
                 "Duration of LLM requests",
             )
             .buckets(buckets),
@@ -141,7 +187,7 @@ impl Metrics {
 
         let input_sequence_length = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_input_sequence_tokens", prefix),
+                frontend_metric_name("input_sequence_tokens"),
                 "Input sequence length in tokens",
             )
             .buckets(vec![
@@ -154,7 +200,7 @@ impl Metrics {
 
         let output_sequence_length = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_output_sequence_tokens", prefix),
+                frontend_metric_name("output_sequence_tokens"),
                 "Output sequence length in tokens",
             )
             .buckets(vec![
@@ -166,7 +212,7 @@ impl Metrics {
 
         let time_to_first_token = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_time_to_first_token_seconds", prefix),
+                frontend_metric_name("time_to_first_token_seconds"),
                 "Time to first token in seconds",
             )
             .buckets(vec![
@@ -179,7 +225,7 @@ impl Metrics {
 
         let inter_token_latency = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_inter_token_latency_seconds", prefix),
+                frontend_metric_name("inter_token_latency_seconds"),
                 "Inter-token latency in seconds",
             )
             .buckets(vec![

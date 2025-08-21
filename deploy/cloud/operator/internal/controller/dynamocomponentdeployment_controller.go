@@ -22,12 +22,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
-	"github.com/imdario/mergo"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -35,13 +33,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
-	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
-	istioNetworking "istio.io/api/networking/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -49,7 +47,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,7 +62,6 @@ import (
 const (
 	DefaultClusterName                                   = "default"
 	DefaultServiceAccountName                            = "default"
-	KubeValueNameSharedMemory                            = "shared-memory"
 	KubeAnnotationDeploymentStrategy                     = "nvidia.com/deployment-strategy"
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"
@@ -73,13 +69,10 @@ const (
 	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
-	DefaultIngressSuffix                                 = "local"
 	KubernetesDeploymentStrategy                         = "kubernetes"
 
-	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
-	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
 	DeploymentTypeStandard       = "standard"
-	DeploymentTypeLeaderWorker   = "leader-worker"
+	DeploymentTypeMultinodeGrove = "multinode-grove"
 	ComponentTypePlanner         = "Planner"
 )
 
@@ -88,10 +81,7 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                controller_common.Config
-	NatsAddr              string
-	EtcdAddr              string
 	EtcdStorage           etcdStorage
-	UseVirtualService     bool
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -206,15 +196,10 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	// Determine deployment type
-	deploymentType := GetDeploymentType(dynamoComponentDeployment)
-
-	logs.Info("Using deployment type", "type", deploymentType)
-
 	// Create the appropriate workload resource based on deployment type
 	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
 	var deployment *appsv1.Deployment
-	if r.Config.EnableLWS && deploymentType == DeploymentTypeLeaderWorker {
+	if r.Config.EnableLWS && dynamoComponentDeployment.IsMultinode() {
 		desiredReplicas := int32(1)
 		if dynamoComponentDeployment.Spec.Replicas != nil {
 			desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
@@ -369,7 +354,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	logs.Info("Finished reconciling.")
 	r.Recorder.Eventf(dynamoComponentDeployment, corev1.EventTypeNormal, "Update", "All resources updated!")
 
-	if deploymentType == DeploymentTypeLeaderWorker {
+	if dynamoComponentDeployment.IsMultinode() {
 		err = r.computeAvailableStatusConditionForLeaderWorkerSets(ctx, req, leaderWorkerSets)
 	} else {
 		err = r.computeAvailableStatusCondition(ctx, req, deployment)
@@ -413,17 +398,6 @@ func (r *DynamoComponentDeploymentReconciler) computeAvailableStatusConditionFor
 		)
 		return err
 	}
-}
-
-// GetDeploymentType returns the deployment type from the annotations
-// If not set, it returns the default DeploymentTypeStandard
-func GetDeploymentType(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) string {
-	resourceAnnotations := getResourceAnnotations(dynamoComponentDeployment)
-	deploymentType := resourceAnnotations[KubeAnnotationDeploymentType]
-	if deploymentType == "" {
-		deploymentType = DeploymentTypeStandard
-	}
-	return deploymentType
 }
 
 // IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
@@ -479,21 +453,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 	labels := make(map[string]string)
 	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 
-	lwsSizeStr, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
-	if !ok {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: missing required annotation %s", KubeAnnotationLWSSize)
-	}
-	lwsSize, err := strconv.ParseInt(lwsSizeStr, 10, 32)
-	if err != nil {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: invalid value for annotation %s: %v", KubeAnnotationLWSSize, err)
-	}
-	if lwsSize <= 0 {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: LWS size must be greater than 0, got %d", lwsSize)
-	}
-	if lwsSize == 1 {
-		return nil, false, errors.New("generateVolcanoPodGroup: LWS size of 1 means that the LWS is not needed, change 'nvidia.com/deployment-type' to 'standard'/disable whatever flag you used to enable LWS")
-	}
-	minMember := int32(lwsSize)
+	minMember := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	podGroup := &volcanov1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -510,16 +470,12 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
-	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleLeader)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
 
-	if labels != nil {
-		leaderPodTemplateSpec.ObjectMeta.Labels = labels
-	} else {
-		leaderPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
-	}
+	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
 	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
 	leaderPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
@@ -532,40 +488,23 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	leaderPodTemplateSpec.Spec.SchedulerName = "volcano"
 
 	if leaderPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for Ray leader pod")
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Command cannot be nil for LWS leader pod")
 	}
 
 	if len(leaderPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for Ray leader pod")
+		return nil, errors.New("generateLeaderPodTemplateSpec: container Args cannot be empty for LWS leader pod")
 	}
-
-	currentArgs := leaderPodTemplateSpec.Spec.Containers[0].Args[0]
-	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
-		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
-	}
-
-	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
-	// until we implement proper probe configuration that can differentiate between
-	// leader and worker pods.
-	leaderPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
-	leaderPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
-
-	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
 
 	return leaderPodTemplateSpec, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
-	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleWorker)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
 
-	if labels != nil {
-		workerPodTemplateSpec.ObjectMeta.Labels = labels
-	} else {
-		workerPodTemplateSpec.ObjectMeta.Labels = make(map[string]string)
-	}
+	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
 	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
 	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
@@ -578,24 +517,16 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
 	if workerPodTemplateSpec.Spec.Containers[0].Command == nil {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for Ray worker pod")
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Command cannot be nil for LWS worker pod")
 	}
 
 	if len(workerPodTemplateSpec.Spec.Containers[0].Args) == 0 {
-		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for Ray worker pod")
+		return nil, errors.New("generateWorkerPodTemplateSpec: container Args cannot be empty for LWS worker pod")
 	}
 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
-		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
+		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for LWS worker pod")
 	}
-
-	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
-	// until we implement proper probe configuration that can differentiate between
-	// leader and worker pods.
-	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
-	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
-
-	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
 
 	return workerPodTemplateSpec, nil
 }
@@ -653,18 +584,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 
 	// Each individual LeaderWorkerSet always has exactly 1 replica
 	singleReplica := int32(1)
-	size, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
-	if !ok {
-		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size annotation '%s' is required", KubeAnnotationLWSSize)
-	}
-	sizeInt, err := strconv.ParseInt(size, 10, 32)
-	if err != nil {
-		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: LWS size annotation value must be an integer")
-	}
-	if sizeInt < 1 {
-		return nil, false, fmt.Errorf("generateLeaderWorkerSet: LWS size must be greater than 0, got %d", sizeInt)
-	}
-	groupSize := int32(sizeInt)
+	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
 		Replicas:      &singleReplica,
@@ -952,7 +872,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx 
 	if err != nil {
 		return false, err
 	}
-	if r.UseVirtualService {
+	if r.Config.IngressConfig.UseVirtualService() {
 		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
 			return r.generateVirtualService(ctx, opt)
 		})
@@ -975,49 +895,11 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
+	if opt.dynamoComponentDeployment.Spec.Ingress == nil || !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}
-	host := getIngressHost(opt.dynamoComponentDeployment.Spec.Ingress)
-
-	ingress.Spec = networkingv1.IngressSpec{
-		IngressClassName: opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName,
-		Rules: []networkingv1.IngressRule{
-			{
-				Host: host,
-				IngressRuleValue: networkingv1.IngressRuleValue{
-					HTTP: &networkingv1.HTTPIngressRuleValue{
-						Paths: []networkingv1.HTTPIngressPath{
-							{
-								Path:     "/",
-								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
-								Backend: networkingv1.IngressBackend{
-									Service: &networkingv1.IngressServiceBackend{
-										Name: opt.dynamoComponentDeployment.Name,
-										Port: networkingv1.ServiceBackendPort{
-											Number: commonconsts.DynamoServicePort,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	if opt.dynamoComponentDeployment.Spec.Ingress.TLS != nil {
-		ingress.Spec.TLS = []networkingv1.IngressTLS{
-			{
-				Hosts:      []string{host},
-				SecretName: opt.dynamoComponentDeployment.Spec.Ingress.TLS.SecretName,
-			},
-		}
-	}
-
-	return ingress, false, nil
+	return dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context.Context, opt generateResourceOption) (*networkingv1beta1.VirtualService, bool, error) {
@@ -1031,40 +913,11 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		},
 	}
 
-	vsEnabled := opt.dynamoComponentDeployment.Spec.Ingress.Enabled && opt.dynamoComponentDeployment.Spec.Ingress.UseVirtualService && opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway != nil
-	if !vsEnabled {
+	if !opt.dynamoComponentDeployment.Spec.Ingress.IsVirtualServiceEnabled() {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}
-
-	vs.Spec = istioNetworking.VirtualService{
-		Hosts: []string{
-			getIngressHost(opt.dynamoComponentDeployment.Spec.Ingress),
-		},
-		Gateways: []string{*opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway},
-		Http: []*istioNetworking.HTTPRoute{
-			{
-				Match: []*istioNetworking.HTTPMatchRequest{
-					{
-						Uri: &istioNetworking.StringMatch{
-							MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
-						},
-					},
-				},
-				Route: []*istioNetworking.HTTPRouteDestination{
-					{
-						Destination: &istioNetworking.Destination{
-							Host: opt.dynamoComponentDeployment.Name,
-							Port: &istioNetworking.PortSelector{
-								Number: commonconsts.DynamoServicePort,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	return vs, false, nil
+	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) getKubeName(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, debug bool) string {
@@ -1134,7 +987,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	}
 
 	// nolint: gosimple
-	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt)
+	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleMain)
 	if err != nil {
 		return
 	}
@@ -1273,24 +1126,36 @@ func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOp
 }
 
 //nolint:gocyclo,nakedret
-func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	logs := log.FromContext(ctx)
+func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
+	}
+
+	// Convert user-provided metrics annotation into controller-managed label
+	// By default (no annotation), metrics are enabled
+	metricsAnnotationValue := ""
+	if opt.dynamoComponentDeployment.Spec.Annotations != nil {
+		metricsAnnotationValue = opt.dynamoComponentDeployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics]
+	}
+	switch metricsAnnotationValue {
+	case commonconsts.KubeLabelValueFalse:
+		// Explicitly disabled, don't add the label
+	default:
+		// Any other value (including empty) enables metrics
+		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
+	// Add component type label if specified
+	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
 	}
 
 	podAnnotations := make(map[string]string)
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.isStealingTrafficDebugModeEnabled)
 
-	containerPort := commonconsts.DynamoServicePort
-
-	var envs []corev1.EnvVar
-	envsSeen := make(map[string]struct{})
-
 	resourceAnnotations := opt.dynamoComponentDeployment.Spec.Annotations
-	specEnvs := opt.dynamoComponentDeployment.Spec.Envs
 
 	if resourceAnnotations == nil {
 		resourceAnnotations = make(map[string]string)
@@ -1298,297 +1163,21 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	if specEnvs != nil {
-		envs = make([]corev1.EnvVar, 0, len(specEnvs)+1)
-
-		for _, env := range specEnvs {
-			if _, ok := envsSeen[env.Name]; ok {
-				continue
-			}
-			if env.Name == commonconsts.EnvDynamoServicePort {
-				// nolint: gosec
-				containerPort, err = strconv.Atoi(env.Value)
-				if err != nil {
-					return nil, errors.Wrapf(err, "invalid port value %s", env.Value)
-				}
-			}
-			envsSeen[env.Name] = struct{}{}
-			envVar := corev1.EnvVar{
-				Name: env.Name,
-			}
-			if env.Value != "" {
-				envVar.Value = env.Value
-			}
-			if env.ValueFrom != nil {
-				envVar.ValueFrom = env.ValueFrom
-			}
-			envs = append(envs, envVar)
-		}
-	}
-
-	defaultEnvs := []corev1.EnvVar{
-		{
-			Name:  commonconsts.EnvDynamoServicePort,
-			Value: fmt.Sprintf("%d", containerPort),
-		},
-	}
-
-	if r.NatsAddr != "" {
-		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
-			Name:  "NATS_SERVER",
-			Value: r.NatsAddr,
-		})
-	}
-
-	if r.EtcdAddr != "" {
-		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
-			Name:  "ETCD_ENDPOINTS",
-			Value: r.EtcdAddr,
-		})
-	}
-
-	for _, env := range defaultEnvs {
-		if _, ok := envsSeen[env.Name]; !ok {
-			envs = append(envs, env)
-		}
-	}
-
-	var livenessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
-		livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe
-	}
-
-	var readinessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.ReadinessProbe != nil {
-		readinessProbe = opt.dynamoComponentDeployment.Spec.ReadinessProbe
-	}
-
-	volumes := make([]corev1.Volume, 0)
-	volumeMounts := make([]corev1.VolumeMount, 0)
-
-	args := make([]string, 0)
-
-	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
-
-	// ensure liveness and readiness probes are enabled for the dynamo components
-	args = append(args, "--system-app-port", fmt.Sprintf("%d", commonconsts.DynamoHealthPort))
-	args = append(args, "--enable-system-app")
-	args = append(args, "--use-default-health-checks")
-
-	if opt.dynamoComponentDeployment.Spec.ServiceName != "" {
-		args = append(args, []string{"--service-name", opt.dynamoComponentDeployment.Spec.ServiceName}...)
-		args = append(args, opt.dynamoComponentDeployment.Spec.DynamoTag)
-		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
-		}
-		if componentType, exists := opt.dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; exists && componentType == ComponentTypePlanner {
-			args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
-		}
-	}
-
-	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {
-		for _, env := range opt.dynamoComponentDeployment.Spec.Envs {
-			if env.Name == "DYNAMO_CONFIG_PATH" {
-				args = append(args, "-f", env.Value)
-			}
-		}
-	}
-
-	dynamoResources := opt.dynamoComponentDeployment.Spec.Resources
-
-	resources, err := getResourcesConfig(dynamoResources)
+	basePodSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, consts.MultinodeDeploymentTypeLWS)
 	if err != nil {
-		err = errors.Wrap(err, "failed to get resources config")
+		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err
 	}
 
-	sharedMemorySizeLimit := resource.MustParse("64Mi")
-	memoryLimit := resources.Limits[corev1.ResourceMemory]
-	if !memoryLimit.IsZero() {
-		sharedMemorySizeLimit.SetMilli(memoryLimit.MilliValue() / 2)
+	// Ensure we have at least one container (the main container should be there from GenerateBasePodSpec)
+	if len(basePodSpec.Containers) == 0 {
+		return nil, errors.New("no containers found in base pod spec")
 	}
 
-	volumes = append(volumes, corev1.Volume{
-		Name: KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &sharedMemorySizeLimit,
-			},
-		},
-	})
-	volumeMounts = append(volumeMounts, corev1.VolumeMount{
-		Name:      KubeValueNameSharedMemory,
-		MountPath: "/dev/shm",
-	})
-	if opt.dynamoComponentDeployment.Spec.PVC != nil {
-		volumes = append(volumes, corev1.Volume{
-			Name: getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-				},
-			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-			MountPath: *opt.dynamoComponentDeployment.Spec.PVC.MountPoint,
-		})
-	}
-
-	imageName := opt.dynamoComponentDeployment.GetImage()
-	if imageName == "" {
-		return nil, errors.Errorf("image is not set for component %s", opt.dynamoComponentDeployment.Name)
-	}
-
-	var securityContext *corev1.SecurityContext
-	var mainContainerSecurityContext *corev1.SecurityContext
-
-	enableRestrictedSecurityContext := os.Getenv("ENABLE_RESTRICTED_SECURITY_CONTEXT") == "true"
-	if enableRestrictedSecurityContext {
-		securityContext = &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			RunAsNonRoot:             ptr.To(true),
-			RunAsUser:                ptr.To(int64(1000)),
-			RunAsGroup:               ptr.To(int64(1000)),
-			SeccompProfile: &corev1.SeccompProfile{
-				Type: corev1.SeccompProfileTypeRuntimeDefault,
-			},
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-			},
-		}
-		mainContainerSecurityContext = securityContext.DeepCopy()
-		mainContainerSecurityContext.RunAsUser = ptr.To(int64(1034))
-	}
+	// Get the main container from the base spec
+	container := basePodSpec.Containers[0]
 
 	containers := make([]corev1.Container, 0, 2)
-
-	// TODO: Temporarily disabling probes
-	container := corev1.Container{
-		Name:           "main",
-		Image:          imageName,
-		Command:        []string{"sh", "-c"},
-		Args:           []string{strings.Join(args, " ")},
-		LivenessProbe:  livenessProbe,
-		ReadinessProbe: readinessProbe,
-		Resources:      resources,
-		Env:            envs,
-		TTY:            true,
-		Stdin:          true,
-		VolumeMounts:   volumeMounts,
-		Ports: []corev1.ContainerPort{
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.DynamoContainerPortName,
-				ContainerPort: int32(containerPort), // nolint: gosec
-			},
-			{
-				Protocol:      corev1.ProtocolTCP,
-				Name:          commonconsts.DynamoHealthPortName,
-				ContainerPort: int32(commonconsts.DynamoHealthPort),
-			},
-		},
-		SecurityContext: mainContainerSecurityContext,
-	}
-
-	// Set default probes if none are provided
-	if livenessProbe == nil {
-		container.LivenessProbe = &corev1.Probe{
-			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
-			InitialDelaySeconds: 60, // 1 minute
-			PeriodSeconds:       60, // Check every 1 minute
-			TimeoutSeconds:      5,  // 5 second timeout
-			FailureThreshold:    10, // Allow 10 failures before declaring unhealthy
-			SuccessThreshold:    1,  // Need 1 success to be considered healthy
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-				},
-			},
-		}
-	}
-
-	if readinessProbe == nil {
-		container.ReadinessProbe = &corev1.Probe{
-			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
-			InitialDelaySeconds: 60, // 1 minute
-			PeriodSeconds:       60, // Check every 1 minute
-			TimeoutSeconds:      5,  // 5 second timeout
-			FailureThreshold:    10, // Allow 10 failures before declaring not ready
-			SuccessThreshold:    1,  // Need 1 success to be considered ready
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/readyz",
-					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-				},
-			},
-		}
-	}
-
-	if opt.dynamoComponentDeployment.Spec.EnvFromSecret != nil {
-		container.EnvFrom = []corev1.EnvFromSource{
-			{
-				SecretRef: &corev1.SecretEnvSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: *opt.dynamoComponentDeployment.Spec.EnvFromSecret,
-					},
-				},
-			},
-		}
-	}
-
-	if resourceAnnotations["nvidia.com/enable-container-privileged"] == commonconsts.KubeLabelValueTrue {
-		if container.SecurityContext == nil {
-			container.SecurityContext = &corev1.SecurityContext{}
-		}
-		container.SecurityContext.Privileged = &[]bool{true}[0]
-	}
-
-	if resourceAnnotations["nvidia.com/enable-container-ptrace"] == commonconsts.KubeLabelValueTrue {
-		if container.SecurityContext == nil {
-			container.SecurityContext = &corev1.SecurityContext{}
-		}
-		container.SecurityContext.Capabilities = &corev1.Capabilities{
-			Add: []corev1.Capability{"SYS_PTRACE"},
-		}
-	}
-
-	if resourceAnnotations["nvidia.com/run-container-as-root"] == commonconsts.KubeLabelValueTrue {
-		if container.SecurityContext == nil {
-			container.SecurityContext = &corev1.SecurityContext{}
-		}
-		container.SecurityContext.RunAsUser = &[]int64{0}[0]
-	}
-
-	// Merge extraPodSpecMainContainer into container, only overriding empty fields
-	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
-		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
-		if extraPodSpecMainContainer != nil {
-			if len(extraPodSpecMainContainer.Command) > 0 {
-				logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
-				container.Command = extraPodSpecMainContainer.Command
-			}
-			if len(extraPodSpecMainContainer.Args) > 0 {
-				// Special case: if command is "sh -c", we must collapse args into a single string
-				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
-					joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
-					logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
-					container.Args = []string{joinedArgs}
-				} else {
-					logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
-					container.Args = extraPodSpecMainContainer.Args
-				}
-			}
-			// finally, Merge non empty fields from extraPodSpecMainContainer into container, only overriding empty fields
-			err := mergo.Merge(&container, extraPodSpecMainContainer)
-			if err != nil {
-				err = errors.Wrapf(err, "failed to merge extraPodSpecMainContainer into container")
-				return nil, err
-			}
-		}
-	}
 
 	containers = append(containers, container)
 
@@ -1628,55 +1217,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
-	podSpec := corev1.PodSpec{
-		Containers: containers,
-		Volumes:    volumes,
-	}
-
-	imagePullSecrets := []corev1.LocalObjectReference{}
-
-	if r.DockerSecretRetriever == nil {
-		err = errors.New("DockerSecretRetriever is not initialized")
-		return
-	}
-	secretsName, err := r.DockerSecretRetriever.GetSecrets(opt.dynamoComponentDeployment.Namespace, imageName)
-	if err != nil {
-		err = errors.Wrapf(err, "failed to get secrets for component %s and image %s", opt.dynamoComponentDeployment.Name, imageName)
-		return
-	}
-
-	for _, secretName := range secretsName {
-		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
-			Name: secretName,
-		})
-	}
-
-	if len(imagePullSecrets) > 0 {
-		podSpec.ImagePullSecrets = imagePullSecrets
-	}
+	podSpec := basePodSpec
+	podSpec.Containers = containers
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
 	if extraPodMetadata != nil {
-		for k, v := range extraPodMetadata.Annotations {
-			podAnnotations[k] = v
-		}
-
-		for k, v := range extraPodMetadata.Labels {
-			podLabels[k] = v
-		}
-	}
-
-	extraPodSpec := opt.dynamoComponentDeployment.Spec.ExtraPodSpec
-
-	if extraPodSpec != nil {
-		podSpec.SchedulerName = extraPodSpec.SchedulerName
-		podSpec.NodeSelector = extraPodSpec.NodeSelector
-		podSpec.Affinity = extraPodSpec.Affinity
-		podSpec.Tolerations = extraPodSpec.Tolerations
-		podSpec.TopologySpreadConstraints = extraPodSpec.TopologySpreadConstraints
-		podSpec.Containers = append(podSpec.Containers, extraPodSpec.Containers...)
-		podSpec.ServiceAccountName = extraPodSpec.ServiceAccountName
+		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
+		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -1695,18 +1243,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
-	if resourceAnnotations["nvidia.com/enable-host-ipc"] == commonconsts.KubeLabelValueTrue {
-		podSpec.HostIPC = true
-	}
-
-	if resourceAnnotations["nvidia.com/enable-host-network"] == commonconsts.KubeLabelValueTrue {
-		podSpec.HostNetwork = true
-	}
-
-	if resourceAnnotations["nvidia.com/enable-host-pid"] == commonconsts.KubeLabelValueTrue {
-		podSpec.HostPID = true
-	}
-
 	if opt.isStealingTrafficDebugModeEnabled || isDebugModeEnabled {
 		podSpec.ShareProcessNamespace = &[]bool{true}[0]
 	}
@@ -1716,103 +1252,10 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
-		Spec: podSpec,
+		Spec: *podSpec,
 	}
 
 	return
-}
-
-func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequirements, error) {
-	currentResources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("300m"),
-			corev1.ResourceMemory: resource.MustParse("500Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("500m"),
-			corev1.ResourceMemory: resource.MustParse("1Gi"),
-		},
-	}
-
-	if resources == nil {
-		return currentResources, nil
-	}
-
-	if resources.Limits != nil {
-		if resources.Limits.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.CPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits cpu quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceCPU] = q
-		}
-		if resources.Limits.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Limits.Memory)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits memory quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceMemory] = q
-		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits gpu quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[commonconsts.KubeResourceGPUNvidia] = q
-		}
-		for k, v := range resources.Limits.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits %s quantity", k)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Requests != nil {
-		if resources.Requests.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.CPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests cpu quantity")
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceCPU] = q
-		}
-		if resources.Requests.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Requests.Memory)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests memory quantity")
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceMemory] = q
-		}
-		for k, v := range resources.Requests.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests %s quantity", k)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceName(k)] = q
-		}
-	}
-	return currentResources, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {
@@ -1832,7 +1275,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.IsMainComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
+	if !opt.dynamoComponentDeployment.IsFrontendComponent() || (!opt.isGenericService && !opt.containsStealingTrafficDebugModeEnabled) {
 		// if it's not the main component or if it's not a generic service and not contains stealing traffic debug mode enabled, we don't need to create the service
 		return kubeService, true, nil
 	}
@@ -1845,11 +1288,8 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 		selector[k] = v
 	}
 
-	// Check if we're using LeaderWorkerSet
-	deploymentType := GetDeploymentType(opt.dynamoComponentDeployment)
-
 	// If using LeaderWorkerSet, modify selector to only target leaders
-	if deploymentType == DeploymentTypeLeaderWorker {
+	if opt.dynamoComponentDeployment.IsMultinode() {
 		selector["role"] = "leader"
 	}
 
@@ -1930,7 +1370,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			}))
 	}
 
-	if r.UseVirtualService {
+	if r.Config.IngressConfig.UseVirtualService() {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})

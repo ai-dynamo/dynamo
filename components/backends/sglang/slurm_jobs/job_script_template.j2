@@ -1,0 +1,138 @@
+#!/bin/bash
+#SBATCH --job-name={{ job_name }}
+#SBATCH --nodes={{ total_nodes }}
+#SBATCH --ntasks={{ total_nodes }}
+#SBATCH --ntasks-per-node=1
+#SBATCH --account={{ account }}
+#SBATCH --time={{ time_limit }}
+#SBATCH --output=logs/%j/log.out
+#SBATCH --error=logs/%j/log.err
+#SBATCH --partition={{ partition }}
+
+# Constants
+PREFILL_NODES={{ prefill_nodes }}
+DECODE_NODES={{ decode_nodes }}
+PREFILL_WORKERS={{ prefill_workers }}
+DECODE_WORKERS={{ decode_workers }}
+TOTAL_NODES=$((PREFILL_NODES + DECODE_NODES))
+GPUS_PER_NODE={{ gpus_per_node }}
+PREFILL_NODES_PER_WORKER=$((PREFILL_NODES / PREFILL_WORKERS))
+DECODE_NODES_PER_WORKER=$((DECODE_NODES / DECODE_WORKERS))
+LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}/"
+SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
+OUTPUT_DIR="${SLURM_SUBMIT_DIR}/outputs"
+MODEL_DIR="{{ model_dir }}"
+CONFIG_DIR="{{ config_dir }}"
+CONTAINER_IMAGE="{{ container_image }}"
+NETWORK_INTERFACE="{{ network_interface }}"
+GPU_TYPE="{{ gpu_type | default('h100') }}"
+
+{% raw %}
+
+mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}"
+
+nodes=($(scontrol show hostnames $SLURM_NODELIST))
+if [ ${#nodes[@]} -ne $TOTAL_NODES ]; then
+    echo "Error: Expected $TOTAL_NODES nodes but got ${#nodes[@]} nodes"
+    exit 1
+fi
+
+# Print node information
+for i in "${!nodes[@]}"; do
+    echo "Node $i: ${nodes[$i]}"
+done
+
+# Get IP address of the master node (first prefill node) for NATS/ETCD
+MASTER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[0]} ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+if [ -z "$MASTER_IP" ]; then
+    echo "Error: Could not retrieve IP address for master host ${nodes[0]} on interface $NETWORK_INTERFACE"
+    exit 1
+fi
+echo "Master IP address: $MASTER_IP"
+
+# Compute leader nodes for each worker
+prefill_leaders=()
+for i in $(seq 0 $((PREFILL_WORKERS - 1))); do
+    leader_idx=$((i * PREFILL_NODES_PER_WORKER))
+    prefill_leaders[$i]=$leader_idx
+done
+
+decode_leaders=()
+for i in $(seq 0 $((DECODE_WORKERS - 1))); do
+    leader_idx=$((PREFILL_NODES + i * DECODE_NODES_PER_WORKER))
+    decode_leaders[$i]=$leader_idx
+done
+
+echo "Prefill worker leaders: ${prefill_leaders[@]}"
+echo "Decode worker leaders: ${decode_leaders[@]}"
+
+# Prepare enroot arguments to pass to srun commands
+ENROOT_ARGS="\
+    --container-image=${CONTAINER_IMAGE} \
+    --no-container-entrypoint \
+    --no-container-mount-home \
+    --container-mounts=${MODEL_DIR}:/model/,${CONFIG_DIR}:/configs/,${SCRIPT_DIR}:/scripts/,${OUTPUT_DIR}:/outputs/,${LOG_DIR}:/logs/ \
+"
+
+# Build common worker arguments
+WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE} --master_ip ${MASTER_IP}"
+
+# Launch prefill workers
+for worker_idx in $(seq 0 $((PREFILL_WORKERS - 1))); do
+    leader_idx=${prefill_leaders[$worker_idx]}
+    leader_node=${nodes[$leader_idx]}
+
+    # Get leader IP for this worker group
+    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    echo "Prefill worker $worker_idx leader: $leader_node ($LEADER_IP)"
+
+    # Launch all nodes for this worker
+    for node_idx in $(seq 0 $((PREFILL_NODES_PER_WORKER - 1))); do
+        global_node_idx=$((leader_idx + node_idx))
+        node=${nodes[$global_node_idx]}
+        local_rank=$node_idx
+
+        echo "Launching prefill worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
+
+        cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill_w${worker_idx}.out --error=${LOG_DIR}/${node}_prefill_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${PREFILL_NODES_PER_WORKER} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
+        echo "$cmd"
+        $cmd &
+    done
+done
+
+# Launch decode workers
+for worker_idx in $(seq 0 $((DECODE_WORKERS - 1))); do
+    leader_idx=${decode_leaders[$worker_idx]}
+    leader_node=${nodes[$leader_idx]}
+
+    # Get leader IP for this worker group
+    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    echo "Decode worker $worker_idx leader: $leader_node ($LEADER_IP)"
+
+    # Launch all nodes for this worker
+    for node_idx in $(seq 0 $((DECODE_NODES_PER_WORKER - 1))); do
+        global_node_idx=$((leader_idx + node_idx))
+        node=${nodes[$global_node_idx]}
+        local_rank=$node_idx
+
+        echo "Launching decode worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
+
+        cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode_w${worker_idx}.out --error=${LOG_DIR}/${node}_decode_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${DECODE_NODES_PER_WORKER} --worker_type decode --gpu_utilization_log /logs/${node}_decode_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
+        echo "$cmd"
+        $cmd &
+    done
+done
+
+echo ""
+echo "To connect to the host prefill node:"
+echo "srun $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${nodes[0]} --overlap --pty bash"
+
+echo ""
+echo "Make sure to cancel the job at the end:"
+echo "scancel $SLURM_JOB_ID"
+
+# Wait for all tasks to complete
+wait
+echo "Script finished at $(date)"
+
+{% endraw %}

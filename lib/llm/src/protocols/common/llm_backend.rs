@@ -24,6 +24,15 @@ pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TopLogprob {
+    pub rank: u32,
+    pub token_id: TokenIdType,
+    pub token: TokenType,
+    pub logprob: f64,
+}
+pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BackendOutput {
     /// New token_ids generated from the LLM Engine
     pub token_ids: Vec<TokenIdType>,
@@ -40,6 +49,8 @@ pub struct BackendOutput {
 
     /// Optional log probabilities
     pub log_probs: Option<LogProbs>,
+
+    pub top_logprobs: Option<TopLogprobs>,
 
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
@@ -77,6 +88,8 @@ pub struct LLMEngineOutput {
     /// Optional log probabilities
     pub log_probs: Option<LogProbs>,
 
+    pub top_logprobs: Option<TopLogprobs>,
+
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
@@ -93,6 +106,7 @@ impl LLMEngineOutput {
             text: None,
             cum_log_probs: None,
             log_probs: None,
+            top_logprobs: None,
             finish_reason: Some(FinishReason::Cancelled),
             index: None,
         }
@@ -106,6 +120,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Stop),
+            top_logprobs: None,
             index: None,
         }
     }
@@ -117,6 +132,7 @@ impl LLMEngineOutput {
             text: None,
             cum_log_probs: None,
             log_probs: None,
+            top_logprobs: None,
             finish_reason: Some(FinishReason::Length),
             index: None,
         }
@@ -129,6 +145,7 @@ impl LLMEngineOutput {
             text: None,
             cum_log_probs: None,
             log_probs: None,
+            top_logprobs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
             index: None,
         }

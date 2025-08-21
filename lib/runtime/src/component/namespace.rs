@@ -19,7 +19,7 @@ use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
 
 use super::*;
-
+use crate::metrics::MetricsRegistry;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -78,6 +78,28 @@ impl EventSubscriber for Namespace {
     }
 }
 
+impl MetricsRegistry for Namespace {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        // Build as: [ "" (DRT), non-empty parent basenames from root -> leaf ]
+        let mut names = vec![String::new()]; // Start with empty string for DRT
+
+        // Collect parent basenames from root to leaf
+        let parent_names: Vec<String> =
+            std::iter::successors(self.parent.as_deref(), |ns| ns.parent.as_deref())
+                .map(|ns| ns.basename())
+                .filter(|name| !name.is_empty())
+                .collect();
+
+        // Append parent names in reverse order (root to leaf)
+        names.extend(parent_names.into_iter().rev());
+        names
+    }
+}
+
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
@@ -89,8 +111,8 @@ mod tests {
     async fn test_publish() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        ns.publish("test", &"test".to_string()).await.unwrap();
+        let ns = dtr.namespace("test_namespace_publish".to_string()).unwrap();
+        ns.publish("test_event", &"test".to_string()).await.unwrap();
         rt.shutdown();
     }
 
@@ -98,13 +120,15 @@ mod tests {
     async fn test_subscribe() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
+        let ns = dtr
+            .namespace("test_namespace_subscribe".to_string())
+            .unwrap();
 
         // Create a subscriber
-        let mut subscriber = ns.subscribe("test").await.unwrap();
+        let mut subscriber = ns.subscribe("test_event").await.unwrap();
 
         // Publish a message
-        ns.publish("test", &"test_message".to_string())
+        ns.publish("test_event", &"test_message".to_string())
             .await
             .unwrap();
 

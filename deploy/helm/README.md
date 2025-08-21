@@ -26,11 +26,22 @@ This approach allows you to install Dynamo directly using a DynamoGraphDeploymen
 - Kubernetes 1.16+
 - ETCD v3.5+ (without auth)
 - NATS v2.10+ (with jetstream enabled)
+- Grove v0.1.0+ (optional if deploying using Grove)
 
 ### Basic Installation
 
+Here is how you would install a VLLM inference backend example.
+
 ```bash
-helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/vllm/deploy/agg.yaml
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml
+```
+
+### Installation using Grove
+
+Same example as above, but using Grove PodGangSet resources.
+
+```bash
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml --set deploymentType=grove
 ```
 
 ### Customizable Properties
@@ -39,7 +50,7 @@ You can override the default configuration by setting the following properties:
 
 ```bash
 helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
-  -f ./examples/vllm/deploy/agg.yaml \
+  -f ./components/backends/vllm/deploy/agg.yaml \
   --set "imagePullSecrets[0].name=docker-secret-1" \
   --set etcdAddr="my-etcd-service:2379" \
   --set natsAddr="nats://my-nats-service:4222"
@@ -52,6 +63,19 @@ helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
 | `imagePullSecrets` | Array of image pull secrets for accessing private registries | `imagePullSecrets[0].name=docker-secret-1` |
 | `etcdAddr` | Address of the etcd service | `dynamo-platform-etcd:2379` |
 | `natsAddr` | Address of the NATS messaging service | `nats://dynamo-platform-nats:4222` |
+| `deploymentType` | Type of deployment to use. Can be `basic` or `grove`. If not specified, `basic` is used. | `deploymentType=grove` |
 
+## Feature Support Comparison
 
+The following table shows which deployment features are supported by the **Helm chart installation** versus the **Operator path**:
+
+| Feature | Helm Chart | Operator | Description |
+|---------|------------|----------|-------------|
+| **Singlenode** (k8sDeployments) | ✅ Supported | ✅ Supported | Single-node deployments using standard Kubernetes Deployments |
+| **Singlenode** (Grove PodGangSet) | ✅ Supported | ✅ Supported | Single-node deployments using Grove PodGangSet resources |
+| **Multinode** (Grove PodGangSet and LWS) | ❌ Not Supported | ✅ Supported | Multi-node deployments requiring Grove PodGangSet and LeaderWorkerSet (LWS) |
+
+**Key Differences:**
+- **Helm Chart**: Best for simple single-node deployments and quick testing. Supports both basic Kubernetes deployments and Grove PodGangSet resources.
+- **Operator**: Required for advanced multi-node deployments. Provides full feature support including complex distributed inference configurations.
 

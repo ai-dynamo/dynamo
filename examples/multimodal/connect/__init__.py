@@ -19,7 +19,6 @@ import torch
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from dynamo.runtime import DistributedRuntime
-from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ class AbstractOperation(ABC):
         if len(notification_key) == 0:
             raise ValueError("Argument `notification_key` must not be an empty string.")
 
-        self._notification_key: str = "" if notification_key is None else notification_key
+        self._notification_key: str = notification_key
         self._connector: Connector = connector
         self._operation_kind: OperationKind = operation_kind
         self._local_descriptors: Descriptor | list[Descriptor] = local_descriptors
@@ -208,17 +207,10 @@ class ActiveOperation(AbstractOperation):
         if isinstance(remote_descriptors, list) and len(remote_descriptors) == 1:
             remote_descriptors = remote_descriptors[0]
 
-        if isinstance(local_descriptors, list) != isinstance(remote_descriptors, list):
+        if (isinstance(local_descriptors, list) and isinstance(remote_descriptors, list) and len(local_descriptors) != len(remote_descriptors)):
+            raise ValueError("When `local_descriptors` and `remote_descriptors` are lists, they must have the same length.")
+        elif isinstance(local_descriptors, list) != isinstance(remote_descriptors, list):
             raise ValueError("Both `local_descriptors` and `remote_descriptors` must be either lists or single descriptors.")
-        # Ensure that the descriptors are of the same size here to avoid confusing errors from NIXL.
-        if isinstance(local_descriptors, list) and isinstance(remote_descriptors, list):
-            if len(local_descriptors) != len(remote_descriptors):
-                raise ValueError(f"When `local_descriptors` and `remote_descriptors` are lists, they must have the same length. {len(local_descriptors)} != {len(remote_descriptors)}.")
-            for i in range(len(local_descriptors)):
-                if local_descriptors[i].size != remote_descriptors[i].size:
-                    raise ValueError(f"Descriptor length mismatch: `local_descriptors` and `remote_descriptors` descriptor at {i} must have the same size. {local_descriptors[i].size} != {remote_descriptors[i].size}.")
-        elif (isinstance(local_descriptors, Descriptor) and isinstance(remote_descriptors, Descriptor)) and local_descriptors.size != remote_descriptors.size:
-                raise ValueError(f"Local and remote descriptors must be the same size. {local_descriptors.size} != {remote_descriptors.size}.")
         if not isinstance(notification_key, str):
             raise TypeError("Argument `notification_key` must be `str`.")
         if len(notification_key) == 0:
@@ -327,7 +319,7 @@ class ActiveOperation(AbstractOperation):
         # yielding control to the event loop to allow other operations to run.
         iteration_count = 0
         while True:
-            if iteration_count & 10 == 0:
+            if iteration_count % 10 == 0:
                 logger.debug(f"Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={iteration_count / 10}s }}.")
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
@@ -338,6 +330,7 @@ class ActiveOperation(AbstractOperation):
                 # Any other state indicates completion or error.
                 case _:
                     return
+            iteration_count += 1
 
     @abstractmethod
     def cancel(self) -> None:
@@ -430,8 +423,6 @@ class Connector:
         namespace = "dynamo" if namespace is None else namespace
         if not isinstance(namespace, str):
             raise TypeError("Argument `namespace` must be `str` or `None`.")
-        if dynamo_context is not None and "runtime" in dynamo_context:
-            runtime = dynamo_context["runtime"] if runtime is None else runtime
         if not isinstance(runtime, DistributedRuntime) or runtime is None:
             raise TypeError("Argument `runtime` must be `dynamo.runtime.DistributedRuntime` or `None`.")
         worker_id = worker_id if worker_id is not None else str(uuid.uuid4())
@@ -1258,7 +1249,10 @@ class Remote:
         """
         Private method for releasing NIXL resources. Not intended for public use.
         """
-        pass
+        # We have to unregister the remote agent from NIXL because we cannot know if the remote worker has updated its descriptors or not, and
+        # NIXL will return an error if we attempt to register a remote agent with the same name but different descriptors (aka conn_info).
+        self._connector._nixl.remove_remote_agent(self._name)
+        logger.debug(f"dynamo.connect.{self.__class__.__name__}: Unregistered NIXL remote {{ name: \"{self._name}\" }}.")
 
     @property
     def connector(self) -> Connector:

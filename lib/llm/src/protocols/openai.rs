@@ -17,11 +17,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
 };
+use crate::protocols::openai::common_ext::CommonExtProvider;
 
 pub mod chat_completions;
+pub mod common_ext;
 pub mod completions;
 pub mod embeddings;
 pub mod models;
@@ -61,9 +63,33 @@ trait OpenAIStopConditionsProvider {
     fn get_stop(&self) -> Option<Vec<String>>;
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
+
+    /// Get ignore_eos from CommonExt if the type supports it.
+    /// Default returns None for types without CommonExt support.
+    fn get_common_ignore_eos(&self) -> Option<bool> {
+        None
+    }
+
+    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
+    /// CommonExt (root-level) takes precedence over NvExt.
+    fn get_ignore_eos(&self) -> Option<bool> {
+        // Check common first (takes precedence), then fall back to nvext
+        self.get_common_ignore_eos()
+            .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
+    }
 }
 
-impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
+trait OpenAIOutputOptionsProvider {
+    fn get_logprobs(&self) -> Option<u32>;
+
+    fn get_prompt_logprobs(&self) -> Option<u32>;
+
+    fn get_skip_special_tokens(&self) -> Option<bool>;
+
+    fn get_formatted_prompt(&self) -> Option<bool>;
+}
+
+impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
     fn extract_sampling_options(&self) -> Result<common::SamplingOptions> {
         // let result = self.validate();
         // if let Err(e) = result {
@@ -88,6 +114,27 @@ impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
             }
         }
 
+        let guided_decoding_backend = self.get_guided_decoding_backend();
+        let guided_json = self.get_guided_json();
+        let guided_regex = self.get_guided_regex();
+        let guided_grammar = self.get_guided_grammar();
+        let guided_choice = self.get_guided_choice();
+
+        let guided_decoding = match common::GuidedDecodingOptions::from_optional(
+            guided_json.cloned(),
+            guided_regex,
+            guided_choice,
+            guided_grammar,
+            guided_decoding_backend,
+        ) {
+            Ok(options) => options,
+            Err(e) => {
+                // Handle the validation error (log, return error, etc.)
+                tracing::error!("Invalid guided decoding options: {:?}", e);
+                return Err(e);
+            }
+        };
+
         Ok(common::SamplingOptions {
             n: None,
             best_of: None,
@@ -101,6 +148,7 @@ impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
             seed: None,
             use_beam_search: None,
             length_penalty: None,
+            guided_decoding,
         })
     }
 }
@@ -117,11 +165,8 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             }
         }
 
-        let mut ignore_eos = None;
-
-        if let Some(nvext) = self.nvext() {
-            ignore_eos = nvext.ignore_eos;
-        }
+        // Use the trait method to get ignore_eos, which handles precedence
+        let ignore_eos = self.get_ignore_eos();
 
         Ok(common::StopConditions {
             max_tokens,
@@ -129,6 +174,22 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             stop,
             stop_token_ids_hidden: None,
             ignore_eos,
+        })
+    }
+}
+
+impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
+    fn extract_output_options(&self) -> Result<common::OutputOptions> {
+        let logprobs = self.get_logprobs();
+        let prompt_logprobs = self.get_prompt_logprobs();
+        let skip_special_tokens = self.get_skip_special_tokens();
+        let formatted_prompt = self.get_formatted_prompt();
+
+        Ok(common::OutputOptions {
+            logprobs,
+            prompt_logprobs,
+            skip_special_tokens,
+            formatted_prompt,
         })
     }
 }

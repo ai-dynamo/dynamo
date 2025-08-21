@@ -12,6 +12,7 @@ use dynamo_runtime::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    local_model::runtime_config::ModelRuntimeConfig,
     model_card::{self, ModelDeploymentCard},
     model_type::ModelType,
 };
@@ -28,6 +29,10 @@ pub struct ModelEntry {
 
     /// Specifies whether the model is a chat, completions, etc model.
     pub model_type: ModelType,
+
+    /// Runtime configuration specific to this model instance
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<ModelRuntimeConfig>,
 }
 
 impl ModelEntry {

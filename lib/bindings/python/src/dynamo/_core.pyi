@@ -216,10 +216,14 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
+
+        Args:
+            handler: The request handler function
+            graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
         """
         ...
 
@@ -436,6 +440,12 @@ class ModelDeploymentCard:
     A model deployment card is a collection of model information
     """
 
+    ...
+
+class ModelRuntimeConfig:
+    """
+    A model runtime configuration is a collection of runtime information
+    """
     ...
 
 class OAIChatPreprocessor:
@@ -1118,6 +1128,23 @@ class BlockManager:
         BlockList
             List of allocated blocks
         """
+        ...
+
+class KvbmCacheManager:
+    """
+    A KV cache manager for VLLM
+    """
+
+    def __init__(self, block_manager: BlockManager) -> None:
+        ...
+
+
+class KvbmRequest:
+    """
+    A request for KV cache
+    """
+
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
 class ZmqKvEventListener:

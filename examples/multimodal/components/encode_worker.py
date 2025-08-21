@@ -13,26 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import asyncio
-import base64
-import binascii
 import logging
-from io import BytesIO
-from queue import Queue
-from typing import AsyncIterator, Optional
-from urllib.parse import urlparse
+import os
+import signal
+import sys
+from typing import AsyncIterator, Tuple
 
-import connect
-import httpx
 import torch
-from PIL import Image
-from transformers import AutoImageProcessor
-from utils.model import load_vision_model
-from utils.protocol import EncodeRequest, EncodeResponse
-from utils.vllm import parse_vllm_args
+import uvloop
+from transformers import AutoImageProcessor, LlavaForConditionalGeneration
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.utils import FlexibleArgumentParser
 
-from dynamo.sdk import async_on_start, endpoint, service
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import connect
+from utils.args import Config, base_parse_args, parse_endpoint
+from utils.image_loader import ImageLoader
+from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 try:
@@ -51,101 +55,35 @@ except ImportError as e:
 CACHE_SIZE_MAXIMUM = 8
 
 
-@service(
-    dynamo={
-        "namespace": "dynamo",
-    },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
-    workers=1,
-)
 class VllmEncodeWorker:
-    def __init__(self) -> None:
-        class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(class_name, "")
-        self.MODEL_ID = self.engine_args.model
+    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs) -> None:
+        self.downstream_endpoint = args.downstream_endpoint
+        self.engine_args = engine_args
+        self.model = self.engine_args.model
 
+        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
         self.image_processor = AutoImageProcessor.from_pretrained(
-            self.MODEL_ID, trust_remote_code=True
+            self.model, trust_remote_code=True
         )
-        self.vision_model = load_vision_model(self.MODEL_ID)
+        # self.vision_model = load_vision_model(self.model)
+        self.vision_model = LlavaForConditionalGeneration.from_pretrained(
+            self.model, device_map="auto", torch_dtype=torch.float16
+        ).eval()
 
-        self._image_cache: dict[str, Image.Image] = {}
-        self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
+        self.min_workers = 1
 
-        self._http_client: Optional[httpx.AsyncClient] = None
-        self._http_timeout = 30.0
+    def cleanup(self):
+        pass
 
-    async def load_image(self, image_url: str) -> Image.Image:
-        parsed_url = urlparse(image_url)
-
-        # For HTTP(S) URLs, check cache first
-        if parsed_url.scheme in ("http", "https"):
-            image_url_lower = image_url.lower()
-            if image_url_lower in self._image_cache:
-                logger.debug(f"Image found in cache for URL: {image_url}")
-                return self._image_cache[image_url_lower]
-
-        try:
-            if parsed_url.scheme == "data":
-                # Parse data URL format: data:[<media type>][;base64],<data>
-                if not parsed_url.path.startswith("image/"):
-                    raise ValueError("Data URL must be an image type")
-
-                # Split the path into media type and data
-                media_type, data = parsed_url.path.split(",", 1)
-                if ";base64" not in media_type:
-                    raise ValueError("Data URL must be base64 encoded")
-
-                try:
-                    image_bytes = base64.b64decode(data)
-                    image_data = BytesIO(image_bytes)
-                except binascii.Error as e:
-                    raise ValueError(f"Invalid base64 encoding: {e}")
-            elif parsed_url.scheme in ("http", "https"):
-                if not self._http_client:
-                    raise RuntimeError("HTTP client not initialized")
-
-                response = await self._http_client.get(image_url)
-                response.raise_for_status()
-
-                if not response.content:
-                    raise ValueError("Empty response content from image URL")
-
-                image_data = BytesIO(response.content)
+    async def generate(
+        self, request: vLLMMultimodalRequest
+    ) -> AsyncIterator[MyRequestOutput]:
+        logger.debug(f"Got raw request: {request}")
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
+                request = vLLMMultimodalRequest.model_validate_json(request)
             else:
-                raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
-
-            # PIL is sync, so offload to a thread to avoid blocking the event loop
-            image = await asyncio.to_thread(Image.open, image_data)
-
-            # Validate image format and convert to RGB
-            if image.format not in ("JPEG", "PNG", "WEBP"):
-                raise ValueError(f"Unsupported image format: {image.format}")
-
-            image_converted = image.convert("RGB")
-
-            # Cache HTTP(S) URLs
-            if parsed_url.scheme in ("http", "https"):
-                image_url_lower = image_url.lower()
-                # Cache the image for future use, and evict the oldest image if the cache is full
-                if self._cache_queue.full():
-                    oldest_image_url = self._cache_queue.get()
-                    del self._image_cache[oldest_image_url]
-
-                self._image_cache[image_url_lower] = image_converted
-                self._cache_queue.put(image_url_lower)
-
-            return image
-
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error loading image: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error loading image: {e}")
-            raise ValueError(f"Failed to load image: {e}")
-
-    @endpoint()
-    async def encode(self, request: EncodeRequest) -> AsyncIterator[EncodeResponse]:
+                request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
@@ -161,73 +99,185 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.load_image(request.image_url)
+            image = await self.image_loader.load_image(request.image_url)
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
-            # Add a batch dimension to everything
-            for item in image_embeds:
-                image_embeds[item] = image_embeds[item].unsqueeze(0).to(DEVICE)
-            logger.debug(f"Image embeds: {image_embeds}")
+            # [gluo NOTE] The commented section is for VLM generalization support,
+            # will use more generic approach once utils/model.py is fixed,
+            # see utils/models.py for details.
+            # # Add a batch dimension to everything
+            # for item in image_embeds:
+            #     image_embeds[item] = image_embeds[item].unsqueeze(0).to(DEVICE)
+            # logger.debug(f"Image embeds: {image_embeds}")
 
-            image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
-            )
-            image_sizes = (
-                image_embeds["image_sizes"].tolist()
-                if "image_sizes" in image_embeds
-                else [image.size]
-            )
-            logger.debug(
-                f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
-            )
+            # image_grid_thw = (
+            #     image_embeds["image_grid_thw"].tolist()
+            #     if "image_grid_thw" in image_embeds
+            #     else None
+            # )
+            # image_sizes = (
+            #     image_embeds["image_sizes"].tolist()
+            #     if "image_sizes" in image_embeds
+            #     else [image.size]
+            # )
+            # logger.debug(
+            #     f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
+            # )
+
+            # with torch.no_grad():
+            #     embeddings = self.vision_model.get_multimodal_embeddings(**image_embeds)
+            #     if isinstance(embeddings, tuple) or isinstance(embeddings, list):
+            #         # The result multimodal_embeddings may be a list or tuple of tensors, with each
+            #         # tensor corresponding to a multimodal data item (image or video).
+            #         # TODO: for multi-image support, this result will contain multiple tensors.
+            #         embeddings = embeddings[0].unsqueeze(0)
+            #     logger.debug(
+            #         f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
+            #     )
 
             with torch.no_grad():
-                embeddings = self.vision_model.get_multimodal_embeddings(**image_embeds)
-                if isinstance(embeddings, tuple) or isinstance(embeddings, list):
-                    # The result multimodal_embeddings may be a list or tuple of tensors, with each
-                    # tensor corresponding to a multimodal data item (image or video).
-                    # TODO: for multi-image support, this result will contain multiple tensors.
-                    embeddings = embeddings[0].unsqueeze(0)
-                logger.debug(
-                    f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
+                logger.debug(f"Vision model device: {self.vision_model.device}")
+                vision_outputs = self.vision_model.vision_tower(
+                    image_embeds["pixel_values"].to(self.vision_model.device)
                 )
+                logger.debug("Vision model completed.")
 
-                if request.serialized_request is None:
-                    logger.error(
-                        f"Request serialized_request is None for request: {{ id: {request_id} }}."
-                    )
+                embeddings = vision_outputs.last_hidden_state
+                embeddings = self.vision_model.multi_modal_projector(embeddings)
 
-                # Create a descriptor for the embeddings, this will register the memory with the connector (and the NIXL runtime).
-                descriptor = connect.Descriptor(embeddings)
-                # Create a write operation using the serialized request and the descriptor.
-                # This will begin the RDMA transfer of the embeddings to the remote worker.
-                write_op = await self._connector.begin_write(
-                    descriptor,
-                    request.serialized_request,
+            descriptor = connect.Descriptor(embeddings)
+
+            with self._connector.create_readable(descriptor) as readable:
+                request.serialized_request = readable.to_serialized()
+                # Clear the image URL as hint that the image is passed as embeddings.
+                request.image_url = None
+
+                logger.debug(f"Request: {request.model_dump_json()}")
+
+                # Get the response generator
+                response_generator = await self.pd_worker_client.round_robin(
+                    request.model_dump_json()
                 )
-                # Await for the write operation to complete.
-                # This will block until the data has been written to the remote worker or an error occurs.
-                await write_op.wait_for_completion()
+                await readable.wait_for_completion()
 
-                yield EncodeResponse(
-                    request_id=request.request_id,
-                    image_grid_thw=image_grid_thw,
-                    image_sizes=image_sizes,
-                ).model_dump_json()
+                async for response in response_generator:
+                    output = MyRequestOutput.model_validate_json(response.data())
+                    yield MyRequestOutput(
+                        request_id=output.request_id,
+                        prompt=output.prompt,
+                        prompt_token_ids=output.prompt_token_ids,
+                        prompt_logprobs=output.prompt_logprobs,
+                        outputs=output.outputs,
+                        finished=output.finished,
+                    ).model_dump_json()
+
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
 
-    @async_on_start
-    async def async_init(self):
+    async def async_init(self, runtime: DistributedRuntime):
         logger.info("Startup started.")
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            self.downstream_endpoint
+        )
+        self.pd_worker_client = (
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
+            .client()
+        )
+
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector()
+        self._connector = connect.Connector(runtime=runtime, namespace=parsed_namespace)
         await self._connector.initialize()
-        # Initialize HTTP client with default limits
-        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
+
         logger.info("Startup completed.")
+
+    @classmethod
+    def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
+        DEFAULT_ENDPOINT = "dyn://dynamo.encoder.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.llm.generate"
+
+        parser = FlexibleArgumentParser(
+            description="vLLM based encoder for Dynamo LLM."
+        )
+        parser.add_argument(
+            "--endpoint",
+            type=str,
+            default=DEFAULT_ENDPOINT,
+            help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_ENDPOINT}'",
+        )
+        parser.add_argument(
+            "--downstream-endpoint",
+            type=str,
+            default=DEFAULT_DOWNSTREAM_ENDPOINT,
+            help=f"The endpoint string of the downstream LLM in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_DOWNSTREAM_ENDPOINT}'",
+        )
+
+        args, config = base_parse_args(parser)
+
+        return args, config
+
+
+async def graceful_shutdown(runtime):
+    """
+    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
+    However, in-flight requests will still be processed until they are finished.
+    After all in-flight requests are finished, the `serve_endpoint` functions will return
+    and the engine will be shutdown by Python's garbage collector.
+    """
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
+
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+    # Runtime setup
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
+    # worker setup
+    args, config = VllmEncodeWorker.parse_args()
+    await init(runtime, args, config)
+
+
+async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Config):
+    """
+    Instantiate and serve
+    """
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    handler = VllmEncodeWorker(args, config.engine_args)
+    await handler.async_init(runtime)
+
+    logger.info(f"Starting to serve the {args.endpoint} endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(handler.generate),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())

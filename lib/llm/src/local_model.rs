@@ -10,18 +10,22 @@ use dynamo_runtime::protocols::Endpoint as EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
-    component::{Component, Endpoint},
+    component::Endpoint,
     storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
 };
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
+pub mod runtime_config;
+
+use runtime_config::ModelRuntimeConfig;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -34,7 +38,8 @@ const DEFAULT_NAME: &str = "dynamo";
 const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 
 /// We can't have it default to 0, so pick something
-const DEFAULT_HTTP_PORT: u16 = 8080;
+/// 'pub' because the bindings use it for consistency.
+pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
@@ -45,15 +50,25 @@ pub struct LocalModelBuilder {
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
+    http_host: Option<String>,
     http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     migration_limit: u32,
+    is_mocker: bool,
+    extra_engine_args: Option<PathBuf>,
+    runtime_config: ModelRuntimeConfig,
+    user_data: Option<serde_json::Value>,
 }
 
 impl Default for LocalModelBuilder {
     fn default() -> Self {
         LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
+            http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
+            tls_cert_path: Default::default(),
+            tls_key_path: Default::default(),
             model_path: Default::default(),
             model_name: Default::default(),
             model_config: Default::default(),
@@ -62,6 +77,10 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            is_mocker: Default::default(),
+            extra_engine_args: Default::default(),
+            runtime_config: Default::default(),
+            user_data: Default::default(),
         }
     }
 }
@@ -98,9 +117,23 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Passing None resets it to default
-    pub fn http_port(&mut self, port: Option<u16>) -> &mut Self {
-        self.http_port = port.unwrap_or(DEFAULT_HTTP_PORT);
+    pub fn http_host(&mut self, host: Option<String>) -> &mut Self {
+        self.http_host = host;
+        self
+    }
+
+    pub fn http_port(&mut self, port: u16) -> &mut Self {
+        self.http_port = port;
+        self
+    }
+
+    pub fn tls_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_cert_path = p;
+        self
+    }
+
+    pub fn tls_key_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_key_path = p;
         self
     }
 
@@ -116,6 +149,26 @@ impl LocalModelBuilder {
 
     pub fn migration_limit(&mut self, migration_limit: Option<u32>) -> &mut Self {
         self.migration_limit = migration_limit.unwrap_or(0);
+        self
+    }
+
+    pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
+        self.is_mocker = is_mocker;
+        self
+    }
+
+    pub fn extra_engine_args(&mut self, extra_engine_args: Option<PathBuf>) -> &mut Self {
+        self.extra_engine_args = extra_engine_args;
+        self
+    }
+
+    pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
+        self.runtime_config = runtime_config;
+        self
+    }
+
+    pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
+        self.user_data = user_data;
         self
     }
 
@@ -148,13 +201,18 @@ impl LocalModelBuilder {
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
             card.migration_limit = self.migration_limit;
+            card.user_data = self.user_data.take();
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
                 endpoint_id,
                 template,
+                http_host: self.http_host.take(),
                 http_port: self.http_port,
+                tls_cert_path: self.tls_cert_path.take(),
+                tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
+                runtime_config: self.runtime_config.clone(),
             });
         }
 
@@ -169,7 +227,7 @@ impl LocalModelBuilder {
         let relative_path = model_path.trim_start_matches(HF_SCHEME);
         let full_path = if is_hf_repo {
             // HF download if necessary
-            super::hub::from_hf(relative_path).await?
+            super::hub::from_hf(relative_path, self.is_mocker).await?
         } else {
             fs::canonicalize(relative_path)?
         };
@@ -203,15 +261,34 @@ impl LocalModelBuilder {
             card.context_length = context_length;
         }
 
+        // Override runtime configs with mocker engine args
+        if self.is_mocker {
+            if let Some(path) = &self.extra_engine_args {
+                let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                    .expect("Failed to load mocker engine args for runtime config overriding.");
+                self.runtime_config.total_kv_blocks =
+                    Some(mocker_engine_args.num_gpu_blocks as u64);
+                self.runtime_config.max_num_seqs =
+                    mocker_engine_args.max_num_seqs.map(|v| v as u64);
+                self.runtime_config.max_num_batched_tokens =
+                    mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+            }
+        }
+
         card.migration_limit = self.migration_limit;
+        card.user_data = self.user_data.take();
 
         Ok(LocalModel {
             card,
             full_path,
             endpoint_id,
             template,
+            http_host: self.http_host.take(),
             http_port: self.http_port,
+            tls_cert_path: self.tls_cert_path.take(),
+            tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
+            runtime_config: self.runtime_config.clone(),
         })
     }
 }
@@ -222,8 +299,12 @@ pub struct LocalModel {
     card: ModelDeploymentCard,
     endpoint_id: EndpointId,
     template: Option<RequestTemplate>,
-    http_port: u16, // Only used if input is HTTP server
+    http_host: Option<String>,
+    http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
+    runtime_config: ModelRuntimeConfig,
 }
 
 impl LocalModel {
@@ -235,24 +316,43 @@ impl LocalModel {
         &self.full_path
     }
 
+    /// Human friendly model name. This is the correct name.
     pub fn display_name(&self) -> &str {
         &self.card.display_name
     }
 
+    /// The name under which we make this model available over HTTP.
+    /// A slugified version of the model's name, for use in NATS, etcd, etc.
     pub fn service_name(&self) -> &str {
-        &self.card.service_name
+        self.card.slug().as_ref()
     }
 
     pub fn request_template(&self) -> Option<RequestTemplate> {
         self.template.clone()
     }
 
+    pub fn http_host(&self) -> Option<String> {
+        self.http_host.clone()
+    }
+
     pub fn http_port(&self) -> u16 {
         self.http_port
     }
 
+    pub fn tls_cert_path(&self) -> Option<&Path> {
+        self.tls_cert_path.as_deref()
+    }
+
+    pub fn tls_key_path(&self) -> Option<&Path> {
+        self.tls_key_path.as_deref()
+    }
+
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn runtime_config(&self) -> &ModelRuntimeConfig {
+        &self.runtime_config
     }
 
     pub fn is_gguf(&self) -> bool {
@@ -283,8 +383,6 @@ impl LocalModel {
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
             anyhow::bail!("Cannot attach to static endpoint");
         };
-        self.ensure_unique(endpoint.component(), self.display_name())
-            .await?;
 
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
@@ -300,43 +398,21 @@ impl LocalModel {
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
         // (Why don't we put the model card directly under this key?)
-        let network_name = ModelNetworkName::from_local(endpoint, etcd_client.lease_id());
+        let network_name = ModelNetworkName::new();
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
+            runtime_config: Some(self.runtime_config.clone()),
         };
         etcd_client
             .kv_create(
-                network_name.to_string(),
+                &network_name,
                 serde_json::to_vec_pretty(&model_registration)?,
                 None, // use primary lease
             )
             .await
-    }
-
-    /// Ensure that each component serves only one model.
-    /// We can have multiple instances of the same model running using the same component name
-    /// (they get load balanced, and are differentiated in etcd by their lease_id).
-    /// We cannot have multiple models with the same component name.
-    ///
-    /// Returns an error if there is already a component by this name serving a different model.
-    async fn ensure_unique(&self, component: &Component, model_name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = component.drt().etcd_client() else {
-            // A static component is necessarily unique, it cannot register
-            return Ok(());
-        };
-        for endpoint_info in component.list_instances().await? {
-            let network_name: ModelNetworkName = (&endpoint_info).into();
-
-            if let Ok(entry) = network_name.load_entry(&etcd_client).await {
-                if entry.name != model_name {
-                    anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {network_name} running model {}.", entry.name);
-                }
-            }
-        }
-        Ok(())
     }
 }
 

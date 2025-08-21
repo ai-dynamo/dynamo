@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::local_model::LocalModel;
@@ -44,8 +45,17 @@ pub struct Flags {
     pub model_path_flag: Option<PathBuf>,
 
     /// HTTP port. `in=http` only
+    /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
     #[arg(long, default_value = "8080")]
     pub http_port: u16,
+
+    /// TLS certificate file
+    #[arg(long, requires = "tls_key_path")]
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// TLS certificate key file
+    #[arg(long, requires = "tls_cert_path")]
+    pub tls_key_path: Option<PathBuf>,
 
     /// The name of the model we are serving
     #[arg(long)]
@@ -64,46 +74,6 @@ pub struct Flags {
     #[arg(long)]
     pub model_config: Option<PathBuf>,
 
-    /// sglang, vllm
-    ///
-    /// How many GPUs to use at once, total across all nodes.
-    /// This must divide by num_nodes, and each node must use the same number of GPUs.
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..256))]
-    pub tensor_parallel_size: u32,
-
-    /// sglang only
-    /// vllm uses CUDA_VISIBLE_DEVICES env var
-    ///
-    /// Use GPUs from this ID upwards.
-    /// If your machine has four GPUs but the first two (0 and 1) are in use,
-    /// pass --base-gpu-id 2 to use the third GPU (and up, if tensor_parallel_size > 1)
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..256))]
-    pub base_gpu_id: u32,
-
-    /// vllm and sglang only
-    ///
-    /// How many nodes/hosts to use
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..256))]
-    pub num_nodes: u32,
-
-    /// vllm and sglang only
-    ///
-    /// This nodes' unique ID, running from 0 to num_nodes.
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..255))]
-    pub node_rank: u32,
-
-    /// For multi-node / pipeline parallel this is the <host>:<port> of the first node.
-    ///
-    /// - vllm: The address/port of the Ray head node.
-    ///
-    /// - sglang: The Torch Distributed init method address, in format <host>:<port>.
-    ///   It becomes "tcp://<host>:<port>" when given to torch.distributed.init_process_group.
-    ///   This expects to use the nccl backend (transparently to us here).
-    ///   All nodes must use the same address here, which is node_rank == 0's address.
-    ///
-    #[arg(long)]
-    pub leader_addr: Option<String>,
-
     /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
@@ -113,7 +83,6 @@ pub struct Flags {
 
     /// Maximum number of batched tokens for KV routing
     /// Needed for informing the KV router
-    /// TODO: derive from vllm args
     /// NOTE: this is not actually used for now
     #[arg(long, default_value = "8192")]
     pub max_num_batched_tokens: Option<u32>,
@@ -136,16 +105,23 @@ pub struct Flags {
     #[arg(long)]
     pub use_kv_events: Option<bool>,
 
+    /// KV Router: Whether to enable replica synchronization across multiple router instances.
+    /// When true, routers will publish and subscribe to events to maintain consistent state.
+    /// Default: false
+    #[arg(long)]
+    pub router_replica_sync: Option<bool>,
+
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
     #[arg(long)]
     pub context_length: Option<u32>,
 
-    /// KV cache block size (vllm only)
+    /// KV cache block size (is this used? Maybe by Python vllm worker?)
     #[arg(long)]
     pub kv_cache_block_size: Option<u32>,
 
+    /// Mocker engine only.
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]
@@ -167,6 +143,12 @@ pub struct Flags {
     #[arg(long, value_parser = clap::value_parser!(u32).range(0..1024))]
     pub migration_limit: Option<u32>,
 
+    /// Make this a static worker.
+    /// Do not connect to or advertise self on etcd.
+    /// in=dyn://x.y.z only
+    #[arg(long, default_value = "false")]
+    pub static_worker: bool,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
@@ -176,9 +158,23 @@ pub struct Flags {
 impl Flags {
     /// For each Output variant, check if it would be able to run.
     /// This takes validation out of the main engine creation path.
-    pub fn validate(&self, local_model: &LocalModel, out_opt: &Output) -> anyhow::Result<()> {
+    pub fn validate(
+        &self,
+        local_model: &LocalModel,
+        in_opt: &Input,
+        out_opt: &Output,
+    ) -> anyhow::Result<()> {
+        match in_opt {
+            Input::Endpoint(_) => {}
+            _ => {
+                if self.static_worker {
+                    anyhow::bail!("'--static-worker true' only applies to in=dyn://x.y.z");
+                }
+            }
+        }
+
         match out_opt {
-            Output::Dynamic => {
+            Output::Auto => {
                 if self.context_length.is_some() {
                     anyhow::bail!("'--context-length' flag should only be used on the worker node, not on the ingress");
                 }
@@ -187,6 +183,19 @@ impl Flags {
                 }
                 if self.migration_limit.is_some() {
                     anyhow::bail!("'--migration-limit' flag should only be used on the worker node, not on the ingress");
+                }
+            }
+            Output::Static(_) => {
+                if self.model_name.is_none()
+                    || self
+                        .model_path_pos
+                        .as_ref()
+                        .or(self.model_path_flag.as_ref())
+                        .is_none()
+                {
+                    anyhow::bail!(
+                        "out=dyn://<path> requires --model-name and --model-path, which are the name and path on disk of the model we expect to serve."
+                    );
                 }
             }
             Output::EchoFull => {}
@@ -199,22 +208,6 @@ impl Flags {
             }
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => {}
-            Output::SgLang => {
-                if !local_model.path().is_dir() {
-                    // TODO GGUF support for sglang: https://github.com/ai-dynamo/dynamo/issues/572
-                    anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
-                }
-            }
-            Output::Vllm => {
-                if self.base_gpu_id != 0 {
-                    anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
-                }
-            }
-            Output::Trtllm => {
-                if self.base_gpu_id != 0 {
-                    anyhow::bail!("TRTLLM does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
-                }
-            }
             #[cfg(feature = "llamacpp")]
             Output::LlamaCpp => {
                 if !local_model.path().is_file() {
@@ -225,6 +218,16 @@ impl Flags {
                 // nothing to check here
             }
         }
+
+        match out_opt {
+            Output::Mocker => {}
+            _ => {
+                if self.extra_engine_args.is_some() {
+                    anyhow::bail!("`--extra-engine-args` is only for the mocker engine");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -235,6 +238,7 @@ impl Flags {
                 self.kv_overlap_score_weight,
                 self.router_temperature,
                 self.use_kv_events,
+                self.router_replica_sync,
                 self.max_num_batched_tokens,
             ),
         )

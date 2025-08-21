@@ -72,7 +72,6 @@ class vLLMGenerateRequest(BaseModel):
     Serializable class of all the fields vLLM engine requires for inference
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
     engine_prompt: PatchedTokensPrompt
     sampling_params: SamplingParams
     request_id: str
@@ -88,7 +87,8 @@ class vLLMGenerateRequest(BaseModel):
         return v
 
     model_config = ConfigDict(
-        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)}
+        arbitrary_types_allowed=True,
+        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)},
     )
 
 
@@ -106,16 +106,7 @@ class ImageContent(BaseModel):
     image_url: ImageURLDetail
 
 
-class VideoURLDetail(BaseModel):
-    url: str
-
-
-class VideoContent(BaseModel):
-    type: Literal["video_url"]
-    video_url: VideoURLDetail
-
-
-MessageContent = Union[TextContent, ImageContent, VideoContent]
+MessageContent = Union[TextContent, ImageContent]
 
 
 class ChatMessage(BaseModel):
@@ -135,18 +126,17 @@ class MultiModalRequest(BaseModel):
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: Optional[str] = None
-    video_url: Optional[str] = None
+    # image_features: Optional[List[List[List[float]]]] = None # Remove once have NIXL support
+    serialized_request: Optional[connect.SerializedRequest] = None
 
 
 class EncodeRequest(BaseModel):
     """
-    Serializable class for encoding requests for both images and videos
+    Serializable class of all the fields vLLM engine requires for inference
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
-    num_frames: Optional[int] = None
+    image_url: str
     request_id: str
     serialized_request: Optional[connect.SerializedRequest] = None
 
@@ -156,7 +146,8 @@ class EncodeResponse(BaseModel):
     request_id: str
     image_grid_thw: Optional[List[Any]] = None
     image_sizes: Optional[List[Any]] = None
-    raw_frames: Optional[List[List[List[List[int]]]]] = None
+    serialized_request: Optional[connect.SerializedRequest] = None
+    image_features: List[List[List[float]]]  # Remove once have NIXL support
 
 
 class MyRequestOutput(BaseModel):
@@ -169,6 +160,7 @@ class MyRequestOutput(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     prompt: Optional[str] = None
     prompt_token_ids: Optional[List[int]] = None
@@ -176,6 +168,7 @@ class MyRequestOutput(BaseModel):
     outputs: List[CompletionOutput]
     finished: bool
     metrics: Optional[RequestMetrics] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
     # lora_request: Optional[LoRARequest] = None
     # encoder_prompt: Optional[str] = None
     # encoder_prompt_token_ids: Optional[List[int]] = None

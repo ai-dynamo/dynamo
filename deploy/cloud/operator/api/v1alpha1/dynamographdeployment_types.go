@@ -20,8 +20,6 @@
 package v1alpha1
 
 import (
-	"fmt"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -31,22 +29,30 @@ import (
 
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
-	// required
+	// DynamoGraph selects the graph (workflow/topology) to deploy. This must match
+	// a graph name packaged with the Dynamo archive.
 	DynamoGraph string `json:"dynamoGraph,omitempty"`
-	// optional
-	// key is the name of the service defined in DynamoComponent
-	// value is the DynamoComponentDeployment override for that service
-	// if not set, the DynamoComponentDeployment will be used as is
+	// Services allows per-service overrides of the component deployment settings.
+	// - key: name of the service defined by the DynamoComponent
+	// - value: overrides for that service
+	// If not set for a service, the default DynamoComponentDeployment values are used.
 	// +kubebuilder:validation:Optional
 	Services map[string]*DynamoComponentDeploymentOverridesSpec `json:"services,omitempty"`
-	// Environment variables to be set in the deployment
+	// Envs are environment variables applied to all services in the graph unless
+	// overridden by service-specific configuration.
 	// +kubebuilder:validation:Optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
+	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
+	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	BackendFramework string `json:"backendFramework,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
-	State      string             `json:"state,omitempty"`
+	// State is a high-level textual status of the graph deployment lifecycle.
+	State string `json:"state,omitempty"`
+	// Conditions contains the latest observed conditions of the graph deployment.
+	// The slice is merged by type on patch updates.
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
@@ -58,7 +64,9 @@ type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentSpec   `json:"spec,omitempty"`
+	// Spec defines the desired state for this graph deployment.
+	Spec DynamoGraphDeploymentSpec `json:"spec,omitempty"`
+	// Status reflects the current observed state of this graph deployment.
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 
@@ -85,20 +93,6 @@ func (s *DynamoGraphDeployment) GetSpec() any {
 
 func (s *DynamoGraphDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoGraphDeploymentSpec)
-}
-
-func (s *DynamoGraphDeployment) SetEndpointStatus(isSecured bool, endpointHost string) {
-	protocol := "http"
-	if isSecured {
-		protocol = "https"
-	}
-	s.AddStatusCondition(metav1.Condition{
-		Type:               "EndpointExposed",
-		Status:             metav1.ConditionTrue,
-		Reason:             "EndpointExposed",
-		Message:            fmt.Sprintf("%s://%s", protocol, endpointHost),
-		LastTransitionTime: metav1.Now(),
-	})
 }
 
 func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {

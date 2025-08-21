@@ -15,9 +15,6 @@
 
 pub mod hf;
 
-#[cfg(feature = "sentencepiece")]
-pub mod sp;
-
 // TODO: Add tokenizer benchmarks
 // TODO: Enable README.md as a module doc
 // #[doc = include_str!("../README.md")]
@@ -31,15 +28,10 @@ pub use anyhow::{Error, Result};
 
 pub use hf::HuggingFaceTokenizer;
 
-#[cfg(feature = "sentencepiece")]
-pub use sp::SentencePieceTokenizer;
-
 /// Represents the type of tokenizer being used
 #[derive(Debug)]
 pub enum TokenizerType {
     HuggingFace(String),
-    #[cfg(feature = "sentencepiece")]
-    SentencePiece(String),
 }
 
 /// character offsets in the original text
@@ -105,8 +97,12 @@ impl Tokenizer {
     }
 
     /// Create a stateful sequence object for decoding token_ids into text
-    pub fn decode_stream(&self, skip_special_tokens: bool) -> DecodeStream {
-        DecodeStream::new(self.0.clone(), skip_special_tokens)
+    pub fn decode_stream(
+        &self,
+        prompt_token_ids: &[TokenIdType],
+        skip_special_tokens: bool,
+    ) -> DecodeStream {
+        DecodeStream::new(self.0.clone(), prompt_token_ids, skip_special_tokens)
     }
 }
 
@@ -137,7 +133,6 @@ where
 /// The file extension is used to determine the tokenizer type.
 /// Supported file types are:
 /// - json: HuggingFace tokenizer
-/// - model: SentencePiece tokenizer
 pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> {
     let path = Path::new(file_path);
     let extension = path
@@ -150,22 +145,16 @@ pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tok
             let tokenizer = HuggingFaceTokenizer::from_file(file_path)?;
             Ok(Arc::new(tokenizer))
         }
-        "model" => {
-            #[cfg(feature = "sentencepiece")]
-            {
-                let tokenizer = SentencePieceTokenizer::from_file(file_path)?;
-                Ok(Arc::new(tokenizer))
-            }
-            #[cfg(not(feature = "sentencepiece"))]
-            {
-                Err(Error::msg(
-                    "SentencePiece tokenizer not supported".to_string(),
-                ))
-            }
-        }
         _ => Err(Error::msg("Unsupported file type".to_string())),
     }
 }
+
+// With incremental detokenization, we need to consider the final context tokens when handling the initial decode tokens.
+// This is the initial offset from the end of the context that we start decoding from.
+// Both Huggingface TGI and vLLM use this same value.
+// See: https://github.com/huggingface/text-generation-inference/blob/24c2bff65924801ddf90fa24fcc72752d4f45538/server/text_generation_server/models/mamba.py#L169
+// and https://github.com/vllm-project/vllm/blob/da2705198fa19030a25d0bea437f7be6547d47d4/vllm/transformers_utils/detokenizer_utils.py#L51
+const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
 
 /// DecodeStream will keep the state necessary to produce individual chunks of
 /// strings given an input stream of token_ids.
@@ -188,62 +177,63 @@ pub struct DecodeStream {
     /// so decoding the whole ids produces a valid prefix.
     /// Prefix is the previously produced string, kept around to trim off of
     /// the next valid chunk
-    ids: Vec<u32>,
+    all_token_ids: Vec<u32>,
 
-    /// The previously returned chunk that needs to be discarded from the
-    /// decoding of the current ids to produce the next chunk
-    prefix: String,
+    prefix_offset: usize,
 
-    /// The index within the ids corresponding to the prefix so we can drain
-    /// correctlyk
-    prefix_index: usize,
-
-    /// We need to keep 2 prefixes.
-    /// Prefix is the second one that was already emitted to discard the part
-    /// of the text of all the ids
-    /// read is the prefix kept only for starting side effects of the prefix
-    read_index: usize,
+    read_offset: usize,
 }
 
 impl DecodeStream {
-    pub fn new(tokenizer: Arc<dyn traits::Tokenizer>, skip_special_tokens: bool) -> Self {
+    pub fn new(
+        tokenizer: Arc<dyn traits::Tokenizer>,
+        prompt_token_ids: &[TokenIdType],
+        skip_special_tokens: bool,
+    ) -> Self {
+        let num_input_tokens = prompt_token_ids.len();
+        let prompt_token_ids = prompt_token_ids.to_vec();
         Self {
             tokenizer,
             skip_special_tokens,
-            ids: Vec::with_capacity(64),
-            prefix: String::with_capacity(64),
-            prefix_index: 0,
-            read_index: 0,
+            all_token_ids: prompt_token_ids,
+            prefix_offset: num_input_tokens
+                .saturating_sub(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET),
+            read_offset: num_input_tokens,
         }
     }
 
     /// Step appends a token_id to the internal state and tries to produce a text chunk.
     ///
-    /// The method only fails if the internal state is corrupted.
+    /// Implementation directly copied from Huggingface's TGI:
+    /// https://github.com/huggingface/text-generation-inference/blob/24c2bff65924801ddf90fa24fcc72752d4f45538/server/text_generation_server/models/model.py#L144
     ///
     /// Returning `None` means the given id is not enough to produce a chunk.
     /// This typically happens with `byte_fallback` options where some tokens do not
     /// represent valid UTF-8, and only follow-up token_ids will help produce
     /// a valid chunk.
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
-        self.ids.push(id);
-        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+        self.all_token_ids.push(id);
 
-        if decoded.len() <= self.prefix.len() || decoded.ends_with('�') {
-            return Ok(None);
+        let prefix_text = self.tokenizer.decode(
+            &self.all_token_ids[self.prefix_offset..self.read_offset],
+            self.skip_special_tokens,
+        )?;
+
+        let new_text = self.tokenizer.decode(
+            &self.all_token_ids[self.prefix_offset..],
+            self.skip_special_tokens,
+        )?;
+
+        if new_text.len() > prefix_text.len() && !new_text.ends_with("�") {
+            let new_text = new_text[prefix_text.len()..].to_string();
+
+            self.prefix_offset = self.read_offset;
+            self.read_offset = self.all_token_ids.len();
+
+            Ok(Some(new_text))
+        } else {
+            Ok(None)
         }
-        if !decoded.starts_with(&self.prefix) {
-            anyhow::bail!("Detokenizer failure: invalid prefix");
-        }
-        let new_text = decoded[self.prefix.len()..].to_string();
-
-        self.prefix = decoded;
-        self.read_index = self.prefix_index;
-
-        let new_prefix_index = self.ids.len() - self.prefix_index;
-        self.prefix_index = new_prefix_index;
-
-        Ok(Some(new_text))
     }
 }
 

@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-agg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: trtllm-agg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+    TRTLLMWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: trtllm-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+          workingDir: /workspace/components/backends/trtllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m dynamo.trtllm
+              --model-path Qwen/Qwen3-0.6B
+              --served-model-name Qwen/Qwen3-0.6B
+              --extra-engine-args engine_configs/agg.yaml

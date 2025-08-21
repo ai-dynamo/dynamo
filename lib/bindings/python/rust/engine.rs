@@ -13,11 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
+use super::context::{callable_accepts_kwarg, PyContext};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyModule};
+use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
@@ -36,7 +38,6 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PythonAsyncEngine>()?;
     Ok(())
 }
-
 // todos:
 // - [ ] enable context cancellation
 //   - this will likely require a change to the function signature python calling arguments
@@ -113,6 +114,7 @@ pub struct PythonServerStreamingEngine {
     _cancel_token: CancellationToken,
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
+    has_pycontext: bool,
 }
 
 impl PythonServerStreamingEngine {
@@ -121,10 +123,16 @@ impl PythonServerStreamingEngine {
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
     ) -> Self {
+        let has_pycontext = Python::with_gil(|py| {
+            let callable = generator.bind(py);
+            callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
+        });
+
         PythonServerStreamingEngine {
             _cancel_token: cancel_token,
             generator,
             event_loop,
+            has_pycontext,
         }
     }
 }
@@ -133,6 +141,9 @@ impl PythonServerStreamingEngine {
 enum ResponseProcessingError {
     #[error("python exception: {0}")]
     PythonException(String),
+
+    #[error("python generator exit: {0}")]
+    PyGeneratorExit(String),
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
@@ -163,6 +174,8 @@ where
 
         let generator = self.generator.clone();
         let event_loop = self.event_loop.clone();
+        let ctx_python = ctx.clone();
+        let has_pycontext = self.has_pycontext;
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -177,7 +190,18 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let gen = generator.call1(py, (py_request,))?;
+                let py_ctx = Py::new(py, PyContext::new(ctx_python.clone()))?;
+
+                let gen = if has_pycontext {
+                    // Pass context as a kwarg
+                    let kwarg = PyDict::new(py);
+                    kwarg.set_item("context", &py_ctx)?;
+                    generator.call(py, (py_request,), Some(&kwarg))
+                } else {
+                    // Legacy: No `context` arg
+                    generator.call1(py, (py_request,))
+                }?;
+
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
                 pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
             })
@@ -224,6 +248,9 @@ where
                                 ctx.stop_generating();
                                 let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
                                 msg
+                            }
+                            ResponseProcessingError::PyGeneratorExit(_) => {
+                                "Stream ended before generation completed".to_string()
                             }
                             ResponseProcessingError::PythonException(e) => {
                                 let msg = format!("a python exception was caught while processing the async generator: {}", e);
@@ -276,8 +303,16 @@ where
 {
     let item = item.map_err(|e| {
         println!();
-        Python::with_gil(|py| e.display(py));
-        ResponseProcessingError::PythonException(e.to_string())
+        let mut is_py_generator_exit = false;
+        Python::with_gil(|py| {
+            e.display(py);
+            is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
+        });
+        if is_py_generator_exit {
+            ResponseProcessingError::PyGeneratorExit(e.to_string())
+        } else {
+            ResponseProcessingError::PythonException(e.to_string())
+        }
     })?;
     let response = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))

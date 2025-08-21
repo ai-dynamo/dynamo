@@ -1,30 +1,52 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
+COMPONENTS = [
+    "frontend/src/dynamo/frontend",
+    "backends/vllm/src/dynamo/vllm",
+    "backends/sglang/src/dynamo/sglang",
+    "backends/trtllm/src/dynamo/trtllm",
+    "backends/mocker/src/dynamo/mocker",
+    "backends/llama_cpp/src/dynamo/llama_cpp",
+    "planner/src/dynamo/planner",
+]
 
-class CustomBuildHook(BuildHookInterface):
+
+class VersionWriterHook(BuildHookInterface):
+    """
+    A Hatch build hook to write the project version to a file.
+    """
+
     def initialize(self, version, build_data):
-        if self.target_name == "wheel":
-            bin_path = os.getenv("DYNAMO_BIN_PATH", "target/release")
-            build_data["force_include"] = {
-                f"{bin_path}/dynamo-run": "dynamo/sdk/cli/bin/dynamo-run",
-                f"{bin_path}/metrics": "dynamo/sdk/cli/bin/metrics",
-                f"{bin_path}/mock_worker": "dynamo/sdk/cli/bin/mock_worker",
-                f"{bin_path}/libdynamo_llm_capi.so": "dynamo/sdk/cli/bin/libdynamo_llm_capi.so",
-            }
+        """
+        This method is called before the build process begins.
+        """
+
+        full_version = self.metadata.version
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            git_version = result.stdout.strip()
+            if git_version:
+                full_version += f"+{git_version}"
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+        version_content = f'#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n#  SPDX-License-Identifier: Apache-2.0\n\n# This file is auto-generated at build time\n__version__ = "{full_version}"\n'
+
+        for component in COMPONENTS:
+            version_file_path = os.path.join(
+                self.root, f"components/{component}/_version.py"
+            )
+            with open(version_file_path, "w") as f:
+                f.write(version_content)

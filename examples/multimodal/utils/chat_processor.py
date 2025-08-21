@@ -45,7 +45,6 @@ class ProcessMixInRequired(Protocol):
 class ProcessMixIn(ProcessMixInRequired):
     """
     Mixin for pre and post processing for vLLM
-    Requires engine_args, engine_client, processor, model_config to be initialized
     """
 
     engine_args: AsyncEngineArgs
@@ -179,6 +178,7 @@ class ChatProcessor:
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if request.stream:
             # Handle streaming response
+            num_output_text_so_far = 0
             async for raw_response in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
@@ -187,12 +187,32 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
+                enable_force_include_usage=False,
             ):
-                yield raw_response
+                if raw_response.startswith("data: [DONE]"):
+                    yield raw_response
+                    break
+
+                # Parse the response
+                response = json.loads(raw_response.lstrip("data: "))
+
+                # Process delta content to extract only new text
+                if "choices" in response and len(response["choices"]) > 0:
+                    if "delta" in response["choices"][0]:
+                        content = response["choices"][0]["delta"].get("content", "")
+                        if content:
+                            # Extract only the new part from the full content
+                            new_content = content[num_output_text_so_far:]
+                            response["choices"][0]["delta"]["content"] = new_content
+                            num_output_text_so_far = len(content)
+
+                # Yield the processed response
+                yield f"data: {json.dumps(response)}\n\n"
         else:
             # Handle non-streaming response
             # Collect all chunks into a single response
             full_response = None
+            num_output_text_so_far = 0
             async for raw_response in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
@@ -201,6 +221,7 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
+                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     break
@@ -221,12 +242,17 @@ class ChatProcessor:
                         ],
                     }
 
-                # Concatenate content if it exists
+                # Concatenate content if it exists. Each delta contains the full text so far.
                 if "choices" in response and len(response["choices"]) > 0:
                     if "delta" in response["choices"][0]:
                         content = response["choices"][0]["delta"].get("content", "")
                         if content:
-                            full_response["choices"][0]["message"]["content"] += content
+                            # Extract only the new part from the full content
+                            new_content = content[num_output_text_so_far:]
+                            full_response["choices"][0]["message"][
+                                "content"
+                            ] += new_content
+                            num_output_text_so_far = len(content)
 
                     # Update finish reason if present
                     if "finish_reason" in response["choices"][0]:

@@ -2,18 +2,6 @@
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # Dynamo Support Matrix
@@ -70,24 +58,30 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version**   | glibc version                        | CUDA Version |
 | :----------------- | :------------ | :----------------------------------- | :----------- |
-| ai-dynamo          | 0.3.2         | >=2.28                               |              |
-| ai-dynamo-runtime  | 0.3.2         | >=2.28 (Python 3.12 has known issues)|              |
-| ai-dynamo-vllm     | 0.8.4.post4¹  | >=2.28 (recommended)                 |              |
-| NIXL               | 0.4.0         | >=2.27                               | >=11.8       |
+| ai-dynamo          | 0.4.1         | >=2.28                               |              |
+| ai-dynamo-runtime  | 0.4.1         | >=2.28 (Python 3.12 has known issues)|              |
+| NIXL               | 0.4.1         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
 
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
-| **ai-dynamo-vllm**   | 0.8.4.post4¹                                                                     |
-| **TensorRT-LLM**     | 1.0.0rc²                                                                         |
-| **NIXL**             | 0.4.0                                                                            |
+| **TensorRT-LLM**     | 1.0.0rc4                                                                         |
+| **NIXL**             | 0.4.1                                                                            |
 
 > [!Important]
-> ¹ ai-dynamo-vllm `v0.8.4.post4` is a customized patch of `v0.8.4` from vLLM.
->
 > ² Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
+
+## Cloud Service Provider Compatibility
+
+### AWS
+
+| **Host Operating System** | **Version** | **Architecture** | **Status**   |
+| :------------------------ | :---------- | :--------------- | :----------- |
+| **Amazon Linux**          | 2023        | x86_64           | Supported    |
+
+
 
 ## Build Support
 
@@ -96,7 +90,12 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 - **Wheels**: Pre-built Python wheels are only available for **x86_64 Linux**.
    No wheels are available for other platforms at this time.
 
-- **Container Images**: We distribute only the source code for container images, **x86_64 Linux** and **ARM64** are supported for these.
-   Users must build the container image from source if they require it.
+- **Runtime Container Images**: We distribute only **AMD64** images of the runtime target on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) for [TensorRT-LLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime), [vLLM](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime), and [SGLang](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime).
+    Users must build the container image from source if they require an **ARM64** image.
+
+- **Deployment-supportive Images**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the [Dynamo kubernetes-operator](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator) to simplify deployments of Dynamo Graphs.
+    It is currently provided as an **AMD64** image only.
+
+- **Helm Charts**: [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) hosts the helm charts supporting Kubernetes deployments of Dynamo. [Dynamo CRDs](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-crds), [Dynamo Platform](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform), and [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph) are available.
 
 Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation).

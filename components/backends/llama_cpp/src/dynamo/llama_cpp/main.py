@@ -15,6 +15,8 @@ from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from . import __version__
+
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 
 configure_dynamo_logging()
@@ -29,6 +31,7 @@ class Config:
     model_path: str
     model_name: Optional[str]
     context_length: int
+    migration_limit: int
 
 
 @dynamo_worker(static=False)
@@ -40,7 +43,13 @@ async def worker(runtime: DistributedRuntime):
 
     model_type = ModelType.Chat  # llama.cpp does the pre-processing
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(model_type, endpoint, config.model_path, config.model_name)
+    await register_llm(
+        model_type,
+        endpoint,
+        config.model_path,
+        config.model_name,
+        migration_limit=config.migration_limit,
+    )
 
     # Initialize the engine
     # For more parameters see:
@@ -77,6 +86,9 @@ def cmd_line_args():
         description="llama.cpp server integrated with Dynamo LLM."
     )
     parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend llama.cpp {__version__}"
+    )
+    parser.add_argument(
         "--model-path",
         type=str,
         required=True,
@@ -99,6 +111,12 @@ def cmd_line_args():
         type=int,
         default=None,
         help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     args = parser.parse_args()
 
@@ -124,6 +142,7 @@ def cmd_line_args():
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
     config.context_length = args.context_length
+    config.migration_limit = args.migration_limit
     return config
 
 
