@@ -202,6 +202,9 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+            card.tool_call_parser = self.runtime_config.tool_call_parser.take();
+            card.reasoning_parser = self.runtime_config.reasoning_parser.take();
+
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),

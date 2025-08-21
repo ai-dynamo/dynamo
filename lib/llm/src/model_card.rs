@@ -137,6 +137,14 @@ pub struct ModelDeploymentCard {
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
+
+    /// Tool call parser name for the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_parser: Option<String>,
+
+    /// Reasoning parser name for the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_parser: Option<String>,
 }
 
 impl ModelDeploymentCard {
@@ -441,6 +449,8 @@ impl ModelDeploymentCard {
             kv_cache_block_size: 0,
             migration_limit: 0,
             user_data: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
         })
     }
 
@@ -482,6 +492,8 @@ impl ModelDeploymentCard {
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             user_data: None,
+            tool_call_parser: None,
+            reasoning_parser: None,
         })
     }
 }

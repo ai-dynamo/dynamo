@@ -58,6 +58,10 @@ class Config:
     # Connector list from CLI
     connector_list: Optional[list] = None
 
+    # tool and reasoning parser info 
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
+
 
 def parse_args() -> Config:
     parser = FlexibleArgumentParser(
@@ -101,6 +105,18 @@ def parse_args() -> Config:
         default=["nixl"],
         help="List of connectors to use in order (e.g., --connector nixl lmcache). "
         "Options: nixl, lmcache, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
+    )
+    parser.add_argument(
+        "--tool-call-parser",
+        type=str,
+        default=None,
+        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4'.",
+    )
+    parser.add_argument(
+        "--reasoning-parser",
+        type=str,
+        default=None,
+        help="Reasoning parser name for the model.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -151,7 +167,8 @@ def parse_args() -> Config:
     config.port_range = DynamoPortRange(
         min=args.dynamo_port_min, max=args.dynamo_port_max
     )
-
+    config.tool_call_parser = args.tool_call_parser
+    config.reasoning_parser = args.reasoning_parser
     # Check for conflicting flags
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
