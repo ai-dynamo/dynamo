@@ -262,7 +262,7 @@ impl HttpService {
         &self.route_docs
     }
 
-    pub async fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+    pub fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
         self.state.flags.set(&endpoint_type, enable);
         tracing::info!(
             "{} endpoints {}",
