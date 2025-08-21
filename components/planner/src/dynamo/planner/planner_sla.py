@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import asyncio
 import logging
 
 from pydantic import BaseModel
 
 from dynamo.planner.defaults import SLAPlannerDefaults
+from dynamo.planner.utils.argparse import create_sla_planner_parser
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -52,101 +52,6 @@ async def init_planner(runtime: DistributedRuntime, args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SLA Planner")
-    parser.add_argument(
-        "--environment",
-        default=SLAPlannerDefaults.environment,
-        choices=["kubernetes"],
-        help="Environment type",
-    )
-    parser.add_argument(
-        "--backend",
-        default=SLAPlannerDefaults.backend,
-        choices=["vllm", "sglang"],
-        help="Backend type",
-    )
-    parser.add_argument(
-        "--no-operation",
-        action="store_true",
-        default=SLAPlannerDefaults.no_operation,
-        help="Enable no-operation mode",
-    )
-    parser.add_argument(
-        "--log-dir", default=SLAPlannerDefaults.log_dir, help="Log directory path"
-    )
-    parser.add_argument(
-        "--adjustment-interval",
-        type=int,
-        default=SLAPlannerDefaults.adjustment_interval,
-        help="Adjustment interval in seconds",
-    )
-    parser.add_argument(
-        "--max-gpu-budget",
-        type=int,
-        default=SLAPlannerDefaults.max_gpu_budget,
-        help="Maximum GPU budget",
-    )
-    parser.add_argument(
-        "--min-endpoint",
-        type=int,
-        default=SLAPlannerDefaults.min_endpoint,
-        help="Minimum number of endpoints",
-    )
-    parser.add_argument(
-        "--decode-engine-num-gpu",
-        type=int,
-        default=SLAPlannerDefaults.decode_engine_num_gpu,
-        help="Number of GPUs for decode engine",
-    )
-    parser.add_argument(
-        "--prefill-engine-num-gpu",
-        type=int,
-        default=SLAPlannerDefaults.prefill_engine_num_gpu,
-        help="Number of GPUs for prefill engine",
-    )
-    parser.add_argument(
-        "--profile-results-dir",
-        default=SLAPlannerDefaults.profile_results_dir,
-        help="Profile results directory",
-    )
-    parser.add_argument(
-        "--isl", type=int, default=SLAPlannerDefaults.isl, help="Input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=SLAPlannerDefaults.osl, help="Output sequence length"
-    )
-    parser.add_argument(
-        "--ttft",
-        type=float,
-        default=SLAPlannerDefaults.ttft,
-        help="Time to first token",
-    )
-    parser.add_argument(
-        "--itl", type=float, default=SLAPlannerDefaults.itl, help="Inter-token latency"
-    )
-    parser.add_argument(
-        "--load-predictor",
-        default=SLAPlannerDefaults.load_predictor,
-        help="Load predictor type",
-    )
-    parser.add_argument(
-        "--load-prediction-window-size",
-        type=int,
-        default=SLAPlannerDefaults.load_prediction_window_size,
-        help="Load prediction window size",
-    )
-    parser.add_argument(
-        "--prometheus-port",
-        type=int,
-        default=SLAPlannerDefaults.prometheus_port,
-        help="Prometheus port",
-    )
-    parser.add_argument(
-        "--no-correction",
-        action="store_true",
-        default=SLAPlannerDefaults.no_correction,
-        help="Disable correction factor",
-    )
-
+    parser = create_sla_planner_parser()
     args = parser.parse_args()
     asyncio.run(init_planner(args))

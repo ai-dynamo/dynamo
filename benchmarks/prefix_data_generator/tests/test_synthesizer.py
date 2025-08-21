@@ -19,7 +19,7 @@ import random
 import tempfile
 import unittest
 
-from data_generator.synthesizer import Synthesizer
+from prefix_data_generator.synthesizer import Synthesizer
 
 
 # Helper function to create and dump data

@@ -31,7 +31,7 @@ def main(args):
     def get_isl_osl(t):
         isl_osl_ratio = (args.isl_osl_ratio_min + args.isl_osl_ratio_max) / 2 + (
             args.isl_osl_ratio_max - args.isl_osl_ratio_min
-        ) / 2 * np.sin(2 * np.pi / args.isl_osl_ratio_period * t)
+        ) / 2 * np.sin(2 * np.pi / args.isl_osl_ratio_period * t - np.pi / 2)
         logger.info(f"isl_osl_ratio at {t:.2f}: {isl_osl_ratio:.2f}")
         if np.random.uniform(0, 1) < isl_osl_ratio:
             return (args.isl1, args.osl1)
@@ -43,7 +43,7 @@ def main(args):
         t_e = min(t + args.process_interval, args.time_duration)
         request_rate = (args.request_rate_min + args.request_rate_max) / 2 + (
             args.request_rate_max - args.request_rate_min
-        ) / 2 * np.sin(2 * np.pi / args.request_rate_period * t)
+        ) / 2 * np.sin(2 * np.pi / args.request_rate_period * t - np.pi / 2)
         logger.info(f"request_rate at {t:.2f}: {request_rate:.2f}")
         num_requests = np.random.poisson(request_rate * (t_e - t))
         for req_idx in range(num_requests):
@@ -100,7 +100,8 @@ if __name__ == "__main__":
     # request rate parameters
     # for the process interval at [t, t + process_interval), the number of requests to generate is sampled
     # from a poison distribution with the following parameters:
-    # request_rate(t) = (min + max) / 2 + (max - min) / 2 * sin(2 * pi / period * t)
+    # request_rate(t) = (min + max) / 2 + (max - min) / 2 * sin(2 * pi / period * t - pi / 2)
+    # the phase shift is pi / 2 to make the request rate start from the minimum at t = 0
     # num_requests[t, t + process_interval) ~ Poisson(request_rate(t) * process_interval)
     # requests are uniformly distributed in the interval [t, t + process_interval)
     parser.add_argument(
@@ -125,7 +126,7 @@ if __name__ == "__main__":
     # isl/osl parameters
     # isl/osl is randomly sampled from two candidates following the isl-osl-ratio.
     # at time t, the isl-osl-ratio is calculated as:
-    # isl-osl-ratio(t) = (min + max) / 2 + (max - min) / 2 * sin(2 * pi / period * t)
+    # isl-osl-ratio(t) = (min + max) / 2 + (max - min) / 2 * sin(2 * pi / period * t - pi / 2)
     # Then, we sample [isl1/osl1, isl2/osl2] from the distribution [isl-osl-ratio(t), 1 - isl-osl-ratio(t)]
     parser.add_argument(
         "--isl1", type=int, default=100, help="Minimum input sequence length"

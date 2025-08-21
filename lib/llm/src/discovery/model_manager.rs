@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::component::Component;
+use dynamo_runtime::prelude::DistributedRuntimeProvider;
+use dynamo_runtime::slug::Slug;
 
 use crate::discovery::ModelEntry;
 
@@ -212,6 +214,23 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        let etcd_client = component
+            .drt()
+            .etcd_client()
+            .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
+        let router_key = format!(
+            "kv_routers/{}/{}",
+            Slug::from_string(model_name),
+            uuid::Uuid::new_v4()
+        );
+        etcd_client
+            .kv_create(
+                &router_key,
+                serde_json::to_vec_pretty(&kv_router_config.unwrap_or_default())?,
+                None, // use primary lease
+            )
+            .await?;
+
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
             component.clone(),
