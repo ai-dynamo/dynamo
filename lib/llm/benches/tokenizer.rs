@@ -45,21 +45,50 @@ pub fn decode(c: &mut Criterion) {
         29889, 8413, 266, 5062, 364, 25443, 29889, 2296, 3708, 1127, 4964, 368, 29892, 11223, 9109,
         472, 3271, 29889,
     ];
-    let tokenizer: Arc<dyn Tokenizer> =
-        Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
-    let ds = DecodeStream::new(tokenizer, false);
-    let mut decoder = Decoder::new(ds, StopConditions::default());
+
     let mut group = c.benchmark_group("decode-group");
-    group.throughput(Throughput::Bytes(TEST_TOKS.len() as u64));
+    group.throughput(Throughput::Elements(TEST_TOKS.len() as u64));
     group.bench_function("tokenizer_decoder", |b| {
-        b.iter(|| {
-            for tok in black_box(TEST_TOKS) {
-                let _ = decoder.step(tok).unwrap();
-            }
-        })
+        b.iter_with_setup(
+            || {
+                let tokenizer: Arc<dyn Tokenizer> =
+                    Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
+                let ds = DecodeStream::new(tokenizer, &[], false);
+                Decoder::new(ds, StopConditions::default())
+            },
+            |mut decoder| {
+                for tok in black_box(TEST_TOKS) {
+                    let _ = decoder.step(tok).unwrap();
+                }
+            },
+        )
     });
     group.finish();
 }
 
-criterion_group!(benches, encode, decode);
+pub fn decode_big(c: &mut Criterion) {
+    const NUM_TOKENS: usize = 2048;
+
+    const BIG_TEST_TOKS: [TokenIdType; NUM_TOKENS] = [450; NUM_TOKENS];
+    let mut group = c.benchmark_group("decode-big-group");
+    group.throughput(Throughput::Elements(NUM_TOKENS as u64));
+    group.bench_function("tokenizer_decoder_big", |b| {
+        b.iter_with_setup(
+            || {
+                let tokenizer: Arc<dyn Tokenizer> =
+                    Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
+                let ds = DecodeStream::new(tokenizer, &[], false);
+                Decoder::new(ds, StopConditions::default())
+            },
+            |mut decoder| {
+                for tok in black_box(&BIG_TEST_TOKS) {
+                    let _ = decoder.step(*tok).unwrap();
+                }
+            },
+        )
+    });
+    group.finish();
+}
+
+criterion_group!(benches, encode, decode, decode_big);
 criterion_main!(benches);

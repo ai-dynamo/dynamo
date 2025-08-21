@@ -24,7 +24,7 @@ disable_overlap_scheduler: true
 cuda_graph_config:
   max_batch_size: 16
 kv_cache_config:
-  free_gpu_memory_fraction: 0.95
+  free_gpu_memory_fraction: 0.85
 
 cache_transceiver_config:
   backend: default

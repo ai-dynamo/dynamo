@@ -45,8 +45,17 @@ pub struct Flags {
     pub model_path_flag: Option<PathBuf>,
 
     /// HTTP port. `in=http` only
+    /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
     #[arg(long, default_value = "8080")]
     pub http_port: u16,
+
+    /// TLS certificate file
+    #[arg(long, requires = "tls_key_path")]
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// TLS certificate key file
+    #[arg(long, requires = "tls_cert_path")]
+    pub tls_key_path: Option<PathBuf>,
 
     /// The name of the model we are serving
     #[arg(long)]
@@ -95,6 +104,12 @@ pub struct Flags {
     /// Default: true
     #[arg(long)]
     pub use_kv_events: Option<bool>,
+
+    /// KV Router: Whether to enable replica synchronization across multiple router instances.
+    /// When true, routers will publish and subscribe to events to maintain consistent state.
+    /// Default: false
+    #[arg(long)]
+    pub router_replica_sync: Option<bool>,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -223,6 +238,7 @@ impl Flags {
                 self.kv_overlap_score_weight,
                 self.router_temperature,
                 self.use_kv_events,
+                self.router_replica_sync,
                 self.max_num_batched_tokens,
             ),
         )

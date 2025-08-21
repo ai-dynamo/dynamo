@@ -108,7 +108,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--gpu-type",
-        choices=["h100", "gb200-fp8", "gb200-fp4"],
+        choices=["h100", "gb200-fp8"],
         default="h100",
         help="GPU type to use",
     )
@@ -127,10 +127,14 @@ def main(input_args: list[str] | None = None):
 
     # Validation
     if args.prefill_nodes % args.prefill_workers != 0:
-        raise ValueError(f"Prefill nodes ({args.prefill_nodes}) must be divisible by prefill workers ({args.prefill_workers})")
-    
+        raise ValueError(
+            f"Prefill nodes ({args.prefill_nodes}) must be divisible by prefill workers ({args.prefill_workers})"
+        )
+
     if args.decode_nodes % args.decode_workers != 0:
-        raise ValueError(f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})")
+        raise ValueError(
+            f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})"
+        )
 
     total_nodes = args.prefill_nodes + args.decode_nodes
     template_vars = {

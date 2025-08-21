@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import re
 from copy import deepcopy
 from typing import Literal
 
@@ -35,11 +36,21 @@ logger.addHandler(console_handler)
 def break_arguments(args: list[str]) -> list[str]:
     ans = []
     if isinstance(args, str):
-        ans = args.split(" ")
+        ans = re.split(r"[ =]", args)
     else:
         for arg in args:
             ans.extend(arg.split(" "))
     return ans
+
+
+def remove_valued_arguments(args: list[str], key: str) -> list[str]:
+    """Remove a valued argument (e.g., --key value) from the arguments list if exists."""
+    if key in args:
+        idx = args.index(key)
+        if idx + 1 < len(args):
+            del args[idx : idx + 2]
+
+    return args
 
 
 def join_arguments(args: list[str]) -> list[str]:
@@ -237,6 +248,167 @@ class VllmV1ConfigModifier:
         return 0
 
 
+class SGLangConfigModifier:
+    @classmethod
+    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
+        config = deepcopy(config)
+
+        # set metadata name
+        config["metadata"]["name"] = "sglang-agg"
+
+        # disable planner
+        if "Planner" in config["spec"]["services"]:
+            del config["spec"]["services"]["Planner"]
+
+        if target == "prefill":
+            # convert prefill worker into decode worker
+            config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ] = config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+            ]
+            del config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+            ]
+
+            args = config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ]["extraPodSpec"]["mainContainer"]["args"]
+
+            args = break_arguments(args)
+
+            # remove `--disaggregation-mode` and `--disaggregation-transfer-backend`
+            args = remove_valued_arguments(args, "--disaggregation-mode")
+            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
+
+            # disable prefix caching
+            if "--disable-radix-cache" not in args:
+                args = append_argument(args, "--disable-radix-cache")
+
+            config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ]["extraPodSpec"]["mainContainer"]["args"] = join_arguments(args)
+
+        elif target == "decode":
+            # delete prefill worker
+            del config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+            ]
+
+            args = config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ]["extraPodSpec"]["mainContainer"]["args"]
+
+            args = break_arguments(args)
+
+            # call `dynamo.sglang.worker` instead of `dynamo.sglang.decode_worker`
+            idx = args.index("dynamo.sglang.decode_worker")
+            args[idx] = "dynamo.sglang.worker"
+
+            # remove `--disaggregation-mode` and `--disaggregation-transfer-backend`
+            args = remove_valued_arguments(args, "--disaggregation-mode")
+            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
+
+            # enable prefix caching
+            if "--disable-radix-cache" in args:
+                args.remove("--disable-radix-cache")
+
+            config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ]["extraPodSpec"]["mainContainer"]["args"] = join_arguments(args)
+
+        # set num workers to 1
+        decode_worker_config = config["spec"]["services"][
+            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        ]
+        decode_worker_config["replicas"] = 1
+
+        return config
+
+    @classmethod
+    def set_config_tp_size(cls, config: dict, tp_size: int):
+        config = deepcopy(config)
+
+        config["spec"]["services"][
+            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        ]["resources"]["requests"]["gpu"] = str(tp_size)
+        if (
+            "limits"
+            in config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ]["resources"]
+        ):
+            config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+            ]["resources"]["limits"]["gpu"] = str(tp_size)
+
+        args = config["spec"]["services"][
+            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        ]["extraPodSpec"]["mainContainer"]["args"]
+
+        args = break_arguments(args)
+
+        try:
+            idx = args.index("--tp")
+            args[idx + 1] = str(tp_size)
+        except ValueError:
+            args = append_argument(args, ["--tp", str(tp_size)])
+
+        config["spec"]["services"][
+            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        ]["extraPodSpec"]["mainContainer"]["args"] = join_arguments(args)
+
+        return config
+
+    @classmethod
+    def get_model_name(cls, config: dict) -> str:
+        worker_name = WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        args = config["spec"]["services"][worker_name]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+
+        args = break_arguments(args)
+        for i, arg in enumerate(args):
+            if arg == "--served-model-name" and i + 1 < len(args):
+                return args[i + 1]
+
+        logger.warning(
+            f"Model name not found in configuration args, using default model name: {DEFAULT_MODEL_NAME}"
+        )
+        return DEFAULT_MODEL_NAME
+
+    @classmethod
+    def get_port(cls, config: dict) -> int:
+        args = config["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+        args = break_arguments(args)
+        try:
+            idx = args.index("--http-port")
+            return int(args[idx + 1])
+        except ValueError:
+            logger.warning(
+                f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+    @classmethod
+    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+        # TODO
+        try:
+            with open(dynamo_log_fn, "r") as f:
+                for line in f:
+                    if "KV Cache is allocated" in line and "#tokens:" in line:
+                        # Extract the number after "#tokens:"
+                        match = re.search(r"#tokens:\s*(\d+)", line)
+                        if match:
+                            return int(match.group(1))
+        except Exception as e:
+            logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
+        return 0
+
+
 CONFIG_MODIFIERS = {
     "vllm": VllmV1ConfigModifier,
+    "sglang": SGLangConfigModifier,
 }

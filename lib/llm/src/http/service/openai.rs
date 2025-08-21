@@ -31,6 +31,7 @@ use super::{
     service_v2, RouteDoc,
 };
 use crate::preprocessor::LLMMetricAnnotation;
+use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -39,11 +40,24 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_runtime::logging::get_distributed_tracing_context;
+use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
+
+// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
+/// Default body limit in bytes (45MB) to support 500k+ token payloads.
+/// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
+fn get_body_limit() -> usize {
+    std::env::var("DYN_HTTP_BODY_LIMIT_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|mb| mb * 1024 * 1024)
+        .unwrap_or(45 * 1024 * 1024)
+}
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
@@ -106,6 +120,24 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        // First check for PipelineError::ServiceOverloaded
+        if let Some(pipeline_err) =
+            err.downcast_ref::<dynamo_runtime::pipeline::error::PipelineError>()
+        {
+            if matches!(
+                pipeline_err,
+                dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
+            ) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorMessage {
+                        error: pipeline_err.to_string(),
+                    }),
+                );
+            }
+        }
+
+        // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
             Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
@@ -132,6 +164,13 @@ impl From<HttpError> for ErrorMessage {
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+    // Try to get request id from trace context
+    if let Some(trace_context) = get_distributed_tracing_context() {
+        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+            return x_dynamo_request_id;
+        }
+    }
+
     // Try to get the request ID from the primary source
     if let Some(primary) = primary {
         if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
@@ -181,7 +220,7 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle))
+    let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -281,7 +320,11 @@ async fn completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // TODO: report ISL/OSL for non-streaming requests
+        // Tap the stream to collect metrics for non-streaming requests without altering items
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
+        });
+
         let response = NvCreateCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
@@ -371,14 +414,15 @@ async fn handler_chat_completions(
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
 
-    let response = tokio::spawn(chat_completions(state, template, request, stream_handle))
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
-                e,
-            ))
-        })?;
+    let response =
+        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await chat completions task: {:?}",
+                    e,
+                ))
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -395,7 +439,6 @@ async fn handler_chat_completions(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
@@ -506,7 +549,10 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
-        // TODO: report ISL/OSL for non-streaming requests
+        let stream = stream.inspect(move |response| {
+            process_metrics_only(response, &mut response_collector);
+        });
+
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
@@ -597,7 +643,7 @@ async fn handler_responses(
     // create the connection handles
     let (mut connection_handle, _stream_handle) = create_connection_monitor(context.clone()).await;
 
-    let response = tokio::spawn(responses(state, template, request))
+    let response = tokio::spawn(responses(state, template, request).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -729,7 +775,7 @@ pub fn validate_response_input_is_text_only(
     request: &NvCreateResponse,
 ) -> Option<impl IntoResponse> {
     match &request.inner.input {
-        async_openai::types::responses::Input::Text(_) => None,
+        dynamo_async_openai::types::responses::Input::Text(_) => None,
         _ => Some(ErrorMessage::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
     }
 }
@@ -902,6 +948,17 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
     }
 }
 
+fn process_metrics_only<T>(
+    annotated: &Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+) {
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+    }
+}
+
 fn process_event_converter<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
@@ -956,6 +1013,7 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
@@ -971,6 +1029,7 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -985,6 +1044,7 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1024,12 +1084,12 @@ pub fn responses_router(
 mod tests {
     use std::collections::HashMap;
 
-    use async_openai::types::responses::{
+    use dynamo_async_openai::types::responses::{
         CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
         Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
         ToolChoiceMode, Truncation,
     };
-    use async_openai::types::{
+    use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };
@@ -1120,6 +1180,22 @@ mod tests {
                 BACKUP_ERROR_MESSAGE,
                 other_error_from_engine().unwrap_err()
             )
+        );
+    }
+
+    #[test]
+    fn test_service_overloaded_error_response_from_anyhow() {
+        use dynamo_runtime::pipeline::error::PipelineError;
+
+        let err: anyhow::Error = PipelineError::ServiceOverloaded(
+            "All workers are busy, please retry later".to_string(),
+        )
+        .into();
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.error,
+            "Service temporarily unavailable: All workers are busy, please retry later"
         );
     }
 
@@ -1228,6 +1304,7 @@ mod tests {
                 messages: vec![],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -1254,6 +1331,7 @@ mod tests {
                 )],
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         };
         let result = validate_chat_completion_required_fields(&request);

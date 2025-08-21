@@ -117,6 +117,12 @@ class Publisher:
         self.kv_listener = kv_listener
         self.worker_id = worker_id
         self.kv_block_size = kv_block_size
+        self.max_window_size = None
+
+        # The first few kv events from the model engine are always "created" type events.
+        # Use these events to capture the max_window_size of the model.
+        # When the first event that is not a "created" type is received, the publisher will set this to False to stop processing "created" type events.
+        self.processing_initial_created_events = True
 
         # Needed by the events and metrics publishers
         self.metrics_publisher = None
@@ -289,9 +295,14 @@ class Publisher:
         events = self.engine.llm.get_kv_cache_events_async(timeout=5)
         async for event in events:
             logging.debug(f"KV cache event received: {event}")
+            # drop the events that is not emitted from the global attention layer.
+            if self.should_drop_event(event):
+                continue
+
             event_id = event["event_id"]
             data = event["data"]
             if data["type"] == "stored":
+                self.processing_initial_created_events = False
                 parent_hash = _to_signed_i64(data["parent_hash"])
                 token_ids = []
                 num_block_tokens = []
@@ -332,6 +343,7 @@ class Publisher:
                     parent_hash,
                 )
             elif data["type"] == "removed":
+                self.processing_initial_created_events = False
                 block_hashes = []
                 for block_hash in data["block_hashes"]:
                     block_hash = _to_signed_i64(block_hash)
@@ -347,6 +359,9 @@ class Publisher:
                     f"publish removed event: event_id: {event_id}, block_hashes: {block_hashes}"
                 )
                 self.kv_event_publisher.publish_removed(event_id, block_hashes)
+            elif data["type"] == "created" and self.processing_initial_created_events:
+                self.update_max_window_size(event)
+
         return True
 
     def start(self):
@@ -393,6 +408,42 @@ class Publisher:
             self.publish_kv_cache_events_thread.join(timeout=cleanup_timeout)
             if self.publish_kv_cache_events_thread.is_alive():
                 logging.warning("KV cache events thread did not stop within timeout")
+
+    def update_max_window_size(self, event):
+        if "window_size" in event:
+            window_size = event["window_size"]
+            if self.max_window_size is None or window_size > self.max_window_size:
+                self.max_window_size = window_size
+                logging.debug(
+                    f"kv events max_window_size has been updated to {self.max_window_size}"
+                )
+
+    # The global attention layer will emit the KV event with the max_window_size.
+    # We only want to keep the KV event that has the max_window_size to ensure
+    # the accuracy of KV routing.
+    # TRTLLM emits a "created" event at the very beginning when it creates the KV cache,
+    # so we can use the "created" event to identify the max_window_size of the global
+    # attention layer in the model engine.
+    def should_drop_event(self, event):
+        # There are two cases for KV event filtering:
+        #
+        # 1. If "window_size" is NOT in the KV event:
+        #    "window_size" was added to KV events only recently, so some older versions of TRTLLM
+        #    might not include it. In this case, the publisher will assume that all events are
+        #    from the global attention layer.
+        #
+        # 2. If "window_size" is present in the KV event:
+        #    The publisher will not drop any KV events until all initial "created" KV events
+        #    have been processed in order to capture the max_window_size.
+        #    After processing all "created" events, the publisher will only accept KV events
+        #    whose window_size is equal to the max_window_size to ensure accurate routing.
+        if "window_size" not in event or self.processing_initial_created_events:
+            return False
+
+        if event["window_size"] != self.max_window_size:
+            return True
+
+        return False
 
 
 @asynccontextmanager

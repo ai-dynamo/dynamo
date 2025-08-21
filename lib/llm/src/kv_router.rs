@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,11 +16,12 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
-use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
 pub mod metrics_aggregator;
+pub mod prefill_counter;
 pub mod protocols;
 pub mod publisher;
 pub mod recorder;
@@ -28,48 +30,59 @@ pub mod scoring;
 pub mod sequence;
 
 use crate::{
+    discovery::{ModelEntry, MODEL_ROOT_PATH},
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
             compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
             KvRouterError, OverlapScores, RouterEvent,
         },
-        // metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
+    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
 
-use dynamo_runtime::component::Instance;
 use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
+
+// for metric scraping (pull-based)
+pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
+
+// for metric publishing (push-based)
 pub const KV_EVENT_SUBJECT: &str = "kv_events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
-pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
+pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
+
+// for inter-router comms
+pub const PREFILL_SUBJECT: &str = "prefill_events";
+pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &[Instance],
+        workers: &HashMap<i64, Option<ModelRuntimeConfig>>,
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 
     pub router_temperature: f64,
 
     pub use_kv_events: bool,
+
+    pub router_replica_sync: bool,
 
     // TODO: this is not actually used for now
     // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
@@ -82,6 +95,7 @@ impl Default for KvRouterConfig {
             overlap_score_weight: 1.0,
             router_temperature: 0.0,
             use_kv_events: true,
+            router_replica_sync: false,
             max_num_batched_tokens: 8192,
         }
     }
@@ -94,6 +108,7 @@ impl KvRouterConfig {
         overlap_score_weight: Option<f64>,
         temperature: Option<f64>,
         use_kv_events: Option<bool>,
+        replica_sync: Option<bool>,
         max_num_batched_tokens: Option<u32>,
     ) -> Self {
         let default = Self::default();
@@ -101,6 +116,7 @@ impl KvRouterConfig {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
             router_temperature: temperature.unwrap_or(default.router_temperature),
             use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
+            router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
         }
@@ -135,10 +151,6 @@ pub struct KvRouter {
     scheduler: KvScheduler,
 
     block_size: u32,
-
-    // To ensure blocking reads / writes
-    // TODO: benchmark tradeoffs
-    find_best_match_mutex: Mutex<()>,
 }
 
 impl KvRouter {
@@ -146,8 +158,10 @@ impl KvRouter {
         component: Component,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
-        use_kv_events: bool,
+        kv_router_config: Option<KvRouterConfig>,
     ) -> Result<Self> {
+        let kv_router_config = kv_router_config.unwrap_or_default();
+
         let cancellation_token = component
             .drt()
             .primary_lease()
@@ -164,7 +178,27 @@ impl KvRouter {
             }
         };
 
-        let indexer = if use_kv_events {
+        // Create runtime config watcher using the generic etcd watcher
+        // TODO: Migrate to discovery_client() once it exposes kv_get_and_watch_prefix functionality
+        let etcd_client = component
+            .drt()
+            .etcd_client()
+            .expect("Cannot KV route without etcd client");
+
+        use dynamo_runtime::utils::typed_prefix_watcher::{
+            key_extractors, watch_prefix_with_extraction,
+        };
+        let runtime_configs_watcher = watch_prefix_with_extraction(
+            etcd_client,
+            MODEL_ROOT_PATH,
+            key_extractors::lease_id,
+            |model_entry: ModelEntry| model_entry.runtime_config,
+            cancellation_token.clone(),
+        )
+        .await?;
+        let runtime_configs_rx = runtime_configs_watcher.receiver();
+
+        let indexer = if kv_router_config.use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
         } else {
             // hard code 120 seconds for now
@@ -176,10 +210,12 @@ impl KvRouter {
         };
 
         let scheduler = KvScheduler::start(
-            component.namespace().clone(),
+            component.clone(),
             block_size,
             instances_rx,
+            runtime_configs_rx,
             selector,
+            kv_router_config.router_replica_sync,
         )
         .await?;
 
@@ -215,7 +251,6 @@ impl KvRouter {
             indexer,
             scheduler,
             block_size,
-            find_best_match_mutex: Mutex::new(()), // Add this
         })
     }
 
@@ -227,10 +262,6 @@ impl KvRouter {
         context_id: &str,
         tokens: &[u32],
     ) -> anyhow::Result<(i64, u32)> {
-        // Acquire mutex to serialize access
-        // TODO: may as well make all the subroutines synchronous if benchmarking favors this
-        let _guard = self.find_best_match_mutex.lock().await;
-
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
@@ -263,17 +294,14 @@ impl KvRouter {
         Ok((best_worker_id, overlap_amount))
     }
 
-    /// Free all blocks associated with a request
-    pub async fn mark_prefill_completed(&self, request_id: &String) {
+    pub async fn mark_prefill_completed(&self, request_id: &str) {
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    /// Free all blocks associated with a request
-    pub async fn free(&self, request_id: &String) {
+    pub async fn free(&self, request_id: &str) {
         self.scheduler.free(request_id).await
     }
 
-    /// Get the block size this router was configured with
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
@@ -323,10 +351,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
-                let (instance_id, overlap_amount) = self
-                    .chooser
-                    .find_best_match(&context_id, &request.token_ids)
-                    .await?;
+                let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
+                    // If instance_id is set, use it
+                    (id, 0)
+                } else {
+                    // Otherwise, find the best match
+                    self.chooser
+                        .find_best_match(&context_id, &request.token_ids)
+                        .await?
+                };
+
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();

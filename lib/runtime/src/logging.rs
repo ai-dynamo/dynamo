@@ -48,11 +48,15 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
+use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
+use axum::http;
 use axum::http::request::Parts;
+use axum::http::Request;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::time::Instant;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::field::Field;
 use tracing::span;
 use tracing::Id;
@@ -130,74 +134,128 @@ pub fn is_valid_span_id(span_id: &str) -> bool {
 
 pub struct DistributedTraceIdLayer;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributedTraceContext {
-    trace_id: String,
-    span_id: String,
-    parent_id: Option<String>,
-    tracestate: Option<String>,
-    start: Instant,
+    pub trace_id: String,
+    pub span_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
+    #[serde(skip)]
+    start: Option<Instant>,
+    #[serde(skip)]
     end: Option<Instant>,
-    x_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_dynamo_request_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl DistributedTraceContext {
+    /// Create a traceparent string from the context
+    pub fn create_traceparent(&self) -> String {
+        format!("00-{}-{}-01", self.trace_id, self.span_id)
+    }
+}
+
+/// Parse a traceparent string into its components
+pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
+    let pieces: Vec<_> = traceparent.split('-').collect();
+    if pieces.len() != 4 {
+        return (None, None);
+    }
+    let trace_id = pieces[1];
+    let parent_id = pieces[2];
+
+    if !is_valid_trace_id(trace_id) || !is_valid_span_id(parent_id) {
+        return (None, None);
+    }
+
+    (Some(trace_id.to_string()), Some(parent_id.to_string()))
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TraceParent {
     pub trace_id: Option<String>,
     pub parent_id: Option<String>,
     pub tracestate: Option<String>,
     pub x_request_id: Option<String>,
+    pub x_dynamo_request_id: Option<String>,
 }
 
-impl<S> FromRequestParts<S> for TraceParent
-where
-    S: Send + Sync,
-{
-    type Rejection = Infallible;
+pub trait GenericHeaders {
+    fn get(&self, key: &str) -> Option<&str>;
+}
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+impl GenericHeaders for async_nats::HeaderMap {
+    fn get(&self, key: &str) -> Option<&str> {
+        async_nats::HeaderMap::get(self, key).map(|value| value.as_str())
+    }
+}
+
+impl GenericHeaders for http::HeaderMap {
+    fn get(&self, key: &str) -> Option<&str> {
+        http::HeaderMap::get(self, key).and_then(|value| value.to_str().ok())
+    }
+}
+
+impl TraceParent {
+    pub fn from_headers<H: GenericHeaders>(headers: &H) -> TraceParent {
         let mut trace_id = None;
         let mut parent_id = None;
         let mut tracestate = None;
-        if let Some(header_value) = parts.headers.get("traceparent") {
-            if let Ok(header_str) = header_value.to_str() {
-                let pieces: Vec<_> = header_str.split('-').collect();
-                if pieces.len() == 4 {
-                    let candidate_trace_id = pieces[1];
-                    let candidate_parent_id = pieces[2];
+        let mut x_request_id = None;
+        let mut x_dynamo_request_id = None;
 
-                    if is_valid_trace_id(candidate_trace_id)
-                        && is_valid_span_id(candidate_parent_id)
-                    {
-                        trace_id = Some(candidate_trace_id.to_string());
-                        parent_id = Some(candidate_parent_id.to_string());
-                    } else {
-                        tracing::debug!("Invalid traceparent header: {}", header_str);
-                    }
-                }
-            }
+        if let Some(header_value) = headers.get("traceparent") {
+            (trace_id, parent_id) = parse_traceparent(header_value);
         }
 
-        if let Some(header_value) = parts.headers.get("tracestate") {
-            if let Ok(header_str) = header_value.to_str() {
-                tracestate = Some(header_str.to_string());
-            }
+        if let Some(header_value) = headers.get("x-request-id") {
+            x_request_id = Some(header_value.to_string());
         }
 
-        // Extract X-Request-ID or x-request-id (case-insensitive)
-        let x_request_id = parts
-            .headers
-            .get("x-request-id")
-            .and_then(|val| val.to_str().ok())
-            .map(|s| s.to_string());
+        if let Some(header_value) = headers.get("tracestate") {
+            tracestate = Some(header_value.to_string());
+        }
 
-        Ok(TraceParent {
+        if let Some(header_value) = headers.get("x-dynamo-request-id") {
+            x_dynamo_request_id = Some(header_value.to_string());
+        }
+
+        // Validate UUID format
+        let x_dynamo_request_id =
+            x_dynamo_request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
+        TraceParent {
             trace_id,
             parent_id,
             tracestate,
             x_request_id,
-        })
+            x_dynamo_request_id,
+        }
     }
+}
+
+// Takes Axum request and returning a span
+pub fn make_request_span<B>(req: &Request<B>) -> Span {
+    let method = req.method();
+    let uri = req.uri();
+    let version = format!("{:?}", req.version());
+
+    let trace_parent = TraceParent::from_headers(req.headers());
+
+    tracing::info_span!(
+        "http-request",
+        method = %method,
+        uri = %uri,
+        version = %version,
+        trace_id = trace_parent.trace_id,
+        parent_id = trace_parent.parent_id,
+        x_request_id = trace_parent.x_request_id,
+    x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+
+    )
 }
 
 #[derive(Debug, Default)]
@@ -241,6 +299,7 @@ where
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
             let mut x_request_id: Option<String> = None;
+            let mut x_dynamo_request_id: Option<String> = None;
             let mut tracestate: Option<String> = None;
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
@@ -275,6 +334,10 @@ where
 
             if let Some(x_request_id_input) = visitor.fields.get("x_request_id") {
                 x_request_id = Some(x_request_id_input.to_string());
+            }
+
+            if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
+                x_dynamo_request_id = Some(x_request_id_input.to_string());
             }
 
             if parent_id.is_none() {
@@ -312,9 +375,10 @@ where
                 span_id: span_id.expect("Span ID must be set"),
                 parent_id,
                 tracestate,
-                start: Instant::now(),
+                start: Some(Instant::now()),
                 end: None,
                 x_request_id,
+                x_dynamo_request_id,
             });
         }
     }
@@ -364,16 +428,17 @@ fn setup_logging() {
 
 #[cfg(not(feature = "tokio-console"))]
 fn setup_logging() {
-    let filter_layer = filters(load_config());
+    let fmt_filter_layer = filters(load_config());
+    let trace_filter_layer = filters(load_config());
     if jsonl_logging_enabled() {
         let l = fmt::layer()
             .with_ansi(false)
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
-            .with_filter(filter_layer);
+            .with_filter(fmt_filter_layer);
         tracing_subscriber::registry()
-            .with(DistributedTraceIdLayer)
+            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
             .with(l)
             .init();
     } else {
@@ -381,7 +446,7 @@ fn setup_logging() {
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
             .with_writer(std::io::stderr)
-            .with_filter(filter_layer);
+            .with_filter(fmt_filter_layer);
         tracing_subscriber::registry().with(l).init();
     }
 }
@@ -615,6 +680,15 @@ where
                     );
                 } else {
                     visitor.fields.remove("x_request_id");
+                }
+
+                if let Some(x_dynamo_request_id) = tracing_context.x_dynamo_request_id.clone() {
+                    visitor.fields.insert(
+                        "x_dynamo_request_id".to_string(),
+                        serde_json::Value::String(x_dynamo_request_id),
+                    );
+                } else {
+                    visitor.fields.remove("x_dynamo_request_id");
                 }
             } else {
                 tracing::error!(

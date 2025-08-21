@@ -42,8 +42,8 @@ use futures::StreamExt;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, OnceCell};
-use tokio::time::{interval, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -174,7 +174,7 @@ impl MockVllmEngine {
         (schedulers, kv_event_receivers)
     }
 
-    /// Start background tasks to poll and publish metrics every second
+    /// Start background tasks to publish metrics on change
     async fn start_metrics_publishing(
         schedulers: &[Scheduler],
         component: Option<Component>,
@@ -189,7 +189,7 @@ impl MockVllmEngine {
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
-                    if let Err(e) = publisher.create_endpoint(comp.clone()).await {
+                    if let Err(e) = publisher.create_endpoint(comp.clone(), None).await {
                         tracing::error!("Metrics endpoint failed: {e}");
                     }
                 }
@@ -202,19 +202,18 @@ impl MockVllmEngine {
 
         tracing::info!("Starting metrics background tasks");
         for (dp_rank, scheduler) in schedulers.iter().enumerate() {
-            let scheduler = scheduler.clone();
+            let mut metrics_rx = scheduler.metrics_receiver();
             let publisher = metrics_publisher.clone();
             let dp_rank = dp_rank as u32;
             let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
-                let mut interval = interval(Duration::from_millis(100));
-
                 loop {
                     tokio::select! {
-                        _ = interval.tick() => {
-                            // Get metrics from scheduler
-                            let metrics = scheduler.get_forward_pass_metrics().await;
+                        // Watch for metrics changes
+                        Ok(_) = metrics_rx.changed() => {
+                            // Get the latest metrics
+                            let metrics = metrics_rx.borrow().clone();
 
                             // Publish metrics
                             if let Err(e) = publisher.publish(Arc::new(metrics)) {
@@ -405,6 +404,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             text: None,
                             cum_log_probs: None,
                             log_probs: None,
+                            top_logprobs: None,
                             finish_reason: None,
                             index: None,
                         };
@@ -525,7 +525,7 @@ mod integration_tests {
     use super::*;
     use crate::kv_router::indexer::RouterEvent;
     use crate::kv_router::KV_EVENT_SUBJECT;
-    use crate::protocols::common::{SamplingOptions, StopConditions};
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::{
         pipeline::Context,
         pipeline::{network::Ingress, PushRouter},
@@ -567,7 +567,7 @@ mod integration_tests {
 
         let engine = MockVllmEngine::new(args);
         engine.start(test_component.clone()).await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let engine = Arc::new(engine);
         tracing::info!("✓ MockVllmEngine created with DP_SIZE: {DP_SIZE}");
 
@@ -597,7 +597,7 @@ mod integration_tests {
         tracing::info!("✓ Server started in background");
 
         // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         tracing::info!("✓ Server startup delay completed");
 
         // Print all registered instances from etcd
@@ -633,6 +633,7 @@ mod integration_tests {
 
         // Create test requests for both DP workers
         let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
+            model: "mock".to_string(),
             token_ids: tokens,
             batch_token_ids: None,
             stop_conditions: StopConditions {
@@ -640,10 +641,12 @@ mod integration_tests {
                 ..Default::default()
             },
             sampling_options: SamplingOptions::default(),
+            output_options: OutputOptions::default(),
             eos_token_ids: vec![],
             mdc_sum: None,
             annotations: vec![format!("dp_rank:{dp_rank}")],
             estimated_prefix_hit_num_blocks: None,
+            backend_instance_id: None,
         };
 
         let requests = vec![
@@ -730,7 +733,7 @@ mod integration_tests {
             cancel_token,
         )
         .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let processed_endpoints = metrics_aggregator.get_endpoints();
         tracing::info!(

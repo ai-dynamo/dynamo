@@ -60,63 +60,122 @@ fi
 
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
-    # H100 dynamo prefill command
-    python3 -m dynamo.sglang.worker \
-        --model-path /model/ \
-        --served-model-name deepseek-ai/DeepSeek-R1 \
-        --skip-tokenizer-init \
-        --disaggregation-mode prefill \
-        --disaggregation-transfer-backend nixl \
-        --disaggregation-bootstrap-port 30001 \
-        --dist-init-addr "$HOST_IP:$PORT" \
-        --nnodes "$TOTAL_NODES" \
-        --node-rank "$RANK" \
-        --tp-size "$TOTAL_GPUS" \
-        --dp-size "$TOTAL_GPUS" \
-        --enable-dp-attention \
-        --decode-log-interval 1 \
-        --enable-deepep-moe \
-        --page-size 1 \
-        --trust-remote-code \
-        --moe-dense-tp-size 1 \
-        --enable-dp-lm-head \
-        --disable-radix-cache \
-        --watchdog-timeout 1000000 \
-        --enable-two-batch-overlap \
-        --deepep-mode normal \
-        --mem-fraction-static 0.85 \
-        --deepep-config /configs/deepep.json \
-        --ep-num-redundant-experts 32 \
-        --ep-dispatch-algorithm dynamic \
-        --eplb-algorithm deepseek
+    if [ "$cmd" = "dynamo" ]; then
+        # H100 dynamo prefill command
+        python3 -m dynamo.sglang \
+            --model-path /model/ \
+            --served-model-name deepseek-ai/DeepSeek-R1 \
+            --skip-tokenizer-init \
+            --disaggregation-mode prefill \
+            --disaggregation-transfer-backend nixl \
+            --disaggregation-bootstrap-port 30001 \
+            --dist-init-addr "$HOST_IP:$PORT" \
+            --nnodes "$TOTAL_NODES" \
+            --node-rank "$RANK" \
+            --tp-size "$TOTAL_GPUS" \
+            --dp-size "$TOTAL_GPUS" \
+            --enable-dp-attention \
+            --decode-log-interval 1 \
+            --enable-deepep-moe \
+            --page-size 1 \
+            --trust-remote-code \
+            --moe-dense-tp-size 1 \
+            --enable-dp-lm-head \
+            --disable-radix-cache \
+            --watchdog-timeout 1000000 \
+            --enable-two-batch-overlap \
+            --deepep-mode normal \
+            --mem-fraction-static 0.85 \
+            --deepep-config /configs/deepep.json \
+            --ep-num-redundant-experts 32 \
+            --ep-dispatch-algorithm dynamic \
+            --eplb-algorithm deepseek
+    elif [ "$cmd" = "sglang" ]; then
+        # H100 sglang prefill command
+        python3 -m sglang.launch_server \
+            --model-path /model/ \
+            --served-model-name deepseek-ai/DeepSeek-R1 \
+            --disaggregation-transfer-backend nixl \
+            --disaggregation-mode prefill \
+            --dist-init-addr "$HOST_IP:$PORT" \
+            --nnodes "$TOTAL_NODES" \
+            --node-rank "$RANK" \
+            --tp-size "$TOTAL_GPUS" \
+            --dp-size "$TOTAL_GPUS" \
+            --enable-dp-attention \
+            --decode-log-interval 1 \
+            --enable-deepep-moe \
+            --page-size 1 \
+            --host 0.0.0.0 \
+            --trust-remote-code \
+            --moe-dense-tp-size 1 \
+            --enable-dp-lm-head \
+            --disable-radix-cache \
+            --watchdog-timeout 1000000 \
+            --enable-two-batch-overlap \
+            --deepep-mode normal \
+            --mem-fraction-static 0.85 \
+            --ep-num-redundant-experts 32 \
+            --ep-dispatch-algorithm dynamic \
+            --eplb-algorithm deepseek \
+            --deepep-config /configs/deepep.json
+    fi
 elif [ "$mode" = "decode" ]; then
-    # H100 dynamo decode command
-    python3 -m dynamo.sglang.decode_worker \
-        --model-path /model/ \
-        --served-model-name deepseek-ai/DeepSeek-R1 \
-        --skip-tokenizer-init \
-        --disaggregation-mode decode \
-        --disaggregation-transfer-backend nixl \
-        --disaggregation-bootstrap-port 30001 \
-        --dist-init-addr "$HOST_IP:$PORT" \
-        --nnodes "$TOTAL_NODES" \
-        --node-rank "$RANK" \
-        --tp-size "$TOTAL_GPUS" \
-        --dp-size "$TOTAL_GPUS" \
-        --enable-dp-attention \
-        --decode-log-interval 1 \
-        --enable-deepep-moe \
-        --page-size 1 \
-        --trust-remote-code \
-        --moe-dense-tp-size 1 \
-        --enable-dp-lm-head \
-        --disable-radix-cache \
-        --watchdog-timeout 1000000 \
-        --enable-two-batch-overlap \
-        --deepep-mode low_latency \
-        --mem-fraction-static 0.835 \
-        --ep-num-redundant-experts 32 \
-        --cuda-graph-bs 256
+    if [ "$cmd" = "dynamo" ]; then
+        # H100 dynamo decode command
+        python3 -m dynamo.sglang \
+            --model-path /model/ \
+            --served-model-name deepseek-ai/DeepSeek-R1 \
+            --skip-tokenizer-init \
+            --disaggregation-mode decode \
+            --disaggregation-transfer-backend nixl \
+            --disaggregation-bootstrap-port 30001 \
+            --dist-init-addr "$HOST_IP:$PORT" \
+            --nnodes "$TOTAL_NODES" \
+            --node-rank "$RANK" \
+            --tp-size "$TOTAL_GPUS" \
+            --dp-size "$TOTAL_GPUS" \
+            --enable-dp-attention \
+            --decode-log-interval 1 \
+            --enable-deepep-moe \
+            --page-size 1 \
+            --trust-remote-code \
+            --moe-dense-tp-size 1 \
+            --enable-dp-lm-head \
+            --disable-radix-cache \
+            --watchdog-timeout 1000000 \
+            --enable-two-batch-overlap \
+            --deepep-mode low_latency \
+            --mem-fraction-static 0.835 \
+            --ep-num-redundant-experts 32 \
+            --cuda-graph-bs 128
+    elif [ "$cmd" = "sglang" ]; then
+        # H100 sglang decode command
+        python3 -m sglang.launch_server \
+            --model-path /model/ \
+            --disaggregation-transfer-backend nixl \
+            --disaggregation-mode decode \
+            --dist-init-addr "$HOST_IP:$PORT" \
+            --nnodes "$TOTAL_NODES" \
+            --node-rank "$RANK" \
+            --tp-size "$TOTAL_GPUS" \
+            --dp-size "$TOTAL_GPUS" \
+            --enable-dp-attention \
+            --decode-log-interval 1 \
+            --enable-deepep-moe \
+            --page-size 1 \
+            --host 0.0.0.0 \
+            --trust-remote-code \
+            --moe-dense-tp-size 1 \
+            --enable-dp-lm-head \
+            --disable-radix-cache \
+            --watchdog-timeout 1000000 \
+            --enable-two-batch-overlap \
+            --deepep-mode low_latency \
+            --mem-fraction-static 0.835 \
+            --ep-num-redundant-experts 32 \
+            --cuda-graph-bs 128
+    fi
 fi
 
 

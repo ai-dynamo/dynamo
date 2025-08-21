@@ -20,12 +20,16 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="v0.10.0"
+VLLM_REF="aab549870df50edf0512f0a59b574f692f546465"  # from v0.10.1
+# When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
+# aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
+VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1-cp38-abi3-manylinux1_x86_64.whl"
+VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="1876566"
-FLASHINF_REF="v0.2.8rc1"
+DEEPGEMM_REF="f85ec64"
+FLASHINF_REF="v0.2.11"
 TORCH_BACKEND="cu128"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
@@ -47,6 +51,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --vllm-ref)
             VLLM_REF="$2"
+            shift 2
+            ;;
+        --vllm-git-url)
+            VLLM_GIT_URL="$2"
             shift 2
             ;;
         --max-jobs)
@@ -78,13 +86,13 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
-            echo "  --vllm-ref REF    Git reference to checkout (default: 059d4cd)"
-            echo "  --max-jobs NUM    Maximum number of parallel jobs (default: 16)"
+            echo f"  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
+            echo f"  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
-            echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
-            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 6c9558e)"
-            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: 1d72ed4)"
-            echo "  --torch-backend BACKEND  Torch backend to use (default: cu128)"
+            echo f"  --installation-dir DIR  Directory to install vllm (default: ${INSTALLATION_DIR})"
+            echo f"  --deepgemm-ref REF  Git reference for DeepGEMM (default: ${DEEPGEMM_REF})"
+            echo f"  --flashinf-ref REF  Git reference for Flash Infer (default: ${FLASHINF_REF})"
+            echo f"  --torch-backend BACKEND  Torch backend to use (default: ${TORCH_BACKEND})"
             exit 0
             ;;
         *)
@@ -107,10 +115,17 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 # Install common dependencies
 uv pip install pip cuda-python
 
+if [ "$ARCH" = "amd64" ]; then
+    # LMCache installation currently fails on arm64 due to CUDA dependency issues:
+    # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
+    # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
+    uv pip install lmcache==0.3.3
+fi
+
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
 cd $INSTALLATION_DIR
-git clone https://github.com/vllm-project/vllm.git
+git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
@@ -119,7 +134,7 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+    if ! uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl; then
         echo "Pinned versions failed"
         exit 1
         # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
@@ -135,17 +150,26 @@ if [ "$ARCH" = "arm64" ]; then
     fi
 else
     echo "Installing vllm for AMD64 architecture"
+
+    echo "Attempting to install pinned OpenAI version..."
+    if ! uv pip install  openai==1.99.9; then
+        echo "Pinned versions failed"
+        exit 1
+    fi
+
+    export VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_PRECOMPILED_WHEEL_LOCATION}"
+
     if [ "$EDITABLE" = "true" ]; then
-        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=$TORCH_BACKEND
+	uv pip install -e . --torch-backend=$TORCH_BACKEND
     else
-        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
+        uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
 
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-bash install_python_libraries.sh # These libraries aren't pinned.
+TORCH_CUDA_ARCH_LIST="9.0;10.0" bash install_python_libraries.sh # These libraries aren't pinned.
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM
@@ -171,7 +195,7 @@ else
     git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
     cd flashinfer
     git checkout $FLASHINF_REF
-    python -m pip install -v .
+    uv pip install -v --no-build-isolation .
 fi
 
 echo "vllm installation completed successfully"

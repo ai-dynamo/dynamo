@@ -28,21 +28,29 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
-use crate::Result;
+use crate::{metrics::MetricsRegistry, Result};
 
+use async_nats::connection::State;
 use async_nats::{client, jetstream, Subscriber};
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
+use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::metrics::prometheus_names::nats_client as nats_metrics;
 pub use crate::slug::Slug;
 use tracing as log;
+
+use super::utils::build_in_runtime;
 
 pub const URL_PREFIX: &str = "nats://";
 
@@ -119,33 +127,55 @@ impl Client {
         Ok(subscription)
     }
 
-    /// Upload file to NATS at this URL
-    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
-        let mut disk_file = TokioFile::open(filepath).await?;
-
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+    /// Helper method to get or optionally create an object store bucket
+    ///
+    /// # Arguments
+    /// * `bucket_name` - The name of the bucket to retrieve
+    /// * `create_if_not_found` - If true, creates the bucket when it doesn't exist
+    ///
+    /// # Returns
+    /// The object store bucket or an error
+    async fn get_or_create_bucket(
+        &self,
+        bucket_name: &str,
+        create_if_not_found: bool,
+    ) -> anyhow::Result<jetstream::object_store::ObjectStore> {
         let context = self.jetstream();
 
-        let bucket = match context.get_object_store(&bucket_name).await {
-            Ok(bucket) => bucket,
+        match context.get_object_store(bucket_name).await {
+            Ok(bucket) => Ok(bucket),
             Err(err) if err.to_string().contains("stream not found") => {
                 // err.source() is GetStreamError, which has a kind() which
                 // is GetStreamErrorKind::JetStream which wraps a jetstream::Error
                 // which has code 404. Phew. So yeah check the string for now.
 
-                tracing::debug!("Creating NATS bucket {bucket_name}");
-                context
-                    .create_object_store(jetstream::object_store::Config {
-                        bucket: bucket_name.to_string(),
-                        ..Default::default()
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed creating bucket / object store: {e}"))?
+                if create_if_not_found {
+                    tracing::debug!("Creating NATS bucket {bucket_name}");
+                    context
+                        .create_object_store(jetstream::object_store::Config {
+                            bucket: bucket_name.to_string(),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed creating bucket / object store: {e}"))
+                } else {
+                    anyhow::bail!(
+                        "NATS get_object_store bucket does not exist: {bucket_name}. {err}."
+                    );
+                }
             }
             Err(err) => {
                 anyhow::bail!("NATS get_object_store error: {err}");
             }
-        };
+        }
+    }
+
+    /// Upload file to NATS at this URL
+    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
+        let mut disk_file = TokioFile::open(filepath).await?;
+
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
             name: key.to_string(),
@@ -167,20 +197,7 @@ impl Client {
         let mut disk_file = TokioFile::create(filepath).await?;
 
         let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
-        let context = self.jetstream();
-
-        let bucket = match context.get_object_store(&bucket_name).await {
-            Ok(bucket) => bucket,
-            Err(err) if err.to_string().contains("stream not found") => {
-                // err.source() is GetStreamError, which has a kind() which
-                // is GetStreamErrorKind::JetStream which wraps a jetstream::Error
-                // which has code 404. Phew. So yeah check the string for now.
-                anyhow::bail!("NATS get_object_store bucket does not exist: {bucket_name}. {err}.");
-            }
-            Err(err) => {
-                anyhow::bail!("NATS get_object_store error: {err}");
-            }
-        };
+        let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
             anyhow::anyhow!(
@@ -203,6 +220,59 @@ impl Client {
             }
             Err(err) => Err(anyhow::anyhow!("NATS get_object_store error: {err}")),
         }
+    }
+
+    /// Upload a serializable struct to NATS object store using bincode
+    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: Url) -> anyhow::Result<()>
+    where
+        T: Serialize,
+    {
+        // Serialize the data using bincode (more efficient binary format)
+        let binary_data = bincode::serialize(data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize data with bincode: {e}"))?;
+
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
+
+        let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
+            name: key.to_string(),
+            ..Default::default()
+        };
+
+        // Upload the serialized bytes
+        let mut cursor = std::io::Cursor::new(binary_data);
+        bucket.put(key_meta, &mut cursor).await.map_err(|e| {
+            anyhow::anyhow!("Failed uploading to bucket / object store {bucket_name}/{key}: {e}")
+        })?;
+
+        Ok(())
+    }
+
+    /// Download and deserialize a struct from NATS object store using bincode
+    pub async fn object_store_download_data<T>(&self, nats_url: Url) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
+
+        let mut obj_reader = bucket.get(&key).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed downloading from bucket / object store {bucket_name}/{key}: {e}"
+            )
+        })?;
+
+        // Read all bytes into memory
+        let mut buffer = Vec::new();
+        tokio::io::copy(&mut obj_reader, &mut buffer)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed reading object data: {e}"))?;
+
+        // Deserialize from bincode
+        let data = bincode::deserialize(&buffer)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize data with bincode: {e}"))?;
+
+        Ok(data)
     }
 }
 
@@ -236,7 +306,9 @@ fn validate_nats_server(server: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
+// TODO(jthomson04): We really shouldn't be hardcoding this.
+const NATS_WORKER_THREADS: usize = 4;
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
@@ -258,8 +330,24 @@ impl ClientOptions {
             }
         };
 
-        let client = client.connect(self.server).await?;
+        let (client, _) = build_in_runtime(
+            async move {
+                client
+                    .connect(self.server)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+            },
+            NATS_WORKER_THREADS,
+        )
+        .await?;
+
         let js_ctx = jetstream::new(client.clone());
+
+        // Validate JetStream is available
+        js_ctx
+            .query_account()
+            .await
+            .map_err(|e| anyhow::anyhow!("JetStream not available: {e}"))?;
 
         Ok(Client { client, js_ctx })
     }
@@ -489,11 +577,122 @@ impl NatsQueue {
     }
 }
 
+/// Prometheus metrics that mirror the NATS client statistics (in primitive types)
+/// to be used for the System Status Server.
+///
+/// ⚠️  IMPORTANT: These Prometheus Gauges are COPIES of NATS client data, not live references!
+///
+/// How it works:
+/// 1. NATS client provides source data via client.statistics() and connection_state()
+/// 2. set_from_client_stats() reads current NATS values and updates these Prometheus Gauges
+/// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
+///
+/// Flow: NATS Client → Client Statistics → set_from_client_stats() → Prometheus Gauge
+/// Note: These are snapshots updated when set_from_client_stats() is called.
+#[derive(Debug, Clone)]
+pub struct DRTNatsClientPrometheusMetrics {
+    nats_client: client::Client,
+    /// Number of bytes received (excluding protocol overhead)
+    pub in_bytes: IntGauge,
+    /// Number of bytes sent (excluding protocol overhead)
+    pub out_bytes: IntGauge,
+    /// Number of messages received
+    pub in_messages: IntGauge,
+    /// Number of messages sent
+    pub out_messages: IntGauge,
+    /// Number of times connection was established
+    pub connects: IntGauge,
+    /// Current connection state (0 = disconnected, 1 = connected, 2 = reconnecting)
+    pub connection_state: IntGauge,
+}
+
+impl DRTNatsClientPrometheusMetrics {
+    /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
+    pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
+        let in_bytes = drt.create_intgauge(
+            nats_metrics::IN_TOTAL_BYTES,
+            "Total number of bytes received by NATS client",
+            &[],
+        )?;
+        let out_bytes = drt.create_intgauge(
+            nats_metrics::OUT_OVERHEAD_BYTES,
+            "Total number of bytes sent by NATS client",
+            &[],
+        )?;
+        let in_messages = drt.create_intgauge(
+            nats_metrics::IN_MESSAGES,
+            "Total number of messages received by NATS client",
+            &[],
+        )?;
+        let out_messages = drt.create_intgauge(
+            nats_metrics::OUT_MESSAGES,
+            "Total number of messages sent by NATS client",
+            &[],
+        )?;
+        let connects = drt.create_intgauge(
+            nats_metrics::CONNECTS,
+            "Total number of connections established by NATS client",
+            &[],
+        )?;
+        let connection_state = drt.create_intgauge(
+            nats_metrics::CONNECTION_STATE,
+            "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
+            &[],
+        )?;
+
+        Ok(Self {
+            nats_client,
+            in_bytes,
+            out_bytes,
+            in_messages,
+            out_messages,
+            connects,
+            connection_state,
+        })
+    }
+
+    /// Copy statistics from the stored NATS client to these Prometheus metrics
+    pub fn set_from_client_stats(&self) {
+        let stats = self.nats_client.statistics();
+
+        // Get current values from the client statistics
+        let in_bytes = stats.in_bytes.load(Ordering::Relaxed);
+        let out_bytes = stats.out_bytes.load(Ordering::Relaxed);
+        let in_messages = stats.in_messages.load(Ordering::Relaxed);
+        let out_messages = stats.out_messages.load(Ordering::Relaxed);
+        let connects = stats.connects.load(Ordering::Relaxed);
+
+        // Get connection state
+        let connection_state = match self.nats_client.connection_state() {
+            State::Connected => 1,
+            // treat Disconnected and Pending as "down"
+            State::Disconnected | State::Pending => 0,
+        };
+
+        // Update Prometheus metrics
+        // Using gauges allows us to set absolute values directly
+        self.in_bytes.set(in_bytes as i64);
+        self.out_bytes.set(out_bytes as i64);
+        self.in_messages.set(in_messages as i64);
+        self.out_messages.set(out_messages as i64);
+        self.connects.set(connects as i64);
+        self.connection_state.set(connection_state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     use super::*;
     use figment::Jail;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct TestData {
+        id: u32,
+        name: String,
+        values: Vec<f64>,
+    }
 
     #[test]
     fn test_client_options_builder() {
@@ -538,5 +737,53 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    // Integration test for object store data operations using bincode
+    #[tokio::test]
+    #[ignore] // Requires NATS server to be running
+    async fn test_object_store_data_operations() {
+        // Create test data
+        let test_data = TestData {
+            id: 42,
+            name: "test_item".to_string(),
+            values: vec![1.0, 2.5, 3.7, 4.2],
+        };
+
+        // Set up client
+        let client_options = ClientOptions::builder()
+            .server("nats://localhost:4222")
+            .build()
+            .expect("Failed to build client options");
+
+        let client = client_options
+            .connect()
+            .await
+            .expect("Failed to connect to NATS");
+
+        // Test URL (using .bin extension to indicate binary format)
+        let url =
+            Url::parse("nats://localhost/test-bucket/test-data.bin").expect("Failed to parse URL");
+
+        // Upload the data
+        client
+            .object_store_upload_data(&test_data, url.clone())
+            .await
+            .expect("Failed to upload data");
+
+        // Download the data
+        let downloaded_data: TestData = client
+            .object_store_download_data(url.clone())
+            .await
+            .expect("Failed to download data");
+
+        // Verify the data matches
+        assert_eq!(test_data, downloaded_data);
+
+        // Clean up
+        client
+            .object_store_delete_bucket("test-bucket")
+            .await
+            .expect("Failed to delete bucket");
     }
 }

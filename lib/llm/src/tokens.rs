@@ -87,6 +87,12 @@ impl From<&[Token]> for Tokens {
     }
 }
 
+impl From<Vec<usize>> for Tokens {
+    fn from(tokens: Vec<usize>) -> Self {
+        Tokens(tokens.into_iter().map(|t| t as u32).collect())
+    }
+}
+
 impl From<Vec<i32>> for Tokens {
     /// Converts `Vec<i32>` to `Tokens`, casting each `i32` to `u32`.
     fn from(tokens: Vec<i32>) -> Self {
@@ -460,6 +466,11 @@ impl TokenBlock {
     pub fn parent_sequence_hash(&self) -> Option<SequenceHash> {
         self.parent_sequence_hash
     }
+
+    /// Returns the number of tokens in the block.
+    pub fn block_size(&self) -> usize {
+        self.tokens.0.len()
+    }
 }
 
 /// Represents a sequence of tokens, segmented into fixed-size, hashed blocks.
@@ -481,6 +492,7 @@ pub struct TokenBlockSequence {
     blocks: Vec<TokenBlock>,
     current_block: PartialTokenBlock,
     salt_hash: SaltHash,
+    block_size: usize,
 }
 
 impl TokenBlockSequence {
@@ -507,6 +519,7 @@ impl TokenBlockSequence {
             blocks,
             current_block,
             salt_hash,
+            block_size: block_size as usize,
         }
     }
 
@@ -545,14 +558,12 @@ impl TokenBlockSequence {
             tokens_to_append = self.current_block.push_tokens(available_tokens);
 
             // Check if the current block *became* full after pushing tokens
-            if self.current_block.remaining() == 0 && !tokens_to_append.is_empty() {
+            if self.current_block.remaining() == 0 {
                 // If it became full AND there are still more tokens to append,
                 // commit it now so the next loop iteration starts with a fresh block.
                 let new_block = self.current_block.commit()?;
                 self.blocks.push(new_block);
             }
-            // If it became full and there are NO more tokens, the loop will exit,
-            // and the block remains partial but full, ready for the next append/commit.
         }
 
         let end_block_index = self.blocks.len();
@@ -708,6 +719,13 @@ impl TokenBlockSequence {
         self.truncate(len)
     }
 
+    /// Resets the sequence to the initial state.
+    pub fn reset(&mut self) {
+        self.blocks.clear();
+        self.current_block =
+            PartialTokenBlock::create_sequence_root(self.block_size as u32, self.salt_hash);
+    }
+
     /// Removes the last token from the sequence and returns it, or [`None`] if it is empty.
     ///
     /// This operation is analogous to `Vec::pop`.
@@ -779,6 +797,11 @@ impl TokenBlockSequence {
         (self.blocks, self.current_block)
     }
 
+    /// Returns the block size used for this sequence.
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
     /// Returns the [`SaltHash`] used for this sequence.
     pub fn salt_hash(&self) -> SaltHash {
         self.salt_hash
@@ -789,6 +812,38 @@ impl TokenBlockSequence {
     pub fn total_tokens(&self) -> usize {
         let block_size = self.current_block.block_size as usize;
         (self.blocks.len() * block_size) + self.current_block.len()
+    }
+
+    /// Extract the token with the range
+    pub fn tokens_at(&self, range: Range<usize>) -> Tokens {
+        let total = self.total_tokens();
+
+        // Validate range - return empty tokens for invalid ranges
+        if range.start > range.end || range.end > total {
+            return Tokens::default();
+        }
+
+        // Handle empty range
+        if range.is_empty() {
+            return Tokens::default();
+        }
+
+        let mut result = Vec::with_capacity(range.len());
+
+        for i in range {
+            if i < self.blocks.len() * self.block_size {
+                // Token is in a completed block
+                let block_index = i / self.block_size;
+                let token_index = i % self.block_size;
+                result.push(self.blocks[block_index].tokens()[token_index]);
+            } else {
+                // Token is in the current partial block
+                let current_block_index = i - (self.blocks.len() * self.block_size);
+                result.push(self.current_block.tokens()[current_block_index]);
+            }
+        }
+
+        Tokens::from(result)
     }
 
     /// Splits a [`Tokens`] object into a vector of completed blocks and a final partial block.
@@ -857,6 +912,7 @@ impl TokenBlockSequence {
             blocks,
             current_block,
             salt_hash,
+            block_size: block_size as usize,
         }
     }
 }
@@ -1109,6 +1165,15 @@ mod tests {
             Some(SEQ_HASH_5_8)
         );
 
+        // Test tokens_at across blocks and partial block
+        assert_eq!(seq_multi.tokens_at(0..4).as_ref(), &[1, 2, 3, 4]); // First complete block
+        assert_eq!(seq_multi.tokens_at(4..8).as_ref(), &[5, 6, 7, 8]); // Second complete block
+        assert_eq!(seq_multi.tokens_at(8..9).as_ref(), &[9]); // Current partial block
+        assert_eq!(seq_multi.tokens_at(2..6).as_ref(), &[3, 4, 5, 6]); // Spanning blocks
+        assert_eq!(seq_multi.tokens_at(6..9).as_ref(), &[7, 8, 9]); // Spanning to partial
+        assert_eq!(seq_multi.tokens_at(5..5).as_ref(), &[0u32; 0]); // Empty range
+        assert_eq!(seq_multi.tokens_at(10..15).as_ref(), &[0u32; 0]); // Out of bounds
+
         // No salt hash
         let seq_no_salt = create_test_sequence(&[1, 2, 3, 4, 5], 4, None);
         assert_eq!(seq_no_salt.salt_hash(), 0);
@@ -1142,22 +1207,22 @@ mod tests {
         assert_eq!(sequence.current_block().tokens.as_ref(), &[9, 10, 11]);
 
         // Append token 12 - should complete block 2 (index 2)
+        // This will also commit block 2
         let completed_idx = sequence.append(12).unwrap();
-        assert_eq!(completed_idx, None); // Lazy commit: extend returns None
-        assert_eq!(sequence.blocks().len(), 2); // Block 2 not added yet
-        assert_eq!(sequence.current_block.tokens.as_ref(), &[9, 10, 11, 12]); // Current block is now full
-        assert_eq!(sequence.current_block.remaining(), 0);
+        assert_eq!(completed_idx, Some(2));
+        assert_eq!(sequence.blocks().len(), 3);
+        assert_eq!(sequence.current_block.tokens.as_ref(), &[0u32; 0]);
+        assert_eq!(sequence.current_block.remaining(), 4);
         assert_eq!(
             sequence.current_block().parent_sequence_hash,
-            Some(SEQ_HASH_5_8)
+            Some(SEQ_HASH_9_12)
         ); // Still linked to block 1
 
         // Append token 13 - should not complete a block
-        // NOW appending 13 should first commit block 2, then add 13 to the new current
         let completed_idx_13 = sequence.append(13).unwrap();
-        assert_eq!(completed_idx_13, Some(2)); // Block 2 (index 2) was completed by this append
-        assert_eq!(sequence.blocks.len(), 3); // Now 3 blocks committed
-        assert_eq!(sequence.blocks[2].tokens().as_ref(), &[9, 10, 11, 12]); // Verify committed block 2
+        assert_eq!(completed_idx_13, None);
+        assert_eq!(sequence.blocks().len(), 3);
+        assert_eq!(sequence.blocks[2].tokens().as_ref(), &[9, 10, 11, 12]);
         assert_eq!(sequence.blocks[2].sequence_hash(), SEQ_HASH_9_12);
         assert_eq!(sequence.current_block.tokens.as_ref(), &[13]); // New current block has 13
         assert_eq!(sequence.current_block.remaining(), 3);
@@ -1180,16 +1245,17 @@ mod tests {
         assert_eq!(seq1.blocks.len(), 0);
         assert_eq!(seq1.current_block.tokens.as_ref(), &[1, 2]);
         assert_eq!(seq1.current_block.remaining(), 2);
+        assert_eq!(seq1.current_block.parent_sequence_hash, None); // Still the root block
 
         // Case 2: Extend exactly block size
         let mut seq2 = create_test_sequence(&[], block_size, salt_hash);
         let tokens2 = Tokens::from(vec![1, 2, 3, 4]);
         let completed2 = seq2.extend(tokens2).unwrap();
-        assert_eq!(completed2, None); // Block is full but not committed yet
-        assert_eq!(seq2.blocks.len(), 0); // No blocks committed
-        assert_eq!(seq2.current_block.tokens.as_ref(), &[1, 2, 3, 4]); // Current block is full
-        assert_eq!(seq2.current_block.remaining(), 0);
-        assert_eq!(seq2.current_block.parent_sequence_hash, None); // Still the root block
+        assert_eq!(completed2, Some(0..1));
+        assert_eq!(seq2.blocks.len(), 1);
+        assert_eq!(seq2.current_block.tokens.as_ref(), &[0u32; 0]); // Current block is empty
+        assert_eq!(seq2.current_block.remaining(), 4);
+        assert_eq!(seq2.current_block.parent_sequence_hash, Some(SEQ_HASH_1_4)); // Still the root block
 
         // Case 3: Extend more than block size, less than two blocks
         let mut seq3 = create_test_sequence(&[], block_size, salt_hash);
@@ -1206,13 +1272,13 @@ mod tests {
         let mut seq4 = create_test_sequence(&[], block_size, salt_hash);
         let tokens4 = Tokens::from(vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let completed4 = seq4.extend(tokens4).unwrap();
-        assert_eq!(completed4, Some(0..1)); // Only block 0 is committed
-        assert_eq!(seq4.blocks.len(), 1); // Only 1 block committed
-        assert_eq!(seq4.current_block.tokens.as_ref(), &[5, 6, 7, 8]); // Current block holds the second block's tokens
-        assert_eq!(seq4.current_block.remaining(), 0); // Current block is full
+        assert_eq!(completed4, Some(0..2)); // Only block 0 is committed
+        assert_eq!(seq4.blocks.len(), 2); // Only 1 block committed
+        assert_eq!(seq4.current_block.tokens.as_ref(), &[0u32; 0]);
+        assert_eq!(seq4.current_block.remaining(), 4);
         assert_eq!(seq4.blocks[0].tokens().as_ref(), &[1, 2, 3, 4]);
         assert_eq!(seq4.blocks[0].sequence_hash(), SEQ_HASH_1_4);
-        assert_eq!(seq4.current_block.parent_sequence_hash, Some(SEQ_HASH_1_4)); // Parent is the first block
+        assert_eq!(seq4.current_block.parent_sequence_hash, Some(SEQ_HASH_5_8)); // Parent is the first block
 
         // Case 5: Extend multiple times, completing blocks across calls
         let mut seq5 = create_test_sequence(&[], block_size, salt_hash);
@@ -1252,12 +1318,18 @@ mod tests {
         let mut seq7 = create_test_sequence(&[1, 2], block_size, salt_hash);
         let tokens7 = Tokens::from(vec![3, 4]);
         let completed7 = seq7.extend(tokens7).unwrap();
-        assert_eq!(completed7, None); // Block is full but not committed yet
-        assert_eq!(seq7.blocks.len(), 0);
-        assert_eq!(seq7.current_block.tokens.as_ref(), &[1, 2, 3, 4]); // Current block is full
-        assert_eq!(seq7.current_block.remaining(), 0);
+        assert_eq!(completed7, Some(0..1)); // Block is full but not committed yet
+        assert_eq!(seq7.blocks.len(), 1);
+        assert_eq!(seq7.current_block.tokens.as_ref(), &[0u32; 0]); // Current block is full
+        assert_eq!(seq7.current_block.remaining(), 4);
         assert_eq!(seq7.total_tokens(), 4);
-        assert_eq!(seq7.current_block.parent_sequence_hash, None); // Still the root block
+        assert_eq!(seq7.current_block.parent_sequence_hash, Some(SEQ_HASH_1_4)); // Still the root block
+
+        // Test tokens_at extraction
+        assert_eq!(seq7.tokens_at(0..2).as_ref(), &[1, 2]);
+        assert_eq!(seq7.tokens_at(1..3).as_ref(), &[2, 3]);
+        assert_eq!(seq7.tokens_at(0..4).as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(seq7.tokens_at(2..2).as_ref(), &[0u32; 0]); // Empty range
     }
 
     #[test]

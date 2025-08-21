@@ -37,6 +37,8 @@ mod path;
 use lease::*;
 pub use path::*;
 
+use super::utils::build_in_runtime;
+
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
 
 /// ETCD Client
@@ -45,6 +47,7 @@ pub struct Client {
     client: etcd_client::Client,
     primary_lease: i64,
     runtime: Runtime,
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,33 +104,36 @@ impl Client {
     /// If the lease expires, the [`Runtime`] will be shutdown.
     /// If the [`Runtime`] is shutdown, the lease will be revoked.
     pub async fn new(config: ClientOptions, runtime: Runtime) -> Result<Self> {
-        runtime
-            .secondary()
-            .spawn(Self::create(config, runtime.clone()))
-            .await?
-    }
-
-    /// Create a new etcd client and tie the primary [`CancellationToken`] to the primary etcd lease.
-    async fn create(config: ClientOptions, runtime: Runtime) -> Result<Self> {
         let token = runtime.primary_token();
-        let client =
-            etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options).await?;
 
-        let lease_id = if config.attach_lease {
-            let lease_client = client.lease_client();
+        let ((client, lease_id), rt) = build_in_runtime(
+            async move {
+                let client =
+                    etcd_client::Client::connect(config.etcd_url, config.etcd_connect_options)
+                        .await?;
 
-            let lease = create_lease(lease_client, 10, token)
-                .await
-                .context("creating primary lease")?;
+                let lease_id = if config.attach_lease {
+                    let lease_client = client.lease_client();
 
-            lease.id
-        } else {
-            0
-        };
+                    let lease = create_lease(lease_client, 10, token)
+                        .await
+                        .context("creating primary lease")?;
+
+                    lease.id
+                } else {
+                    0
+                };
+
+                Ok((client, lease_id))
+            },
+            1,
+        )
+        .await?;
 
         Ok(Client {
             client,
             primary_lease: lease_id,
+            rt,
             runtime,
         })
     }
@@ -155,8 +161,7 @@ impl Client {
     pub async fn create_lease(&self, ttl: i64) -> Result<Lease> {
         let token = self.runtime.child_token();
         let lease_client = self.client.lease_client();
-        self.runtime
-            .secondary()
+        self.rt
             .spawn(create_lease(lease_client, ttl, token))
             .await?
     }
@@ -164,26 +169,18 @@ impl Client {
     // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
     pub async fn revoke_lease(&self, lease_id: i64) -> Result<()> {
         let lease_client = self.client.lease_client();
-        self.runtime
-            .secondary()
-            .spawn(revoke_lease(lease_client, lease_id))
-            .await?
+        self.rt.spawn(revoke_lease(lease_client, lease_id)).await?
     }
 
-    pub async fn kv_create(
-        &self,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> Result<()> {
+    pub async fn kv_create(&self, key: &str, value: Vec<u8>, lease_id: Option<i64>) -> Result<()> {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction
         let txn = Txn::new()
-            .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Ensure the lock does not exist
+            .when(vec![Compare::version(key, CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value, Some(put_options)), // Create the object
+                TxnOp::put(key, value, Some(put_options)), // Create the object
             ]);
 
         // Execute the transaction
@@ -345,7 +342,7 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(32);
 
-        self.runtime.secondary().spawn(async move {
+        self.rt.spawn(async move {
             for kv in kvs {
                 if tx.send(WatchEvent::Put(kv)).await.is_err() {
                     // receiver is already closed
@@ -635,15 +632,11 @@ mod tests {
             .id();
 
         // Create the key
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
+        let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
         // Try to create the key again - this should fail
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
+        let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_err());
 
         // Create or validate should succeed as the values match

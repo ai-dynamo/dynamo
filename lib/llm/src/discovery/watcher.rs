@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
 use tokio::sync::{mpsc::Receiver, Notify};
@@ -36,13 +37,24 @@ use crate::{
 
 use super::{ModelEntry, ModelManager, MODEL_ROOT_PATH};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ModelUpdate {
+    Added(ModelType),
+    Removed(ModelType),
+}
+
 pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_mode: RouterMode,
     notify_on_model: Notify,
+    model_update_tx: Option<Sender<ModelUpdate>>,
     kv_router_config: Option<KvRouterConfig>,
+    busy_threshold: Option<f64>,
 }
+
+const ALL_MODEL_TYPES: &[ModelType] =
+    &[ModelType::Chat, ModelType::Completion, ModelType::Embedding];
 
 impl ModelWatcher {
     pub fn new(
@@ -50,14 +62,21 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_router_config: Option<KvRouterConfig>,
+        busy_threshold: Option<f64>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
             drt: runtime,
             router_mode,
             notify_on_model: Notify::new(),
+            model_update_tx: None,
             kv_router_config,
+            busy_threshold,
         }
+    }
+
+    pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
+        self.model_update_tx = Some(tx);
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -99,6 +118,12 @@ impl ModelWatcher {
                         }
                     };
                     self.manager.save_model_entry(key, model_entry.clone());
+
+                    if let Some(tx) = &self.model_update_tx {
+                        tx.send(ModelUpdate::Added(model_entry.model_type))
+                            .await
+                            .ok();
+                    }
 
                     if self.manager.has_model_any(&model_entry.name) {
                         tracing::trace!(name = model_entry.name, "New endpoint for existing model");
@@ -151,13 +176,91 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
+            let mut update_tx = true;
+            let mut model_type: ModelType = model_entry.model_type;
+            if model_entry.model_type == ModelType::Chat
+                && self.manager.list_chat_completions_models().is_empty()
+            {
+                self.manager.remove_chat_completions_model(&model_name).ok();
+                model_type = ModelType::Chat;
+            } else if model_entry.model_type == ModelType::Completion
+                && self.manager.list_completions_models().is_empty()
+            {
+                self.manager.remove_completions_model(&model_name).ok();
+                model_type = ModelType::Completion;
+            } else if model_entry.model_type == ModelType::Embedding
+                && self.manager.list_embeddings_models().is_empty()
+            {
+                self.manager.remove_embeddings_model(&model_name).ok();
+                model_type = ModelType::Embedding;
+            } else if model_entry.model_type == ModelType::Backend {
+                if self.manager.list_chat_completions_models().is_empty() {
+                    self.manager.remove_chat_completions_model(&model_name).ok();
+                    model_type = ModelType::Chat;
+                }
+                if self.manager.list_completions_models().is_empty() {
+                    self.manager.remove_completions_model(&model_name).ok();
+                    if model_type == ModelType::Chat {
+                        model_type = ModelType::Backend;
+                    } else {
+                        model_type = ModelType::Completion;
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    "Model {} is still active in other instances, not removing",
+                    model_name
+                );
+                update_tx = false;
+            }
+            if update_tx {
+                if let Some(tx) = &self.model_update_tx {
+                    tx.send(ModelUpdate::Removed(model_type)).await.ok();
+                }
+            }
             return Ok(None);
         }
 
         // Ignore the errors because model could be either type
-        let _ = self.manager.remove_chat_completions_model(&model_name);
-        let _ = self.manager.remove_completions_model(&model_name);
-        let _ = self.manager.remove_embeddings_model(&model_name);
+        let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
+        let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
+        let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
+
+        let mut chat_model_removed = false;
+        let mut completions_model_removed = false;
+        let mut embeddings_model_removed = false;
+
+        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
+            chat_model_removed = true;
+        }
+        if completions_model_remove_err.is_ok() && self.manager.list_completions_models().is_empty()
+        {
+            completions_model_removed = true;
+        }
+        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
+            embeddings_model_removed = true;
+        }
+
+        if !chat_model_removed && !completions_model_removed && !embeddings_model_removed {
+            tracing::debug!(
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}",
+                model_name,
+                chat_model_removed,
+                completions_model_removed,
+                embeddings_model_removed
+            );
+        } else {
+            for model_type in ALL_MODEL_TYPES {
+                if (chat_model_removed && *model_type == ModelType::Chat)
+                    || (completions_model_removed && *model_type == ModelType::Completion)
+                    || (embeddings_model_removed && *model_type == ModelType::Embedding)
+                {
+                    if let Some(tx) = &self.model_update_tx {
+                        tx.send(ModelUpdate::Removed(*model_type)).await.ok();
+                    }
+                }
+            }
+        }
 
         Ok(Some(model_name))
     }
@@ -216,21 +319,31 @@ impl ModelWatcher {
                     None
                 };
 
-                let chat_engine =
-                    entrypoint::build_routed_pipeline::<
-                        NvCreateChatCompletionRequest,
-                        NvCreateChatCompletionStreamResponse,
-                    >(&card, &client, self.router_mode, kv_chooser.clone())
-                    .await?;
+                let chat_engine = entrypoint::build_routed_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(
+                    &card,
+                    &client,
+                    self.router_mode,
+                    self.busy_threshold,
+                    kv_chooser.clone(),
+                )
+                .await?;
                 self.manager
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
 
-                let completions_engine =
-                    entrypoint::build_routed_pipeline::<
-                        NvCreateCompletionRequest,
-                        NvCreateCompletionResponse,
-                    >(&card, &client, self.router_mode, kv_chooser)
-                    .await?;
+                let completions_engine = entrypoint::build_routed_pipeline::<
+                    NvCreateCompletionRequest,
+                    NvCreateCompletionResponse,
+                >(
+                    &card,
+                    &client,
+                    self.router_mode,
+                    self.busy_threshold,
+                    kv_chooser,
+                )
+                .await?;
                 self.manager
                     .add_completions_model(&model_entry.name, completions_engine)?;
             }
@@ -238,7 +351,9 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client(client, Default::default())
+                >::from_client_with_threshold(
+                    client, Default::default(), self.busy_threshold
+                )
                 .await?;
                 let engine = Arc::new(push_router);
                 self.manager
@@ -248,7 +363,9 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
-                >::from_client(client, Default::default())
+                >::from_client_with_threshold(
+                    client, Default::default(), self.busy_threshold
+                )
                 .await?;
                 let engine = Arc::new(push_router);
                 self.manager
@@ -274,7 +391,9 @@ impl ModelWatcher {
                 let router = PushRouter::<
                     PreprocessedEmbeddingRequest,
                     Annotated<EmbeddingsEngineOutput>,
-                >::from_client(client, self.router_mode)
+                >::from_client_with_threshold(
+                    client, self.router_mode, self.busy_threshold
+                )
                 .await?;
 
                 // Note: Embeddings don't need KV routing complexity

@@ -175,7 +175,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--gpu_type",
         type=str,
-        choices=["h100", "gb200-fp8", "gb200-fp4"],
+        choices=["h100", "gb200-fp8"],
         default="h100",
         help="Type of GPU to use",
     )
@@ -200,6 +200,10 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.local_rank >= args.nodes_per_worker:
         raise ValueError(f"Local rank ({args.local_rank}) must be less than nodes per worker ({args.nodes_per_worker})")
 
+    if args.local_rank >= args.nodes_per_worker:
+        raise ValueError(
+            f"Local rank ({args.local_rank}) must be less than nodes per worker ({args.nodes_per_worker})"
+        )
 
 
 def setup_env_vars_for_gpu_script(
@@ -283,12 +287,13 @@ def setup_prefill_worker(
     Setup the prefill worker.
     """
     total_gpus = nodes_per_worker * gpus_per_node
-    
     # Only the first prefill worker's leader node sets up NATS/ETCD/Frontend
     if worker_idx == 0 and local_rank == 0:
         setup_head_prefill_node(master_ip)
     else:
-        logging.info(f"Setting up child prefill worker {worker_idx}, local rank {local_rank}")
+        logging.info(
+            f"Setting up child prefill worker {worker_idx}, local rank {local_rank}"
+        )
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
@@ -313,7 +318,6 @@ def setup_decode_worker(
     Setup the decode worker.
     """
     total_gpus = nodes_per_worker * gpus_per_node
-    
     logging.info(f"Setting up decode worker {worker_idx}, local rank {local_rank}")
 
     if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
