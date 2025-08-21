@@ -145,7 +145,7 @@ class StatLoggerFactory:
         self.component = component
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
-        self.labels = labels or []
+        self.metrics_labels = metrics_labels or []
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
