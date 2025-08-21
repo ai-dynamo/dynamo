@@ -185,7 +185,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
 
     factory = StatLoggerFactory(
-        component, config.engine_args.data_parallel_rank or 0, metrics_labels = [("model", config.model)]
+        component,
+        config.engine_args.data_parallel_rank or 0,
+        metrics_labels=[("model", config.model)],
     )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
