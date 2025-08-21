@@ -20,7 +20,7 @@ use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
     network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime};
+use dynamo_runtime::{protocols::EndpointId, DistributedRuntime};
 
 use crate::entrypoint::EngineConfig;
 

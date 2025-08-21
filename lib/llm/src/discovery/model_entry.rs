@@ -25,7 +25,7 @@ pub struct ModelEntry {
     pub name: String,
 
     /// How to address this on the network
-    pub endpoint: protocols::Endpoint,
+    pub endpoint: protocols::EndpointId,
 
     /// Specifies whether the model is a chat, completions, etc model.
     pub model_type: ModelType,
