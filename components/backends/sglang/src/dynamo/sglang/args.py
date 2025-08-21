@@ -128,6 +128,13 @@ def parse_args(args: list[str]) -> Config:
 
     server_args = ServerArgs.from_cli_args(parsed_args)
 
+    if not server_args.skip_tokenizer_init:
+        logging.warning(
+            "When using the dynamo frontend (python3 -m dynamo.frontend), we perform tokenization and detokenization "
+            "in the frontend. Automatically setting --skip-tokenizer-init to True."
+        )
+        server_args.skip_tokenizer_init = True
+
     return Config(server_args, dynamo_args)
 
 
