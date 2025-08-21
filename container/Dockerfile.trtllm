@@ -413,7 +413,7 @@ COPY --from=build /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     python3 -m pip install --no-cache-dir --break-system-packages --requirement /tmp/requirements.txt && \
     echo "uninstall (networkx packaging torch triton) as we will use NVIDIA's versions later" && \
-    python3 -m pip uninstall --break-system-packages networkx packaging torch triton
+    python3 -m pip uninstall --yes --break-system-packages networkx packaging torch triton
 
 # Install test dependencies
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
