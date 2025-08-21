@@ -9,7 +9,7 @@ use std::{
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, HeaderValue},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -21,7 +21,8 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
-use futures::{stream, StreamExt};
+use futures::{stream, Stream, StreamExt};
+use std::pin::Pin;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -47,6 +48,13 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
+
+// Dynamo Annotation for the query_instance_id signaling the router to return the best worker_instance_id when the FrontEnd is only interested in getting the id and not completing the request
+pub const ANNOTATION_QUERY_INSTANCE_ID: &str = "query_instance_id";
+// Dynamo Annotation for the worker_instance_id coming from the router
+pub const ANNOTATION_WORKER_INSTANCE_ID: &str = "worker_instance_id";
+// Dynamo header to return the worker_instance_id from the router to the FrontEnd
+pub const DYNAMO_WORKER_INSTANCE_ID_HEADER: &str = "worker-instance-id";
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
@@ -264,36 +272,48 @@ async fn completions(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // prepare to process any annotations
-    let annotations = request.annotations();
+    let requested_annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
+    let base_stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // capture the context to cancel the stream if the client disconnects
-    let ctx = stream.context();
+    let ctx = base_stream.context();
 
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    // build injected annotations (e.g., request_id)
+    let injected_annos = requested_annotations
+        .as_ref()
+        .map(|set| {
+            set.iter()
+                .filter_map(|a| {
+                    if a == ANNOTATION_REQUEST_ID {
+                        Annotated::<NvCreateCompletionResponse>::from_annotation(
+                            ANNOTATION_REQUEST_ID,
+                            &request_id,
+                        )
+                        .ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
-    // apply any annotations to the front of the stream
-    let stream = stream::iter(annotations).chain(stream);
+    // decide if caller asked for just the worker id roundtrip
+    let wants_worker_roundtrip = requested_annotations
+        .as_ref()
+        .map_or(false, |set| {
+            set.contains(ANNOTATION_QUERY_INSTANCE_ID)
+                || set.contains(&ANNOTATION_QUERY_INSTANCE_ID.to_string())
+        });
+
+    // prepend + probe first item; returns rebuilt stream and optional header value
+    let (stream, worker_id_header) =
+        prepend_and_probe_worker_id(base_stream, injected_annos, wants_worker_roundtrip).await;
 
     if streaming {
         let stream = stream.map(move |response| {
@@ -307,7 +327,9 @@ async fn completions(
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
-        Ok(sse_stream.into_response())
+        // if FrontEnd wants the worker_instance_id only attach header
+        let resp = attach_worker_header(sse_stream.into_response(), &worker_id_header);
+        return Ok(resp);
     } else {
         // Tap the stream to collect metrics for non-streaming requests without altering items
         let stream = stream.inspect(move |response| {
@@ -326,7 +348,9 @@ async fn completions(
             })?;
 
         inflight_guard.mark_ok();
-        Ok(Json(response).into_response())
+        // if FrontEnd wants the worker_instance_id only attach header
+        let resp = attach_worker_header(Json(response).into_response(), &worker_id_header);
+        return Ok(resp);
     }
 }
 
@@ -491,33 +515,45 @@ async fn chat_completions(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     tracing::trace!("Issuing generate call for chat completions");
-    let annotations = request.annotations();
+    let requested_annotations = request.annotations();
+
+    // The FrontEnd might just want the best worker id and return it
+    let wants_worker_roundtrip = requested_annotations
+        .as_ref()
+        .map_or(false, |set| {
+            set.contains(ANNOTATION_QUERY_INSTANCE_ID)
+                || set.contains(&ANNOTATION_QUERY_INSTANCE_ID.to_string())
+        });
 
     // issue the generate call on the engine
-    let stream = engine
+    let base_stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // capture the context to cancel the stream if the client disconnects
-    let ctx = stream.context();
+    let ctx = base_stream.context();
 
-    // prepare any requested annotations
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    // build any annotations we want to inject at the front (e.g., request_id)
+    let injected_annos = requested_annotations
+        .as_ref()
+        .map(|set| {
+            set.iter()
+                .filter_map(|a| {
+                    if a == ANNOTATION_REQUEST_ID {
+                        Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
-    // apply any annotations to the front of the stream
-    let stream = stream::iter(annotations).chain(stream);
+    // Prepend + probe first item for worker_instance_id (if requested)
+    let (stream, worker_id_header) =
+        prepend_and_probe_worker_id(base_stream, injected_annos, wants_worker_roundtrip).await;
+
 
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
@@ -1324,3 +1360,70 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+// helper to pull ANNOTATION_WORKER_INSTANCE_ID from an annotated event
+fn extract_worker_instance_id<T: Serialize>(ann: &Annotated<T>) -> Option<String> {
+    if let Some(ev) = ann.event.as_deref() {
+        if ev == ANNOTATION_WORKER_INSTANCE_ID {
+            if let Some(comments) = ann.comment.as_ref() {
+                if let Some(first) = comments.first() {
+                    return Some(first.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Prepend injected annotations and (optionally) probe the first stream item to
+/// capture `worker_instance_id`, returning a reconstructed stream and the header value.
+///
+/// - `base_stream`: stream from the engine
+/// - `prepend`: any injected annotations (e.g., request_id) to put in front
+/// - `wants_worker_roundtrip`: true if the client requested `query_instance_id`
+async fn prepend_and_probe_worker_id<T, S>(
+    base_stream: S,
+    prepend: Vec<crate::types::Annotated<T>>,
+    wants_worker_roundtrip: bool,
+) -> (
+    Pin<Box<dyn Stream<Item = crate::types::Annotated<T>> + Send>>,
+    Option<String>,
+)
+where
+    T: Serialize + Send + 'static,
+    S: Stream<Item = crate::types::Annotated<T>> + Send + 'static,
+{
+    // Build: [prepend...] + base_stream
+    let mut s = futures::stream::iter(prepend).chain(base_stream).boxed();
+
+    // Peek first item (if any)
+    let first_opt = s.next().await;
+
+    // Capture worker id if caller asked for it
+    let worker_id = if wants_worker_roundtrip {
+        first_opt
+            .as_ref()
+            .and_then(|a| extract_worker_instance_id(a))
+    } else {
+        None
+    };
+
+    // Rebuild the stream, putting the first item back (if present)
+    let s = match first_opt {
+        Some(first) => futures::stream::once(async move { first }).chain(s).boxed(),
+        None => s,
+    };
+
+    (s, worker_id)
+}
+
+/// Attach the worker id to the HTTP response, if present.
+fn attach_worker_header(mut resp: Response, worker_id: &Option<String>) -> Response {
+    if let Some(id) = worker_id {
+        if let Ok(hv) = HeaderValue::from_str(id) {
+            resp.headers_mut().insert(DYNAMO_WORKER_INSTANCE_ID_HEADER, hv);
+        }
+    }
+    resp
+}
+
