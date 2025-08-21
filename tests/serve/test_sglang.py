@@ -156,7 +156,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             response = requests.post(
                 f"http://localhost:{server.port}/v1/chat/completions",
                 json={
-                    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+                    "model": "Qwen/Qwen3-0.6B",
                     "messages": [
                         {
                             "role": "user",
@@ -194,7 +194,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             response = requests.post(
                 f"http://localhost:{server.port}/v1/completions",
                 json={
-                    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+                    "model": "Qwen/Qwen3-0.6B",
                     "prompt": "Roger Federer is the greatest tennis player of all time",
                     "max_tokens": 30,
                 },
