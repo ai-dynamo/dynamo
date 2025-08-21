@@ -332,9 +332,7 @@ mod tests {
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     use super::*;
-    use crate::distributed::test_helpers::{
-        create_test_drt_async, create_test_drt_with_settings_async,
-    };
+    use crate::distributed::test_helpers::create_test_drt_async;
     use crate::logging::tests::load_log;
     use crate::metrics::MetricsRegistry;
     use anyhow::{anyhow, Result};
@@ -479,7 +477,7 @@ mod integration_tests {
                 ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
             ],
             (async || {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
@@ -558,7 +556,7 @@ mod integration_tests {
 
                 crate::logging::init();
 
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
@@ -607,7 +605,7 @@ mod integration_tests {
                 ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Check if system status server was started
                 let system_info_opt = drt.system_status_server_info();
@@ -716,7 +714,7 @@ mod integration_tests {
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
             ],
             async {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
