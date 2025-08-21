@@ -140,7 +140,9 @@ class VllmBaseWorker:
 
         # Create vLLM engine with metrics logger and KV event publisher attached
         self.stats_logger = StatLoggerFactory(
-            component, self.engine_args.data_parallel_rank or 0
+            component,
+            self.engine_args.data_parallel_rank or 0,
+            metrics_labels=[("model", self.engine_args.model)],
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
@@ -353,7 +355,9 @@ class VllmPDWorker(VllmBaseWorker):
                 extra_args.pop("serialized_request", None)
                 decode_request.sampling_params.extra_args = extra_args
                 logger.debug("Decode request: %s", decode_request)
-                async for decode_response in await self.decode_worker_client.round_robin(
+                async for (
+                    decode_response
+                ) in await self.decode_worker_client.round_robin(
                     decode_request.model_dump_json()
                 ):
                     output = MyRequestOutput.model_validate_json(decode_response.data())
