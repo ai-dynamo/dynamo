@@ -42,6 +42,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Ubuntu**           | 24.04       | ARM64            | Experimental |
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
+
 > [!Note]
 > For **Linux**, the **ARM64** support is experimental and may have limitations.
 > Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04).
@@ -79,8 +80,11 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Host Operating System** | **Version** | **Architecture** | **Status**   |
 | :------------------------ | :---------- | :--------------- | :----------- |
-| **Amazon Linux**          | 2023        | x86_64           | Supported    |
+| **Amazon Linux**          | 2023        | x86_64           | Supported*   |
 
+
+> [!Caution]
+> * There is a known issue with the TensorRT-LLM framework when installed within the AL2023 container via the Python Wheels which makes effective environment setup challenging.
 
 
 ## Build Support
