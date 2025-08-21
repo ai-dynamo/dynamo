@@ -183,7 +183,7 @@ impl
         incoming_request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
+        let mut deltas = request.response_generator();
         let ctx = context.context();
         let req = request.inner.messages.into_iter().next_back().unwrap();
 

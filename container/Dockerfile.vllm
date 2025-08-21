@@ -83,7 +83,7 @@ RUN apt-get update -y && \
     curl tar ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-ARG NIXL_UCX_REF=v1.19.x
+ARG NIXL_UCX_REF=v1.19.0
 ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
