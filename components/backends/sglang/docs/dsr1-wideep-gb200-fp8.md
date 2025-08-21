@@ -29,11 +29,7 @@ docker build \
   -f container/Dockerfile.sglang-wideep \
   -t dynamo-wideep-gb200 \
   --build-arg MODE=blackwell \
-<<<<<<< HEAD:components/backends/sglang/docs/dsr1-wideep-gb200-fp8.md
-  --build-arg SGLANG_IMAGE=lmsysorg/sglang:v0.4.9.post6-cu128-gb200 \
-=======
   --build-arg SGLANG_IMAGE_TAG=v0.5.0rc0-cu129-gb200 \
->>>>>>> main:components/backends/sglang/docs/dsr1-wideep-gb200.md
   --build-arg ARCH=arm64 \
   --build-arg ARCH_ALT=aarch64 \
   .
