@@ -537,74 +537,177 @@ pub mod kserve_test {
         let mut client = get_ready_client(TestPort::StreamInferSuccess as u16, 5).await;
 
         let model_name = "counter";
+        let request_id = "1234";
 
-        let outbound = async_stream::stream! {
-            let request_count = 1;
-            for _ in 0..request_count {
-                let request = ModelInferRequest {
-                    model_name: model_name.into(),
-                    model_version: "1".into(),
-                    id: "1234".into(),
-                    inputs: vec![text_input.clone()],
-                    ..Default::default()
-                };
+        // Response streaming true
+        {
+            let text_input = text_input.clone();
+            let outbound = async_stream::stream! {
+                let request_count = 1;
+                for _ in 0..request_count {
+                    let request = ModelInferRequest {
+                        model_name: model_name.into(),
+                        model_version: "1".into(),
+                        id: request_id.clone().into(),
+                        inputs: vec![text_input.clone(),
+                        inference::model_infer_request::InferInputTensor{
+                            name: "streaming".into(),
+                            datatype: "BOOL".into(),
+                            shape: vec![1],
+                            contents: Some(inference::InferTensorContents {
+                                bool_contents: vec![true],
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
 
-                yield request;
-            }
-        };
+                    yield request;
+                }
+            };
 
-        let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
-        let mut inbound = response.into_inner();
+            let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+            let mut inbound = response.into_inner();
 
-        let mut response_idx = 0;
-        while let Some(response) = inbound.message().await.unwrap() {
-            assert!(response.error_message.is_empty(), "Expected successful inference");
-            assert!(response.infer_response.is_some(), "Expected successful inference");
-            
-            if let Some(response) = &response.infer_response {
-                assert_eq!(
-                    response.model_name,
-                    model_name,
-                    "Expected response of the same model name",
-                );
-                for output in &response.outputs {
-                    match output.name.as_str() {
-                        "text_output" => {
-                            assert_eq!(
-                                output.datatype, "BYTES",
-                                "Expected 'text_output' to have datatype 'BYTES'"
-                            );
-                            assert_eq!(
-                                output.shape, vec![1],
-                                "Expected 'text_output' to have shape [1]"
-                            );
-                            let expected_output : Vec<u8> = format!("choice {response_idx}").into();
-                            assert_eq!(
-                                output.contents.as_ref().unwrap().bytes_contents,
-                                vec![expected_output],
-                                "Expected 'text_output' to contain 'dummy output'"
-                            );
+            let mut response_idx = 0;
+            while let Some(response) = inbound.message().await.unwrap() {
+                assert!(response.error_message.is_empty(), "Expected successful inference");
+                assert!(response.infer_response.is_some(), "Expected successful inference");
+                
+                if let Some(response) = &response.infer_response {
+                    assert_eq!(
+                        response.model_name,
+                        model_name,
+                        "Expected response of the same model name",
+                    );
+                    assert_eq!(
+                        response.id, request_id,
+                        "Expected response ID to match request ID"
+                    );
+                    for output in &response.outputs {
+                        match output.name.as_str() {
+                            "text_output" => {
+                                assert_eq!(
+                                    output.datatype, "BYTES",
+                                    "Expected 'text_output' to have datatype 'BYTES'"
+                                );
+                                assert_eq!(
+                                    output.shape, vec![1],
+                                    "Expected 'text_output' to have shape [1]"
+                                );
+                                let expected_output : Vec<u8> = format!("choice {response_idx}").into();
+                                assert_eq!(
+                                    output.contents.as_ref().unwrap().bytes_contents,
+                                    vec![expected_output],
+                                    "Expected 'text_output' to contain 'dummy output'"
+                                );
+                            }
+                            "finish_reason" => {
+                                assert_eq!(
+                                    output.datatype, "BYTES",
+                                    "Expected 'finish_reason' to have datatype 'BYTES'"
+                                );
+                                assert_eq!(
+                                    output.shape, vec![0],
+                                    "Expected 'finish_reason' to have shape [0]"
+                                );
+                            }
+                            _ => panic!("Unexpected output name: {}", output.name),
                         }
-                        "finish_reason" => {
-                            assert_eq!(
-                                output.datatype, "BYTES",
-                                "Expected 'finish_reason' to have datatype 'BYTES'"
-                            );
-                            assert_eq!(
-                                output.shape, vec![0],
-                                "Expected 'finish_reason' to have shape [0]"
-                            );
-                        }
-                        _ => panic!("Unexpected output name: {}", output.name),
                     }
                 }
+                response_idx += 1;
             }
-            response_idx += 1;
+            assert_eq!(response_idx,
+                10,
+                "Expected 10 responses"
+            )
         }
-        assert_eq!(response_idx,
-            10,
-            "Expected 10 responses"
-        )
+
+        // Response streaming false
+        {
+            let text_input = text_input.clone();
+            let outbound = async_stream::stream! {
+                let request_count = 2;
+                for idx in 0..request_count {
+                    let request = ModelInferRequest {
+                        model_name: model_name.into(),
+                        model_version: "1".into(),
+                        id: format!("{idx}").into(),
+                        inputs: vec![text_input.clone()],
+                        ..Default::default()
+                    };
+
+                    yield request;
+                }
+            };
+
+            let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+            let mut inbound = response.into_inner();
+
+            let mut response_idx = 0;
+            while let Some(response) = inbound.message().await.unwrap() {
+                assert!(response.error_message.is_empty(), "Expected successful inference");
+                assert!(response.infer_response.is_some(), "Expected successful inference");
+                
+                // Each response is the complete inference
+                if let Some(response) = &response.infer_response {
+                    assert_eq!(
+                        response.model_name,
+                        model_name,
+                        "Expected response of the same model name",
+                    );
+                    // [gluo NOTE] Here we assume the responses across requests are
+                    // processed in the order of receiving requests, which is not true
+                    // if we improve stream handling in gRPC frontend. Consider:
+                    //   time 0: request 0 -> long running -> response 0 (time 5)
+                    //   time 1: request 1 -> short running -> response 1 (time 2)
+                    // We expect response 1 to be received before response 0 as their
+                    // requests are independent from each other.
+                    assert_eq!(
+                        response.id, format!("{response_idx}"),
+                        "Expected response ID to match request ID"
+                    );
+                    for output in &response.outputs {
+                        match output.name.as_str() {
+                            "text_output" => {
+                                assert_eq!(
+                                    output.datatype, "BYTES",
+                                    "Expected 'text_output' to have datatype 'BYTES'"
+                                );
+                                assert_eq!(
+                                    output.shape, vec![10],
+                                    "Expected 'text_output' to have shape [10]"
+                                );
+                                let expected_output : Vec<Vec<u8>> = (0..10).map(|i| format!("choice {i}").into()).collect();
+                                assert_eq!(
+                                    output.contents.as_ref().unwrap().bytes_contents,
+                                    expected_output,
+                                    "Expected 'text_output' to contain 'dummy output'"
+                                );
+                            }
+                            "finish_reason" => {
+                                assert_eq!(
+                                    output.datatype, "BYTES",
+                                    "Expected 'finish_reason' to have datatype 'BYTES'"
+                                );
+                                assert_eq!(
+                                    output.shape, vec![0],
+                                    "Expected 'finish_reason' to have shape [0]"
+                                );
+                            }
+                            _ => panic!("Unexpected output name: {}", output.name),
+                        }
+                    }
+                }
+                response_idx += 1;
+            }
+            assert_eq!(response_idx,
+                2,
+                "Expected 2 responses, each for one of the two requests"
+            )
+        }
     }
 
     #[rstest]
