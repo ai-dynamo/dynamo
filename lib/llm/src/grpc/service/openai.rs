@@ -1,27 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{pin::Pin, sync::Arc};
-use anyhow::Error;
+use std::sync::Arc;
 use dynamo_runtime::{
     engine::{AsyncEngineContext, AsyncEngineStream}, pipeline::{AsyncEngineContextProvider, Context}, protocols::annotated::AnnotationsProvider
 };
 use futures::{stream, Stream, StreamExt};
-use serde::{Deserialize, Serialize};
 
-use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
 use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
 };
-use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 
 use super::kserve;
+
 // [gluo NOTE] These are common utilities that should be shared between frontends
+use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
 use crate::http::service::{
     metrics::{Endpoint, ResponseMetricCollector},
     disconnect::{
-        create_connection_monitor, monitor_for_disconnects, ConnectionHandle,
+        create_connection_monitor, ConnectionHandle,
     },
 };
 

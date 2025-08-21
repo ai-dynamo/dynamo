@@ -84,6 +84,7 @@ pub struct KserveService {
 
     port: u16,
     host: String,
+    request_template: Option<RequestTemplate>,
 }
 
 #[derive(Clone, Builder)]
@@ -95,7 +96,6 @@ pub struct KserveServiceConfig {
     #[builder(setter(into), default = "String::from(\"0.0.0.0\")")]
     host: String,
 
-     // [WIP] should apply to all request type.
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
@@ -140,166 +140,36 @@ impl KserveService {
     }
 }
 
-impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
-    type Error = Status;
+impl KserveServiceConfigBuilder {
+    pub fn build(self) -> Result<KserveService, anyhow::Error> {
+        let config: KserveServiceConfig = self.build_internal()?;
 
-    fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
-        // iterate through inputs
-        let mut text_input = None;
-        let mut stream = false;
-        for input in request.inputs.iter() {
-            match input.name.as_str() {
-                "text_input" => {
-                    if input.datatype != "BYTES" {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected 'text_input' to be of type BYTES for string input, got {:?}",
-                            input.datatype
-                        )));
-                    }
-                    if input.shape != vec![1] && input.shape != vec![1, 1] {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected 'text_input' to have shape [1], got {:?}",
-                            input.shape
-                        )));
-                    }
-                    match &input.contents {
-                        Some(content) => {
-                            let bytes = &content.bytes_contents[0];
-                            text_input = Some(String::from_utf8_lossy(&bytes).to_string());
-                        }
-                        _ => {
-                            // [gluo WIP] look for 'raw_input_contents'
-                            return Err(Status::invalid_argument(format!(
-                                "[gluo WIP] Currently expecting 'text_input' contents to be of type BYTES"
-                            )));
-                        }
-                    }
-                }
-                "streaming" | "stream" => {
-                    if input.datatype != "BOOL" {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected '{}' to be of type BOOL, got {:?}",
-                            input.name,
-                            input.datatype
-                        )));
-                    }
-                    if input.shape != vec![1] {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected 'stream' to have shape [1], got {:?}",
-                            input.shape
-                        )));
-                    }
-                    match &input.contents {
-                        Some(content) => {
-                            stream = content.bool_contents[0];
-                        }
-                        _ => {
-                            return Err(Status::invalid_argument(format!(
-                                "expected 'stream' contents to be of type BOOL"
-                            )));
-                        }
-                    }
-                }
-                _ => {
-                    return Err(Status::invalid_argument(format!("Invalid input name: {}, supported inputs are 'text_input', 'stream'", input.name)));
-                }
-            }
-        }
+        let model_manager = Arc::new(ModelManager::new());
+        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
 
-        // return error if text_input is None
-        let text_input = match text_input {
-            Some(input) => input,
-            None => {
-                return Err(Status::invalid_argument(
-                    "Missing required input: 'text_input'"
-                ));
-            }
-        };
-        
+        // enable prometheus metrics
+        let registry = metrics::Registry::new();
+        state.metrics_clone().register(&registry)?;
 
-        // [gluo FIXME] directly construct the object
-        Ok(NvCreateCompletionRequest {
-            inner: CreateCompletionRequest {
-                model: request.model_name,
-                prompt: async_openai::types::Prompt::String(text_input),
-                stream: Some(stream),
-                ..Default::default()
-            },
-            nvext: None,
+        Ok(KserveService {
+            state,
+            port: config.port,
+            host: config.host,
+            request_template: config.request_template,
         })
     }
-}
 
-impl TryFrom<NvCreateCompletionResponse> for ModelInferResponse {
-    type Error = anyhow::Error;
+    pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
+        self.request_template = Some(request_template);
+        self
+    }
 
-    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
-        let mut outputs = vec![];
-        let mut text_output = vec![];
-        let mut finish_reason = vec![];
-        for choice in &response.inner.choices {
-            text_output.push(choice.text.clone());
-            if let Some(reason) = choice.finish_reason.as_ref() {
-                match reason {
-                    CompletionFinishReason::Stop => { finish_reason.push("stop".to_string()); }
-                    CompletionFinishReason::Length => { finish_reason.push("length".to_string()); }
-                    CompletionFinishReason::ContentFilter => { finish_reason.push("content_filter".to_string()); }
-                }
-            }
-        }
-        outputs.push(inference::model_infer_response::InferOutputTensor {
-                    name: "text_output".to_string(),
-                    datatype: "BYTES".to_string(),
-                    shape: vec![text_output.len() as i64],
-                contents: Some(inference::InferTensorContents {
-                    bytes_contents: text_output.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        outputs.push(inference::model_infer_response::InferOutputTensor {
-                    name: "finish_reason".to_string(),
-                    datatype: "BYTES".to_string(),
-                    shape: vec![finish_reason.len() as i64],
-                contents: Some(inference::InferTensorContents {
-                    bytes_contents: finish_reason.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        
-
-        Ok(ModelInferResponse {
-            model_name: response.inner.model,
-            model_version: "1".to_string(),
-            id: response.inner.id,
-            outputs,
-            parameters: ::std::collections::HashMap::<String, InferParameter>::new(),
-            raw_output_contents: vec![],
-        })
+    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
+        self.etcd_client = Some(etcd_client);
+        self
     }
 }
 
-impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
-        match ModelInferResponse::try_from(response) {
-            Ok(response) => {
-                Ok(ModelStreamInferResponse {
-                    infer_response: Some(response),
-                    ..Default::default()
-                })
-            }
-            Err(e) => {
-                Ok(ModelStreamInferResponse {
-                    infer_response: None,
-                    error_message: format!("Failed to convert response: {}", e).into(),
-                })
-            }
-        }
-    }
-}
 
 #[tonic::async_trait]
 impl GrpcInferenceService for KserveService {
@@ -307,13 +177,26 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
-        let completion_request: NvCreateCompletionRequest = request.into_inner().try_into().map_err(|e| {
+        let mut completion_request: NvCreateCompletionRequest = request.into_inner().try_into().map_err(|e| {
             Status::invalid_argument(format!("Failed to parse request: {}", e))
         })?;
 
         if completion_request.inner.stream.unwrap_or(false) {
             // return error that streaming is not supported
             return Err(Status::invalid_argument("Streaming is not supported for this endpoint"));
+        }
+
+        // Apply template values if present
+        if let Some(template) = self.request_template.as_ref() {
+            if completion_request.inner.model.is_empty() {
+                completion_request.inner.model = template.model.clone();
+            }
+            if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+                completion_request.inner.temperature = Some(template.temperature);
+            }
+            if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+                completion_request.inner.max_tokens = Some(template.max_completion_tokens);
+            }
         }
 
         let stream = completion_response_stream(self.state_clone(), completion_request).await?;
@@ -343,33 +226,63 @@ impl GrpcInferenceService for KserveService {
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
         let mut request_stream = request.into_inner();
         let state = self.state_clone();
+        let template = self.request_template.clone();
         let output = async_stream::try_stream! {
             // [gluo FIXME] should be able to demux request / response streaming
             // await requests in a separate task until cancellation / completion,
             // and passing AsyncEngineStream for each request to the response stream
             // which will be collectively polling.
             while let Some(request) = request_stream.next().await {
-                // [gluo FIXME] request error handling
-                let completion_request: NvCreateCompletionRequest = request.unwrap().try_into().map_err(|e| {
+                let mut completion_request: NvCreateCompletionRequest = request.unwrap().try_into().map_err(|e| {
                     Status::invalid_argument(format!("Failed to parse request: {}", e))
                 })?;
 
-                // [gluo FIXME] handle non-streaming
+                // Apply template values if present
+                if let Some(template) = &template {
+                    if completion_request.inner.model.is_empty() {
+                        completion_request.inner.model = template.model.clone();
+                    }
+                    if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+                        completion_request.inner.temperature = Some(template.temperature);
+                    }
+                    if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+                        completion_request.inner.max_tokens = Some(template.max_completion_tokens);
+                    }
+                }
+
+                let streaming = completion_request.inner.stream.unwrap_or(false);
+
                 let stream = completion_response_stream(state.clone(), completion_request).await?;
 
-                pin_mut!(stream);
-                while let Some(response) = stream.next().await {
-                    match response.data {
-                        Some(data) => {
-                            let reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
-                                Status::invalid_argument(format!("Failed to parse response: {}", e))
-                            })?;
-                            yield reply;
-                        },
-                        None => {
-                            // Skip if no data is present, the response is for annotation
-                        },
+                if streaming {
+                    pin_mut!(stream);
+                    while let Some(response) = stream.next().await {
+                        match response.data {
+                            Some(data) => {
+                                let reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                    Status::invalid_argument(format!("Failed to parse response: {}", e))
+                                })?;
+                                yield reply;
+                            },
+                            None => {
+                                // Skip if no data is present, the response is for annotation
+                            },
+                        }
                     }
+                } else {
+                    let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(
+                                "Failed to fold completions stream: {:?}",
+                                e
+                            );
+                            Status::internal("Failed to fold completions stream")
+                        })?;
+
+                    yield completion_response.try_into().map_err(|e| {
+                        Status::invalid_argument(format!("Failed to parse response: {}", e))
+                    })?;
                 }
             }
         };
@@ -475,31 +388,161 @@ impl GrpcInferenceService for KserveService {
     }
 }
 
-impl KserveServiceConfigBuilder {
-    pub fn build(self) -> Result<KserveService, anyhow::Error> {
-        let config: KserveServiceConfig = self.build_internal()?;
+impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
+    type Error = Status;
 
-        let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
+    fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
+        // iterate through inputs
+        let mut text_input = None;
+        let mut stream = false;
+        for input in request.inputs.iter() {
+            match input.name.as_str() {
+                "text_input" => {
+                    if input.datatype != "BYTES" {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'text_input' to be of type BYTES for string input, got {:?}",
+                            input.datatype
+                        )));
+                    }
+                    if input.shape != vec![1] && input.shape != vec![1, 1] {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'text_input' to have shape [1], got {:?}",
+                            input.shape
+                        )));
+                    }
+                    match &input.contents {
+                        Some(content) => {
+                            let bytes = &content.bytes_contents[0];
+                            text_input = Some(String::from_utf8_lossy(&bytes).to_string());
+                        }
+                        _ => {
+                            // [gluo WIP] look for 'raw_input_contents'
+                            return Err(Status::invalid_argument(format!(
+                                "[gluo WIP] Currently expecting 'text_input' contents to be of type BYTES"
+                            )));
+                        }
+                    }
+                }
+                "streaming" | "stream" => {
+                    if input.datatype != "BOOL" {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected '{}' to be of type BOOL, got {:?}",
+                            input.name,
+                            input.datatype
+                        )));
+                    }
+                    if input.shape != vec![1] {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'stream' to have shape [1], got {:?}",
+                            input.shape
+                        )));
+                    }
+                    match &input.contents {
+                        Some(content) => {
+                            stream = content.bool_contents[0];
+                        }
+                        _ => {
+                            return Err(Status::invalid_argument(format!(
+                                "expected 'stream' contents to be of type BOOL"
+                            )));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Status::invalid_argument(format!("Invalid input name: {}, supported inputs are 'text_input', 'stream'", input.name)));
+                }
+            }
+        }
 
-        // enable prometheus metrics
-        let registry = metrics::Registry::new();
-        state.metrics_clone().register(&registry)?;
-
-        Ok(KserveService {
-            state,
-            port: config.port,
-            host: config.host,
+        // return error if text_input is None
+        let text_input = match text_input {
+            Some(input) => input,
+            None => {
+                return Err(Status::invalid_argument(
+                    "Missing required input: 'text_input'"
+                ));
+            }
+        };
+        
+        Ok(NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: request.model_name,
+                prompt: async_openai::types::Prompt::String(text_input),
+                stream: Some(stream),
+                ..Default::default()
+            },
+            nvext: None,
         })
     }
+}
 
-    pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
-        self.request_template = Some(request_template);
-        self
+impl TryFrom<NvCreateCompletionResponse> for ModelInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
+        let mut outputs = vec![];
+        let mut text_output = vec![];
+        let mut finish_reason = vec![];
+        for choice in &response.inner.choices {
+            text_output.push(choice.text.clone());
+            if let Some(reason) = choice.finish_reason.as_ref() {
+                match reason {
+                    CompletionFinishReason::Stop => { finish_reason.push("stop".to_string()); }
+                    CompletionFinishReason::Length => { finish_reason.push("length".to_string()); }
+                    CompletionFinishReason::ContentFilter => { finish_reason.push("content_filter".to_string()); }
+                }
+            }
+        }
+        outputs.push(inference::model_infer_response::InferOutputTensor {
+                    name: "text_output".to_string(),
+                    datatype: "BYTES".to_string(),
+                    shape: vec![text_output.len() as i64],
+                contents: Some(inference::InferTensorContents {
+                    bytes_contents: text_output.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        outputs.push(inference::model_infer_response::InferOutputTensor {
+                    name: "finish_reason".to_string(),
+                    datatype: "BYTES".to_string(),
+                    shape: vec![finish_reason.len() as i64],
+                contents: Some(inference::InferTensorContents {
+                    bytes_contents: finish_reason.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        
+
+        Ok(ModelInferResponse {
+            model_name: response.inner.model,
+            model_version: "1".to_string(),
+            id: response.inner.id,
+            outputs,
+            parameters: ::std::collections::HashMap::<String, InferParameter>::new(),
+            raw_output_contents: vec![],
+        })
     }
+}
 
-    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
-        self.etcd_client = Some(etcd_client);
-        self
+impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
+        match ModelInferResponse::try_from(response) {
+            Ok(response) => {
+                Ok(ModelStreamInferResponse {
+                    infer_response: Some(response),
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                Ok(ModelStreamInferResponse {
+                    infer_response: None,
+                    error_message: format!("Failed to convert response: {}", e).into(),
+                })
+            }
+        }
     }
 }
