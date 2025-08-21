@@ -21,7 +21,7 @@ This guide demonstrates how to deploy google/gemma-3-1b-it with Variable Sliding
 VSWA is a mechanism in which a model’s layers alternate between multiple sliding window sizes. An example of this is Gemma 3, which incorporates both global attention layers and sliding window layers.
 
 > [!Note]
-> - Ensure that required services such as `nats` and `etcd` are running before starting.  
+> - Ensure that required services such as `nats` and `etcd` are running before starting.
 > - Request access to `google/gemma-3-1b-it` on Hugging Face and set your `HF_TOKEN` environment variable for authentication.
 
 ### Aggregated Serving
