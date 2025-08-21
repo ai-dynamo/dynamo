@@ -493,7 +493,8 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages "cuda-python>=
     python3 -m pip install --no-cache-dir --break-system-packages \
         /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
         /workspace/wheelhouse/ai_dynamo*any.whl \
-        /workspace/wheelhouse/nixl*.whl
+        /workspace/wheelhouse/nixl*.whl && \
+    python3 -m pip uninstall -y --break-system-packages triton
 
 COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
 COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
