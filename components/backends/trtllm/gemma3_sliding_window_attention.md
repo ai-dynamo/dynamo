@@ -20,13 +20,6 @@ limitations under the License.
 This guide demonstrates how to deploy google/gemma-3-1b-it with Variable Sliding Window Attention (VSWA) using Dynamo. Since google/gemma-3-1b-it is a small model, each aggregated, decode, or prefill worker only requires one H100 GPU or one GB200 GPU.
 VSWA is a mechanism in which a model’s layers alternate between multiple sliding window sizes. An example of this is Gemma 3, which incorporates both global attention layers and sliding window layers.
 
-## Notes
-* To run Gemma 3 with VSWA and KV Routing with KV block reuse, ensure that the container is built using commit ID `c9eebcb4541d961ab390f0bd0a22e2c89f1bcc78` from Tensorrt-LLM.
-```bash
-./container/build.sh --framework trtllm --tensorrtllm-commit c9eebcb4541d961ab390f0bd0a22e2c89f1bcc78
-```
-* The 1.0.0rc4 release version of TensorRT-LLM can also run Gemma 3 with VSWA, but KV block reuse cannot be turned on in that version.
-
 ### Aggregated Serving
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
