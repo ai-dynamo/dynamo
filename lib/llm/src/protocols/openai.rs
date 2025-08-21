@@ -195,7 +195,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
 }
 
 pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debug>:
-    Send + Sync + 'static
+    Send + 'static
 {
     fn choice_from_postprocessor(
         &mut self,

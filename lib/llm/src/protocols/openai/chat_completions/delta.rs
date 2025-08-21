@@ -46,7 +46,7 @@ pub struct DeltaGeneratorOptions {
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DeltaGenerator {
     /// Unique identifier for the chat completion session.
     id: String,
