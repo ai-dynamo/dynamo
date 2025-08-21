@@ -20,6 +20,7 @@ pub mod kserve_test {
         tonic::include_proto!("inference");
     }
     use chrono::format;
+    use dynamo_llm::entrypoint::input::grpc;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStreamInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelConfigRequest, ModelConfigResponse};
 
@@ -55,8 +56,8 @@ pub mod kserve_test {
     use prometheus::{proto::MetricType, Registry};
     use reqwest::StatusCode;
     use rstest::*;
-    use tonic::transport::Channel;
-    use std::time::Duration;
+    use tonic::{transport::Channel, Request, Response};
+    use std::time::{self, Duration};
     use std::{io::Cursor, sync::Arc};
     use tokio::time::{sleep, timeout};
     use tokio_util::codec::FramedRead;
@@ -410,6 +411,29 @@ pub mod kserve_test {
             "Expected error message to contain 'Streaming is not supported', got: {}",
             err.message()
         );
+
+        // AlwaysFailEngine
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: "failure".into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: vec![text_input.clone()],
+            ..Default::default()
+        });
+
+        let response = client.model_infer(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for streaming, get {}", err
+        );
+        assert!(
+            err.message().contains("Failed to generate completions:"),
+            "Expected error message to contain 'Failed to generate completions:', got: {}",
+            err.message()
+        );
     }
 
     #[rstest]
@@ -480,288 +504,143 @@ pub mod kserve_test {
         }
     }
 
-    // [gluo WIP] re-enable below
-    // #[allow(deprecated)]
-    // #[tokio::test]
-    async fn test_grpc_service() {
-        let service = GrpcService::builder().port(8989).build().unwrap();
-        let state = service.state_clone();
-        let manager = state.manager();
+    #[rstest]
+    #[tokio::test]
+    async fn test_stream_infer_sucess(service_with_engines: (GrpcService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+        text_input: inference::model_infer_request::InferInputTensor) {
+        // start server
+        let service = service_with_engines.0;
 
         let token = CancellationToken::new();
         let cancel_token = token.clone();
         let task = tokio::spawn(async move { service.run(token.clone()).await });
 
-        let registry = Registry::new();
+        // create client and send request to unregistered model
+        let mut client = get_ready_client(8989, 5).await;
 
-        let counter = Arc::new(CounterEngine {});
-        let result = manager.add_completions_model("foo", counter);
-        assert!(result.is_ok());
+        let model_name = "counter";
 
-        let failure = Arc::new(AlwaysFailEngine {});
-        let result = manager.add_chat_completions_model("bar", failure.clone());
-        assert!(result.is_ok());
+        let outbound = async_stream::stream! {
+            let request_count = 1;
+            for _ in 0..request_count {
+                let request = ModelInferRequest {
+                    model_name: model_name.into(),
+                    model_version: "1".into(),
+                    id: "1234".into(),
+                    inputs: vec![text_input.clone()],
+                    ..Default::default()
+                };
 
-        let result = manager.add_completions_model("bar", failure);
-        assert!(result.is_ok());
+                yield request;
+            }
+        };
 
-        let metrics = state.metrics_clone();
-        metrics.register(&registry).unwrap();
+        let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+        let mut inbound = response.into_inner();
 
-        let mut foo_counters = [0u64; 8];
-        let mut bar_counters = [0u64; 8];
-
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-
-        let client = reqwest::Client::new();
-
-        let message = async_openai::types::ChatCompletionRequestMessage::User(
-            async_openai::types::ChatCompletionRequestUserMessage {
-                content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                    "hi".to_string(),
-                ),
-                name: None,
-            },
-        );
-
-        let mut request = async_openai::types::CreateChatCompletionRequestArgs::default()
-            .model("foo")
-            .messages(vec![message])
-            .build()
-            .expect("Failed to build request");
-
-        // let mut request = ChatCompletionRequest::builder()
-        //     .model("foo")
-        //     .add_user_message("hi")
-        //     .build()
-        //     .unwrap();
-
-        // ==== ChatCompletions / Stream / Success ====
-        request.stream = Some(true);
-
-        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
-        request.max_tokens = Some(3000);
-
-        let response = client
-            .post("http://localhost:8989/v1/chat/completions")
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-
-        assert!(response.status().is_success(), "{:?}", response);
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        assert_eq!(metrics.get_inflight_count("foo"), 1);
-
-        // process byte stream
-        let _ = response.bytes().await.unwrap();
-
-        inc_counter(
-            Endpoint::ChatCompletions,
-            RequestType::Stream,
-            Status::Success,
-            &mut foo_counters,
-        );
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-
-        // check registry and look or the request duration histogram
-        let families = registry.gather();
-        let histogram_metric_family = families
-            .into_iter()
-            .find(|m| m.get_name() == format!("{}_request_duration_seconds", FRONTEND_METRIC_PREFIX))
-            .expect("Histogram metric not found");
-
-        assert_eq!(
-            histogram_metric_family.get_field_type(),
-            MetricType::HISTOGRAM
-        );
-
-        let histogram_metric = histogram_metric_family.get_metric();
-
-        assert_eq!(histogram_metric.len(), 1); // We have one metric with label model
-
-        let metric = &histogram_metric[0];
-        let histogram = metric.get_histogram();
-
-        let buckets = histogram.get_bucket();
-
-        let mut found = false;
-
-        for bucket in buckets {
-            let upper_bound = bucket.get_upper_bound();
-            let cumulative_count = bucket.get_cumulative_count();
-
-            println!(
-                "Bucket upper bound: {}, count: {}",
-                upper_bound, cumulative_count
-            );
-
-            // Since our observation is 2.5, it should fall into the bucket with upper bound 4.0
-            if upper_bound >= 4.0 {
+        let mut response_idx = 0;
+        while let Some(response) = inbound.message().await.unwrap() {
+            assert!(response.error_message.is_empty(), "Expected successful inference");
+            assert!(response.infer_response.is_some(), "Expected successful inference");
+            
+            if let Some(response) = &response.infer_response {
                 assert_eq!(
-                    cumulative_count, 1,
-                    "Observation should be counted in the 4.0 bucket"
+                    response.model_name,
+                    model_name,
+                    "Expected response of the same model name",
                 );
-                found = true;
-            } else {
-                assert_eq!(
-                    cumulative_count, 0,
-                    "No observations should be in this bucket"
-                );
+                for output in &response.outputs {
+                    match output.name.as_str() {
+                        "text_output" => {
+                            assert_eq!(
+                                output.datatype, "BYTES",
+                                "Expected 'text_output' to have datatype 'BYTES'"
+                            );
+                            assert_eq!(
+                                output.shape, vec![1],
+                                "Expected 'text_output' to have shape [1]"
+                            );
+                            let expected_output : Vec<u8> = format!("choice {response_idx}").into();
+                            assert_eq!(
+                                output.contents.as_ref().unwrap().bytes_contents,
+                                vec![expected_output],
+                                "Expected 'text_output' to contain 'dummy output'"
+                            );
+                        }
+                        "finish_reason" => {
+                            assert_eq!(
+                                output.datatype, "BYTES",
+                                "Expected 'finish_reason' to have datatype 'BYTES'"
+                            );
+                            assert_eq!(
+                                output.shape, vec![0],
+                                "Expected 'finish_reason' to have shape [0]"
+                            );
+                        }
+                        _ => panic!("Unexpected output name: {}", output.name),
+                    }
+                }
+            }
+            response_idx += 1;
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_stream_infer_failure(service_with_engines: (GrpcService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+        text_input: inference::model_infer_request::InferInputTensor) {
+        // start server
+        let service = service_with_engines.0;
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+        // create client and send request to unregistered model
+        let mut client = get_ready_client(8989, 5).await;
+
+        let model_name = "failure";
+
+        let outbound = async_stream::stream! {
+            let request_count = 1;
+            for _ in 0..request_count {
+                let request = ModelInferRequest {
+                    model_name: model_name.into(),
+                    model_version: "1".into(),
+                    id: "1234".into(),
+                    inputs: vec![text_input.clone()],
+                    ..Default::default()
+                };
+
+                yield request;
+            }
+        };
+
+        let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+        let mut inbound = response.into_inner();
+
+        loop {
+            match inbound.message().await {
+                Ok(Some(_)) => {
+                    panic!("Expecting failure in the stream");
+                },
+                Err(err) => {
+                    assert_eq!(
+                        err.code(),
+                        tonic::Code::Internal,
+                        "Expected Internal error for streaming, get {}", err
+                    );
+                    assert!(
+                        err.message().contains("Failed to generate completions:"),
+                        "Expected error message to contain 'Failed to generate completions:', got: {}",
+                        err.message()
+                    );
+                }
+                Ok(None) => {
+                    // End of stream
+                    break;
+                }
             }
         }
-
-        assert!(found, "The expected bucket was not found");
-        // ==== ChatCompletions / Stream / Success ====
-
-        // ==== ChatCompletions / Unary / Success ====
-        request.stream = Some(false);
-
-        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
-        request.max_tokens = Some(0);
-
-        let future = client
-            .post("http://localhost:8989/v1/chat/completions")
-            .json(&request)
-            .send();
-
-        let response = future.await.unwrap();
-
-        assert!(response.status().is_success(), "{:?}", response);
-        inc_counter(
-            Endpoint::ChatCompletions,
-            RequestType::Unary,
-            Status::Success,
-            &mut foo_counters,
-        );
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-        // ==== ChatCompletions / Unary / Success ====
-
-        // ==== ChatCompletions / Stream / Error ====
-        request.model = "bar".to_string();
-
-        // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
-        request.max_tokens = Some(0);
-        request.stream = Some(true);
-
-        let response = client
-            .post("http://localhost:8989/v1/chat/completions")
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        inc_counter(
-            Endpoint::ChatCompletions,
-            RequestType::Stream,
-            Status::Error,
-            &mut bar_counters,
-        );
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-        // ==== ChatCompletions / Stream / Error ====
-
-        // ==== ChatCompletions / Unary / Error ====
-        request.stream = Some(false);
-
-        let response = client
-            .post("http://localhost:8989/v1/chat/completions")
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        inc_counter(
-            Endpoint::ChatCompletions,
-            RequestType::Unary,
-            Status::Error,
-            &mut bar_counters,
-        );
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-        // ==== ChatCompletions / Unary / Error ====
-
-        // ==== Completions / Unary / Error ====
-        let mut request = async_openai::types::CreateCompletionRequestArgs::default()
-            .model("bar")
-            .prompt("hi")
-            .build()
-            .unwrap();
-
-        let response = client
-            .post("http://localhost:8989/v1/completions")
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        inc_counter(
-            Endpoint::Completions,
-            RequestType::Unary,
-            Status::Error,
-            &mut bar_counters,
-        );
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-        // ==== Completions / Unary / Error ====
-
-        // ==== Completions / Stream / Error ====
-        request.stream = Some(true);
-
-        let response = client
-            .post("http://localhost:8989/v1/completions")
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        inc_counter(
-            Endpoint::Completions,
-            RequestType::Stream,
-            Status::Error,
-            &mut bar_counters,
-        );
-        compare_counters(&metrics, "foo", &foo_counters);
-        compare_counters(&metrics, "bar", &bar_counters);
-        // ==== Completions / Stream / Error ====
-
-        // =========== Test Invalid Request ===========
-        // send a completion request to a chat endpoint
-        request.stream = Some(false);
-
-        let response = client
-            .post("http://localhost:8989/v1/chat/completions")
-            .json(&request)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(
-            response.status(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{:?}",
-            response
-        );
-
-        // =========== Query /metrics endpoint ===========
-        let response = client
-            .get("http://localhost:8989/metrics")
-            .send()
-            .await
-            .unwrap();
-
-        assert!(response.status().is_success(), "{:?}", response);
-        println!("{}", response.text().await.unwrap());
-
-        cancel_token.cancel();
-        task.await.unwrap().unwrap();
     }
 }

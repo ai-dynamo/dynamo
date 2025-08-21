@@ -1,29 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::env::var;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
+use crate::grpc::service::kserve::inference::DataType;
+use crate::grpc::service::kserve::inference::ModelInput;
+use crate::grpc::service::kserve::inference::ModelOutput;
 use crate::http::service::metrics;
 use crate::http::service::Metrics;
-use crate::http::service::RouteDoc;
 
 use crate::discovery::ModelManager;
-use crate::preprocessor::prompt;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
-use async_nats::jetstream::stream;
 use async_openai::types::CompletionFinishReason;
 use async_openai::types::CreateCompletionRequest;
-use async_openai::types::Model;
-use async_openai::types::Stop;
 use derive_builder::Builder;
 use dynamo_runtime::transports::etcd;
+use futures::pin_mut;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
+use tokio_stream::{Stream, StreamExt};
 
 use tonic::{transport::Server, Request, Response, Status};
 use crate::grpc::service::openai::{model_infer_completions, completion_response_stream};
@@ -34,7 +31,7 @@ pub mod inference {
     tonic::include_proto!("inference");
 }
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
-use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStreamInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelConfigRequest, ModelConfigResponse};
+use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStreamInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelConfigRequest, ModelConfigResponse, ModelConfig};
 
 /// [WIP] Understand the State, central piece for dynamo logic
 /// gRPC service shared state
@@ -79,11 +76,6 @@ impl State {
     pub fn etcd_client(&self) -> Option<&etcd::Client> {
         self.etcd_client.as_ref()
     }
-
-    // TODO
-    pub fn sse_keep_alive(&self) -> Option<Duration> {
-        None
-    }
 }
 
 // [WIP] rename to Kserve?
@@ -92,10 +84,8 @@ pub struct GrpcService {
     // The state we share with every request handler
     state: Arc<State>,
 
-    // router: axum::Router, // [WIP] should be the tonic server
     port: u16,
     host: String,
-    // route_docs: Vec<RouteDoc>, // [WIP] does this apply for gRPC?
 }
 
 #[derive(Clone, Builder)]
@@ -150,11 +140,6 @@ impl GrpcService {
 
         Ok(())
     }
-
-    // Documentation of exposed HTTP endpoints
-    // pub fn route_docs(&self) -> &[RouteDoc] {
-    //     &self.route_docs
-    // }
 }
 
 impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
@@ -173,7 +158,7 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                             input.datatype
                         )));
                     }
-                    if input.shape != vec![1] {
+                    if input.shape != vec![1] && input.shape != vec![1, 1] {
                         return Err(Status::invalid_argument(format!(
                             "Expected 'text_input' to have shape [1], got {:?}",
                             input.shape
@@ -333,7 +318,18 @@ impl GrpcInferenceService for GrpcService {
             return Err(Status::invalid_argument("Streaming is not supported for this endpoint"));
         }
 
-        let completion_response = model_infer_completions(self.state_clone(), completion_request).await?;
+        // let completion_response = model_infer_completions(self.state_clone(), completion_request).await?;
+        let stream = completion_response_stream(self.state_clone(), completion_request).await?;
+
+        let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to fold completions stream: {:?}",
+                    e
+                );
+                Status::internal("Failed to fold completions stream")
+            })?;
 
         let reply = completion_response.try_into().map_err(|e| {
             Status::invalid_argument(format!("Failed to parse response: {}", e))
@@ -351,15 +347,20 @@ impl GrpcInferenceService for GrpcService {
         let mut stream = request.into_inner();
         let state = self.state_clone();
         let output = async_stream::try_stream! {
-            // [gluo FIXME] should be able to demux request / response streaming 
+            // [gluo FIXME] should be able to demux request / response streaming
+            // await requests in a separate task until cancellation / completion,
+            // and passing AsyncEngineStream for each request to the response stream
+            // which will be collectively polling.
             while let Some(request) = stream.next().await {
                 // [gluo FIXME] request error handling
                 let completion_request: NvCreateCompletionRequest = request.unwrap().try_into().map_err(|e| {
                     Status::invalid_argument(format!("Failed to parse request: {}", e))
                 })?;
 
-                let mut stream = completion_response_stream(state.clone(), completion_request).await?;
+                // [gluo FIXME] handle non-streaming
+                let stream = completion_response_stream(state.clone(), completion_request).await?;
 
+                pin_mut!(stream);
                 while let Some(response) = stream.next().await {
                     match response.data {
                         Some(data) => {
@@ -369,8 +370,8 @@ impl GrpcInferenceService for GrpcService {
                             yield reply;
                         },
                         None => {
-                            // Handle the case where there is no data
-                        }
+                            // Skip if no data is present, the response is for annotation
+                        },
                     }
                 }
             }
@@ -381,16 +382,99 @@ impl GrpcInferenceService for GrpcService {
 
     async fn model_metadata(
         &self,
-        _request: Request<ModelMetadataRequest>,
+        request: Request<ModelMetadataRequest>,
     ) -> Result<Response<ModelMetadataResponse>, Status> {
-        unimplemented!()
+        let models = self.state.manager().list_completions_models();
+        let request_model_name = request.into_inner().name;
+        for model_name in models {
+            if request_model_name == model_name {
+                return Ok(Response::new(ModelMetadataResponse {
+                    name: model_name,
+                    versions: vec!["1".to_string()],
+                    platform: "dynamo".to_string(),
+                    inputs: vec![
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "text_input".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![1],
+                        },
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "streaming".to_string(),
+                            datatype: "BOOL".to_string(),
+                            shape: vec![1],
+                        },
+                    ],
+                    outputs: vec![
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "text_output".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![-1],
+                        },
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "finish_reason".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![-1],
+                        },
+                    ],
+                }));
+            }
+        }
+        Err(Status::not_found(format!(
+            "Model '{}' not found",
+            request_model_name
+        )))
     }
 
     async fn model_config(
         &self,
-        _request: Request<ModelConfigRequest>,
+        request: Request<ModelConfigRequest>,
     ) -> Result<Response<ModelConfigResponse>, Status> {
-        unimplemented!()
+        let models = self.state.manager().list_completions_models();
+        let request_model_name = request.into_inner().name;
+        for model_name in models {
+            if request_model_name == model_name {
+                let config = ModelConfig {
+                    name: model_name,
+                    platform: "dynamo".to_string(),
+                    backend: "dynamo".to_string(),
+                    input: vec![ModelInput {
+                        name: "text_input".to_string(),
+                        data_type: DataType::TypeString as i32,
+                        dims: vec![1],
+                        ..Default::default()
+                    },
+                    ModelInput {
+                        name: "streaming".to_string(),
+                        data_type: DataType::TypeBool as i32,
+                        dims: vec![1],
+                        optional: true,
+                        ..Default::default()
+                    }],
+                    output: vec![
+                        ModelOutput {
+                            name: "text_output".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![-1],
+                            ..Default::default()    
+                        },
+                        ModelOutput {
+                            name: "finish_reason".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![-1],
+                            ..Default::default()    
+                        }
+                    ],
+                    ..Default::default()
+                };
+                return Ok(Response::new(ModelConfigResponse {
+                    config: Some(config),
+                }));
+            }
+        }
+        Err(Status::not_found(format!(
+            "Model '{}' not found",
+            request_model_name
+        )))
     }
 }
 
