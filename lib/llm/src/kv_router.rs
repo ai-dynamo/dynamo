@@ -16,6 +16,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
@@ -73,7 +74,7 @@ pub trait WorkerSelector {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 
