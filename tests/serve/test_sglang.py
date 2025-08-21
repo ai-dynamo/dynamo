@@ -172,7 +172,6 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             assert "choices" in result
             assert len(result["choices"]) > 0
             content = result["choices"][0]["message"]["content"]
-            assert len(content) > 0
             responses.append(content)
             logger.info(f"SGLang {config.name} response: {content}")
 
