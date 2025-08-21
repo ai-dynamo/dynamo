@@ -1182,7 +1182,7 @@ func GenerateBasePodSpecForController(
 
 func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
 	// default: enabled=true, size=8Gi
-	size := resource.MustParse("8Gi")
+	size := resource.MustParse(commonconsts.DefaultSharedMemorySize)
 	if spec != nil {
 		if spec.Disabled {
 			return nil, nil
@@ -1202,7 +1202,7 @@ func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev
 	}
 	volumeMount := corev1.VolumeMount{
 		Name:      commonconsts.KubeValueNameSharedMemory,
-		MountPath: "/dev/shm",
+		MountPath: commonconsts.DefaultSharedMemoryMountPath,
 	}
 	return &volume, &volumeMount
 }
