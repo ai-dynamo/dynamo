@@ -268,7 +268,6 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
-            pytest.mark.nightly,
         ],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
