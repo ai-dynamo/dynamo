@@ -159,6 +159,12 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
     /// terminate without draining the remaining items in the stream. This is implementation
     /// specific and may not be supported by all engines.
     fn kill(&self);
+
+    /// Links child AsyncEngineContext to this AsyncEngineContext. If the `stop_generating`, `stop`
+    /// or `kill` on this AsyncEngineContext is called, the same method is called on all linked
+    /// child AsyncEngineContext, in the order they are linked, and then the method on this
+    /// AsyncEngineContext continues.
+    fn link_child(&self, child: Arc<dyn AsyncEngineContext>);
 }
 
 /// Provides access to the [`AsyncEngineContext`] associated with an engine operation.
