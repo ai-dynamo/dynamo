@@ -78,7 +78,7 @@ class KubernetesMonitor:
             "-n",
             self.namespace,
             "--selector",
-            f"app.kubernetes.io/name={self.deployment_name}",
+            f"nvidia.com/dynamo-namespace={self.deployment_name}",
             "-o",
             "json",
         ]
@@ -95,16 +95,19 @@ class KubernetesMonitor:
             total_pods = 0
 
             for pod in data.get("items", []):
-                pod_name = pod.get("metadata", {}).get("name", "")
                 pod_phase = pod.get("status", {}).get("phase", "")
+                pod_labels = pod.get("metadata", {}).get("labels", {})
+                component = pod_labels.get("nvidia.com/dynamo-component", "")
 
                 # Only count Running pods
                 if pod_phase == "Running":
-                    total_pods += 1
-                    if "prefill" in pod_name.lower():
+                    if component == "VllmPrefillWorker":
                         prefill_pods += 1
-                    elif "decode" in pod_name.lower():
+                    elif component == "VllmDecodeWorker":
                         decode_pods += 1
+                    else:
+                        continue
+                    total_pods += 1
 
             counts = PodCounts(
                 timestamp=time.time(),

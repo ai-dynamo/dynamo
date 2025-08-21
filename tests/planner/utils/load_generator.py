@@ -43,7 +43,7 @@ class LoadGenerator:
         self,
         req_per_sec: float,
         duration_sec: int,
-        estimated_request_duration: float = 12.0,
+        estimated_request_duration: float = 3.0,
     ) -> Dict[str, Any]:
         """
         Calculate genai-perf parameters to approximate desired request rate.
@@ -54,24 +54,11 @@ class LoadGenerator:
             estimated_request_duration: Estimated average request duration in seconds
 
         Returns:
-            Dictionary with concurrency and request_count parameters
+            Dictionary with concurrency and request_rate parameters
         """
-        # For genai-perf, we need to balance concurrency and request count
-        # to achieve the desired rate over the test duration
-
-        total_requests = int(req_per_sec * duration_sec)
-
-        # Concurrency should be roughly: req_per_sec * avg_request_duration
-        # But we also need to consider the request sending rate
-        concurrency = max(1, int(req_per_sec * estimated_request_duration))
-
-        # Ensure we have enough requests for the duration
-        request_count = max(total_requests, concurrency * 2)
-
+        # Use request rate for planner testing as suggested
         return {
-            "concurrency": concurrency,
-            "request_count": request_count,
-            "total_requests": total_requests,
+            "request_rate": req_per_sec,
         }
 
     async def generate_load(
@@ -93,22 +80,25 @@ class LoadGenerator:
         # Calculate genai-perf parameters
         params = self._calculate_genai_perf_params(req_per_sec, duration_sec)
         logger.info(
-            f"Using concurrency={params['concurrency']}, request_count={params['request_count']}"
+            f"Using request_rate={params['request_rate']} req/s for {duration_sec}s"
         )
 
         # Create artifact directory if not provided
         if artifact_dir is None:
-            artifact_dir = tempfile.mkdtemp(prefix="scaling_test_")
+            # Store artifacts in tests/planner/artifacts for easier access
+            base_artifacts_dir = "/home/hannahz/dev/ai-dynamo/tests/planner/artifacts"
+            os.makedirs(base_artifacts_dir, exist_ok=True)
+            artifact_dir = tempfile.mkdtemp(
+                prefix="scaling_test_", dir=base_artifacts_dir
+            )
 
         os.makedirs(artifact_dir, exist_ok=True)
 
-        # Build genai-perf command
+        # Build genai-perf command (with streaming for planner, but no problematic extra-inputs)
         cmd = [
             "genai-perf",
             "profile",
             "--model",
-            self.model,
-            "--tokenizer",
             self.model,
             "--endpoint-type",
             "chat",
@@ -119,40 +109,18 @@ class LoadGenerator:
             self.base_url,
             "--synthetic-input-tokens-mean",
             str(self.isl),
-            "--synthetic-input-tokens-stddev",
-            "0",
             "--output-tokens-mean",
             str(self.osl),
-            "--output-tokens-stddev",
-            "0",
-            "--extra-inputs",
-            f"max_tokens:{self.osl}",
-            "--extra-inputs",
-            f"min_tokens:{self.osl}",
-            "--extra-inputs",
-            "ignore_eos:true",
-            "--extra-inputs",
-            '{"nvext":{"ignore_eos":true}}',
-            "--concurrency",
-            str(params["concurrency"]),
-            "--request-count",
-            str(params["request_count"]),
-            "--warmup-request-count",
-            "5",
+            "--request-rate",
+            str(params["request_rate"]),
+            "--measurement-interval",
+            str(min(30000, duration_sec * 1000)),  # Cap at 30s to avoid timeouts
             "--num-dataset-entries",
-            str(max(100, params["request_count"])),
-            "--random-seed",
-            "100",
+            str(
+                max(100, int(req_per_sec * min(30, duration_sec)))
+            ),  # Match measurement interval
             "--artifact-dir",
             artifact_dir,
-            "--",
-            "-v",
-            "--max-threads",
-            str(max(params["concurrency"], 32)),
-            "-H",
-            "Authorization: Bearer NOT USED",
-            "-H",
-            "Accept: text/event-stream",
         ]
 
         logger.info(f"Running command: {' '.join(cmd)}")
@@ -165,7 +133,7 @@ class LoadGenerator:
                 capture_output=True,
                 text=True,
                 timeout=duration_sec
-                + 600,  # Add buffer for genai-perf overhead (generous for 3000 tokens)
+                + 60,  # Add reasonable buffer for genai-perf overhead
             )
 
             end_time = time.time()
