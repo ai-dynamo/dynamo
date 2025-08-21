@@ -150,7 +150,7 @@ class StatLoggerFactory:
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
-        logger = DynamoStatLoggerPublisher(self.component, dp_rank, self.labels)
+        logger = DynamoStatLoggerPublisher(self.component, dp_rank, metrics_labels=self.metrics_labels)
         self.created_logger = logger
 
         return logger
