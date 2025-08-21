@@ -113,12 +113,12 @@ $ cargo metadata --format-version=1 | jq -r '.target_directory'
 /home/ubuntu/dynamo/.build/target  <-- this is the target path
 ```
 
-If cargo is not installed and configured property, you will see an error, such as the following:
+If cargo is not installed and configured properly, you will see one or more errors, such as the following:
 ```
 error: could not find `Cargo.toml` in $HOME or any parent directory
 ```
 
-Before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
+Lastly, before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
 
 ### Updating Python Bindings
 
