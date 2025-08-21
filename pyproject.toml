@@ -22,7 +22,6 @@ dependencies = [
     # filelock: required by planner
     "filelock",
     "typer",
-    "circus>=0.19.0",
     "click<8.2.0",
     "setuptools",
 ]

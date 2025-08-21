@@ -63,7 +63,6 @@ A high-performance request router written in Rust that:
 The planner component monitors system state and dynamically adjusts worker allocation:
 
 - **Dynamic scaling** - Scales prefill/decode workers up and down based on metrics
-- **Multiple backends** - Supports local (circus-based) and Kubernetes scaling
 - **SLA-based planning** - Ensures inference performance targets are met
 - **Load-based planning** - Optimizes resource utilization based on demand
 

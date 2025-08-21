@@ -25,7 +25,6 @@ Key features include:
 
 * **Load-based scaling** that monitors KV cache utilization and prefill queue size to make scaling decisions
 * **SLA-based scaling** that uses predictive modeling and performance interpolation to proactively meet TTFT and ITL targets
-* **Multi-backend support** for both local (Circus) and Kubernetes environments
 * **Graceful scaling** that ensures no requests are dropped during scale-down operations
 
 .. list-table::
