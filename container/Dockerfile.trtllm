@@ -408,7 +408,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # Common dependencies
 # TODO: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --system --break-system-packages --requirement /tmp/requirements.txt
+    uv pip install --system --break-system-packages --requirement /tmp/requirements.txt && \
+    echo "uninstall torch and triton as we will use NVIDIA's versions later" && \
+    uv pip uninstall --system --break-system-packages torch triton
 
 # Install test dependencies
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
@@ -435,6 +437,7 @@ ARG SYMPY_VER=1.14.0
 ARG PACKAGING_VER=23.2
 ARG FLASH_ATTN_VER=2.7.3
 ARG MPMATH_VER=1.3.0
+RUN uv pip list # TODO remove this line
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info
@@ -458,6 +461,7 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
+RUN uv pip list # TODO remove this line
 
 
 # Install TensorRT-LLM (same as in build stage)
@@ -480,9 +484,6 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 #       we upgrade to a published pip wheel containing this change.
 RUN uv pip install --system --break-system-packages "cuda-python>=12,<13" && \
     uv pip install --system --break-system-packages --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
-    if [ "$ARCH" = "amd64" ]; then \
-        uv pip install --system --break-system-packages "triton==3.3.1"; \
-    fi; \
     uv pip install --system --break-system-packages \
         /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
         /workspace/wheelhouse/ai_dynamo*any.whl \
