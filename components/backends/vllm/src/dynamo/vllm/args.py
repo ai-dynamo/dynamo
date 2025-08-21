@@ -58,7 +58,7 @@ class Config:
     # Connector list from CLI
     connector_list: Optional[list] = None
 
-    # tool and reasoning parser info 
+    # tool and reasoning parser info
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
