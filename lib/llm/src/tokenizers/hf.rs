@@ -26,23 +26,13 @@ pub struct HuggingFaceTokenizer {
 
 impl HuggingFaceTokenizer {
     pub fn from_file(model_name: &str) -> Result<Self> {
-        let mut tokenizer = HfTokenizer::from_file(model_name)
+        let tokenizer = HfTokenizer::from_file(model_name)
             .map_err(|err| Error::msg(format!("Error loading tokenizer: {}", err)))?;
-
-        // Disable truncation to allow inputs longer than default 512 tokens
-        tokenizer.with_truncation(None).map_err(|err| {
-            Error::msg(format!("Error disabling tokenizer truncation: {}", err))
-        })?;
 
         Ok(HuggingFaceTokenizer { tokenizer })
     }
 
-    pub fn from_tokenizer(mut tokenizer: HfTokenizer) -> Self {
-        // Disable truncation to allow inputs longer than default 512 tokens
-        if let Err(err) = tokenizer.with_truncation(None) {
-            tracing::warn!("Failed to disable tokenizer truncation: {}", err);
-        }
-
+    pub fn from_tokenizer(tokenizer: HfTokenizer) -> Self {
         HuggingFaceTokenizer { tokenizer }
     }
 }
@@ -89,6 +79,6 @@ impl Tokenizer for HuggingFaceTokenizer {}
 
 impl From<HfTokenizer> for HuggingFaceTokenizer {
     fn from(tokenizer: HfTokenizer) -> Self {
-        Self::from_tokenizer(tokenizer)
+        HuggingFaceTokenizer { tokenizer }
     }
 }
