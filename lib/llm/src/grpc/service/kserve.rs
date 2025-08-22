@@ -13,8 +13,7 @@ use crate::http::service::Metrics;
 use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
-use async_openai::types::CompletionFinishReason;
-use async_openai::types::CreateCompletionRequest;
+use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 use derive_builder::Builder;
 use dynamo_runtime::transports::etcd;
 use futures::pin_mut;
@@ -509,7 +508,7 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
         Ok(NvCreateCompletionRequest {
             inner: CreateCompletionRequest {
                 model: request.model_name,
-                prompt: async_openai::types::Prompt::String(text_input),
+                prompt: Prompt::String(text_input),
                 stream: Some(stream),
                 user: if request.id.is_empty() {
                     None
@@ -518,6 +517,7 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                 },
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: None,
         })
     }

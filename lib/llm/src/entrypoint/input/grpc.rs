@@ -42,6 +42,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         MODEL_ROOT_PATH,
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
+                        router_config.busy_threshold,
                     )
                     .await?;
                 }
@@ -84,14 +85,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, kv_chooser.clone())
+            >(card, &client, router_mode, None, kv_chooser.clone())
             .await?;
             manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
 
             let completions_engine = entrypoint::build_routed_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(card, &client, router_mode, kv_chooser)
+            >(card, &client, router_mode, None, kv_chooser)
             .await?;
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
 
@@ -143,13 +144,27 @@ async fn run_watcher(
     network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
+    busy_threshold: Option<f64>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
+    let watch_obj = ModelWatcher::new(
+        runtime,
+        model_manager,
+        router_mode,
+        kv_router_config,
+        busy_threshold,
+    );
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+
+    // [gluo NOTE] This is different from http::run_watcher where it alters the HTTP service
+    // endpoint being exposed, gRPC doesn't have the same concept as the KServe service
+    // only has one kind of inference endpoint.
+
+    // Pass the sender to the watcher
     let _watcher_task = tokio::spawn(async move {
         watch_obj.watch(receiver).await;
     });
+
     Ok(())
 }

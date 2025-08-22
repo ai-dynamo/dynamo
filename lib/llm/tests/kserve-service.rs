@@ -46,7 +46,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{transport::Channel, Request, Response};
 
-    use async_openai::types::Prompt;
+    use dynamo_async_openai::types::Prompt;
 
     struct SplitEngine {}
 
@@ -102,7 +102,7 @@ pub mod kserve_test {
             let stream = stream! {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 for word in word_list {
-                    yield Annotated::from_data(generator.create_choice(0, Some(format!("{word}")), None));
+                    yield Annotated::from_data(generator.create_choice(0, Some(format!("{word}")), None, None));
                 }
             };
 
@@ -282,7 +282,7 @@ pub mod kserve_test {
         let service = service_with_engines.0;
 
         let token = CancellationToken::new();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
+        let _task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::InferFailure as u16, 5).await;
@@ -400,12 +400,9 @@ pub mod kserve_test {
     ) {
         // start server
         let service = service_with_engines.0;
-        let state = service.state_clone();
-        let manager = state.manager();
 
         let token = CancellationToken::new();
-        let cancel_token = token.clone();
-        let task: tokio::task::JoinHandle<Result<(), Error>> =
+        let _task: tokio::task::JoinHandle<Result<(), Error>> =
             tokio::spawn(async move { service.run(token.clone()).await });
 
         let mut client = get_ready_client(TestPort::InferSuccess as u16, 5).await;
@@ -429,7 +426,7 @@ pub mod kserve_test {
         let input_len = text_input_str.len() as u32;
         let mut serialized_input = input_len.to_le_bytes().to_vec();
         serialized_input.extend_from_slice(text_input_str.as_bytes());
-        let mut request = tonic::Request::new(ModelInferRequest {
+        let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
             id: "1234".into(),
@@ -496,12 +493,9 @@ pub mod kserve_test {
         // start server
         let service = service_with_engines.0;
         let long_running = service_with_engines.3;
-        let state = service.state_clone();
-        let manager = state.manager();
 
         let token = CancellationToken::new();
-        let cancel_token = token.clone();
-        let task: tokio::task::JoinHandle<Result<(), Error>> =
+        let _task: tokio::task::JoinHandle<Result<(), Error>> =
             tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
@@ -553,8 +547,7 @@ pub mod kserve_test {
         let service = service_with_engines.0;
 
         let token = CancellationToken::new();
-        let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
+        let _task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::StreamInferSuccess as u16, 5).await;
@@ -571,7 +564,7 @@ pub mod kserve_test {
                     let request = ModelInferRequest {
                         model_name: model_name.into(),
                         model_version: "1".into(),
-                        id: request_id.clone().into(),
+                        id: request_id.into(),
                         inputs: vec![text_input.clone(),
                         inference::model_infer_request::InferInputTensor{
                             name: "streaming".into(),
@@ -766,8 +759,7 @@ pub mod kserve_test {
         let service = service_with_engines.0;
 
         let token = CancellationToken::new();
-        let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
+        let _task = tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::StreamInferFailure as u16, 5).await;
@@ -835,12 +827,9 @@ pub mod kserve_test {
         // start server
         let service = service_with_engines.0;
         let long_running = service_with_engines.3;
-        let state = service.state_clone();
-        let manager = state.manager();
 
         let token = CancellationToken::new();
-        let cancel_token = token.clone();
-        let task: tokio::task::JoinHandle<Result<(), Error>> =
+        let _task: tokio::task::JoinHandle<Result<(), Error>> =
             tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
