@@ -18,6 +18,7 @@ use dynamo_llm::protocols::{
     openai::{
         chat_completions::{aggregator::ChatCompletionAggregator, NvCreateChatCompletionResponse},
         completions::NvCreateCompletionResponse,
+        StreamArgs,
     },
     ContentProvider, DataStream,
 };
@@ -37,9 +38,10 @@ async fn test_openai_chat_stream() {
 
     // note: we are only taking the first 16 messages to keep the size of the response small
     let stream = create_message_stream(&data).take(16);
-    let result = NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), None)
-        .await
-        .unwrap();
+    let result =
+        NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), StreamArgs::default())
+            .await
+            .unwrap();
 
     // todo: provide a cleaner way to extract the content from choices
     assert_eq!(
@@ -59,9 +61,10 @@ async fn test_openai_chat_stream() {
 #[tokio::test]
 async fn test_openai_chat_edge_case_multi_line_data() {
     let stream = create_stream(CHAT_ROOT_PATH, "edge_cases/valid-multi-line-data");
-    let result = NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), None)
-        .await
-        .unwrap();
+    let result =
+        NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), StreamArgs::default())
+            .await
+            .unwrap();
 
     assert_eq!(
         result
@@ -79,9 +82,10 @@ async fn test_openai_chat_edge_case_multi_line_data() {
 #[tokio::test]
 async fn test_openai_chat_edge_case_comments_per_response() {
     let stream = create_stream(CHAT_ROOT_PATH, "edge_cases/valid-comments_per_response");
-    let result = NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), None)
-        .await
-        .unwrap();
+    let result =
+        NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), StreamArgs::default())
+            .await
+            .unwrap();
 
     assert_eq!(
         result
@@ -99,7 +103,9 @@ async fn test_openai_chat_edge_case_comments_per_response() {
 #[tokio::test]
 async fn test_openai_chat_edge_case_invalid_deserialize_error() {
     let stream = create_stream(CHAT_ROOT_PATH, "edge_cases/invalid-deserialize_error");
-    let result = NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), None).await;
+    let result =
+        NvCreateChatCompletionResponse::from_sse_stream(Box::pin(stream), StreamArgs::default())
+            .await;
 
     assert!(result.is_err());
     // insta::assert_debug_snapshot!(result);
@@ -112,9 +118,10 @@ async fn test_openai_chat_edge_case_invalid_deserialize_error() {
 #[tokio::test]
 async fn test_openai_cmpl_stream() {
     let stream = create_stream(CMPL_ROOT_PATH, "completion.streaming.1").take(16);
-    let result = NvCreateCompletionResponse::from_sse_stream(Box::pin(stream), None)
-        .await
-        .unwrap();
+    let result =
+        NvCreateCompletionResponse::from_sse_stream(Box::pin(stream), StreamArgs::default())
+            .await
+            .unwrap();
 
     // todo: provide a cleaner way to extract the content from choices
     assert_eq!(

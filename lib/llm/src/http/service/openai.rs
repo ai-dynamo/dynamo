@@ -37,6 +37,7 @@ use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     responses::{NvCreateResponse, NvResponse},
+    StreamArgs,
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
@@ -194,6 +195,13 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
+fn get_stream_args(state: &Arc<service_v2::State>, model: &str) -> StreamArgs {
+    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+    let reasoning_parser = None; // TODO: Implement reasoning parser
+
+    StreamArgs::new(tool_call_parser, reasoning_parser)
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -267,7 +275,7 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+    let extra_stream_args = get_stream_args(&state, model);
 
     let mut inflight_guard =
         state
@@ -327,17 +335,16 @@ async fn completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response =
-            NvCreateCompletionResponse::from_annotated_stream(stream, tool_call_parser.clone())
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        "Failed to fold completions stream for {}: {:?}",
-                        request_id,
-                        e
-                    );
-                    ErrorMessage::internal_server_error("Failed to fold completions stream")
-                })?;
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream, extra_stream_args)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to fold completions stream for {}: {:?}",
+                    request_id,
+                    e
+                );
+                ErrorMessage::internal_server_error("Failed to fold completions stream")
+            })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -497,8 +504,7 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
-    println!("Tool Call Parser: {:?}", tool_call_parser);
+    let extra_stream_args = get_stream_args(&state, model);
 
     let mut inflight_guard =
         state
@@ -559,20 +565,22 @@ async fn chat_completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response =
-            NvCreateChatCompletionResponse::from_annotated_stream(stream, tool_call_parser.clone())
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        request_id,
-                        "Failed to fold chat completions stream for: {:?}",
-                        e
-                    );
-                    ErrorMessage::internal_server_error(&format!(
-                        "Failed to fold chat completions stream: {}",
-                        e
-                    ))
-                })?;
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream,
+            extra_stream_args.clone(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                request_id,
+                "Failed to fold chat completions stream for: {:?}",
+                e
+            );
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to fold chat completions stream: {}",
+                e
+            ))
+        })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -733,8 +741,7 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
-    println!("Tool Call Parser: {:?}", tool_call_parser);
+    let extra_stream_args = get_stream_args(&state, model);
 
     let mut inflight_guard =
         state
@@ -753,7 +760,7 @@ async fn responses(
 
     // TODO: handle streaming, currently just unary
     let response =
-        NvCreateChatCompletionResponse::from_annotated_stream(stream, tool_call_parser.clone())
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, extra_stream_args.clone())
             .await
             .map_err(|e| {
                 tracing::error!(
