@@ -19,19 +19,24 @@ use derive_builder::Builder;
 use dynamo_runtime::transports::etcd;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tokio_stream::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
-use tonic::{transport::Server, Request, Response, Status};
 use crate::grpc::service::openai::completion_response_stream;
+use tonic::{transport::Server, Request, Response, Status};
 
-use crate::protocols::openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse};
+use crate::protocols::openai::completions::{
+    NvCreateCompletionRequest, NvCreateCompletionResponse,
+};
 
 pub mod inference {
     tonic::include_proto!("inference");
 }
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
-use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStreamInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelConfigRequest, ModelConfigResponse, ModelConfig};
+use inference::{
+    InferParameter, ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest,
+    ModelInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
+};
 
 /// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
 /// for it as part of HTTP service. Should we always start HTTP service up
@@ -170,7 +175,6 @@ impl KserveServiceConfigBuilder {
     }
 }
 
-
 #[tonic::async_trait]
 impl GrpcInferenceService for KserveService {
     async fn model_infer(
@@ -179,13 +183,15 @@ impl GrpcInferenceService for KserveService {
     ) -> Result<Response<ModelInferResponse>, Status> {
         let request = request.into_inner();
         let request_id = request.id.clone();
-        let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
-            Status::invalid_argument(format!("Failed to parse request: {}", e))
-        })?;
+        let mut completion_request: NvCreateCompletionRequest = request
+            .try_into()
+            .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
         if completion_request.inner.stream.unwrap_or(false) {
             // return error that streaming is not supported
-            return Err(Status::invalid_argument("Streaming is not supported for this endpoint"));
+            return Err(Status::invalid_argument(
+                "Streaming is not supported for this endpoint",
+            ));
         }
 
         // Apply template values if present
@@ -206,23 +212,21 @@ impl GrpcInferenceService for KserveService {
         let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
-                tracing::error!(
-                    "Failed to fold completions stream: {:?}",
-                    e
-                );
+                tracing::error!("Failed to fold completions stream: {:?}", e);
                 Status::internal("Failed to fold completions stream")
             })?;
 
-        let mut reply: ModelInferResponse = completion_response.try_into().map_err(|e| {
-            Status::invalid_argument(format!("Failed to parse response: {}", e))
-        })?;
+        let mut reply: ModelInferResponse = completion_response
+            .try_into()
+            .map_err(|e| Status::invalid_argument(format!("Failed to parse response: {}", e)))?;
 
         reply.id = request_id;
 
         Ok(Response::new(reply))
     }
 
-    type ModelStreamInferStream = Pin<Box<dyn Stream<Item = Result<ModelStreamInferResponse, Status>> + Send  + 'static>>;
+    type ModelStreamInferStream =
+        Pin<Box<dyn Stream<Item = Result<ModelStreamInferResponse, Status>> + Send + 'static>>;
 
     async fn model_stream_infer(
         &self,
@@ -309,7 +313,9 @@ impl GrpcInferenceService for KserveService {
             }
         };
 
-        Ok(Response::new(Box::pin(output) as Self::ModelStreamInferStream))
+        Ok(Response::new(
+            Box::pin(output) as Self::ModelStreamInferStream
+        ))
     }
 
     async fn model_metadata(
@@ -369,32 +375,34 @@ impl GrpcInferenceService for KserveService {
                     name: model_name,
                     platform: "dynamo".to_string(),
                     backend: "dynamo".to_string(),
-                    input: vec![ModelInput {
-                        name: "text_input".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![1],
-                        ..Default::default()
-                    },
-                    ModelInput {
-                        name: "streaming".to_string(),
-                        data_type: DataType::TypeBool as i32,
-                        dims: vec![1],
-                        optional: true,
-                        ..Default::default()
-                    }],
+                    input: vec![
+                        ModelInput {
+                            name: "text_input".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![1],
+                            ..Default::default()
+                        },
+                        ModelInput {
+                            name: "streaming".to_string(),
+                            data_type: DataType::TypeBool as i32,
+                            dims: vec![1],
+                            optional: true,
+                            ..Default::default()
+                        },
+                    ],
                     output: vec![
                         ModelOutput {
                             name: "text_output".to_string(),
                             data_type: DataType::TypeString as i32,
                             dims: vec![-1],
-                            ..Default::default()    
+                            ..Default::default()
                         },
                         ModelOutput {
                             name: "finish_reason".to_string(),
                             data_type: DataType::TypeString as i32,
                             dims: vec![-1],
-                            ..Default::default()    
-                        }
+                            ..Default::default()
+                        },
                     ],
                     ..Default::default()
                 };
@@ -416,7 +424,9 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
     fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
         // Protocol requires if `raw_input_contents` is used to hold input data,
         // it must be used for all inputs.
-        if !request.raw_input_contents.is_empty() && request.inputs.len() != request.raw_input_contents.len() {
+        if !request.raw_input_contents.is_empty()
+            && request.inputs.len() != request.raw_input_contents.len()
+        {
             return Err(Status::invalid_argument(format!(
                 "`raw_input_contents` must be used for all inputs"
             )));
@@ -458,8 +468,7 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                     if input.datatype != "BOOL" {
                         return Err(Status::invalid_argument(format!(
                             "Expected '{}' to be of type BOOL, got {:?}",
-                            input.name,
-                            input.datatype
+                            input.name, input.datatype
                         )));
                     }
                     if input.shape != vec![1] {
@@ -479,7 +488,10 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                     }
                 }
                 _ => {
-                    return Err(Status::invalid_argument(format!("Invalid input name: {}, supported inputs are 'text_input', 'stream'", input.name)));
+                    return Err(Status::invalid_argument(format!(
+                        "Invalid input name: {}, supported inputs are 'text_input', 'stream'",
+                        input.name
+                    )));
                 }
             }
         }
@@ -489,11 +501,11 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
             Some(input) => input,
             None => {
                 return Err(Status::invalid_argument(
-                    "Missing required input: 'text_input'"
+                    "Missing required input: 'text_input'",
                 ));
             }
         };
-        
+
         Ok(NvCreateCompletionRequest {
             inner: CreateCompletionRequest {
                 model: request.model_name,
@@ -522,33 +534,44 @@ impl TryFrom<NvCreateCompletionResponse> for ModelInferResponse {
             text_output.push(choice.text.clone());
             if let Some(reason) = choice.finish_reason.as_ref() {
                 match reason {
-                    CompletionFinishReason::Stop => { finish_reason.push("stop".to_string()); }
-                    CompletionFinishReason::Length => { finish_reason.push("length".to_string()); }
-                    CompletionFinishReason::ContentFilter => { finish_reason.push("content_filter".to_string()); }
+                    CompletionFinishReason::Stop => {
+                        finish_reason.push("stop".to_string());
+                    }
+                    CompletionFinishReason::Length => {
+                        finish_reason.push("length".to_string());
+                    }
+                    CompletionFinishReason::ContentFilter => {
+                        finish_reason.push("content_filter".to_string());
+                    }
                 }
             }
         }
         outputs.push(inference::model_infer_response::InferOutputTensor {
-                    name: "text_output".to_string(),
-                    datatype: "BYTES".to_string(),
-                    shape: vec![text_output.len() as i64],
-                contents: Some(inference::InferTensorContents {
-                    bytes_contents: text_output.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
-                    ..Default::default()
-                }),
+            name: "text_output".to_string(),
+            datatype: "BYTES".to_string(),
+            shape: vec![text_output.len() as i64],
+            contents: Some(inference::InferTensorContents {
+                bytes_contents: text_output
+                    .into_iter()
+                    .map(|text| text.as_bytes().to_vec())
+                    .collect(),
                 ..Default::default()
-            });
+            }),
+            ..Default::default()
+        });
         outputs.push(inference::model_infer_response::InferOutputTensor {
-                    name: "finish_reason".to_string(),
-                    datatype: "BYTES".to_string(),
-                    shape: vec![finish_reason.len() as i64],
-                contents: Some(inference::InferTensorContents {
-                    bytes_contents: finish_reason.into_iter().map(|text| text.as_bytes().to_vec()).collect(),
-                    ..Default::default()
-                }),
+            name: "finish_reason".to_string(),
+            datatype: "BYTES".to_string(),
+            shape: vec![finish_reason.len() as i64],
+            contents: Some(inference::InferTensorContents {
+                bytes_contents: finish_reason
+                    .into_iter()
+                    .map(|text| text.as_bytes().to_vec())
+                    .collect(),
                 ..Default::default()
-            });
-        
+            }),
+            ..Default::default()
+        });
 
         Ok(ModelInferResponse {
             model_name: response.inner.model,
@@ -566,18 +589,14 @@ impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
 
     fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
         match ModelInferResponse::try_from(response) {
-            Ok(response) => {
-                Ok(ModelStreamInferResponse {
-                    infer_response: Some(response),
-                    ..Default::default()
-                })
-            }
-            Err(e) => {
-                Ok(ModelStreamInferResponse {
-                    infer_response: None,
-                    error_message: format!("Failed to convert response: {}", e).into(),
-                })
-            }
+            Ok(response) => Ok(ModelStreamInferResponse {
+                infer_response: Some(response),
+                ..Default::default()
+            }),
+            Err(e) => Ok(ModelStreamInferResponse {
+                infer_response: None,
+                error_message: format!("Failed to convert response: {}", e).into(),
+            }),
         }
     }
 }

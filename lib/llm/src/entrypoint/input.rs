@@ -18,8 +18,8 @@ pub mod batch;
 mod common;
 pub use common::build_routed_pipeline;
 pub mod endpoint;
-pub mod http;
 pub mod grpc;
+pub mod http;
 pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;

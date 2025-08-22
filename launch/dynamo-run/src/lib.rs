@@ -67,8 +67,6 @@ pub async fn run(
     //
     // Create an engine
     //
-    tracing::info!("********* before output validation DEBUG **********");
-
 
     let out_opt = out_opt.unwrap_or_else(|| default_engine_for(&local_model));
     print_cuda(&out_opt);
@@ -85,7 +83,6 @@ pub async fn run(
         rt.clone(),
     )
     .await?;
-    tracing::info!("********* DEBUG **********");
     //
     // Run in from an input
     //

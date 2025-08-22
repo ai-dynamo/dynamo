@@ -19,50 +19,34 @@ pub mod kserve_test {
     pub mod inference {
         tonic::include_proto!("inference");
     }
-    use chrono::format;
-    use dynamo_llm::entrypoint::input::grpc;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
-    use inference::{ModelInferRequest, ModelInferResponse, InferParameter, ModelStreamInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelConfigRequest, ModelConfigResponse};
+    use inference::{ModelInferRequest, ModelInferResponse};
 
     use anyhow::Error;
-    use async_openai::config::OpenAIConfig;
     use async_stream::stream;
-    use dynamo_llm::http::{
-        service::{
-            error::HttpError,
-            metrics::{Endpoint, RequestType, Status, FRONTEND_METRIC_PREFIX},
-            service_v2::HttpService,
-            Metrics,
-        },
-    };
     use dynamo_llm::grpc::service::kserve::KserveService;
     use dynamo_llm::protocols::{
-        codec::SseLineCodec,
-        convert_sse_stream,
         openai::{
-            chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+            chat_completions::{
+                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
         Annotated,
     };
     use dynamo_runtime::{
-        engine::AsyncEngineContext,
         pipeline::{
             async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
         },
         CancellationToken,
     };
-    use futures::StreamExt;
-    use prometheus::{proto::MetricType, Registry};
-    use reqwest::StatusCode;
     use rstest::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time::timeout;
     use tonic::{transport::Channel, Request, Response};
-    use std::time::{self, Duration};
-    use std::{io::Cursor, sync::Arc};
-    use tokio::time::{sleep, timeout};
-    use tokio_util::codec::FramedRead;
 
-    use async_openai::types::{Prompt};
+    use async_openai::types::Prompt;
 
     struct SplitEngine {}
 
@@ -110,9 +94,7 @@ pub mod kserve_test {
             let generator = request.response_generator();
 
             let word_list: Vec<String> = match request.inner.prompt {
-                Prompt::String(str) => {
-                    str.split(' ').map(|s| s.to_string()).collect()
-                }
+                Prompt::String(str) => str.split(' ').map(|s| s.to_string()).collect(),
                 _ => {
                     return Err(Error::msg("SplitEngine only support prompt type String"))?;
                 }
@@ -190,10 +172,7 @@ pub mod kserve_test {
             &self,
             _request: SingleIn<NvCreateChatCompletionRequest>,
         ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
-            Err(HttpError {
-                code: 403,
-                message: "Always fail".to_string(),
-            })?
+            Err(Error::msg("Always fail"))?
         }
     }
 
@@ -209,10 +188,7 @@ pub mod kserve_test {
             &self,
             _request: SingleIn<NvCreateCompletionRequest>,
         ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
-            Err(HttpError {
-                code: 401,
-                message: "Always fail".to_string(),
-            })?
+            Err(Error::msg("Always fail"))?
         }
     }
 
@@ -236,22 +212,27 @@ pub mod kserve_test {
     fn text_input(
         #[default("dummy input")] text: &str,
     ) -> inference::model_infer_request::InferInputTensor {
-        inference::model_infer_request::InferInputTensor{
-                name: "text_input".into(),
-                datatype: "BYTES".into(),
-                shape: vec![1],
-                contents: Some(inference::InferTensorContents {
-                    bytes_contents: vec![text.into()],
-                    ..Default::default()
-                }),
+        inference::model_infer_request::InferInputTensor {
+            name: "text_input".into(),
+            datatype: "BYTES".into(),
+            shape: vec![1],
+            contents: Some(inference::InferTensorContents {
+                bytes_contents: vec![text.into()],
                 ..Default::default()
-            }
+            }),
+            ..Default::default()
+        }
     }
 
     #[fixture]
     fn service_with_engines(
         #[default(8990)] port: u16,
-    ) -> (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>) {
+    ) -> (
+        KserveService,
+        Arc<SplitEngine>,
+        Arc<AlwaysFailEngine>,
+        Arc<LongRunningEngine>,
+    ) {
         let service = KserveService::builder().port(port).build().unwrap();
         let manager = service.model_manager();
 
@@ -278,19 +259,25 @@ pub mod kserve_test {
     // Tests may run in parallel, use this enum to keep track of port used for different
     // test cases
     enum TestPort {
-        InferFailure=8988,
-        InferSuccess=8989,
-        StreamInferFailure=8990,
-        StreamInferSuccess=8991,
-        InferCancellation=8992,
-        StreamInferCancellation=8993
+        InferFailure = 8988,
+        InferSuccess = 8989,
+        StreamInferFailure = 8990,
+        StreamInferSuccess = 8991,
+        InferCancellation = 8992,
+        StreamInferCancellation = 8993,
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_infer_failure(
-        #[with(TestPort::InferFailure as u16)] service_with_engines: (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
-        text_input: inference::model_infer_request::InferInputTensor) {
+        #[with(TestPort::InferFailure as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
         // start server
         let service = service_with_engines.0;
 
@@ -315,7 +302,8 @@ pub mod kserve_test {
         assert_eq!(
             err.code(),
             tonic::Code::NotFound,
-            "Expected NotFound error for unregistered model, get {}", err
+            "Expected NotFound error for unregistered model, get {}",
+            err
         );
 
         // missing input
@@ -333,7 +321,8 @@ pub mod kserve_test {
         assert_eq!(
             err.code(),
             tonic::Code::InvalidArgument,
-            "Expected InvalidArgument error for missing input, get {}", err
+            "Expected InvalidArgument error for missing input, get {}",
+            err
         );
 
         // request streaming
@@ -341,17 +330,18 @@ pub mod kserve_test {
             model_name: "split".into(),
             model_version: "1".into(),
             id: "1234".into(),
-            inputs: vec![text_input.clone(),
-            inference::model_infer_request::InferInputTensor{
-                name: "streaming".into(),
-                datatype: "BOOL".into(),
-                shape: vec![1],
-                contents: Some(inference::InferTensorContents {
-                    bool_contents: vec![true],
+            inputs: vec![
+                text_input.clone(),
+                inference::model_infer_request::InferInputTensor {
+                    name: "streaming".into(),
+                    datatype: "BOOL".into(),
+                    shape: vec![1],
+                    contents: Some(inference::InferTensorContents {
+                        bool_contents: vec![true],
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }
+                },
             ],
             ..Default::default()
         });
@@ -362,7 +352,8 @@ pub mod kserve_test {
         assert_eq!(
             err.code(),
             tonic::Code::InvalidArgument,
-            "Expected InvalidArgument error for streaming, get {}", err
+            "Expected InvalidArgument error for streaming, get {}",
+            err
         );
         // assert "stream" in error message
         assert!(
@@ -386,7 +377,8 @@ pub mod kserve_test {
         assert_eq!(
             err.code(),
             tonic::Code::Internal,
-            "Expected Internal error for streaming, get {}", err
+            "Expected Internal error for streaming, get {}",
+            err
         );
         assert!(
             err.message().contains("Failed to generate completions:"),
@@ -397,8 +389,15 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_infer_success(#[with(TestPort::InferSuccess as u16)] service_with_engines: (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
-        text_input: inference::model_infer_request::InferInputTensor) {
+    async fn test_infer_success(
+        #[with(TestPort::InferSuccess as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
         // start server
         let service = service_with_engines.0;
         let state = service.state_clone();
@@ -406,7 +405,8 @@ pub mod kserve_test {
 
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { service.run(token.clone()).await });
+        let task: tokio::task::JoinHandle<Result<(), Error>> =
+            tokio::spawn(async move { service.run(token.clone()).await });
 
         let mut client = get_ready_client(TestPort::InferSuccess as u16, 5).await;
 
@@ -455,12 +455,11 @@ pub mod kserve_test {
                         "Expected 'text_output' to have datatype 'BYTES'"
                     );
                     assert_eq!(
-                        output.shape, vec![1],
+                        output.shape,
+                        vec![1],
                         "Expected 'text_output' to have shape [1]"
                     );
-                    let expected_output : Vec<Vec<u8>> = vec![
-                        "dummyinput".into(),
-                    ];
+                    let expected_output: Vec<Vec<u8>> = vec!["dummyinput".into()];
                     assert_eq!(
                         output.contents.as_ref().unwrap().bytes_contents,
                         expected_output,
@@ -473,7 +472,8 @@ pub mod kserve_test {
                         "Expected 'finish_reason' to have datatype 'BYTES'"
                     );
                     assert_eq!(
-                        output.shape, vec![0],
+                        output.shape,
+                        vec![0],
                         "Expected 'finish_reason' to have shape [0]"
                     );
                 }
@@ -484,8 +484,15 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_infer_cancellation(#[with(TestPort::InferCancellation as u16)] service_with_engines: (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
-        text_input: inference::model_infer_request::InferInputTensor) {
+    async fn test_infer_cancellation(
+        #[with(TestPort::InferCancellation as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
         // start server
         let service = service_with_engines.0;
         let long_running = service_with_engines.3;
@@ -494,7 +501,8 @@ pub mod kserve_test {
 
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { service.run(token.clone()).await });
+        let task: tokio::task::JoinHandle<Result<(), Error>> =
+            tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::InferCancellation as u16, 5).await;
@@ -514,17 +522,15 @@ pub mod kserve_test {
         );
 
         // Cancelling the request by dropping the request future after 1 second
-        let response = match timeout(Duration::from_millis(500), client.model_infer(request)).await {
+        let response = match timeout(Duration::from_millis(500), client.model_infer(request)).await
+        {
             Ok(_) => Err("Expect request timed out"),
             Err(_) => {
                 println!("Cancelled request after 500ms");
                 Ok("timed out")
             }
         };
-        assert!(
-            response.is_ok(),
-            "Expected client timed out",
-        );
+        assert!(response.is_ok(), "Expected client timed out",);
         long_running.wait_for_delay().await;
         assert!(
             long_running.was_cancelled(),
@@ -534,8 +540,15 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_stream_infer_success(#[with(TestPort::StreamInferSuccess as u16)] service_with_engines: (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
-        text_input: inference::model_infer_request::InferInputTensor) {
+    async fn test_stream_infer_success(
+        #[with(TestPort::StreamInferSuccess as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
         // start server
         let service = service_with_engines.0;
 
@@ -577,28 +590,33 @@ pub mod kserve_test {
                 }
             };
 
-            let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+            let response = client
+                .model_stream_infer(Request::new(outbound))
+                .await
+                .unwrap();
             let mut inbound = response.into_inner();
 
             let mut response_idx = 0;
             while let Some(response) = inbound.message().await.unwrap() {
-                assert!(response.error_message.is_empty(), "Expected successful inference");
-                assert!(response.infer_response.is_some(), "Expected successful inference");
-                
+                assert!(
+                    response.error_message.is_empty(),
+                    "Expected successful inference"
+                );
+                assert!(
+                    response.infer_response.is_some(),
+                    "Expected successful inference"
+                );
+
                 if let Some(response) = &response.infer_response {
                     assert_eq!(
-                        response.model_name,
-                        model_name,
+                        response.model_name, model_name,
                         "Expected response of the same model name",
                     );
                     assert_eq!(
                         response.id, request_id,
                         "Expected response ID to match request ID"
                     );
-                    let expected_output : Vec<Vec<u8>> = vec![
-                        "dummy".into(),
-                        "input".into(),
-                    ];
+                    let expected_output: Vec<Vec<u8>> = vec!["dummy".into(), "input".into()];
                     for output in &response.outputs {
                         match output.name.as_str() {
                             "text_output" => {
@@ -607,7 +625,8 @@ pub mod kserve_test {
                                     "Expected 'text_output' to have datatype 'BYTES'"
                                 );
                                 assert_eq!(
-                                    output.shape, vec![1],
+                                    output.shape,
+                                    vec![1],
                                     "Expected 'text_output' to have shape [1]"
                                 );
                                 assert_eq!(
@@ -622,7 +641,8 @@ pub mod kserve_test {
                                     "Expected 'finish_reason' to have datatype 'BYTES'"
                                 );
                                 assert_eq!(
-                                    output.shape, vec![0],
+                                    output.shape,
+                                    vec![0],
                                     "Expected 'finish_reason' to have shape [0]"
                                 );
                             }
@@ -632,10 +652,7 @@ pub mod kserve_test {
                 }
                 response_idx += 1;
             }
-            assert_eq!(response_idx,
-                2,
-                "Expected 2 responses"
-            )
+            assert_eq!(response_idx, 2, "Expected 2 responses")
         }
 
         // Response streaming false
@@ -656,19 +673,27 @@ pub mod kserve_test {
                 }
             };
 
-            let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+            let response = client
+                .model_stream_infer(Request::new(outbound))
+                .await
+                .unwrap();
             let mut inbound = response.into_inner();
 
             let mut response_idx = 0;
             while let Some(response) = inbound.message().await.unwrap() {
-                assert!(response.error_message.is_empty(), "Expected successful inference");
-                assert!(response.infer_response.is_some(), "Expected successful inference");
-                
+                assert!(
+                    response.error_message.is_empty(),
+                    "Expected successful inference"
+                );
+                assert!(
+                    response.infer_response.is_some(),
+                    "Expected successful inference"
+                );
+
                 // Each response is the complete inference
                 if let Some(response) = &response.infer_response {
                     assert_eq!(
-                        response.model_name,
-                        model_name,
+                        response.model_name, model_name,
                         "Expected response of the same model name",
                     );
                     // [gluo NOTE] Here we assume the responses across requests are
@@ -679,7 +704,8 @@ pub mod kserve_test {
                     // We expect response 1 to be received before response 0 as their
                     // requests are independent from each other.
                     assert_eq!(
-                        response.id, format!("{response_idx}"),
+                        response.id,
+                        format!("{response_idx}"),
                         "Expected response ID to match request ID"
                     );
                     for output in &response.outputs {
@@ -690,12 +716,11 @@ pub mod kserve_test {
                                     "Expected 'text_output' to have datatype 'BYTES'"
                                 );
                                 assert_eq!(
-                                    output.shape, vec![1],
+                                    output.shape,
+                                    vec![1],
                                     "Expected 'text_output' to have shape [1]"
                                 );
-                                let expected_output : Vec<Vec<u8>> = vec![
-                                    "dummyinput".into(),
-                                ];
+                                let expected_output: Vec<Vec<u8>> = vec!["dummyinput".into()];
                                 assert_eq!(
                                     output.contents.as_ref().unwrap().bytes_contents,
                                     expected_output,
@@ -708,7 +733,8 @@ pub mod kserve_test {
                                     "Expected 'finish_reason' to have datatype 'BYTES'"
                                 );
                                 assert_eq!(
-                                    output.shape, vec![0],
+                                    output.shape,
+                                    vec![0],
                                     "Expected 'finish_reason' to have shape [0]"
                                 );
                             }
@@ -718,8 +744,8 @@ pub mod kserve_test {
                 }
                 response_idx += 1;
             }
-            assert_eq!(response_idx,
-                2,
+            assert_eq!(
+                response_idx, 2,
                 "Expected 2 responses, each for one of the two requests"
             )
         }
@@ -727,8 +753,15 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_stream_infer_failure(#[with(TestPort::StreamInferFailure as u16)] service_with_engines: (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
-        text_input: inference::model_infer_request::InferInputTensor) {
+    async fn test_stream_infer_failure(
+        #[with(TestPort::StreamInferFailure as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
         // start server
         let service = service_with_engines.0;
 
@@ -756,19 +789,23 @@ pub mod kserve_test {
             }
         };
 
-        let response = client.model_stream_infer(Request::new(outbound)).await.unwrap();
+        let response = client
+            .model_stream_infer(Request::new(outbound))
+            .await
+            .unwrap();
         let mut inbound = response.into_inner();
 
         loop {
             match inbound.message().await {
                 Ok(Some(_)) => {
                     panic!("Expecting failure in the stream");
-                },
+                }
                 Err(err) => {
                     assert_eq!(
                         err.code(),
                         tonic::Code::Internal,
-                        "Expected Internal error for streaming, get {}", err
+                        "Expected Internal error for streaming, get {}",
+                        err
                     );
                     assert!(
                         err.message().contains("Failed to generate completions:"),
@@ -786,8 +823,15 @@ pub mod kserve_test {
 
     #[rstest]
     #[tokio::test]
-    async fn test_stream_infer_cancellation(#[with(TestPort::StreamInferCancellation as u16)] service_with_engines: (KserveService, Arc<SplitEngine>, Arc<AlwaysFailEngine>, Arc<LongRunningEngine>),
-        text_input: inference::model_infer_request::InferInputTensor) {
+    async fn test_stream_infer_cancellation(
+        #[with(TestPort::StreamInferCancellation as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
         // start server
         let service = service_with_engines.0;
         let long_running = service_with_engines.3;
@@ -796,7 +840,8 @@ pub mod kserve_test {
 
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { service.run(token.clone()).await });
+        let task: tokio::task::JoinHandle<Result<(), Error>> =
+            tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::StreamInferCancellation as u16, 5).await;
@@ -823,7 +868,12 @@ pub mod kserve_test {
         );
 
         // Cancelling the request by dropping the request future after 1 second
-        let response = match timeout(Duration::from_millis(500), client.model_stream_infer(Request::new(outbound))).await {
+        let response = match timeout(
+            Duration::from_millis(500),
+            client.model_stream_infer(Request::new(outbound)),
+        )
+        .await
+        {
             Ok(response) => response.unwrap(),
             Err(_) => {
                 panic!("Expected response stream is returned immediately");
