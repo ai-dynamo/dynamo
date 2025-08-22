@@ -2,7 +2,8 @@
 
 This guide demonstrates two setups.
 The EPP-unaware setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
-The EPP-aware setup first uses Dynamo Router to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker.
+The EPP-aware setup uses a custom Dynamo plugin `dyn-kv`to pick the best worker.
+It first uses the plugin to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker. EPP’s default approach is token-aware by approximation only relying on the non-tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It relies on the dynamo router which implements kv routing by running your model’s tokenizer inline.
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
 ## Table of Contents
@@ -113,7 +114,7 @@ helm install dynamo-gaie ./helm/dynamo-gaie \
   -n my-model \
   -f ./vllm_agg_qwen.yaml \
   --set eppAware.enabled=true \
-  --set eppAware.eppImage=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v5-0 \
+  --set eppAware.eppImage=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v5-4 \
   --set imagePullSecrets='{docker-imagepullsecret}' \
   --set-string epp.extraEnv[0].name=USE_STREAMING \
   --set-string epp.extraEnv[0].value=true
