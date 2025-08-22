@@ -96,7 +96,9 @@ with open('${LOG_DIR}/nginx.conf', 'w') as f:
     f.write(config)
 "
 
+{% endraw %}
 {% else %}
+{% raw %}
 # Traditional architecture - first prefill node handles everything  
 MASTER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[0]} ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
 if [ -z "$MASTER_IP" ]; then
@@ -104,16 +106,24 @@ if [ -z "$MASTER_IP" ]; then
     exit 1
 fi
 echo "Master IP address: $MASTER_IP"
+{% endraw %}
 {% endif %}
+{% raw %}
 
 # Compute leader nodes for each worker
+{% endraw %}
 {% if enable_multiple_frontends %}
+{% raw %}
 # With multiple frontends: node 0 = nginx, workers start from node 1
 WORKER_NODE_OFFSET=1
+{% endraw %}
 {% else %}
+{% raw %}
 # Traditional: workers start from node 0
 WORKER_NODE_OFFSET=0
+{% endraw %}
 {% endif %}
+{% raw %}
 
 prefill_leaders=()
 for i in $(seq 0 $((PREFILL_WORKERS - 1))); do
@@ -140,12 +150,18 @@ ENROOT_ARGS="\
 
 # Build common worker arguments
 WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE} --master_ip ${MASTER_IP}"
+{% endraw %}
 {% if enable_multiple_frontends %}
+{% raw %}
 # Add multiple frontends flag for worker setup
 WORKER_ARGS="$WORKER_ARGS --multiple-frontends-enabled"
+{% endraw %}
 {% endif %}
+{% raw %}
 
+{% endraw %}
 {% if enable_multiple_frontends %}
+{% raw %}
 # Launch nginx on node 0
 echo "Launching nginx on ${NGINX_NODE}"
 cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$NGINX_NODE --output=${LOG_DIR}/${NGINX_NODE}_nginx.out --error=${LOG_DIR}/${NGINX_NODE}_nginx.err python /scripts/worker_setup.py --worker_type nginx --nginx_config /logs/nginx.conf ${WORKER_ARGS}"
@@ -176,7 +192,9 @@ if [ $ADDITIONAL_FRONTENDS -gt 0 ]; then
         fi
     done
 fi
+{% endraw %}
 {% endif %}
+{% raw %}
 
 # Launch prefill workers
 for worker_idx in $(seq 0 $((PREFILL_WORKERS - 1))); do
@@ -225,16 +243,22 @@ for worker_idx in $(seq 0 $((DECODE_WORKERS - 1))); do
 done
 
 echo ""
+{% endraw %}
 {% if enable_multiple_frontends %}
+{% raw %}
 echo "Frontend available at: http://${NGINX_NODE}:8000"
 echo "To connect to the nginx node:"
 echo "srun $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${NGINX_NODE} --overlap --pty bash"
 echo "To connect to the master node (NATS/ETCD):"
 echo "srun $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${MASTER_NODE} --overlap --pty bash"
+{% endraw %}
 {% else %}
+{% raw %}
 echo "To connect to the host prefill node:"
 echo "srun $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${nodes[0]} --overlap --pty bash"
+{% endraw %}
 {% endif %}
+{% raw %}
 
 echo ""
 echo "Make sure to cancel the job at the end:"
