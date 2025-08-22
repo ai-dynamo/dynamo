@@ -246,6 +246,17 @@ impl ModelManager {
             .insert(model_name.to_string(), new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
+
+    pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .find(|entry| entry.name == model)
+            .and_then(|entry| entry.runtime_config.as_ref())
+            .and_then(|config| config.tool_call_parser.clone())
+            .map(|parser| parser.to_string())
+    }
 }
 
 pub struct ModelEngines<E> {

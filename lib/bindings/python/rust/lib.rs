@@ -183,8 +183,6 @@ fn register_llm<'p>(
             .user_data(user_data_json);
         // Download from HF, load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        println!("MDC Card tool call parser: {:?}", local_model.card().tool_call_parser);
-        println!("MDC Card reasoning parser: {:?}", local_model.card().reasoning_parser);
         // Advertise ourself on etcd so ingress can find us
         local_model
             .attach(&endpoint.inner, model_type_obj)

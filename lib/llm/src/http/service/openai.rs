@@ -267,6 +267,8 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -325,16 +327,17 @@ async fn completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id,
-                    e
-                );
-                ErrorMessage::internal_server_error("Failed to fold completions stream")
-            })?;
+        let response =
+            NvCreateCompletionResponse::from_annotated_stream(stream, tool_call_parser.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to fold completions stream for {}: {:?}",
+                        request_id,
+                        e
+                    );
+                    ErrorMessage::internal_server_error("Failed to fold completions stream")
+                })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -494,6 +497,9 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+    println!("Tool Call Parser: {:?}", tool_call_parser);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -553,19 +559,20 @@ async fn chat_completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to fold chat completions stream for: {:?}",
-                    e
-                );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
-            })?;
+        let response =
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, tool_call_parser.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        request_id,
+                        "Failed to fold chat completions stream for: {:?}",
+                        e
+                    );
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold chat completions stream: {}",
+                        e
+                    ))
+                })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -726,6 +733,9 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+    println!("Tool Call Parser: {:?}", tool_call_parser);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -742,19 +752,20 @@ async fn responses(
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // TODO: handle streaming, currently just unary
-    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id,
-                "Failed to fold chat completions stream for: {:?}",
-                e
-            );
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to fold chat completions stream: {}",
-                e
-            ))
-        })?;
+    let response =
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, tool_call_parser.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    request_id,
+                    "Failed to fold chat completions stream for: {:?}",
+                    e
+                );
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold chat completions stream: {}",
+                    e
+                ))
+            })?;
 
     // Convert NvCreateChatCompletionResponse --> NvResponse
     let response: NvResponse = response.try_into().map_err(|e| {

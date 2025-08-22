@@ -278,8 +278,6 @@ impl LocalModelBuilder {
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
-        card.tool_call_parser = self.runtime_config.tool_call_parser.take();
-        card.reasoning_parser = self.runtime_config.reasoning_parser.take();
 
         Ok(LocalModel {
             card,
@@ -395,8 +393,7 @@ impl LocalModel {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
-        println!("Inside LocalModel attach");
-        println!("Tool Call Parser: {:?}", self.card.tool_call_parser);
+
         card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;

@@ -237,9 +237,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.tool_call_parser = config.tool_call_parser
         runtime_config.reasoning_parser = config.reasoning_parser
 
-        print("Registering LLM")
-        print("Tool Call Parser: ", runtime_config.tool_call_parser)
-        print("Reasoning Parser: ", runtime_config.reasoning_parser)
         await register_llm(
             ModelType.Backend,
             generate_endpoint,
