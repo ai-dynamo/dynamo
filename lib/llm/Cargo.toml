@@ -78,7 +78,6 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
