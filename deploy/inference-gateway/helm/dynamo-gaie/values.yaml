@@ -66,14 +66,14 @@ epp:
 eppAware:
   enabled: false
   # Optional: override EPP image when epp-aware=true
-  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:1.0.0
+  eppImage: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v5-1
 
   # Sidecar (frontend-router)
   sidecar:
     # Container name for the sidecar
     name: frontend-router
     # Sidecar image
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+    image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:main0813
     # Image pull policy for the sidecar
     imagePullPolicy: IfNotPresent
     # Command and args for running the frontend in router mode.

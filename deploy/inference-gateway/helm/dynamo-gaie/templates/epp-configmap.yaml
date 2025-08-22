@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-gaie.fullname" . }}-epp-config
+  labels:
+    app.kubernetes.io/name: {{ include "dynamo-gaie.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  epp-config-dynamo.yaml: |
+{{ (.Files.Get "epp-config-dynamo.yaml") | indent 4 }}

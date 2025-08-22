@@ -113,7 +113,7 @@ helm install dynamo-gaie ./helm/dynamo-gaie \
   -n my-model \
   -f ./vllm_agg_qwen.yaml \
   --set eppAware.enabled=true \
-  --set eppAware.eppImage=docker.io/lambda108/epp-inference-extension-dynamo:1.0.0 \
+  --set eppAware.eppImage=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v5-0 \
   --set imagePullSecrets='{docker-imagepullsecret}' \
   --set-string epp.extraEnv[0].name=USE_STREAMING \
   --set-string epp.extraEnv[0].value=true
