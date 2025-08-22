@@ -14,13 +14,13 @@
 // limitations under the License.
 
 use dynamo_llm::protocols::{
-    codec::{create_message_stream, Message, SseCodecError},
-    openai::{
-        chat_completions::{aggregator::ChatCompletionAggregator, NvCreateChatCompletionResponse},
-        completions::NvCreateCompletionResponse,
-        ParsingOptions,
-    },
     ContentProvider, DataStream,
+    codec::{Message, SseCodecError, create_message_stream},
+    openai::{
+        ParsingOptions,
+        chat_completions::{NvCreateChatCompletionResponse, aggregator::ChatCompletionAggregator},
+        completions::NvCreateCompletionResponse,
+    },
 };
 use futures::StreamExt;
 

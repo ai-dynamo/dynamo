@@ -16,7 +16,7 @@
 use super::*;
 
 use core::ffi::c_char;
-use nix::fcntl::{fallocate, FallocateFlags};
+use nix::fcntl::{FallocateFlags, fallocate};
 use nix::unistd::unlink;
 use std::ffi::CStr;
 use std::ffi::CString;

@@ -17,8 +17,8 @@ use crate::{
 
 use dynamo_runtime::{
     pipeline::{
-        async_trait, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
-        ServerStreamingEngine, SingleIn,
+        AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
+        SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -126,13 +126,12 @@ impl RetryManager {
             // TODO: Is there anything needed to pass between context?
             let request = SingleIn::new(self.request.clone());
             response_stream = Some(self.next_generate.generate(request).await);
-            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err() {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                    if matches!(req_err.kind(), NatsNoResponders) {
-                        tracing::warn!("Creating new stream... retrying...");
-                        continue;
-                    }
-                }
+            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
+                && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
+                && matches!(req_err.kind(), NatsNoResponders)
+            {
+                tracing::warn!("Creating new stream... retrying...");
+                continue;
             }
             break;
         }
@@ -170,8 +169,8 @@ impl RetryManager {
 mod tests {
     use super::*;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::pipeline::AsyncEngine;
+    use dynamo_runtime::pipeline::context::Controller;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::sync::mpsc;
 
@@ -624,9 +623,11 @@ mod tests {
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
-            assert!(error
-                .to_string()
-                .contains("Stream ended before generation completed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Stream ended before generation completed")
+            );
         }
     }
 
@@ -672,9 +673,11 @@ mod tests {
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
-            assert!(error
-                .to_string()
-                .contains("Stream ended before generation completed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Stream ended before generation completed")
+            );
         }
     }
 }

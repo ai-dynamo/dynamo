@@ -839,8 +839,8 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[test]
-    fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag_multiple_with_new_lines(
-    ) {
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag_multiple_with_new_lines()
+     {
         let input = r#"
         {"name": "get_weather", "arguments":
          {"location": "San Francisco, CA",

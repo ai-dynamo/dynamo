@@ -9,13 +9,13 @@
 // Licensed under Apache 2.0
 
 use crate::{
+    Client, Messages, Runs,
     config::Config,
     error::OpenAIError,
     types::{
         AssistantEventStream, CreateThreadAndRunRequest, CreateThreadRequest, DeleteThreadResponse,
         ModifyThreadRequest, RunObject, ThreadObject,
     },
-    Client, Messages, Runs,
 };
 
 /// Create threads that assistants can interact with.

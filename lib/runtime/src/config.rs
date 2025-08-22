@@ -4,8 +4,8 @@
 use super::Result;
 use derive_builder::Builder;
 use figment::{
-    providers::{Env, Format, Serialized, Toml},
     Figment,
+    providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -371,12 +371,14 @@ mod tests {
                 let result = RuntimeConfig::from_settings();
                 assert!(result.is_err());
                 if let Err(e) = result {
-                    assert!(e
-                        .to_string()
-                        .contains("num_worker_threads: Validation error"));
-                    assert!(e
-                        .to_string()
-                        .contains("max_blocking_threads: Validation error"));
+                    assert!(
+                        e.to_string()
+                            .contains("num_worker_threads: Validation error")
+                    );
+                    assert!(
+                        e.to_string()
+                            .contains("max_blocking_threads: Validation error")
+                    );
                 }
                 Ok(())
             },

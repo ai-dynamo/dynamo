@@ -17,7 +17,7 @@ use crate::config::HealthStatus;
 use crate::logging::make_request_span;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;

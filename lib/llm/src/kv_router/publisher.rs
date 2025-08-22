@@ -14,21 +14,21 @@
 // limitations under the License.
 
 use crate::kv_router::{
-    indexer::{compute_block_hash_for_seq, RouterEvent},
+    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
+    indexer::{RouterEvent, compute_block_hash_for_seq},
     protocols::*,
     scoring::LoadEvent,
-    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
 };
 use async_trait::async_trait;
-use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
+    Error, Result,
     component::{Component, Namespace},
     pipeline::{
-        network::Ingress, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream,
-        SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+        network::Ingress,
     },
     protocols::annotated::Annotated,
-    Error, Result,
 };
 use futures::stream;
 use std::sync::Arc;

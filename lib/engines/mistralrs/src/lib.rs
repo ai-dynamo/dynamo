@@ -25,7 +25,7 @@ use dynamo_runtime::protocols::annotated::Annotated;
 
 use dynamo_llm::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -240,17 +240,16 @@ impl MistralRsEngine {
         }));
 
         // Send warmup request and consume response
-        if let Ok(sender) = engine.mistralrs.get_sender(None) {
-            if let Ok(()) = sender.send(warmup_request).await {
-                if let Some(response) = rx.recv().await {
-                    match response.as_result() {
-                        Ok(r) => {
-                            tracing::debug!(request_id, "Warmup response: {r:?}");
-                        }
-                        Err(err) => {
-                            tracing::error!(request_id, %err, "Failed converting response to result.");
-                        }
-                    }
+        if let Ok(sender) = engine.mistralrs.get_sender(None)
+            && let Ok(()) = sender.send(warmup_request).await
+            && let Some(response) = rx.recv().await
+        {
+            match response.as_result() {
+                Ok(r) => {
+                    tracing::debug!(request_id, "Warmup response: {r:?}");
+                }
+                Err(err) => {
+                    tracing::error!(request_id, %err, "Failed converting response to result.");
                 }
             }
         }
