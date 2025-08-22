@@ -132,3 +132,12 @@ pub mod work_handler {
     /// Time spent processing requests by work handler (histogram)
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
 }
+
+/// KVBM connector namespace names
+pub mod kvbm_connector_namespace {
+    /// KVBM connector leader namespace
+    pub const KVBM_CONNECTOR_LEADER: &str = "kvbm_connector_leader";
+
+    /// KVBM connector worker namespace
+    pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
+}

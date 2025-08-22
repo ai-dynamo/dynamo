@@ -197,7 +197,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
                 xfer_engine
-                    .execute(cancellation_token, drt_for_task, kvbm_metrics)
+                    .execute(cancellation_token, drt_for_task, kvbm_metrics.clone())
                     .await
             },
             primary_token,

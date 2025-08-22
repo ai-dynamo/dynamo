@@ -90,6 +90,7 @@ def convert_kv_cache_blocks(blocks: KVCacheBlocks) -> BlockStates:
     return states
 
 
+# TODO(keiven|ziqi): Auto port selection to be done in Rust
 def find_and_set_available_port_from_env(env_var="DYN_SYSTEM_PORT"):
     """
     Find an available port from the environment variable.

@@ -52,8 +52,7 @@
                     "launch/dynamo-run/Cargo.toml"
                 ],
                 "files.trimTrailingWhitespace": true,
-                "files.insertFinalNewline": true,
-                "rust-analyzer.cargo.allFeatures": true
+                "files.insertFinalNewline": true
             }
         }
     },
