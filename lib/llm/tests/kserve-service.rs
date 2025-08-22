@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "kserve")]
 pub mod kserve_test {
     // For using gRPC client for test
     pub mod inference {
@@ -256,6 +255,27 @@ pub mod kserve_test {
         (service, split, failure, long_running)
     }
 
+    struct RunningService {
+        token: CancellationToken,
+    }
+
+    impl RunningService {
+        fn spawn(service: KserveService) -> Self {
+            let token = CancellationToken::new();
+            tokio::spawn({
+                let t = token.clone();
+                async move { service.run(t).await }
+            });
+            Self { token }
+        }
+    }
+
+    impl Drop for RunningService {
+        fn drop(&mut self) {
+            self.token.cancel();
+        }
+    }
+
     // Tests may run in parallel, use this enum to keep track of port used for different
     // test cases
     enum TestPort {
@@ -279,10 +299,7 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // start server
-        let service = service_with_engines.0;
-
-        let token = CancellationToken::new();
-        let _task = tokio::spawn(async move { service.run(token.clone()).await });
+        let _running = RunningService::spawn(service_with_engines.0);
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::InferFailure as u16, 5).await;
@@ -399,11 +416,7 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // start server
-        let service = service_with_engines.0;
-
-        let token = CancellationToken::new();
-        let _task: tokio::task::JoinHandle<Result<(), Error>> =
-            tokio::spawn(async move { service.run(token.clone()).await });
+        let _running = RunningService::spawn(service_with_engines.0);
 
         let mut client = get_ready_client(TestPort::InferSuccess as u16, 5).await;
 
@@ -491,12 +504,8 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // start server
-        let service = service_with_engines.0;
+        let _running = RunningService::spawn(service_with_engines.0);
         let long_running = service_with_engines.3;
-
-        let token = CancellationToken::new();
-        let _task: tokio::task::JoinHandle<Result<(), Error>> =
-            tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::InferCancellation as u16, 5).await;
@@ -544,10 +553,7 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // start server
-        let service = service_with_engines.0;
-
-        let token = CancellationToken::new();
-        let _task = tokio::spawn(async move { service.run(token.clone()).await });
+        let _running = RunningService::spawn(service_with_engines.0);
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::StreamInferSuccess as u16, 5).await;
@@ -756,10 +762,7 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // start server
-        let service = service_with_engines.0;
-
-        let token = CancellationToken::new();
-        let _task = tokio::spawn(async move { service.run(token.clone()).await });
+        let _running = RunningService::spawn(service_with_engines.0);
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::StreamInferFailure as u16, 5).await;
@@ -825,12 +828,8 @@ pub mod kserve_test {
         text_input: inference::model_infer_request::InferInputTensor,
     ) {
         // start server
-        let service = service_with_engines.0;
+        let _running = RunningService::spawn(service_with_engines.0);
         let long_running = service_with_engines.3;
-
-        let token = CancellationToken::new();
-        let _task: tokio::task::JoinHandle<Result<(), Error>> =
-            tokio::spawn(async move { service.run(token.clone()).await });
 
         // create client and send request to unregistered model
         let mut client = get_ready_client(TestPort::StreamInferCancellation as u16, 5).await;

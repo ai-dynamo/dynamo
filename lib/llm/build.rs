@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "kserve")]
 use tonic_prost_build;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,14 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_protos()
 }
 
-#[cfg(feature = "kserve")]
 fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::compile_protos("src/grpc/protos/kserve.proto")?;
-    Ok(())
-}
-
-#[cfg(not(feature = "kserve"))]
-fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
