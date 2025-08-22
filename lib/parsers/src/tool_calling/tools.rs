@@ -16,8 +16,7 @@ pub fn try_tool_call_parse_aggregate(
 ) -> anyhow::Result<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>> {
     if parser_str.is_none() {
         tracing::info!("No tool parser provided. Trying parsing with default parser.");
-    }
-    else {
+    } else {
         tracing::info!("Using tool parser: {:?}", parser_str);
     }
     let parsed = detect_and_parse_tool_call(message, parser_str)?;
