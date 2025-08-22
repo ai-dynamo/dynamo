@@ -34,7 +34,7 @@ Running the benchmark script will:
 
 2. **Tools** - All included in Dynamo containers:
    - kubectl
-   - GenAI-Perf (NVIDIA's LLM benchmarking tool)
+   - GenAI-Perf (NVIDIA's LLM benchmarking tool). *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
    - Python 3.8+
    - requirements under `deploy/utils/requirements.txt`
 
