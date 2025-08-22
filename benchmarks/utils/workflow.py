@@ -47,7 +47,7 @@ async def run_benchmark_workflow(
             flush=True,
         )
         run_concurrency_sweep(
-            service_url=agg_client.port_forward_frontend(),
+            service_url=agg_client.port_forward_frontend(quiet=True),
             model_name=model,
             isl=isl,
             osl=osl,
@@ -66,7 +66,7 @@ async def run_benchmark_workflow(
     await deploy_and_wait(disagg_client, disagg_manifest)
     try:
         run_concurrency_sweep(
-            service_url=disagg_client.port_forward_frontend(),
+            service_url=disagg_client.port_forward_frontend(quiet=True),
             model_name=model,
             isl=isl,
             osl=osl,
@@ -83,7 +83,7 @@ async def run_benchmark_workflow(
     await vanilla_client.wait_for_deployment_ready(timeout=1800)
     try:
         run_concurrency_sweep(
-            service_url=vanilla_client.port_forward_frontend(),
+            service_url=vanilla_client.port_forward_frontend(quiet=True),
             model_name=model,
             isl=isl,
             osl=osl,

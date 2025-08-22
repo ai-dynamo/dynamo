@@ -110,8 +110,14 @@ class VanillaVllmClient:
 
         raise TimeoutError("Deployment failed to become ready within timeout")
 
-    def port_forward_frontend(self, local_port: int = 8000) -> str:
-        """Port forward the frontend service to a local port"""
+    def port_forward_frontend(self, local_port: int = 8000, quiet: bool = False) -> str:
+        """
+        Port forward the frontend service to a local port.
+
+        Args:
+            local_port: Local port to forward to (default: 8000)
+            quiet: If True, suppress kubectl port-forward output messages (default: False)
+        """
         cmd = [
             "kubectl",
             "port-forward",
@@ -123,8 +129,17 @@ class VanillaVllmClient:
 
         print(f"Starting port forward: {' '.join(cmd)}")
 
+        # Configure output redirection based on quiet flag
+        if quiet:
+            # Suppress kubectl's "Handling connection for..." messages
+            stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
+        else:
+            stdout = None
+            stderr = None
+
         # Start port forward in background
-        self.port_forward_process = subprocess.Popen(cmd)
+        self.port_forward_process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
 
         # Wait a moment for port forward to establish
         print("Waiting for port forward to establish...")

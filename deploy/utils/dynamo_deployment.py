@@ -45,13 +45,13 @@ EXAMPLE_CHAT_REQUEST = {
 
 class ProgressDisplay:
     """Helper class for cleaner progress display during deployment waiting"""
-    
+
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
         self.last_message = ""
         self.spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.spinner_idx = 0
-        
+
     def update(self, message: str, newline: bool = False):
         """Update progress display"""
         if self.verbose or newline:
@@ -61,13 +61,13 @@ class ProgressDisplay:
             sys.stdout.write(f"\r\033[K{message}")
             sys.stdout.flush()
             self.last_message = message
-            
+
     def spinner(self) -> str:
         """Get next spinner character"""
         char = self.spinner_chars[self.spinner_idx]
         self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_chars)
         return char
-        
+
     def finish(self, message: str):
         """Finish with a final message"""
         if not self.verbose and self.last_message:
@@ -119,9 +119,13 @@ class DynamoDeploymentClient:
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
 
-    def port_forward_frontend(self, local_port: int = 8000) -> str:
+    def port_forward_frontend(self, local_port: int = 8000, quiet: bool = False) -> str:
         """
         Port forward the frontend service to a local port.
+
+        Args:
+            local_port: Local port to forward to (default: 8000)
+            quiet: If True, suppress kubectl port-forward output messages (default: False)
         """
         cmd = [
             "kubectl",
@@ -134,8 +138,17 @@ class DynamoDeploymentClient:
 
         print(f"Starting port forward: {' '.join(cmd)}")
 
+        # Configure output redirection based on quiet flag
+        if quiet:
+            # Suppress kubectl's "Handling connection for..." messages
+            stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
+        else:
+            stdout = None
+            stderr = None
+
         # Start port forward in background
-        self.port_forward_process = subprocess.Popen(cmd)
+        self.port_forward_process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
 
         # Wait a moment for port forward to establish
         print("Waiting for port forward to establish...")
@@ -219,10 +232,12 @@ class DynamoDeploymentClient:
                 print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
-    async def wait_for_deployment_ready(self, timeout: int = 1800, verbose: bool = None):
+    async def wait_for_deployment_ready(
+        self, timeout: int = 1800, verbose: bool = None
+    ):
         """
         Wait for the custom resource to be ready with improved progress display.
-        
+
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
             verbose: If True, show detailed status updates. If None, uses DYNAMO_VERBOSE env var.
@@ -230,17 +245,17 @@ class DynamoDeploymentClient:
         # Allow environment variable to control verbosity
         if verbose is None:
             verbose = os.environ.get("DYNAMO_VERBOSE", "false").lower() == "true"
-        
+
         progress = ProgressDisplay(verbose=verbose)
         start_time = time.time()
         last_status = None
         last_conditions_str = ""
         check_interval = 10 if not verbose else 20
-        
+
         # Initial message
         if not verbose:
             print(f"⏳ Waiting for deployment '{self.deployment_name}'...")
-        
+
         while (time.time() - start_time) < timeout:
             try:
                 status = await self.custom_api.get_namespaced_custom_object(
@@ -250,12 +265,12 @@ class DynamoDeploymentClient:
                     plural="dynamographdeployments",
                     name=self.deployment_name,
                 )
-                
+
                 status_obj = status.get("status", {})
                 conditions = status_obj.get("conditions", [])
                 current_state = status_obj.get("state", "unknown")
                 elapsed = time.time() - start_time
-                
+
                 # Check readiness
                 ready_condition = False
                 ready_message = ""
@@ -264,21 +279,21 @@ class DynamoDeploymentClient:
                         ready_condition = condition.get("status") == "True"
                         ready_message = condition.get("message", "")
                         break
-                
+
                 state_successful = current_state == "successful"
-                
+
                 # Extract not ready components from message
                 not_ready_components = []
                 if "resources not ready:" in ready_message:
-                    match = re.search(r'\[(.*?)\]', ready_message)
+                    match = re.search(r"\[(.*?)\]", ready_message)
                     if match:
                         not_ready_components = match.group(1).split()
-                
+
                 # Format progress message based on mode
                 if not verbose:
                     # Concise single-line progress with spinner
                     spinner = progress.spinner()
-                    
+
                     # Create status string
                     if not_ready_components:
                         # Show first 2 components, abbreviate if more
@@ -288,17 +303,20 @@ class DynamoDeploymentClient:
                         status_str = f"Waiting for: {components_str}"
                     else:
                         status_str = f"State: {current_state}"
-                    
+
                     # Format time
                     time_str = f"[{elapsed:.0f}s]"
-                    
+
                     message = f"{spinner} {time_str} {status_str}"
                     progress.update(message)
-                    
+
                 else:
                     # Verbose mode - show details when status changes
                     conditions_str = str(conditions)
-                    if current_state != last_status or conditions_str != last_conditions_str:
+                    if (
+                        current_state != last_status
+                        or conditions_str != last_conditions_str
+                    ):
                         progress.update(f"Current deployment state: {current_state}")
                         progress.update(f"Current conditions: {conditions}")
                         progress.update(f"Elapsed time: {elapsed:.1f}s / {timeout}s")
@@ -308,24 +326,32 @@ class DynamoDeploymentClient:
                         )
                         last_status = current_state
                         last_conditions_str = conditions_str
-                
+
                 # Check if deployment is ready
                 if ready_condition and state_successful:
                     progress.finish(
                         f"✅ Deployment '{self.deployment_name}' ready after {elapsed:.1f}s"
                     )
                     return True
-                    
+
             except kubernetes.client.rest.ApiException as e:
                 if verbose:
-                    progress.update(f"API Exception while checking deployment status: {e}", newline=True)
-                    progress.update(f"Status code: {e.status}, Reason: {e.reason}", newline=True)
+                    progress.update(
+                        f"API Exception while checking deployment status: {e}",
+                        newline=True,
+                    )
+                    progress.update(
+                        f"Status code: {e.status}, Reason: {e.reason}", newline=True
+                    )
             except Exception as e:
                 if verbose:
-                    progress.update(f"Unexpected exception while checking deployment status: {e}", newline=True)
-            
+                    progress.update(
+                        f"Unexpected exception while checking deployment status: {e}",
+                        newline=True,
+                    )
+
             await asyncio.sleep(check_interval)
-        
+
         # Timeout reached
         progress.finish(
             f"❌ Deployment '{self.deployment_name}' failed to become ready within {timeout}s"
