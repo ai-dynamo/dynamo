@@ -1,27 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use dynamo_runtime::{
-    engine::{AsyncEngineContext, AsyncEngineStream}, pipeline::{AsyncEngineContextProvider, Context}, protocols::annotated::AnnotationsProvider
+    engine::AsyncEngineContext,
+    pipeline::{AsyncEngineContextProvider, Context},
+    protocols::annotated::AnnotationsProvider,
 };
 use futures::{stream, Stream, StreamExt};
+use std::sync::Arc;
 
-use crate::protocols::openai::{
-    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+use crate::protocols::openai::completions::{
+    NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
 use crate::types::Annotated;
 
 use super::kserve;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
 use crate::http::service::{
+    disconnect::{create_connection_monitor, ConnectionHandle},
     metrics::{Endpoint, ResponseMetricCollector},
-    disconnect::{
-        create_connection_monitor, ConnectionHandle,
-    },
 };
+use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
 
 use tonic::Status;
 
@@ -52,8 +52,9 @@ pub async fn completion_response_stream(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, mut stream_handle) = create_connection_monitor(context.clone()).await;
-    
+    let (mut connection_handle, mut stream_handle) =
+        create_connection_monitor(context.clone()).await;
+
     let streaming = request.inner.stream.unwrap_or(false);
     // update the request to always stream
     let request = request.map(|mut req| {
@@ -71,9 +72,10 @@ pub async fn completion_response_stream(
         .get_completions_engine(model)
         .map_err(|_| Status::not_found("model not found"))?;
 
-    let inflight_guard = state
-        .metrics_clone()
-        .create_inflight_guard(model, Endpoint::Completions, streaming);
+    let inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Completions, streaming);
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
@@ -95,7 +97,11 @@ pub async fn completion_response_stream(
             .iter()
             .filter_map(|annotation| {
                 if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
+                    Annotated::<NvCreateCompletionResponse>::from_annotation(
+                        ANNOTATION_REQUEST_ID,
+                        &request_id,
+                    )
+                    .ok()
                 } else {
                     None
                 }
