@@ -196,8 +196,8 @@ def main(input_args: list[str] | None = None):
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:
         generate_job_script(args.template, temp_file.name, **template_vars)
-        job_id = submit_job(temp_file.name)
-        print_welcome_message(job_id)
+        # job_id = submit_job(temp_file.name)
+        print_welcome_message("69")
 
 
 if __name__ == "__main__":
