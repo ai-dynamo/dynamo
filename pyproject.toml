@@ -22,7 +22,6 @@ dependencies = [
     # filelock: required by planner
     "filelock",
     "typer",
-    "circus>=0.19.0",
     "click<8.2.0",
     "setuptools",
 ]
@@ -49,8 +48,8 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.0.0rc4",
-    "triton==3.3.1",  # locking triton as version 3.4.0 breaks tensorrt-llm 1.0.0rc4
+    "tensorrt-llm==1.0.0rc6",
+    "triton==3.3.1",  # locking triton as version 3.4.0 breaks tensorrt-llm 1.0.0rc6
 ]
 
 vllm = [
