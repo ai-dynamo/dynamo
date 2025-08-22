@@ -52,8 +52,7 @@ pub async fn completion_response_stream(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, mut stream_handle) =
-        create_connection_monitor(context.clone()).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
 
     let streaming = request.inner.stream.unwrap_or(false);
     // update the request to always stream
@@ -117,7 +116,6 @@ pub async fn completion_response_stream(
         process_metrics_only(response, &mut response_collector);
     });
 
-    stream_handle.arm();
     let stream = grpc_monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully

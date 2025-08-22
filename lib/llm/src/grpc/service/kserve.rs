@@ -13,8 +13,8 @@ use crate::http::service::Metrics;
 use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 use derive_builder::Builder;
+use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 use dynamo_runtime::transports::etcd;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
@@ -244,7 +244,12 @@ impl GrpcInferenceService for KserveService {
                 let request_id: String;
                 let mut completion_request: NvCreateCompletionRequest = match request {
                     Err(e) => {
-                        tracing::error!("Failed to read request: {}", e);
+                        tracing::error!("Unexpected gRPC failed to read request: {}", e);
+                        yield ModelStreamInferResponse {
+                            error_message: e.to_string().into(),
+                            infer_response: None,
+                            ..Default::default()
+                        };
                         continue;
                     }
                     Ok(request) => {
@@ -455,7 +460,15 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                             text_input = Some(String::from_utf8_lossy(&bytes).to_string());
                         }
                         None => {
-                            let raw_input = &request.raw_input_contents[idx];
+                            let raw_input =
+                                request.raw_input_contents.get(idx).ok_or_else(|| {
+                                    Status::invalid_argument("Missing raw input for 'text_input'")
+                                })?;
+                            if raw_input.len() < 4 {
+                                return Err(Status::invalid_argument(
+                                    "'text_input' raw input must be length-prefixed (>= 4 bytes)",
+                                ));
+                            }
                             // We restrict the 'text_input' only contain one element, only need to
                             // parse the first element. Skip first four bytes that is used to store
                             // the length of the input.
@@ -481,7 +494,15 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                             stream = content.bool_contents[0];
                         }
                         None => {
-                            let raw_input = &request.raw_input_contents[idx];
+                            let raw_input =
+                                request.raw_input_contents.get(idx).ok_or_else(|| {
+                                    Status::invalid_argument("Missing raw input for 'stream'")
+                                })?;
+                            if raw_input.is_empty() {
+                                return Err(Status::invalid_argument(
+                                    "'stream' raw input must contain at least one byte",
+                                ));
+                            }
                             stream = raw_input[0] != 0;
                         }
                     }
