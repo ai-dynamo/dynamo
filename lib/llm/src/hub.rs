@@ -115,6 +115,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     download_with_hf_hub(&model_name, ignore_weights).await
 }
 
+// Direct download using the ModelExpress client.
 #[cfg(feature = "model-express")]
 async fn mx_download_direct(model_name: &str) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
