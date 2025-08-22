@@ -25,50 +25,29 @@ import tempfile
 from jinja2 import Template
 
 def print_welcome_message(job_id: str):
-    """Print a creative welcome message with job information."""
+    """Print a clean welcome message with job information."""
     
-    # ASCII art border
-    border = "=" * 80
-    inner_border = "-" * 78
-    
-    # Create the welcome message with proper formatting
-    message = f"""
-{border}
-|{' ' * 78}|
-|  Welcome SA! We hope you enjoy your time on our GB200 NVL72  💚          |
-|{' ' * 78}|
-{inner_border:^80}
-|{' ' * 78}|
-|  🚀 Your logs for this submitted job will be available in:                |
-|      logs/{job_id:<50}|
-|{' ' * 78}|
-|  📁 Access them by running:                                              |
-|      cd logs/{job_id:<50}|
-|{' ' * 78}|
-|  📊 View all prefill/decode worker logs:                                 |
-|      tail -f *_decode_*.err *_prefill_*.err                              |
-|{' ' * 78}|
-|  🔧 To kick off the benchmark:                                           |
-|      • Open a new terminal                                               |
-|      • SSH into the login node                                           |
-|      • Run the srun command from log.out:                                |
-|{' ' * 78}|
-|        cat log.out                                                       |
-|{' ' * 78}|
-{inner_border:^80}
-|{' ' * 78}|
-|                           Enjoy! 🎯                                      |
-|                                                      - NVIDIA            |
-|{' ' * 78}|
-{border}
-"""
+    print(f"""
+🚀 Welcome SA! We hope you enjoy your time on our GB200 NVL72.
 
-    # Print with some flair
-    print("\n" + "🎉" * 40)
-    for line in message.split('\n'):
-        if line.strip():
-            print(line)
-    print("🎉" * 40 + "\n")
+Your logs for this submitted job will be available in logs/{job_id}
+You can access them by running:
+
+    cd logs/{job_id}
+
+You can view all of the prefill/decode worker logs by running:
+
+    tail -f *_decode_*.err *_prefill_*.err
+
+To kick off the benchmark we suggest opening up a new terminal, SSH-ing 
+into the login node, and running the srun command that is found at the 
+bottom of the log.out. You can find it by running:
+
+    cat log.out
+
+Enjoy :)
+- NVIDIA
+""")
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -203,8 +182,8 @@ def main(input_args: list[str] | None = None):
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:
         generate_job_script(args.template, temp_file.name, **template_vars)
-        # job_id = submit_job(temp_file.name)
-        print_welcome_message("69")
+        job_id = submit_job(temp_file.name)
+        print_welcome_message(job_id)
 
 
 if __name__ == "__main__":
