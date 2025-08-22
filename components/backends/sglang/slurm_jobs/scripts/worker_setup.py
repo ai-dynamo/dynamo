@@ -297,7 +297,7 @@ def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
         raise ValueError(f"Nginx config file not found: {nginx_config}")
     
     nginx_cmd = f"apt-get update && apt-get install -y nginx && nginx -c {nginx_config} && sleep 86400"
-    return run_command(nginx_cmd)
+    return run_command(nginx_cmd, background=True)
 
 
 def setup_frontend_worker(worker_idx: int, master_ip: str) -> int:
@@ -316,7 +316,7 @@ def setup_frontend_worker(worker_idx: int, master_ip: str) -> int:
     
     # All frontends run the ingress server
     frontend_cmd = "python3 -m dynamo.frontend --http-port=8000"
-    return run_command(frontend_cmd)
+    return run_command(frontend_cmd, background=True)
 
 
 def setup_prefill_worker(
