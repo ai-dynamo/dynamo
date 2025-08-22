@@ -193,3 +193,19 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     /// Gets the current prompt token count (Input Sequence Length).
     fn get_isl(&self) -> Option<u32>;
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ParsingOptions {
+    pub tool_call_parser: Option<String>,
+
+    pub reasoning_parser: Option<String>,
+}
+
+impl ParsingOptions {
+    pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
+        Self {
+            tool_call_parser,
+            reasoning_parser,
+        }
+    }
+}

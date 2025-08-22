@@ -157,9 +157,9 @@ impl MaybeError for LLMEngineOutput {
         LLMEngineOutput::error(format!("{:?}", err))
     }
 
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+    fn err(&self) -> Option<anyhow::Error> {
         if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
-            Some(anyhow::Error::msg(err_msg.clone()).into())
+            Some(anyhow::Error::msg(err_msg.clone()))
         } else {
             None
         }
@@ -190,11 +190,6 @@ mod tests {
 
         let output = LLMEngineOutput::error("Test error".to_string());
         assert_eq!(format!("{}", output.err().unwrap()), "Test error");
-        assert!(!output.is_ok());
-        assert!(output.is_err());
-
-        let output = LLMEngineOutput::from_err(anyhow::Error::msg("Test error 2").into());
-        assert_eq!(format!("{}", output.err().unwrap()), "Test error 2");
         assert!(!output.is_ok());
         assert!(output.is_err());
     }

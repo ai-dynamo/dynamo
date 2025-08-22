@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
@@ -202,6 +202,7 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
@@ -392,6 +393,7 @@ impl LocalModel {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
+
         card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
@@ -402,7 +404,7 @@ impl LocalModel {
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
-            endpoint: endpoint.id(),
+            endpoint_id: endpoint.id(),
             model_type,
             runtime_config: Some(self.runtime_config.clone()),
         };
