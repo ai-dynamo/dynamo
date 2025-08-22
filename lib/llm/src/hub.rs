@@ -182,13 +182,7 @@ async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow:
     }
 
     match model_path.parent() {
-        Some(path) => {
-            tracing::info!(
-                "Successfully downloaded model '{model_name}' using hf-hub to: {}",
-                path.display()
-            );
-            Ok(path.to_path_buf())
-        }
+        Some(path) => Ok(path.to_path_buf()),
         None => Err(anyhow::anyhow!(
             "Invalid HF cache path: {}",
             model_path.display()
