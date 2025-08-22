@@ -53,6 +53,9 @@ spec:
         command:
         - /bin/sh
         - -c
+        {{- if not $serviceSpec.extraPodSpec.mainContainer.args }}
+          {{- fail (printf "spec.services[%s].extraPodSpec.mainContainer.args must be set for non-frontend components" $serviceName) }}
+        {{- end }}
           {{- end }}
         {{- end }}
         {{- if $serviceSpec.extraPodSpec.mainContainer.args }}
@@ -128,6 +131,7 @@ spec:
           containerPort: {{ $.Values.dynamoSystemPort | default 9090 }}
           protocol: TCP
         {{- end }}
+        {{- if and $serviceSpec.componentType (or (eq $serviceSpec.componentType "frontend") (eq $serviceSpec.componentType "worker")) }}
         livenessProbe:
           {{- if $serviceSpec.livenessProbe }}
           {{ $serviceSpec.livenessProbe | toYaml | nindent 10 }}
@@ -178,5 +182,6 @@ spec:
             scheme: HTTP
           {{- end }}
           {{- end }}
+        {{- end }}
 {{- end }}
 {{- end }}
