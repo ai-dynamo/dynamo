@@ -1,9 +1,12 @@
 ## Inference Gateway Setup with Dynamo
 
 This guide demonstrates two setups.
-The EPP-unaware setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
-The EPP-aware setup uses a custom Dynamo plugin `dyn-kv`to pick the best worker.
-It first uses the plugin to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker. EPP’s default approach is token-aware by approximation only relying on the non-tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It relies on the dynamo router which implements kv routing by running your model’s tokenizer inline.
+
+The basic setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
+
+The EPP-aware setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker.
+It first uses the plugin to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker. EPP’s default approach is token-aware only `by approximation` because it relies on the non-tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
 ## Table of Contents
