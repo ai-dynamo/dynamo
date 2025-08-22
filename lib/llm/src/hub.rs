@@ -45,7 +45,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     {
         // Only use ModelExpress if the environment variable is explicitly set
         if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
-            tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {}", model_name);
+            tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {model_name}");
             
             let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
             
@@ -54,28 +54,28 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
                     tracing::info!("Successfully connected to ModelExpress server");
                     match client.request_model_with_provider_and_fallback(&model_name, MxModelProvider::HuggingFace).await {
                         Ok(()) => {
-                            tracing::info!("Server download succeeded for model: {}", model_name);
+                            tracing::info!("Server download succeeded for model: {model_name}");
                             get_mx_model_path_from_cache(&model_name)
                         }
                         Err(e) => {
-                            tracing::warn!("Server download failed for model '{}': {}. Falling back to direct download.", model_name, e);
+                            tracing::warn!("Server download failed for model '{model_name}': {e}. Falling back to direct download.");
                             mx_download_direct(&model_name).await
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Cannot connect to ModelExpress server: {}. Using direct download.", e);
+                    tracing::warn!("Cannot connect to ModelExpress server: {e}. Using direct download.");
                     mx_download_direct(&model_name).await
                 }
             };
             
             match result {
                 Ok(path) => {
-                    tracing::info!("ModelExpress download completed successfully for model: {}", model_name);
+                    tracing::info!("ModelExpress download completed successfully for model: {model_name}");
                     return Ok(path);
                 }
                 Err(e) => {
-                    tracing::warn!("ModelExpress download failed for model '{}': {}. Falling back to hf-hub.", model_name, e);
+                    tracing::warn!("ModelExpress download failed for model '{model_name}': {e}. Falling back to hf-hub.");
                 }
             }
         }
@@ -88,7 +88,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         }
     }
     
-    tracing::info!("Using hf-hub for model: {}", model_name);
+    tracing::info!("Using hf-hub for model: {model_name}");
     download_with_hf_hub(&model_name, ignore_weights).await
 }
 
@@ -113,13 +113,10 @@ async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow:
     let repo = api.model(model_name.to_string());
     
     let info = repo.info().await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch model '{}' from HuggingFace: {}. Is this a valid HuggingFace ID?", model_name, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to fetch model '{model_name}' from HuggingFace: {e}. Is this a valid HuggingFace ID?"))?;
     
     if info.siblings.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Model '{}' exists but contains no downloadable files.",
-            model_name
-        ));
+        return Err(anyhow::anyhow!("Model '{model_name}' exists but contains no downloadable files."));
     }
     
     let mut model_path = PathBuf::new();
@@ -141,10 +138,8 @@ async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow:
             }
             Err(e) => {
                 return Err(anyhow::anyhow!(
-                    "Failed to download file '{}' from model '{}': {}",
-                    sib.rfilename,
-                    model_name,
-                    e
+                    "Failed to download file '{}' from model '{model_name}': {e}",
+                    sib.rfilename
                 ));
             }
         }
@@ -157,15 +152,13 @@ async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow:
             "valid"
         };
         return Err(anyhow::anyhow!(
-            "No {} files found for model '{}'.",
-            file_type,
-            model_name
+            "No {file_type} files found for model '{model_name}'."
         ));
     }
     
     match model_path.parent() {
         Some(path) => {
-            tracing::info!("Successfully downloaded model '{}' using hf-hub to: {}", model_name, path.display());
+            tracing::info!("Successfully downloaded model '{model_name}' using hf-hub to: {}", path.display());
             Ok(path.to_path_buf())
         }
         None => Err(anyhow::anyhow!("Invalid HF cache path: {}", model_path.display())),
@@ -199,8 +192,7 @@ fn get_mx_model_path_from_cache(model_name: &str) -> anyhow::Result<PathBuf> {
     
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
-            "Model '{}' was downloaded but directory not found at expected location: {}",
-            model_name,
+            "Model '{model_name}' was downloaded but directory not found at expected location: {}",
             model_dir.display()
         ));
     }
