@@ -246,9 +246,8 @@ impl GrpcInferenceService for KserveService {
                     Err(e) => {
                         tracing::error!("Unexpected gRPC failed to read request: {}", e);
                         yield ModelStreamInferResponse {
-                            error_message: e.to_string().into(),
-                            infer_response: None,
-                            ..Default::default()
+                            error_message: e.to_string(),
+                            infer_response: None
                         };
                         continue;
                     }
@@ -431,9 +430,9 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
         if !request.raw_input_contents.is_empty()
             && request.inputs.len() != request.raw_input_contents.len()
         {
-            return Err(Status::invalid_argument(format!(
-                "`raw_input_contents` must be used for all inputs"
-            )));
+            return Err(Status::invalid_argument(
+                "`raw_input_contents` must be used for all inputs",
+            ));
         }
 
         // iterate through inputs
@@ -457,7 +456,7 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                     match &input.contents {
                         Some(content) => {
                             let bytes = &content.bytes_contents[0];
-                            text_input = Some(String::from_utf8_lossy(&bytes).to_string());
+                            text_input = Some(String::from_utf8_lossy(bytes).to_string());
                         }
                         None => {
                             let raw_input =
@@ -616,7 +615,7 @@ impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
             }),
             Err(e) => Ok(ModelStreamInferResponse {
                 infer_response: None,
-                error_message: format!("Failed to convert response: {}", e).into(),
+                error_message: format!("Failed to convert response: {}", e),
             }),
         }
     }

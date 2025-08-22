@@ -39,8 +39,6 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-
-// helper function to get the completion response stream given an request
 pub async fn completion_response_stream(
     state: Arc<kserve::State>,
     request: NvCreateCompletionRequest,
