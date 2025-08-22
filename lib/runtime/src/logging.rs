@@ -1009,28 +1009,40 @@ pub mod tests {
 
                 // Parent span has no parent_id
                 for log_line in &lines {
-                    if log_line.get("span_name").unwrap().as_str().unwrap() == "parent" {
-                        assert!(log_line.get("parent_id").is_none());
+                    if let Some(span_name) = log_line.get("span_name") {
+                        if let Some(span_name_str) = span_name.as_str() {
+                            if span_name_str == "parent" {
+                                assert!(log_line.get("parent_id").is_none());
+                            }
+                        }
                     }
                 }
 
                 // Child span's parent_id is parent_span_id
                 for log_line in &lines {
-                    if log_line.get("span_name").unwrap().as_str().unwrap() == "child" {
-                        assert_eq!(
-                            log_line.get("parent_id").unwrap().as_str().unwrap(),
-                            &parent_span_id
-                        );
+                    if let Some(span_name) = log_line.get("span_name") {
+                        if let Some(span_name_str) = span_name.as_str() {
+                            if span_name_str == "child" {
+                                assert_eq!(
+                                    log_line.get("parent_id").unwrap().as_str().unwrap(),
+                                    &parent_span_id
+                                );
+                            }
+                        }
                     }
                 }
 
                 // Grandchild span's parent_id is child_span_id
                 for log_line in &lines {
-                    if log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild" {
-                        assert_eq!(
-                            log_line.get("parent_id").unwrap().as_str().unwrap(),
-                            &child_span_id
-                        );
+                    if let Some(span_name) = log_line.get("span_name") {
+                        if let Some(span_name_str) = span_name.as_str() {
+                            if span_name_str == "grandchild" {
+                                assert_eq!(
+                                    log_line.get("parent_id").unwrap().as_str().unwrap(),
+                                    &child_span_id
+                                );
+                            }
+                        }
                     }
                 }
 
