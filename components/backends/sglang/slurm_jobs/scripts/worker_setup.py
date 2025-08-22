@@ -296,7 +296,7 @@ def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
     if not nginx_config or not os.path.exists(nginx_config):
         raise ValueError(f"Nginx config file not found: {nginx_config}")
     
-    nginx_cmd = f"nginx -c {nginx_config} && sleep 86400"
+    nginx_cmd = f"apt-get update && apt-get install -y nginx && nginx -c {nginx_config} && sleep 86400"
     return run_command(nginx_cmd)
 
 
