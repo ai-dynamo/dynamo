@@ -188,7 +188,7 @@ Example plots -- **for demonstration purposes only**:
     <td><img src="../images/request_throughput_vs_concurrency.png" alt="Request Throughput vs Concurrency" width="400"></td>
   </tr>
   <tr>
-    <td><img src="../images/efficiency_tok_s_gpu_vs_user_2.png" alt="GPU Efficiency (tokens/s/GPU)" width="400"></td>
+    <td><img src="../images/efficiency_tok_s_gpu_vs_user.png" alt="GPU Efficiency (tokens/s/GPU)" width="400"></td>
     <td><img src="../images/avg_inter_token_latency_vs_concurrency.png" alt="Average Inter-Token Latency vs Concurrency" width="400"></td>
     <td></td>
   </tr>
