@@ -8,7 +8,7 @@ This module defines the core BaseLogitsProcessor interface that all
 logits processors must implement.
 """
 
-from typing import List, Protocol
+from typing import Protocol, Sequence
 
 import torch
 
@@ -23,7 +23,7 @@ class BaseLogitsProcessor(Protocol):
 
     def __call__(
         self,
-        input_ids: List[int],
+        input_ids: Sequence[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
         """
@@ -34,6 +34,6 @@ class BaseLogitsProcessor(Protocol):
             logits: The raw logits for the next token. Shape: (vocab_size,)
 
         Returns:
-            The modified logits tensor with same shape as input.
+            A tensor with the same shape, dtype, and device as `logits`.
         """
-        raise NotImplementedError
+        ...
