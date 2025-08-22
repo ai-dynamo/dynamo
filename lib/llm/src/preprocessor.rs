@@ -209,9 +209,16 @@ impl OpenAIPreprocessor {
                             {
                                 // Use provided tokens, skip tokenization
                                 let tokens = token_data.unwrap().clone();
+                                tracing::trace!("Using provided tokens from EPP: {:?}", tokens);
                                 // Create a passthrough encoding with the provided tokens
                                 let passthrough_encoding = crate::tokenizers::Encoding::Sp(tokens);
                                 (passthrough_encoding, true)
+                            } else if has_backend_instance_id {
+                                // backend_instance_id is set but no token_data provided
+                                tracing::trace!("tokens were not passed by the epp");
+                                // Normal tokenization
+                                let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                (encoding, false)
                             } else {
                                 // Normal tokenization
                                 let encoding = self.tokenizer.encode(&formatted_prompt)?;

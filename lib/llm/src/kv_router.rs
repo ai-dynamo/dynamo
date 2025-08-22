@@ -381,6 +381,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     // Return the tokens in nvext.token_data format
                     let tokens_json = serde_json::to_string(&tokens)?;
                     let response_tokens = Annotated::from_annotation("token_data", &tokens_json)?;
+                    tracing::info!("response_tokens in generate: {:?}", response_tokens);
                     let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
