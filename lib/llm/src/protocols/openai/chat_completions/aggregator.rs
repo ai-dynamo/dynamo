@@ -165,8 +165,8 @@ impl DeltaAggregator {
 
         // After aggregation, inspect each choice's text for tool call syntax
         for choice in aggregator.choices.values_mut() {
-            if choice.tool_calls.is_none() {
-                if let Ok(tool_calls) = try_tool_call_parse_aggregate(
+            if choice.tool_calls.is_none()
+                && let Ok(tool_calls) = try_tool_call_parse_aggregate(
                     &choice.text,
                     parsing_options.tool_call_parser.as_deref(),
                 ) {
@@ -186,7 +186,6 @@ impl DeltaAggregator {
                     choice.finish_reason =
                         Some(dynamo_async_openai::types::FinishReason::ToolCalls);
                 }
-            }
         }
 
         // Extract aggregated choices and sort them by index.
