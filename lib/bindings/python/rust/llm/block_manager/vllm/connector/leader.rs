@@ -15,7 +15,7 @@ use crate::llm::block_manager::{
     vllm::KvbmRequest, VllmBlockManager,
 };
 use crate::DistributedRuntime as PyDistributedRuntime;
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector_namespace;
+use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use dynamo_llm::block_manager::{
     block::{
@@ -104,7 +104,7 @@ impl KvConnectorLeader {
         let drt = drt.inner().clone();
 
         let ns = drt
-            .namespace(kvbm_connector_namespace::KVBM_CONNECTOR_LEADER)
+            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
             .unwrap();
 
         let kvbm_metrics = KvbmMetrics::new(&ns);

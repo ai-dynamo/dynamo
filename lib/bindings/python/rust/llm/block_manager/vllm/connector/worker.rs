@@ -16,7 +16,7 @@ use crate::{
     llm::block_manager::distributed::VllmTensor, to_pyerr,
     DistributedRuntime as PyDistributedRuntime,
 };
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector_namespace;
+use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
@@ -93,7 +93,7 @@ impl KvConnectorWorker {
         .detach();
 
         let kvbm_metrics = KvbmMetrics::new(
-            &drt.namespace(kvbm_connector_namespace::KVBM_CONNECTOR_WORKER)
+            &drt.namespace(kvbm_connector::KVBM_CONNECTOR_WORKER)
                 .unwrap(),
         );
 
