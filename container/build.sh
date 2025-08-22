@@ -613,60 +613,22 @@ fi
 
 # TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
 if [[ $FRAMEWORK == "VLLM" ]]; then
-     DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+    # Define base image tag before using it
+    DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+    
     # Start base image build in background
     echo "======================================"
     echo "Starting Build 1: Base Image"
     echo "======================================"
-    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE &
-    BASE_PID=$!
+    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     
     # Start framework build in background  
     echo "======================================"
     echo "Starting Build 2: Framework Image"
     echo "======================================"
-    $RUN_PREFIX docker build -f $DOCKERFILE --target framework $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE &
-    FRAMEWORK_PID=$!
-    
-    echo ""
-    echo "Both builds started in parallel!"
-    echo "Waiting for both to complete..."
-    echo ""
-    
-    # Wait for both builds and check their status
-    BASE_SUCCESS=true
-    FRAMEWORK_SUCCESS=true
-    
-    echo "Waiting for base image build..."
-    if ! wait $BASE_PID; then
-        echo "Base image build failed!"
-        BASE_SUCCESS=false
-    else
-        echo "Base image build completed successfully!"
-    fi
-    
-    echo "Waiting for framework build..."
-    if ! wait $FRAMEWORK_PID; then
-        echo "Framework build failed!"
-        FRAMEWORK_SUCCESS=false
-    else
-        echo "Framework build completed successfully!"
-    fi
-    
-    # Check if any build failed
-    if [[ "$BASE_SUCCESS" == "false" ]] || [[ "$FRAMEWORK_SUCCESS" == "false" ]]; then
-        echo ""
-        echo "======================================"
-        echo "BUILD FAILED"
-        echo "======================================"
-        echo "Base image build: $([ "$BASE_SUCCESS" == "true" ] && echo "SUCCESS" || echo "FAILED")"
-        echo "Framework build: $([ "$FRAMEWORK_SUCCESS" == "true" ] && echo "SUCCESS" || echo "FAILED")"
-        exit 1
-    fi
-    
     BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    # Use the base image as the foundation for framework builds
+    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+    
 else
     $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 fi
