@@ -20,7 +20,7 @@ pub trait MaybeError {
     fn from_err(err: Box<dyn Error + Send + Sync>) -> Self;
 
     /// Construct into an error instance.
-    fn err(&self) -> Option<Box<dyn Error + Send + Sync>>;
+    fn err(&self) -> Option<anyhow::Error>;
 
     /// Check if the current instance represents a success.
     fn is_ok(&self) -> bool {
@@ -46,8 +46,8 @@ mod tests {
                 message: err.to_string(),
             }
         }
-        fn err(&self) -> Option<Box<dyn Error + Send + Sync>> {
-            Some(anyhow::Error::msg(self.message.clone()).into())
+        fn err(&self) -> Option<anyhow::Error> {
+            Some(anyhow::Error::msg(self.message.clone()))
         }
     }
 

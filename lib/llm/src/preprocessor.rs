@@ -101,7 +101,6 @@ impl OpenAIPreprocessor {
         let mdcsum = mdc.mdcsum();
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
         let PromptFormatter::OAI(formatter) = formatter;
-
         let tokenizer = match &mdc.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
             Some(TokenizerKind::GGUF(tokenizer)) => {

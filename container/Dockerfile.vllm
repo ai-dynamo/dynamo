@@ -291,7 +291,7 @@ RUN uv pip install maturin[patchelf]
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
+ENV PYTHONPATH=$PYTHONPATH:$HOME/dynamo/components/planner/src
 ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
 
