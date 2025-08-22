@@ -188,10 +188,13 @@ impl DeltaGenerator {
         text: &Option<String>,
         token_ids: &[u32],
     ) -> Option<ParserResult> {
-        let text = text.as_deref()?;
+        let text_ref = text.as_deref().unwrap_or("");
+        if text_ref.is_empty() && token_ids.is_empty() {
+            return None;
+        }
         let parser_result = self
             .reasoning_parser
-            .parse_reasoning_streaming_incremental(text, token_ids);
+            .parse_reasoning_streaming_incremental(text_ref, token_ids);
 
         Some(parser_result)
     }

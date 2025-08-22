@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ops::Deref;
-
 use crate::ParserResult;
 use crate::ReasoningParser;
 
@@ -16,32 +14,55 @@ pub struct GptOssReasoningParser {
 }
 
 impl GptOssReasoningParser {
-    pub fn new() -> Self {
-        let enc = load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss).unwrap();
-        Self { enc }
+    pub fn new() -> anyhow::Result<Self> {
+        let enc = match load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss) {
+            Ok(enc) => enc,
+            Err(e) => {
+                tracing::error!("Failed to load HarmonyGptOss encoding: {e}");
+                // This leaves `enc` in an unusable state. Consider making `new()` return a Result in a follow-up.
+                return Err(anyhow::anyhow!(
+                    "Failed to load HarmonyGptOss encoding: {e}"
+                ));
+            }
+        };
+        Ok(Self { enc })
     }
 }
 
 impl Default for GptOssReasoningParser {
     fn default() -> Self {
-        Self::new()
+        Self::new().unwrap()
     }
 }
 
 impl GptOssReasoningParser {
     fn reason_parsing_wrapper(&self, _text: &str, token_ids: &[u32]) -> ParserResult {
-        let mut parser = StreamableParser::new(self.enc.clone(), Some(Role::Assistant)).unwrap();
+        let mut parser = match StreamableParser::new(self.enc.clone(), Some(Role::Assistant)) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Harmony StreamableParser init failed for GPT OSS: {e}");
+                return ParserResult::default();
+            }
+        };
+
         for token_id in token_ids {
-            parser.process(*token_id).unwrap();
+            if let Err(e) = parser.process(*token_id) {
+                tracing::warn!("Harmony parse error for token_id {token_id}: {e}");
+                return ParserResult::default();
+            }
         }
         let output_msgs = parser.messages();
         // let mut reasoning_token_ids = vec![];
         // let mut normal_token_ids = vec![];
         match output_msgs.len() {
             0 => {
+                let current = parser
+                    .current_content()
+                    .map(|s: String| s.as_str().to_owned())
+                    .unwrap_or_default();
                 ParserResult {
-                    normal_text: String::new(), // No normal text in this example
-                    reasoning_text: parser.current_content().unwrap().deref().to_string(), // All text is reasoning
+                    normal_text: String::new(),
+                    reasoning_text: current,
                 }
             }
             1 => {
@@ -51,8 +72,12 @@ impl GptOssReasoningParser {
                 {
                     reasoning_text.push_str(text);
                 }
+                let current = parser
+                    .current_content()
+                    .map(|s| s.as_str().to_owned())
+                    .unwrap_or_default();
                 ParserResult {
-                    normal_text: parser.current_content().unwrap().deref().to_string(),
+                    normal_text: current,
                     reasoning_text,
                 }
             }

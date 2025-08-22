@@ -96,7 +96,7 @@ impl ReasoningParserType {
                 )),
             },
             ReasoningParserType::GptOss => ReasoningParserWrapper {
-                parser: Box::new(GptOssReasoningParser::new()),
+                parser: Box::new(GptOssReasoningParser::default()),
             },
         }
     }
