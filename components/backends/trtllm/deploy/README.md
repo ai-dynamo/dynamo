@@ -219,14 +219,6 @@ Send a test request to verify your deployment. See the [client section](../../..
 
 The deployment templates support various TensorRT-LLM models and configurations. You can customize model-specific arguments in the worker configuration sections of the YAML files.
 
-### Multi-Token Prediction (MTP) Support
-
-For models supporting Multi-Token Prediction (such as DeepSeek R1), special configuration is available. Note that MTP requires the experimental TensorRT-LLM commit:
-
-```bash
-./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit
-```
-
 ## Monitoring and Health
 
 - **Frontend health endpoint**: `http://<frontend-service>:8000/health`
