@@ -184,11 +184,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
         arm64) PLATFORM=linux-arm64 ;; \
         *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
-    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
     | tar -xz -C /tmp && \
-    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
     chmod +x /usr/local/bin/prometheus && \
-    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
+    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
 
 # Copy UCX from dev image as plugin for NIXL
 # Copy NIXL source from devr image
