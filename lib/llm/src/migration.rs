@@ -100,10 +100,13 @@ impl RetryManager {
             if let Some(response) = response_stream.next().await {
                 if let Some(err) = response.err() {
                     const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                    if err.to_string().starts_with(STREAM_ERR_MSG) {
+                    if err
+                        .chain()
+                        .any(|e| e.to_string().starts_with(STREAM_ERR_MSG))
+                    {
                         tracing::warn!("Stream disconnected... recreating stream...");
                         if let Err(err) = self.new_stream().await {
-                            tracing::warn!("Cannot recreate stream: {:?}", err);
+                            tracing::warn!("Cannot recreate stream: {:#}", err);
                         } else {
                             continue;
                         }
@@ -584,7 +587,7 @@ mod tests {
     /// The RetryManager should exhaust all retries and return the original stream disconnection error.
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
-    async fn _test_retry_manager_ongoing_request_migration_indefinite_failure() {
+    async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
         dynamo_runtime::logging::init();
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
@@ -632,7 +635,7 @@ mod tests {
     /// and all retry attempts also fail with stream errors instead of NATS errors.
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
-    async fn _test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
+    async fn test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
         dynamo_runtime::logging::init();
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
