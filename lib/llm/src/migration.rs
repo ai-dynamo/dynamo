@@ -100,10 +100,13 @@ impl RetryManager {
             if let Some(response) = response_stream.next().await {
                 if let Some(err) = response.err() {
                     const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                    if format!("{:?}", err) == STREAM_ERR_MSG {
+                    if err
+                        .chain()
+                        .any(|e| e.to_string().starts_with(STREAM_ERR_MSG))
+                    {
                         tracing::warn!("Stream disconnected... recreating stream...");
                         if let Err(err) = self.new_stream().await {
-                            tracing::warn!("Cannot recreate stream: {:?}", err);
+                            tracing::warn!("Cannot recreate stream: {:#}", err);
                         } else {
                             continue;
                         }
@@ -462,6 +465,7 @@ mod tests {
     /// Expected behavior: All 10 responses should be received successfully.
     #[tokio::test]
     async fn test_retry_manager_no_migration() {
+        dynamo_runtime::logging::init();
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::Success, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
@@ -493,6 +497,7 @@ mod tests {
     /// Expected behavior: All 10 responses should be received successfully after retry.
     #[tokio::test]
     async fn test_retry_manager_new_request_migration() {
+        dynamo_runtime::logging::init();
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::FailThenSuccess, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
@@ -524,6 +529,8 @@ mod tests {
     /// Expected behavior: 5 responses from first stream + 5 responses from retry stream = 10 total.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration() {
+        dynamo_runtime::logging::init();
+
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFail { fail_after: 5 },
@@ -560,6 +567,7 @@ mod tests {
     /// Expected behavior: Should receive an error after all retries are exhausted, with the original error.
     #[tokio::test]
     async fn test_retry_manager_new_request_migration_indefinite_failure() {
+        dynamo_runtime::logging::init();
         let request = create_mock_request(0);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::AlwaysFail, 0, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
@@ -580,6 +588,7 @@ mod tests {
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
+        dynamo_runtime::logging::init();
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlways { fail_after: 3 },
@@ -627,6 +636,7 @@ mod tests {
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
+        dynamo_runtime::logging::init();
         let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlwaysStreamError { fail_after: 3 },
