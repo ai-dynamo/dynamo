@@ -15,9 +15,10 @@
 
 name: NVIDIA Github Validation - vLLM
 
+
 # Do not cancel merges into main
 concurrency:
-  group: pr-build-test-vllm-${{ github.event.number || github.run_id }}
+  group: pr-build-test-vllm-${{ github.ref_name || github.run_id }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 on:
@@ -42,6 +43,10 @@ jobs:
         if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
         run: |
           echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+      - name: Cleanup
+        if: always()
+        run: |
+          docker system prune -af          
       - name: Define Image Tag
         id: define_image_tag
         run: |
@@ -49,7 +54,7 @@ jobs:
       - name: Debug
         run: | 
           lsmod | grep nvidia || true
-          dmesg | grep -i nvrm || true
+          sudo dmesg | grep -i nvrm || true
           nvidia-smi
       - name: Build image
         env:
