@@ -69,7 +69,7 @@ impl DeltaAggregator {
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         extra_stream_args: StreamArgs,
     ) -> Result<NvCreateCompletionResponse> {
-        println!("Tool Call Parser: {:?}", extra_stream_args.tool_call_parser); // TODO: remove this once completion has tool call support
+        tracing::debug!("Tool Call Parser: {:?}", extra_stream_args.tool_call_parser); // TODO: remove this once completion has tool call support
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 let delta = match delta.ok() {
