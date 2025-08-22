@@ -83,7 +83,7 @@ impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Fro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{error::PipelineErrorExt, ManyOut, SingleIn};
+    use crate::pipeline::{ManyOut, SingleIn, error::PipelineErrorExt};
 
     #[tokio::test]
     async fn test_frontend_no_edge() {

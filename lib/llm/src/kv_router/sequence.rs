@@ -29,8 +29,8 @@ use anyhow::Result;
 use dashmap::DashMap;
 use derive_getters::Getters;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -428,21 +428,21 @@ impl ActiveSequencesMultiWorker {
                     }
                 }
                 ActiveSequenceEventData::Free => {
-                    if let Some((_, worker_id)) = request_to_worker.remove(&event.request_id) {
-                        if let Some(sender) = senders.get(&worker_id) {
-                            let _ = sender.send(UpdateSequences::Free {
-                                request_id: event.request_id.clone(),
-                            });
-                        }
+                    if let Some((_, worker_id)) = request_to_worker.remove(&event.request_id)
+                        && let Some(sender) = senders.get(&worker_id)
+                    {
+                        let _ = sender.send(UpdateSequences::Free {
+                            request_id: event.request_id.clone(),
+                        });
                     }
                 }
                 ActiveSequenceEventData::MarkPrefillCompleted => {
-                    if let Some(worker_id) = request_to_worker.get(&event.request_id) {
-                        if let Some(sender) = senders.get(&*worker_id) {
-                            let _ = sender.send(UpdateSequences::MarkPrefillCompleted {
-                                request_id: event.request_id.clone(),
-                            });
-                        }
+                    if let Some(worker_id) = request_to_worker.get(&event.request_id)
+                        && let Some(sender) = senders.get(&*worker_id)
+                    {
+                        let _ = sender.send(UpdateSequences::MarkPrefillCompleted {
+                            request_id: event.request_id.clone(),
+                        });
                     }
                 }
             }

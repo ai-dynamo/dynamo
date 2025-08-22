@@ -25,7 +25,7 @@ use std::{
 use tokio::sync::Mutex;
 
 pub use anyhow::{
-    anyhow as error, bail as raise, Context as ErrorContext, Error, Ok as OK, Result,
+    Context as ErrorContext, Error, Ok as OK, Result, anyhow as error, bail as raise,
 };
 
 use async_once_cell::OnceCell;

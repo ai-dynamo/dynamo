@@ -21,11 +21,12 @@ use validator::Validate;
 use crate::engines::ValidateRequest;
 
 use super::{
+    ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
+    OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     common_ext::{CommonExt, CommonExtProvider},
     nvext::{NvExt, NvExtProvider},
-    validate, ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
-    OpenAIStopConditionsProvider,
+    validate,
 };
 
 mod aggregator;
@@ -87,12 +88,11 @@ impl NvExtProvider for NvCreateCompletionRequest {
     }
 
     fn raw_prompt(&self) -> Option<String> {
-        if let Some(nvext) = self.nvext.as_ref() {
-            if let Some(use_raw_prompt) = nvext.use_raw_prompt {
-                if use_raw_prompt {
-                    return Some(prompt_to_string(&self.inner.prompt));
-                }
-            }
+        if let Some(nvext) = self.nvext.as_ref()
+            && let Some(use_raw_prompt) = nvext.use_raw_prompt
+            && use_raw_prompt
+        {
+            return Some(prompt_to_string(&self.inner.prompt));
         }
         None
     }

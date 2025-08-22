@@ -177,9 +177,11 @@ unsafe fn cuda_memcpy_h2d(
         "Source and destination device memory regions must not overlap for D2D copy"
     );
 
-    let src_slice = std::slice::from_raw_parts(src_ptr, size);
-    cuda_result::memcpy_htod_async(dst_ptr as u64, src_slice, stream.cu_stream())
-        .map_err(|e| TransferError::ExecutionError(format!("CUDA H2D memcpy failed: {}", e)))?;
+    unsafe {
+        let src_slice = std::slice::from_raw_parts(src_ptr, size);
+        cuda_result::memcpy_htod_async(dst_ptr as u64, src_slice, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("CUDA H2D memcpy failed: {}", e)))?
+    };
     Ok(())
 }
 
@@ -199,9 +201,11 @@ unsafe fn cuda_memcpy_d2h(
         "Source and destination device memory regions must not overlap for D2D copy"
     );
 
-    let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
-    cuda_result::memcpy_dtoh_async(dst_slice, src_ptr as u64, stream.cu_stream())
-        .map_err(|e| TransferError::ExecutionError(format!("CUDA D2H memcpy failed: {}", e)))?;
+    unsafe {
+        let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
+        cuda_result::memcpy_dtoh_async(dst_slice, src_ptr as u64, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("CUDA D2H memcpy failed: {}", e)))?;
+    }
     Ok(())
 }
 
@@ -221,8 +225,10 @@ unsafe fn cuda_memcpy_d2d(
         "Source and destination device memory regions must not overlap for D2D copy"
     );
 
-    cuda_result::memcpy_dtod_async(dst_ptr as u64, src_ptr as u64, size, stream.cu_stream())
-        .map_err(|e| TransferError::ExecutionError(format!("CUDA D2D memcpy failed: {}", e)))?;
+    unsafe {
+        cuda_result::memcpy_dtod_async(dst_ptr as u64, src_ptr as u64, size, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("CUDA D2D memcpy failed: {}", e)))?
+    };
     Ok(())
 }
 

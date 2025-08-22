@@ -7,7 +7,7 @@ use dynamo_runtime::slug::Slug;
 
 use crate::discovery::ModelEntry;
 
-use crate::kv_router::{scheduler::DefaultWorkerSelector, KvRouterConfig};
+use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
     types::openai::{
