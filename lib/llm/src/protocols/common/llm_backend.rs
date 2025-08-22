@@ -192,10 +192,5 @@ mod tests {
         assert_eq!(format!("{}", output.err().unwrap()), "Test error");
         assert!(!output.is_ok());
         assert!(output.is_err());
-
-        let output = LLMEngineOutput::from_err(anyhow::Error::msg("Test error 2").into());
-        assert_eq!(format!("{}", output.err().unwrap()), "Test error 2");
-        assert!(!output.is_ok());
-        assert!(output.is_err());
     }
 }

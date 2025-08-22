@@ -47,7 +47,7 @@ use super::{
 };
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
-use crate::protocols::Endpoint as EndpointId;
+use crate::protocols::EndpointId;
 use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,

@@ -440,7 +440,7 @@ impl AnnotatedMockEngine {
     pub fn new(
         inner: MockVllmEngine,
         distributed_runtime: DistributedRuntime,
-        endpoint: dynamo_runtime::protocols::Endpoint,
+        endpoint_id: dynamo_runtime::protocols::EndpointId,
     ) -> Self {
         let inner = Arc::new(inner);
         let inner_clone = inner.clone();
@@ -449,13 +449,13 @@ impl AnnotatedMockEngine {
         tokio::spawn(async move {
             loop {
                 // Try to create component
-                let Ok(namespace) = distributed_runtime.namespace(&endpoint.namespace) else {
+                let Ok(namespace) = distributed_runtime.namespace(&endpoint_id.namespace) else {
                     tracing::debug!("Namespace not available yet, retrying...");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 };
 
-                let Ok(component) = namespace.component(&endpoint.component) else {
+                let Ok(component) = namespace.component(&endpoint_id.component) else {
                     tracing::debug!("Component not available yet, retrying...");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -509,13 +509,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 /// Create a mocker engine as ExecutionContext
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
-    endpoint: dynamo_runtime::protocols::Endpoint,
+    endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
-        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint);
+        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
 }

@@ -20,7 +20,7 @@ use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
     network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime};
+use dynamo_runtime::{protocols::EndpointId, DistributedRuntime};
 
 use crate::entrypoint::EngineConfig;
 
@@ -141,7 +141,7 @@ pub async fn run(
 #[cfg(feature = "integration")]
 mod integration_tests {
     use super::*;
-    use dynamo_runtime::protocols::Endpoint as EndpointId;
+    use dynamo_runtime::protocols::EndpointId;
 
     async fn create_test_environment() -> anyhow::Result<(DistributedRuntime, EngineConfig)> {
         // Create a minimal distributed runtime and engine config for testing
