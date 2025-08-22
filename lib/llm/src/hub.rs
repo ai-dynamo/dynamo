@@ -13,11 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use model_express_client::{Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider};
-use model_express_common::download as mx;
 use hf_hub::api::tokio::ApiBuilder;
 use std::env;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "model-express")]
+use model_express_client::{Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider};
+#[cfg(feature = "model-express")]
+use model_express_common::download as mx;
 
 const MODEL_EXPRESS_ENDPOINT_ENV_VAR: &str = "MODEL_EXPRESS_URL";
 const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
@@ -38,9 +41,10 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let name = name.as_ref();
     let model_name = name.display().to_string();
     
-    // Only use ModelExpress if the environment variable is explicitly set
-    match env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
-        Ok(endpoint) => {
+    #[cfg(feature = "model-express")]
+    {
+        // Only use ModelExpress if the environment variable is explicitly set
+        if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
             tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {}", model_name);
             
             let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
@@ -68,21 +72,27 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
             match result {
                 Ok(path) => {
                     tracing::info!("ModelExpress download completed successfully for model: {}", model_name);
-                    Ok(path)
+                    return Ok(path);
                 }
                 Err(e) => {
                     tracing::warn!("ModelExpress download failed for model '{}': {}. Falling back to hf-hub.", model_name, e);
-                    download_with_hf_hub(&model_name, ignore_weights).await
                 }
             }
         }
-        Err(_) => {
-            tracing::info!("Downloading model {} with hf-hub", model_name);
-            download_with_hf_hub(&model_name, ignore_weights).await
+    }
+    
+    #[cfg(not(feature = "model-express"))]
+    {
+        if env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).is_ok() {
+            tracing::warn!("ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub.");
         }
     }
+    
+    tracing::info!("Using hf-hub for model: {}", model_name);
+    download_with_hf_hub(&model_name, ignore_weights).await
 }
 
+#[cfg(feature = "model-express")]
 async fn mx_download_direct(model_name: &str) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
     mx::download_model(model_name, MxModelProvider::HuggingFace, Some(cache_dir)).await
@@ -182,6 +192,7 @@ fn is_image_file(filename: &str) -> bool {
         || filename.ends_with("JPEG")
 }
 
+#[cfg(feature = "model-express")]
 fn get_mx_model_path_from_cache(model_name: &str) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
     let model_dir = cache_dir.join(model_name);
@@ -197,6 +208,7 @@ fn get_mx_model_path_from_cache(model_name: &str) -> anyhow::Result<PathBuf> {
     Ok(model_dir)
 }
 
+#[cfg(feature = "model-express")]
 fn get_model_express_cache_dir() -> PathBuf {
     if let Ok(cache_path) = env::var("HF_HUB_CACHE") {
         return PathBuf::from(cache_path);
@@ -222,6 +234,7 @@ mod tests {
         let _result: anyhow::Result<PathBuf> = from_hf(test_path, false).await;
     }
 
+    #[cfg(feature = "model-express")]
     #[test]
     fn test_get_model_express_cache_dir() {
         let cache_dir = get_model_express_cache_dir();
