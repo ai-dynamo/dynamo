@@ -27,16 +27,11 @@ spec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/examples/multimodal
-          env:
-            - name: MODEL_NAME
-              value: llava-hf/llava-1.5-7b-hf
-            - name: PROMPT_TEMPLATE
-              value: "USER: <image>\n<prompt> ASSISTANT:"
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/encode_worker.py --model $MODEL_NAME
+            - python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf
     VLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: agg-llava
@@ -49,16 +44,11 @@ spec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/examples/multimodal
-          env:
-            - name: MODEL_NAME
-              value: llava-hf/llava-1.5-7b-hf
-            - name: PROMPT_TEMPLATE
-              value: "USER: <image>\n<prompt> ASSISTANT:"
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/worker.py --model $MODEL_NAME --worker-type prefill
+            - python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type prefill
     Processor:
       envFromSecret: hf-token-secret
       dynamoNamespace: agg-llava
@@ -71,13 +61,8 @@ spec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/examples/multimodal
-          env:
-            - name: MODEL_NAME
-              value: llava-hf/llava-1.5-7b-hf
-            - name: PROMPT_TEMPLATE
-              value: "USER: <image>\n<prompt> ASSISTANT:"
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE"
+            - 'python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-template "USER: <image>\n<prompt> ASSISTANT:"'
