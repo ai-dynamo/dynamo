@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use tonic_prost_build;
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:warning=Building with CUDA KV off");
     build_protos()
