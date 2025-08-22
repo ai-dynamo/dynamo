@@ -264,7 +264,11 @@ vllm_configs = {
         name="deepep",
         directory="/workspace/components/backends/vllm",
         script_name="dsr1_dep.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm, pytest.mark.h100],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.vllm,
+            pytest.mark.h100,
+        ],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
