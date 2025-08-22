@@ -47,8 +47,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --gpus-per-node L     Number of GPUs per node (required, int)"
             echo "  --master-addr ADDR    Master node address (default: localhost)"
             echo "  --log-dir DIR         Directory for log files (default: ./logs)"
-            echo "  --model MODEL    Model name to use (default: deepseek-ai/DeepSeek-R1)"
-            echo "  -h, --help           Show this help message"
+            echo "  --model MODEL         Model name to use (default: ${MODEL})"
+            echo "  -h, --help            Show this help message"
             exit 0
             ;;
         *)
