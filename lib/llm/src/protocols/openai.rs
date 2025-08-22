@@ -195,13 +195,13 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct StreamArgs {
+pub struct ParsingOptions {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
 }
 
-impl StreamArgs {
+impl ParsingOptions {
     pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
         Self {
             tool_call_parser,

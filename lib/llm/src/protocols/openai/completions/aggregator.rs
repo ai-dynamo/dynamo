@@ -23,7 +23,7 @@ use crate::protocols::{
     codec::{Message, SseCodecError},
     common::FinishReason,
     convert_sse_stream,
-    openai::StreamArgs,
+    openai::ParsingOptions,
     Annotated, DataStream,
 };
 
@@ -67,9 +67,9 @@ impl DeltaAggregator {
     /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
-        extra_stream_args: StreamArgs,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateCompletionResponse> {
-        tracing::debug!("Tool Call Parser: {:?}", extra_stream_args.tool_call_parser); // TODO: remove this once completion has tool call support
+        tracing::debug!("Tool Call Parser: {:?}", parsing_options.tool_call_parser); // TODO: remove this once completion has tool call support
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 let delta = match delta.ok() {
@@ -181,17 +181,17 @@ impl From<DeltaChoice> for dynamo_async_openai::types::Choice {
 impl NvCreateCompletionResponse {
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
-        extra_stream_args: StreamArgs,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateCompletionResponse> {
         let stream = convert_sse_stream::<NvCreateCompletionResponse>(stream);
-        NvCreateCompletionResponse::from_annotated_stream(stream, extra_stream_args).await
+        NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
 
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
-        extra_stream_args: StreamArgs,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateCompletionResponse> {
-        DeltaAggregator::apply(stream, extra_stream_args).await
+        DeltaAggregator::apply(stream, parsing_options).await
     }
 }
 
@@ -247,7 +247,7 @@ mod tests {
         let stream: DataStream<Annotated<NvCreateCompletionResponse>> = Box::pin(stream::empty());
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream, StreamArgs::default()).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -271,7 +271,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream, StreamArgs::default()).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -311,7 +311,7 @@ mod tests {
         let stream = Box::pin(stream::iter(annotated_deltas));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream, StreamArgs::default()).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -371,7 +371,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream, StreamArgs::default()).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
