@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: agg-llava
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      dynamoNamespace: agg-llava
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+    EncodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-llava
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/multimodal
+          env:
+            - name: MODEL_NAME
+              value: llava-hf/llava-1.5-7b-hf
+            - name: PROMPT_TEMPLATE
+              value: "USER: <image>\n<prompt> ASSISTANT:"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/encode_worker.py --model $MODEL_NAME
+    VLMWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-llava
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/multimodal
+          env:
+            - name: MODEL_NAME
+              value: llava-hf/llava-1.5-7b-hf
+            - name: PROMPT_TEMPLATE
+              value: "USER: <image>\n<prompt> ASSISTANT:"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/worker.py --model $MODEL_NAME --worker-type prefill
+    Processor:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-llava
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/multimodal
+          env:
+            - name: MODEL_NAME
+              value: llava-hf/llava-1.5-7b-hf
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE"
