@@ -33,3 +33,4 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 regex = "1"
+openai-harmony = "0.0.3"

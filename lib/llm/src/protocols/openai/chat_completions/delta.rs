@@ -121,7 +121,7 @@ impl DeltaGenerator {
     pub fn create_logprobs(
         &self,
         tokens: Vec<common::llm_backend::TokenType>,
-        token_ids: Vec<TokenIdType>,
+        token_ids: &Vec<TokenIdType>,
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
     ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
@@ -133,7 +133,7 @@ impl DeltaGenerator {
             .into_iter()
             .zip(token_ids)
             .map(|(token, token_id)| (token.unwrap_or_default(), token_id))
-            .collect::<Vec<(String, TokenIdType)>>();
+            .collect::<Vec<(String, &TokenIdType)>>();
         let tok_lps = toks
             .iter()
             .zip(logprobs.unwrap())
@@ -151,7 +151,7 @@ impl DeltaGenerator {
                         .map(|top_lp| {
                             let top_t = top_lp.token.clone().unwrap_or_default();
                             let top_tid = top_lp.token_id;
-                            found_selected_token = found_selected_token || top_tid == *tid;
+                            found_selected_token = found_selected_token || top_tid == **tid;
                             dynamo_async_openai::types::TopLogprobs {
                                 token: top_t,
                                 logprob: top_lp.logprob as f32,
@@ -183,11 +183,15 @@ impl DeltaGenerator {
         })
     }
 
-    fn create_reasoning_content(&mut self, text: Option<String>) -> Option<ParserResult> {
-        let text = text?;
+    fn create_reasoning_content(
+        &mut self,
+        text: &Option<String>,
+        token_ids: &[u32],
+    ) -> Option<ParserResult> {
+        let text = text.as_deref()?;
         let parser_result = self
             .reasoning_parser
-            .parse_reasoning_streaming_incremental(&text);
+            .parse_reasoning_streaming_incremental(text, token_ids);
 
         Some(parser_result)
     }
@@ -207,17 +211,12 @@ impl DeltaGenerator {
         &mut self,
         index: u32,
         text: Option<String>,
+        reasoning_content: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     ) -> NvCreateChatCompletionStreamResponse {
-        let reasoning_parser_result = self.create_reasoning_content(text).unwrap_or_default();
-
-        let (normal_text, reasoning_content) = (
-            reasoning_parser_result.get_some_normal_text(),
-            reasoning_parser_result.get_some_reasoning(),
-        );
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: normal_text,
+            content: text,
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
@@ -292,7 +291,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         let logprobs = self.create_logprobs(
             delta.tokens,
-            delta.token_ids,
+            delta.token_ids.as_ref(),
             delta.log_probs,
             delta.top_logprobs,
         );
@@ -318,9 +317,24 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None => None,
         };
 
+        let reasoning_parser_result = self
+            .create_reasoning_content(&delta.text, &delta.token_ids)
+            .unwrap_or_default();
+
+        let (normal_text, reasoning_content) = (
+            reasoning_parser_result.get_some_normal_text(),
+            reasoning_parser_result.get_some_reasoning(),
+        );
+
         // Create the streaming response.
         let index = 0;
-        let stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        let stream_response = self.create_choice(
+            index,
+            normal_text,
+            reasoning_content,
+            finish_reason,
+            logprobs,
+        );
 
         Ok(stream_response)
     }
