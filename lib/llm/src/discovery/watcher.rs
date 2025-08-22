@@ -268,7 +268,7 @@ impl ModelWatcher {
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
     async fn handle_put(&self, model_entry: &ModelEntry) -> anyhow::Result<()> {
-        let endpoint_id = model_entry.endpoint.clone();
+        let endpoint_id = &model_entry.endpoint_id;
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?

@@ -13,7 +13,7 @@ use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
-use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::protocols::EndpointId;
 
 use crate::RouterMode;
 
@@ -130,14 +130,7 @@ impl EntrypointArgs {
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
     ) -> PyResult<Self> {
-        let endpoint_id_obj: Option<EndpointId> = match endpoint_id {
-            Some(eid) => Some(eid.parse().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid endpoint_id format: {eid}"
-                ))
-            })?),
-            None => None,
-        };
+        let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {

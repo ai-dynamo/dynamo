@@ -254,6 +254,32 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         set_side_channel_host_and_port(base_side_channel_port)
 
 
+def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
+    """Create KVEventsConfig for prefix caching if needed."""
+    # If prefix caching is not enabled, no events config needed
+    if not config.engine_args.enable_prefix_caching:
+        return None
+
+    # If user provided their own config, use that
+    if getattr(config.engine_args, "kv_events_config"):
+        logger.info("Using user-provided kv_events_config")
+        return None
+
+    # Create default events config for prefix caching
+    logger.info("Creating Dynamo default kv_events_config for prefix caching")
+    if config.kv_port is None:
+        raise ValueError(
+            "config.kv_port is not set; call configure_ports_with_etcd(...) before overwrite_args "
+            "or provide --kv-event-config to supply an explicit endpoint."
+        )
+    dp_rank = config.engine_args.data_parallel_rank or 0
+    return KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+    )
+
+
 def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
     """Create KVTransferConfig based on user config or connector list.
 
@@ -313,24 +339,16 @@ def overwrite_args(config):
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
         "disable_log_requests": True,
-        # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
 
-    kv_config = create_kv_transfer_config(config)
-    if kv_config:
-        defaults["kv_transfer_config"] = kv_config
+    kv_transfer_config = create_kv_transfer_config(config)
+    if kv_transfer_config:
+        defaults["kv_transfer_config"] = kv_transfer_config
 
-    if config.engine_args.enable_prefix_caching:
-        dp_rank = config.engine_args.data_parallel_rank or 0
-        defaults |= {
-            # Always setting up kv events if enable prefix cache.
-            "kv_events_config": KVEventsConfig(
-                enable_kv_cache_events=True,
-                publisher="zmq",
-                endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-            )
-        }
+    kv_events_config = create_kv_events_config(config)
+    if kv_events_config:
+        defaults["kv_events_config"] = kv_events_config
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():

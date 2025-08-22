@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 __all__ = [
-    "CircusController",
     "PlannerConnector",
     "KubernetesConnector",
     "LoadPlannerDefaults",
@@ -10,7 +9,6 @@ __all__ = [
     "ServiceConfig",
 ]
 # Import the classes
-from dynamo.planner.circusd import CircusController
 from dynamo.planner.config import ServiceConfig
 from dynamo.planner.defaults import LoadPlannerDefaults, SLAPlannerDefaults
 from dynamo.planner.kubernetes_connector import KubernetesConnector
