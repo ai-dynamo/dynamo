@@ -1977,7 +1977,6 @@ dependencies = [
  "toktrie_hf_tokenizers 1.1.1",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "unicode-segmentation",
  "url",
  "uuid 1.17.0",
