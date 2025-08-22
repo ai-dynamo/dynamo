@@ -10,15 +10,15 @@ use zmq::*;
 use BlockTransferPool::*;
 
 use crate::block_manager::{
+    BasicMetadata, Storage,
     block::{
+        Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
         data::local::LocalBlockData,
         locality,
         transfer::{TransferContext, WriteTo, WriteToStrategy},
-        Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
-    BasicMetadata, Storage,
 };
 
 use anyhow::Result;

@@ -32,21 +32,20 @@
 use crate::{
     config::HealthStatus,
     discovery::Lease,
-    metrics::{prometheus_names, MetricsRegistry},
+    metrics::{MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::EtcdPath,
 };
 
 use super::{
-    error,
+    DistributedRuntime, Result, Runtime, error,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
     utils::Duration,
-    DistributedRuntime, Result, Runtime,
 };
 
-use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
+use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
 use crate::protocols::EndpointId;
 use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
@@ -288,11 +287,13 @@ impl Component {
         let component_clone = self.clone();
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
-        debug_assert!(hierarchies
-            .last()
-            .map(|x| x.as_str())
-            .unwrap_or_default()
-            .eq_ignore_ascii_case(&self.service_name())); // it happens that in component, hierarchy and service name are the same
+        debug_assert!(
+            hierarchies
+                .last()
+                .map(|x| x.as_str())
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(&self.service_name())
+        ); // it happens that in component, hierarchy and service name are the same
 
         // Start a background task that scrapes stats every 5 seconds
         let m = component_metrics.clone();

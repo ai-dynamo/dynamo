@@ -45,8 +45,8 @@
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
 use super::block::{
-    locality::LocalityProvider, transfer::TransferContext, BlockError, BlockMetadata, BlockState,
-    ImmutableBlock, MutableBlock,
+    BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
+    locality::LocalityProvider, transfer::TransferContext,
 };
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::{BlockPool, BlockPoolError};
@@ -56,8 +56,9 @@ use nixl_sys::Agent as NixlAgent;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{
+    Mutex,
     mpsc::{self, error::TryRecvError},
-    oneshot, Mutex,
+    oneshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -333,7 +334,9 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                             }
                         }
 
-                        tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
+                        tracing::warn!(
+                            "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
+                        );
                         None
                     };
 
@@ -582,16 +585,16 @@ mod tests {
     use super::*;
 
     use crate::block_manager::{
+        LayoutConfig, NixlRegisterableStorage,
         block::{
-            locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock,
+            BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock, locality::Local,
         },
-        layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
+        layout::{FullyContiguous, LayerSeparate, LayoutType, nixl::NixlLayout},
         pool::{BlockRegistrationDuplicationSetting, ManagedBlockPool},
         storage::{
             DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
             PinnedStorage, StorageAllocator, StorageType,
         },
-        LayoutConfig, NixlRegisterableStorage,
     };
     use crate::tokens::{TokenBlockSequence, Tokens};
     use nixl_sys::{MemoryRegion, NixlDescriptor};

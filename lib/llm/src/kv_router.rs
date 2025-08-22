@@ -9,8 +9,8 @@ use anyhow::Result;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
+        SingleIn, async_trait,
     },
     prelude::*,
     protocols::annotated::Annotated,
@@ -30,12 +30,12 @@ pub mod scoring;
 pub mod sequence;
 
 use crate::{
-    discovery::{ModelEntry, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
-            compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
-            KvRouterError, OverlapScores, RouterEvent,
+            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},

@@ -53,7 +53,7 @@
 //!
 //! [`SchedulerOutput`] is transform
 
-use super::scheduler::{SchedulingDecision, DISCONNECTED_WARNING};
+use super::scheduler::{DISCONNECTED_WARNING, SchedulingDecision};
 use super::*;
 
 use tokio::sync::oneshot;

@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use crate::block_manager::{
-    block::{registry::BlockRegistrationError, BlockState, PrivateBlockExt},
+    block::{BlockState, PrivateBlockExt, registry::BlockRegistrationError},
     events::Publisher,
 };
 

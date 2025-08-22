@@ -18,10 +18,10 @@ use std::collections::HashMap;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
+    Annotated, Annotated,
     codec::{Message, SseCodecError},
     convert_sse_stream,
     openai::ParsingOptions,
-    Annotated,
 };
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
@@ -198,6 +198,17 @@ impl DeltaAggregator {
                     choice.finish_reason =
                         Some(dynamo_async_openai::types::FinishReason::ToolCalls);
                 }
+                for tool_call in &tool_calls {
+                    tracing::debug!(
+                        tool_call_id = %tool_call.id,
+                        function_name = %tool_call.function.name,
+                        arguments = %tool_call.function.arguments,
+                        "Parsed structured tool call from aggregated content"
+                    );
+                }
+                choice.tool_calls = Some(tool_calls);
+                choice.text.clear();
+                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
             }
         }
 

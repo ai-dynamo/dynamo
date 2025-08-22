@@ -15,7 +15,7 @@
 
 use super::*;
 
-use cudarc::driver::{sys::CUevent_flags, CudaEvent, CudaStream};
+use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
 use nixl_sys::Agent as NixlAgent;
 
 use std::sync::Arc;

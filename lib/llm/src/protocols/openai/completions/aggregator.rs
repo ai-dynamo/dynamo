@@ -20,11 +20,11 @@ use futures::{Stream, StreamExt};
 
 use super::NvCreateCompletionResponse;
 use crate::protocols::{
+    Annotated, Annotated, DataStream, DataStream,
     codec::{Message, SseCodecError},
     common::FinishReason,
     convert_sse_stream,
     openai::ParsingOptions,
-    Annotated, DataStream,
 };
 
 /// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].

@@ -10,11 +10,11 @@ use utils::*;
 use zmq::*;
 
 use crate::block_manager::{
-    block::{layout_to_blocks, locality, transfer::TransferContext, Block},
+    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
+    block::{Block, layout_to_blocks, locality, transfer::TransferContext},
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
-    storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator},
-    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
+    storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
 use derive_builder::Builder;
@@ -28,8 +28,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
-    utils::{leader_worker_barrier::WorkerBarrier, task::CriticalTaskExecutionHandle},
     DistributedRuntime,
+    utils::{leader_worker_barrier::WorkerBarrier, task::CriticalTaskExecutionHandle},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -70,10 +70,10 @@ impl Decoder for TwoPartCodec {
         let total_len = 24 + header_len + body_len;
 
         // Check if total_len exceeds max_message_size
-        if let Some(max_size) = self.max_message_size {
-            if total_len > max_size {
-                return Err(TwoPartCodecError::MessageTooLarge(total_len, max_size));
-            }
+        if let Some(max_size) = self.max_message_size
+            && total_len > max_size
+        {
+            return Err(TwoPartCodecError::MessageTooLarge(total_len, max_size));
         }
 
         // Check if enough data is available
@@ -124,10 +124,10 @@ impl Encoder<TwoPartMessage> for TwoPartCodec {
         let total_len = 24 + header_len + body_len; // 24 bytes for lengths and checksum
 
         // Check if total_len exceeds max_message_size
-        if let Some(max_size) = self.max_message_size {
-            if total_len > max_size {
-                return Err(TwoPartCodecError::MessageTooLarge(total_len, max_size));
-            }
+        if let Some(max_size) = self.max_message_size
+            && total_len > max_size
+        {
+            return Err(TwoPartCodecError::MessageTooLarge(total_len, max_size));
         }
 
         dst.put_u64(header_len as u64);

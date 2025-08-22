@@ -16,15 +16,15 @@
 pub use crate::component::Component;
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
+    ErrorContext, RuntimeCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
-    ErrorContext, RuntimeCallback,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
@@ -164,7 +164,9 @@ impl DistributedRuntime {
                 tracing::warn!("Failed to initialize system status start time: {}", e);
             }
 
-            tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
+            tracing::debug!(
+                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
+            );
         }
 
         Ok(distributed_runtime)

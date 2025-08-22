@@ -15,8 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use super::preprocessor::PreprocessedRequest;
 pub use super::FinishReason;
+pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
