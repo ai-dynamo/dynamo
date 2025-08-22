@@ -46,19 +46,22 @@ jobs:
         id: define_image_tag
         run: |
           echo "image_tag=vllm:latest" >> $GITHUB_OUTPUT
+      - name: Debug
+        run: | 
+          lsmod | grep nvidia || true
+          dmesg | grep -i nvrm || true
+          nvidia-smi
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         run: |
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target runtime --framework vllm --use-sccache --sccache-bucket ai-dynamo-sccache --sccache-region "$AWS_DEFAULT_REGION"
-      - name: Debug
-        run: nvidia-smi          
       - name: Run pytest
         env:
           PYTEST_MARKS: "e2e and vllm and gpu_1 and not slow"
         run: |
-          docker run --gpus all -v ${{ github.workspace }}:/workspace -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "VLLM_LOGGING_LEVEL=DEBUG pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+          docker run --gpus all -v ${{ github.workspace }}:/workspace -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "VLLM_LOGGING_LEVEL=DEBUG pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
       - name: Cleanup
         if: always()
         run: |
