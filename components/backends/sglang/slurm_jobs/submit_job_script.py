@@ -118,6 +118,17 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         default="batch",
         help="SLURM partition to use",
     )
+    parser.add_argument(
+        "--enable-multiple-frontends",
+        action="store_true",
+        help="Enable multiple frontend architecture with nginx load balancer"
+    )
+    parser.add_argument(
+        "--num-additional-frontends",
+        type=int,
+        default=0,
+        help="Number of additional frontend nodes (beyond the first frontend on node 1)"
+    )
     return parser.parse_args(args)
 
 
@@ -136,6 +147,11 @@ def main(input_args: list[str] | None = None):
             f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})"
         )
 
+    # Validation for multiple frontends
+    if args.enable_multiple_frontends:
+        if args.num_additional_frontends < 0:
+            raise ValueError("Number of additional frontends cannot be negative")
+
     total_nodes = args.prefill_nodes + args.decode_nodes
     template_vars = {
         "job_name": args.job_name,
@@ -153,6 +169,8 @@ def main(input_args: list[str] | None = None):
         "network_interface": args.network_interface,
         "gpu_type": args.gpu_type,
         "partition": args.partition,
+        "enable_multiple_frontends": args.enable_multiple_frontends,
+        "num_additional_frontends": args.num_additional_frontends,
     }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:

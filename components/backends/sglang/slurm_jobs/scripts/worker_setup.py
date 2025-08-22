@@ -155,7 +155,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--worker_type",
-        choices=["decode", "prefill"],
+        choices=["decode", "prefill", "frontend", "nginx"],
         required=True,
         help="Type of worker to run",
     )
@@ -180,6 +180,18 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Type of GPU to use",
     )
 
+    parser.add_argument(
+        "--nginx_config",
+        type=str,
+        help="Path to nginx configuration file (required for nginx worker type)",
+    )
+
+    parser.add_argument(
+        "--multiple-frontends-enabled",
+        action="store_true",
+        help="Whether multiple frontend architecture is enabled (affects infrastructure setup)",
+    )
+
     return parser.parse_args(args)
 
 
@@ -188,19 +200,25 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.worker_idx < 0:
         raise ValueError("Worker index must be non-negative")
 
-    if args.local_rank < 0:
-        raise ValueError("Local rank must be non-negative")
+    # Only validate these for prefill/decode workers
+    if args.worker_type in ["prefill", "decode"]:
+        if args.local_rank < 0:
+            raise ValueError("Local rank must be non-negative")
 
-    if args.nodes_per_worker < 1:
-        raise ValueError("Nodes per worker must be at least 1")
+        if args.nodes_per_worker < 1:
+            raise ValueError("Nodes per worker must be at least 1")
 
-    if args.gpus_per_node < 1:
-        raise ValueError("GPUs per node must be at least 1")
+        if args.gpus_per_node < 1:
+            raise ValueError("GPUs per node must be at least 1")
 
-    if args.local_rank >= args.nodes_per_worker:
-        raise ValueError(
-            f"Local rank ({args.local_rank}) must be less than nodes per worker ({args.nodes_per_worker})"
-        )
+        if args.local_rank >= args.nodes_per_worker:
+            raise ValueError(
+                f"Local rank ({args.local_rank}) must be less than nodes per worker ({args.nodes_per_worker})"
+            )
+
+    # Validate nginx-specific arguments
+    if args.worker_type == "nginx" and not args.nginx_config:
+        raise ValueError("--nginx_config is required for nginx worker type")
 
 
 def setup_env_vars_for_gpu_script(
@@ -271,6 +289,36 @@ def setup_head_prefill_node(prefill_host_ip: str) -> None:
         raise RuntimeError("Failed to start cache flush server")
 
 
+def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
+    """Setup nginx load balancer"""
+    logging.info("Setting up nginx load balancer")
+    
+    if not nginx_config or not os.path.exists(nginx_config):
+        raise ValueError(f"Nginx config file not found: {nginx_config}")
+    
+    nginx_cmd = f"nginx -c {nginx_config} && sleep 86400"
+    return run_command(nginx_cmd)
+
+
+def setup_frontend_worker(worker_idx: int, master_ip: str) -> int:
+    """Setup a frontend worker"""
+    logging.info(f"Setting up frontend worker {worker_idx}")
+    
+    # First frontend (worker_idx 0) also sets up NATS/ETCD
+    if worker_idx == 0:
+        setup_head_prefill_node(master_ip)
+    else:
+        logging.info(
+            f"Setting up additional frontend worker {worker_idx}"
+        )
+        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+            raise RuntimeError("Failed to connect to etcd")
+    
+    # All frontends run the ingress server
+    frontend_cmd = "python3 -m dynamo.frontend --http-port=8000"
+    return run_command(frontend_cmd)
+
+
 def setup_prefill_worker(
     worker_idx: int,
     local_rank: int,
@@ -279,17 +327,18 @@ def setup_prefill_worker(
     nodes_per_worker: int,
     gpus_per_node: int,
     gpu_type: str,
+    multiple_frontends_enabled: bool = False,
 ) -> int:
     """
     Setup the prefill worker.
     """
     total_gpus = nodes_per_worker * gpus_per_node
-    # Only the first prefill worker's leader node sets up NATS/ETCD/Frontend
-    if worker_idx == 0 and local_rank == 0:
+    # Only setup infrastructure in traditional mode (not multiple frontends)
+    if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
         setup_head_prefill_node(master_ip)
     else:
         logging.info(
-            f"Setting up child prefill worker {worker_idx}, local rank {local_rank}"
+            f"Setting up prefill worker {worker_idx}, local rank {local_rank}"
         )
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
@@ -357,7 +406,14 @@ def main(input_args: list[str] | None = None):
     logging.info(f"Nodes per worker: {args.nodes_per_worker}")
 
     setup_env(args.master_ip)
-    if args.worker_type == "prefill":
+    
+    if args.worker_type == "nginx":
+        if not args.nginx_config:
+            raise ValueError("--nginx_config is required for nginx worker type")
+        setup_nginx_worker(args.master_ip, args.nginx_config)
+    elif args.worker_type == "frontend":
+        setup_frontend_worker(args.worker_idx, args.master_ip)
+    elif args.worker_type == "prefill":
         setup_prefill_worker(
             args.worker_idx,
             args.local_rank,
@@ -366,8 +422,9 @@ def main(input_args: list[str] | None = None):
             args.nodes_per_worker,
             args.gpus_per_node,
             args.gpu_type,
+            args.multiple_frontends_enabled,
         )
-    else:
+    elif args.worker_type == "decode":
         setup_decode_worker(
             args.worker_idx,
             args.local_rank,
