@@ -209,6 +209,7 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
@@ -402,6 +403,7 @@ impl LocalModel {
         // Publish the Model Deployment Card to etcd
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
+<<<<<<< HEAD
         let slug_key = self.card.slug();
         let key = slug_key.to_string();
 
@@ -436,6 +438,13 @@ impl LocalModel {
                     .await?;
             }
         }
+=======
+        let key = self.card.slug().to_string();
+
+        card_store
+            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
+            .await?;
+>>>>>>> cbe854fc (feat: [vLLM] implement cli args for tool and reasoning parsers (#2619))
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
         // (Why don't we put the model card directly under this key?)
