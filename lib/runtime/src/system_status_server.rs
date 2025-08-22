@@ -74,6 +74,8 @@ impl SystemStatusState {
     /// Create new system status server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
         // Note: This metric is created at the DRT level (no namespace), so it will be prefixed with "dynamo_component_"
+        // TODO(keiven): this is part of another upcoming refactor, where we will no longer
+        //               have this duplicate DRT (and Duplicate metrics error).
         let uptime_gauge = match drt.as_ref().create_gauge(
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",

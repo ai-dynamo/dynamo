@@ -392,7 +392,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
         registry
             .drt()
-            .add_prometheus_metric(&current_hierarchy, &metric_name, collector)?;
+            .add_prometheus_metric(&current_hierarchy, collector)?;
     }
 
     Ok(prometheus_metric)
@@ -1384,6 +1384,9 @@ mod test_metricsregistry_nats {
         let namespace = drt.namespace("ns789").unwrap();
         let components = namespace.component("comp789").unwrap();
 
+        // Create a service to trigger metrics callback registration
+        let _service = components.service_builder().create().await.unwrap();
+
         // Get components output which should include NATS client metrics
         // Additional checks for NATS client metrics (without checking specific values)
         let component_nats_metrics =
@@ -1516,15 +1519,15 @@ mod test_metricsregistry_nats {
             (build_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
             (
                 build_metric_name(nats_client::IN_TOTAL_BYTES),
-                400.0,
-                1500.0,
-            ), // Wide range around 923
+                800.0,
+                4000.0,
+            ), // Wide range around observed value of 1888
             (build_metric_name(nats_client::IN_MESSAGES), 0.0, 5.0), // Wide range around 2
             (
                 build_metric_name(nats_client::OUT_OVERHEAD_BYTES),
-                700.0,
-                2500.0,
-            ), // Wide range around 1633
+                1500.0,
+                5000.0,
+            ), // Wide range around observed value of 2752
             (build_metric_name(nats_client::OUT_MESSAGES), 0.0, 5.0), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (build_metric_name(nats_service::AVG_PROCESSING_MS), 0.0, 0.0), // No processing yet
