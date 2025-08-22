@@ -42,7 +42,9 @@ for i in "${!nodes[@]}"; do
     echo "Node $i: ${nodes[$i]}"
 done
 
+{% endraw %}
 {% if enable_multiple_frontends %}
+{% raw %}
 # Multiple frontend architecture
 # Node 0: nginx only 
 # Node 1: NATS/ETCD + first frontend + prefill worker
