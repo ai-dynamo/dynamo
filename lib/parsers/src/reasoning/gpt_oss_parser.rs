@@ -56,10 +56,7 @@ impl GptOssReasoningParser {
         // let mut normal_token_ids = vec![];
         match output_msgs.len() {
             0 => {
-                let current = parser
-                    .current_content()
-                    .map(|s: String| s.as_str().to_owned())
-                    .unwrap_or_default();
+                let current = parser.current_content().unwrap_or_default();
                 ParserResult {
                     normal_text: String::new(),
                     reasoning_text: current,
@@ -72,10 +69,7 @@ impl GptOssReasoningParser {
                 {
                     reasoning_text.push_str(text);
                 }
-                let current = parser
-                    .current_content()
-                    .map(|s| s.as_str().to_owned())
-                    .unwrap_or_default();
+                let current = parser.current_content().unwrap_or_default();
                 ParserResult {
                     normal_text: current,
                     reasoning_text,

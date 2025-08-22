@@ -121,7 +121,7 @@ impl DeltaGenerator {
     pub fn create_logprobs(
         &self,
         tokens: Vec<common::llm_backend::TokenType>,
-        token_ids: &Vec<TokenIdType>,
+        token_ids: &[TokenIdType],
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
     ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
@@ -132,8 +132,8 @@ impl DeltaGenerator {
         let toks = tokens
             .into_iter()
             .zip(token_ids)
-            .map(|(token, token_id)| (token.unwrap_or_default(), token_id))
-            .collect::<Vec<(String, &TokenIdType)>>();
+            .map(|(token, token_id)| (token.unwrap_or_default(), *token_id))
+            .collect::<Vec<(String, TokenIdType)>>();
         let tok_lps = toks
             .iter()
             .zip(logprobs.unwrap())
@@ -151,7 +151,7 @@ impl DeltaGenerator {
                         .map(|top_lp| {
                             let top_t = top_lp.token.clone().unwrap_or_default();
                             let top_tid = top_lp.token_id;
-                            found_selected_token = found_selected_token || top_tid == **tid;
+                            found_selected_token = found_selected_token || top_tid == *tid;
                             dynamo_async_openai::types::TopLogprobs {
                                 token: top_t,
                                 logprob: top_lp.logprob as f32,
@@ -294,7 +294,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         let logprobs = self.create_logprobs(
             delta.tokens,
-            delta.token_ids.as_ref(),
+            &delta.token_ids,
             delta.log_probs,
             delta.top_logprobs,
         );
