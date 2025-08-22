@@ -321,17 +321,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     if let Ok(blocks) = target_pool
                         .match_sequence_hashes(vec![request.sequence_hash].as_slice())
                         .await
+                        && !blocks.is_empty()
                     {
-                        if !blocks.is_empty() {
-                            continue;
-                        }
+                        continue;
                     }
 
                     let target_block = 'target_block: {
-                        if let Ok(blocks) = target_pool.allocate_blocks(1).await {
-                            if let Some(block) = blocks.into_iter().next() {
-                                break 'target_block Some(block);
-                            }
+                        if let Ok(blocks) = target_pool.allocate_blocks(1).await
+                            && let Some(block) = blocks.into_iter().next()
+                        {
+                            break 'target_block Some(block);
                         }
 
                         tracing::warn!(
@@ -507,14 +506,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
         }
 
-        if let Some(targets) = targets.as_ref() {
-            if targets.len() != blocks.len() {
-                tx.send(Err(BlockPoolError::BlockError(BlockError::Other(
-                    anyhow::anyhow!("Number of targets does not match number of blocks."),
-                ))))
-                .unwrap();
-                return rx;
-            }
+        if let Some(targets) = targets.as_ref()
+            && targets.len() != blocks.len()
+        {
+            tx.send(Err(BlockPoolError::BlockError(BlockError::Other(
+                anyhow::anyhow!("Number of targets does not match number of blocks."),
+            ))))
+            .unwrap();
+            return rx;
         }
 
         if blocks.is_empty() {
