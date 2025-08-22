@@ -27,7 +27,7 @@ To use KVBM in vLLM, you can follow the steps below:
 
 ```bash
 # start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 
 # build a container containing vllm and kvbm
 ./container/build.sh --framework vllm --enable-kvbm

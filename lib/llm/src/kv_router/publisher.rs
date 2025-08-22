@@ -498,7 +498,11 @@ impl WorkerMetricsPublisher {
         self.tx.send(metrics)
     }
 
-    pub async fn create_endpoint(&self, component: Component) -> Result<()> {
+    pub async fn create_endpoint(
+        &self,
+        component: Component,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
         let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
@@ -514,6 +518,12 @@ impl WorkerMetricsPublisher {
 
         self.start_nats_metrics_publishing(component.namespace().clone(), worker_id);
 
+        let metrics_labels = metrics_labels.map(|v| {
+            v.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<_>>()
+        });
+
         component
             .endpoint(KV_METRICS_ENDPOINT)
             .endpoint_builder()
@@ -521,6 +531,7 @@ impl WorkerMetricsPublisher {
                 let metrics = metrics_rx.borrow_and_update().clone();
                 serde_json::to_value(&*metrics).unwrap()
             })
+            .metrics_labels(metrics_labels)
             .handler(handler)
             .start()
             .await

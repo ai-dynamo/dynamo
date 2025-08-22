@@ -78,7 +78,7 @@ RUN apt-get update -y && \
     --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
     libnuma-dev librdmacm-dev ibverbs-providers
 
-ARG NIXL_UCX_REF=v1.19.x
+ARG NIXL_UCX_REF=v1.19.0
 
 WORKDIR /workspace
 
