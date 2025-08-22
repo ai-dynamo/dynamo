@@ -32,14 +32,32 @@ async def worker(runtime: DistributedRuntime):
     await client.wait_for_instances()
 
     idx = 0
+    base_delay = 0.1  # Start with 100ms
+    max_delay = 5.0  # Max 5 seconds
+    current_delay = base_delay
+
     while True:
-        # Issue request and process the stream
-        idx += 1
-        stream = await client.generate(f"Query[{idx}] world,sun,moon,star")
-        async for response in stream:
-            print(response.data())
-        # Sleep for 1 second
-        await asyncio.sleep(1)
+        try:
+            # Issue request and process the stream
+            idx += 1
+            stream = await client.generate(f"Query[{idx}] Hello world")
+            async for response in stream:
+                print(response.data())
+            # Reset backoff on successful iteration
+            current_delay = base_delay
+            # Sleep for 1 second
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            # Re-raise for graceful shutdown
+            raise
+        except Exception as e:
+            # Log the exception with context
+            print(f"Error in worker iteration {idx}: {type(e).__name__}: {e}")
+            # Perform exponential backoff
+            print(f"Retrying after {current_delay:.2f} seconds...")
+            await asyncio.sleep(current_delay)
+            # Double the delay for next time, up to max_delay
+            current_delay = min(current_delay * 2, max_delay)
 
 
 if __name__ == "__main__":
