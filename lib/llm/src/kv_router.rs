@@ -372,7 +372,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                 // if request has the annotation "query_instance_id", for example
                 // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
-                // request will not be routed to worker immediately
+                // request will not be routed to worker immediately.
+                // The gateway EPP will receive the worker_instance_id and the tokens.
                 if query_instance_id {
                     let instance_id_str = instance_id.to_string();
                     let response =
@@ -381,7 +382,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     // Return the tokens in nvext.token_data format
                     let tokens_json = serde_json::to_string(&tokens)?;
                     let response_tokens = Annotated::from_annotation("token_data", &tokens_json)?;
-                    tracing::info!("response_tokens in generate: {:?}", response_tokens);
+                    tracing::trace!("Tokens requested in the response through the query_instance_id annotation: {:?}", response_tokens);
                     let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }

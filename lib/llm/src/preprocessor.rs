@@ -215,7 +215,7 @@ impl OpenAIPreprocessor {
                                 (passthrough_encoding, true)
                             } else if has_backend_instance_id {
                                 // backend_instance_id is set but no token_data provided
-                                tracing::trace!("tokens were not passed by the epp");
+                                tracing::trace!("tokens were not passed by the epp, only backend_instance_id was");
                                 // Normal tokenization
                                 let encoding = self.tokenizer.encode(&formatted_prompt)?;
                                 (encoding, false)
