@@ -414,10 +414,18 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
     type Error = Status;
 
     fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
+        // Protocol requires if `raw_input_contents` is used to hold input data,
+        // it must be used for all inputs.
+        if !request.raw_input_contents.is_empty() && request.inputs.len() != request.raw_input_contents.len() {
+            return Err(Status::invalid_argument(format!(
+                "`raw_input_contents` must be used for all inputs"
+            )));
+        }
+
         // iterate through inputs
         let mut text_input = None;
         let mut stream = false;
-        for input in request.inputs.iter() {
+        for (idx, input) in request.inputs.iter().enumerate() {
             match input.name.as_str() {
                 "text_input" => {
                     if input.datatype != "BYTES" {
@@ -437,11 +445,12 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                             let bytes = &content.bytes_contents[0];
                             text_input = Some(String::from_utf8_lossy(&bytes).to_string());
                         }
-                        _ => {
-                            // [gluo WIP] look for 'raw_input_contents'
-                            return Err(Status::invalid_argument(format!(
-                                "[gluo WIP] Currently expecting 'text_input' contents to be of type BYTES"
-                            )));
+                        None => {
+                            let raw_input = &request.raw_input_contents[idx];
+                            // We restrict the 'text_input' only contain one element, only need to
+                            // parse the first element. Skip first four bytes that is used to store
+                            // the length of the input.
+                            text_input = Some(String::from_utf8_lossy(&raw_input[4..]).to_string());
                         }
                     }
                 }
@@ -463,10 +472,9 @@ impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
                         Some(content) => {
                             stream = content.bool_contents[0];
                         }
-                        _ => {
-                            return Err(Status::invalid_argument(format!(
-                                "expected 'stream' contents to be of type BOOL"
-                            )));
+                        None => {
+                            let raw_input = &request.raw_input_contents[idx];
+                            stream = raw_input[0] != 0;
                         }
                     }
                 }
