@@ -111,7 +111,9 @@ class Publisher:
     A class to retrieve stats and kv cache events from TRTLLM engine and publish them to the metrics and events publishers.
     """
 
-    def __init__(self, component, engine, kv_listener, worker_id, kv_block_size, metrics_labels):
+    def __init__(
+        self, component, engine, kv_listener, worker_id, kv_block_size, metrics_labels
+    ):
         self.component = component
         self.engine = engine
         self.kv_listener = kv_listener
@@ -141,7 +143,9 @@ class Publisher:
         if self.metrics_publisher is None:
             logging.error("KV metrics publisher not initialized!")
             return
-        await self.metrics_publisher.create_endpoint(self.component, self.metrics_labels)
+        await self.metrics_publisher.create_endpoint(
+            self.component, self.metrics_labels
+        )
 
     def initialize(self):
         # Setup the metrics publisher
@@ -448,8 +452,12 @@ class Publisher:
 
 
 @asynccontextmanager
-async def get_publisher(component, engine, kv_listener, worker_id, kv_block_size, metrics_labels):
-    publisher = Publisher(component, engine, kv_listener, worker_id, kv_block_size, metrics_labels)
+async def get_publisher(
+    component, engine, kv_listener, worker_id, kv_block_size, metrics_labels
+):
+    publisher = Publisher(
+        component, engine, kv_listener, worker_id, kv_block_size, metrics_labels
+    )
     try:
         publisher.initialize()
         yield publisher
