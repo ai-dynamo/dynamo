@@ -66,8 +66,8 @@ frontend_hosts=()
 frontend_hosts+=("$MASTER_NODE")
 
 # Add additional frontends based on num_additional_frontends
-ADDITIONAL_FRONTENDS={{ num_additional_frontends }}
-if [ $ADDITIONAL_FRONTENDS -gt 0 ]; then
+{% endraw %}ADDITIONAL_FRONTENDS={{ num_additional_frontends }}{% raw %}
+if [ "$ADDITIONAL_FRONTENDS" -gt 0 ]; then
     # Calculate which nodes get additional frontends
     # We have TOTAL_NODES prefill/decode nodes, distribute additional frontends across them
     nodes_per_frontend=$(( (TOTAL_NODES - 1 + ADDITIONAL_FRONTENDS - 1) / ADDITIONAL_FRONTENDS ))  # ceil division
@@ -88,10 +88,9 @@ echo "Frontend hosts: ${frontend_hosts[@]}"
 python3 -c "
 from jinja2 import Template
 import sys
-template = Template(open('${SCRIPT_DIR}/nginx.conf.j2').read())
-config = template.render(
-    frontend_hosts=[$(printf '\"%s\",' "${frontend_hosts[@]}" | sed 's/,$//'))]
-)
+conf_tmpl = Template(open('${SCRIPT_DIR}/nginx.conf.j2').read())
+servers = [%s] % (', '.join(['\"%s\"' % h for h in ${frontend_hosts[@]/#/}]))
+config = conf_tmpl.render(frontend_hosts=[%s] % (', '.join(['\"%s\"' % h for h in ${frontend_hosts[@]/#/}])))
 with open('${LOG_DIR}/nginx.conf', 'w') as f:
     f.write(config)
 "
@@ -175,7 +174,7 @@ echo "$cmd"
 $cmd &
 
 # Launch additional frontends on designated nodes
-if [ $ADDITIONAL_FRONTENDS -gt 0 ]; then
+if [ "$ADDITIONAL_FRONTENDS" -gt 0 ]; then
     frontend_idx=1  # Start from 1 since node 1 is frontend 0
     nodes_per_frontend=$(( (TOTAL_NODES - 1 + ADDITIONAL_FRONTENDS - 1) / ADDITIONAL_FRONTENDS ))
     frontend_node_idx=2
