@@ -169,23 +169,23 @@ impl DeltaAggregator {
                 && let Ok(tool_calls) = try_tool_call_parse_aggregate(
                     &choice.text,
                     parsing_options.tool_call_parser.as_deref(),
-                ) {
-                    if tool_calls.is_empty() {
-                        continue;
-                    }
-                    for tool_call in &tool_calls {
-                        tracing::debug!(
-                            tool_call_id = %tool_call.id,
-                            function_name = %tool_call.function.name,
-                            arguments = %tool_call.function.arguments,
-                            "Parsed structured tool call from aggregated content"
-                        );
-                    }
-                    choice.tool_calls = Some(tool_calls);
-                    choice.text.clear();
-                    choice.finish_reason =
-                        Some(dynamo_async_openai::types::FinishReason::ToolCalls);
+                )
+            {
+                if tool_calls.is_empty() {
+                    continue;
                 }
+                for tool_call in &tool_calls {
+                    tracing::debug!(
+                        tool_call_id = %tool_call.id,
+                        function_name = %tool_call.function.name,
+                        arguments = %tool_call.function.arguments,
+                        "Parsed structured tool call from aggregated content"
+                    );
+                }
+                choice.tool_calls = Some(tool_calls);
+                choice.text.clear();
+                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
+            }
         }
 
         // Extract aggregated choices and sort them by index.
