@@ -67,7 +67,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
-| **TensorRT-LLM**     | 1.0.0rc4                                                                         |
+| **TensorRT-LLM**     | 1.0.0rc6                                                                         |
 | **NIXL**             | 0.4.1                                                                            |
 
 > [!Important]
