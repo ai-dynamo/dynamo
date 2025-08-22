@@ -95,7 +95,7 @@ impl
         let max_tokens = request.inner.max_tokens.unwrap_or(0) as u64;
 
         // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
-        let generator = request.response_generator();
+        let mut generator = request.response_generator();
 
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;

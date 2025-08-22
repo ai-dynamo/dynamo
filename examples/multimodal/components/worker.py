@@ -142,7 +142,6 @@ class VllmBaseWorker:
         self.stats_logger = StatLoggerFactory(
             component,
             self.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", self.engine_args.model)],
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,

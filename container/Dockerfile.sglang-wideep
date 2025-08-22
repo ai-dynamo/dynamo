@@ -20,7 +20,7 @@ FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 ARG MODE="hopper"
 ARG ARCH="amd64"
 ARG ARCH_ALT="x86_64"
-ARG NIXL_UCX_REF="v1.19.x"
+ARG NIXL_UCX_REF="v1.19.0"
 ARG NIXL_TAG="0.5.0"
 ARG CMAKE_VERSION="3.31.8"
 ARG RUST_VERSION="1.87.0"
@@ -97,7 +97,7 @@ RUN cd dynamo/lib/bindings/python && \
     cd /sgl-workspace/dynamo && \
     pip install --break-system-packages .
 
-RUN pip install --break-system-packages sglang-router==0.1.5
+RUN pip install --break-system-packages sglang-router==0.1.9
 
 RUN wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\

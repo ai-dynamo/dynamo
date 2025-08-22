@@ -67,11 +67,11 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
-| **TensorRT-LLM**     | 1.0.0rc4                                                                         |
+| **TensorRT-LLM**     | 1.0.0rc6                                                                         |
 | **NIXL**             | 0.4.1                                                                            |
 
 > [!Important]
-> ² Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
+> Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
 
 ## Cloud Service Provider Compatibility
 
@@ -79,8 +79,11 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Host Operating System** | **Version** | **Architecture** | **Status**   |
 | :------------------------ | :---------- | :--------------- | :----------- |
-| **Amazon Linux**          | 2023        | x86_64           | Supported    |
+| **Amazon Linux**          | 2023        | x86_64           | Supported¹   |
 
+
+> [!Caution]
+> ¹ There is a known issue with the TensorRT-LLM framework when installed within the AL2023 container via the Python Wheels which makes effective environment setup challenging.
 
 
 ## Build Support
