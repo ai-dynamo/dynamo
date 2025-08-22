@@ -26,6 +26,8 @@ const IGNORED: [&str; 5] = [
 ];
 
 const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
+const HF_ENDPOINT_ENV_VAR: &str = "HF_ENDPOINT";
+const HUGGINGFACE_HUB_ENDPOINT_ENV_VAR: &str = "HUGGINGFACE_HUB_ENDPOINT";
 
 /// Checks if a file is a model weight file
 fn is_weight_file(filename: &str) -> bool {
@@ -42,6 +44,15 @@ fn is_weight_file(filename: &str) -> bool {
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let token = env::var(HF_TOKEN_ENV_VAR).ok();
+
+    // If HF_ENDPOINT is provided, propagate it to the canonical env var used by some clients
+    // to select an alternate Hugging Face hub endpoint. We only set it if not already present.
+    if let Ok(endpoint) = env::var(HF_ENDPOINT_ENV_VAR) {
+        if env::var(HUGGINGFACE_HUB_ENDPOINT_ENV_VAR).is_err() {
+            env::set_var(HUGGINGFACE_HUB_ENDPOINT_ENV_VAR, &endpoint);
+        }
+    }
+
     let api = ApiBuilder::new()
         .with_progress(true)
         .with_token(token)
