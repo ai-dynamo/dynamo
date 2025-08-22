@@ -40,15 +40,15 @@ fn is_weight_file(filename: &str) -> bool {
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let model_name = name.display().to_string();
-    
+
     #[cfg(feature = "model-express")]
     {
         // Only use ModelExpress if the environment variable is explicitly set
         if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
             tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {model_name}");
-            
+
             let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
-            
+
             let result = match MxClient::new(config.clone()).await {
                 Ok(mut client) => {
                     tracing::info!("Successfully connected to ModelExpress server");
@@ -68,7 +68,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
                     mx_download_direct(&model_name).await
                 }
             };
-            
+
             match result {
                 Ok(path) => {
                     tracing::info!("ModelExpress download completed successfully for model: {model_name}");
@@ -80,14 +80,14 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
             }
         }
     }
-    
+
     #[cfg(not(feature = "model-express"))]
     {
         if env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).is_ok() {
             tracing::warn!("ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub.");
         }
     }
-    
+
     tracing::info!("Using hf-hub for model: {model_name}");
     download_with_hf_hub(&model_name, ignore_weights).await
 }
@@ -103,35 +103,35 @@ async fn mx_download_direct(model_name: &str) -> anyhow::Result<PathBuf> {
 /// If ignore_weights is true, model weight files will be skipped
 async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let token = env::var(HF_TOKEN_ENV_VAR).ok();
-    
+
     let api = ApiBuilder::new()
         .with_progress(true)
         .with_token(token)
         .high()
         .build()?;
-    
+
     let repo = api.model(model_name.to_string());
-    
+
     let info = repo.info().await
         .map_err(|e| anyhow::anyhow!("Failed to fetch model '{model_name}' from HuggingFace: {e}. Is this a valid HuggingFace ID?"))?;
-    
+
     if info.siblings.is_empty() {
         return Err(anyhow::anyhow!("Model '{model_name}' exists but contains no downloadable files."));
     }
-    
+
     let mut model_path = PathBuf::new();
     let mut files_downloaded = false;
 
-    for sib in info.siblings {
-        if is_ignored_file(&sib.rfilename) || is_image_file(&sib.rfilename) {
+    for sibling in info.siblings {
+        if is_ignored_file(&sibling.rfilename) || is_image_file(&sibling.rfilename) {
             continue;
         }
 
-        if ignore_weights && is_weight_file(&sib.rfilename) {
+        if ignore_weights && is_weight_file(&sibling.rfilename) {
             continue;
         }
 
-        match repo.get(&sib.rfilename).await {
+        match repo.get(&sibling.rfilename).await {
             Ok(path) => {
                 model_path = path;
                 files_downloaded = true;
@@ -139,7 +139,7 @@ async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow:
             Err(e) => {
                 return Err(anyhow::anyhow!(
                     "Failed to download file '{}' from model '{model_name}': {e}",
-                    sib.rfilename
+                    sibling.rfilename
                 ));
             }
         }
@@ -155,7 +155,7 @@ async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow:
             "No {file_type} files found for model '{model_name}'."
         ));
     }
-    
+
     match model_path.parent() {
         Some(path) => {
             tracing::info!("Successfully downloaded model '{model_name}' using hf-hub to: {}", path.display());
@@ -189,14 +189,14 @@ fn is_image_file(filename: &str) -> bool {
 fn get_mx_model_path_from_cache(model_name: &str) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
     let model_dir = cache_dir.join(model_name);
-    
+
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
             "Model '{model_name}' was downloaded but directory not found at expected location: {}",
             model_dir.display()
         ));
     }
-    
+
     Ok(model_dir)
 }
 
@@ -205,14 +205,14 @@ fn get_model_express_cache_dir() -> PathBuf {
     if let Ok(cache_path) = env::var("HF_HUB_CACHE") {
         return PathBuf::from(cache_path);
     }
-    
+
     if let Ok(cache_path) = env::var("MODEL_EXPRESS_PATH") {
         return PathBuf::from(cache_path);
     }
     let home = env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    
+
     PathBuf::from(home).join(".cache/huggingface/hub")
 }
 
@@ -241,7 +241,7 @@ mod tests {
         assert!(is_ignored_file("LICENSE.txt"));
         assert!(is_ignored_file("README.md"));
         assert!(is_ignored_file("USE_POLICY.md"));
-        
+
         assert!(!is_ignored_file("model.bin"));
         assert!(!is_ignored_file("tokenizer.json"));
         assert!(!is_ignored_file("config.json"));
@@ -254,7 +254,7 @@ mod tests {
         assert!(is_weight_file("model.h5"));
         assert!(is_weight_file("model.msgpack"));
         assert!(is_weight_file("model.ckpt.index"));
-        
+
         assert!(!is_weight_file("tokenizer.json"));
         assert!(!is_weight_file("config.json"));
         assert!(!is_weight_file("README.md"));
@@ -268,7 +268,7 @@ mod tests {
         assert!(is_image_file("photo.JPG"));
         assert!(is_image_file("picture.jpeg"));
         assert!(is_image_file("picture.JPEG"));
-        
+
         assert!(!is_image_file("model.bin"));
         assert!(!is_image_file("tokenizer.json"));
         assert!(!is_image_file("config.json"));
