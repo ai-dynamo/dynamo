@@ -30,16 +30,7 @@ This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Specu
 For advanced control over how requests are routed between prefill and decode workers in disaggregated mode, refer to the [Disaggregation Strategy](./README.md#disaggregation-strategy) section.
 
 ## Notes
-* To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
-  * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
-* If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
-
-## Eagle3-one-model
-* Eagle3-one-model (`eagle3_one_model=True`) config is added in `engine_configs/llama4/eagle_one_model`. Build dynamo with the latest commit `66f299a` in TRTLLM 1.0.0.rc2 [Link](https://github.com/NVIDIA/TensorRT-LLM/commits/v1.0.0rc2/).
-* The configs in `engine_configs/llama4/eagle_one_model` are tested with 8xH100 cluster. Be sure to change the `NUM_GPUS_PER_NODE` accordingly or change TP/EP size in config. 1 8xH100 node for aggregated .yml file, 2 8xH100 for prefill/decode .yml file.
-* The current `./multinode/start_frontend_services.sh` may got ran `NUM_GPUS_PER_NODE` times depending on how srun/mpi is launched, beware that the frontend service only needs to be ran once.
-* Eagle3-one-model appends the eagle3 layer at the end of the TRTLLM engine, instead of sending base/draft requests between 2 engines. Visit TRTLLM for more information.
-
+* Make sure the (`eagle3_one_model: true`) is set in the LLM API config inside the `engine_configs/llama4/eagle` folder.
 
 ## Setup
 
@@ -66,7 +57,6 @@ export NUM_NODES=1
 export ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_agg.yaml"
 ./multinode/srun_aggregated.sh
 ```
-* Known Issue: In Aggregated Serving, setting `max_num_tokens` to higher values (e.g. `max_num_tokens: 8448`) can lead to Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
 
 ## Disaggregated Serving
 
@@ -77,8 +67,6 @@ export NUM_DECODE_NODES=1
 export DECODE_ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_decode.yaml"
 ./multinode/srun_disaggregated.sh
 ```
-* Known Issue: In Aggregated Serving, setting `max_num_tokens` to higher values (e.g. `max_num_tokens: 8448`) can lead to Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
-
 
 ## Example Request
 
