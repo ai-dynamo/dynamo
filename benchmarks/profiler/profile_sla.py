@@ -158,7 +158,11 @@ async def run_profile(args):
             base_url = client.get_service_url()
             genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
             gap_result = benchmark_prefill(
-                args.isl, genai_perf_artifact_dir, model_name, base_url=base_url
+                args.isl,
+                genai_perf_artifact_dir,
+                model_name,
+                model_name,
+                base_url=base_url,
             )
             if gap_result is not None:
                 ttft = gap_result["time_to_first_token"]["avg"]
@@ -282,6 +286,7 @@ async def run_profile(args):
                     args.osl,
                     num_request,
                     genai_perf_artifact_dir,
+                    model_name,
                     model_name,
                     base_url=base_url,
                 )
