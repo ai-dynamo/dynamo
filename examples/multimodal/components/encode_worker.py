@@ -27,11 +27,11 @@ from transformers import AutoImageProcessor, LlavaForConditionalGeneration
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+import dynamo.nixl_connect as connect
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import connect
 from utils.args import Config, base_parse_args, parse_endpoint
 from utils.image_loader import ImageLoader
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
@@ -149,7 +149,7 @@ class VllmEncodeWorker:
             descriptor = connect.Descriptor(embeddings)
 
             with self._connector.create_readable(descriptor) as readable:
-                request.serialized_request = readable.to_serialized()
+                request.serialized_request = readable.metadata()
                 # Clear the image URL as hint that the image is passed as embeddings.
                 request.image_url = None
 
@@ -190,7 +190,7 @@ class VllmEncodeWorker:
 
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector(runtime=runtime, namespace=parsed_namespace)
+        self._connector = connect.Connector()
         await self._connector.initialize()
 
         logger.info("Startup completed.")
