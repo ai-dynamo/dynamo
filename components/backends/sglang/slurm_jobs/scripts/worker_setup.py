@@ -126,7 +126,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--leader_ip",
         type=str,
-        required=True,
+        required=False,
         help="IP address of the leader node for this worker group",
     )
     parser.add_argument(
@@ -138,19 +138,19 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--worker_idx",
         type=int,
-        required=True,
+        required=False,
         help="Index of the worker group (0-based)",
     )
     parser.add_argument(
         "--local_rank",
         type=int,
-        required=True,
+        required=False,
         help="Local rank within the worker group (0 for leader)",
     )
     parser.add_argument(
         "--nodes_per_worker",
         type=int,
-        required=True,
+        required=False,
         help="Number of nodes per worker",
     )
     parser.add_argument(
@@ -197,15 +197,15 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
 
 def _validate_args(args: argparse.Namespace) -> None:
     """Validate command line arguments"""
-    if args.worker_idx < 0:
-        raise ValueError("Worker index must be non-negative")
-
-    # Only validate these for prefill/decode workers
     if args.worker_type in ["prefill", "decode"]:
-        if args.local_rank < 0:
+        if args.worker_idx is None or args.worker_idx < 0:
+            raise ValueError("Worker index must be provided and non-negative for prefill/decode")
+
+    if args.worker_type in ["prefill", "decode"]:
+        if args.local_rank is None or args.local_rank < 0:
             raise ValueError("Local rank must be non-negative")
 
-        if args.nodes_per_worker < 1:
+        if args.nodes_per_worker is None or args.nodes_per_worker < 1:
             raise ValueError("Nodes per worker must be at least 1")
 
         if args.gpus_per_node < 1:

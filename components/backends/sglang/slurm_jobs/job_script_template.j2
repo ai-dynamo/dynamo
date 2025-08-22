@@ -85,15 +85,26 @@ fi
 echo "Frontend hosts: ${frontend_hosts[@]}"
 
 # Generate nginx configuration
-python3 -c "
+# Build a Python list literal of frontend hosts from the bash array
+FRONTEND_LIST=$(printf "'%s'," "${frontend_hosts[@]}")
+FRONTEND_LIST="[${FRONTEND_LIST%,}]"
+export FRONTEND_LIST
+python3 - <<'PY'
+import os
 from jinja2 import Template
-import sys
-conf_tmpl = Template(open('${SCRIPT_DIR}/nginx.conf.j2').read())
-servers = [%s] % (', '.join(['\"%s\"' % h for h in ${frontend_hosts[@]/#/}]))
-config = conf_tmpl.render(frontend_hosts=[%s] % (', '.join(['\"%s\"' % h for h in ${frontend_hosts[@]/#/}])))
-with open('${LOG_DIR}/nginx.conf', 'w') as f:
+
+template_path = os.path.join(os.environ['SCRIPT_DIR'], 'nginx.conf.j2')
+output_path = os.path.join(os.environ['LOG_DIR'], 'nginx.conf')
+
+with open(template_path, 'r') as f:
+    tmpl = Template(f.read())
+
+frontend_hosts = eval(os.environ['FRONTEND_LIST'])
+config = tmpl.render(frontend_hosts=frontend_hosts)
+
+with open(output_path, 'w') as f:
     f.write(config)
-"
+PY
 
 {% endraw %}
 {% else %}
