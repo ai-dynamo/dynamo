@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 use hf_hub::api::tokio::ApiBuilder;
 use std::env;
 use std::path::{Path, PathBuf};
