@@ -74,6 +74,8 @@ spec:
           env:
             - name: MODEL_NAME
               value: llava-hf/llava-1.5-7b-hf
+            - name: PROMPT_TEMPLATE
+              value: "USER: <image>\n<prompt> ASSISTANT:"
           command:
             - /bin/sh
             - -c
