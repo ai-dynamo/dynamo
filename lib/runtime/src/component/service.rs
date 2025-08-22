@@ -99,8 +99,14 @@ impl ServiceConfigBuilder {
         // drop the guard to unlock the mutex
         drop(guard);
 
-        // Register the metrics callback for this component after the service is created.
-        component.start_scraping_nats_service_component_metrics()?;
+        // Register metrics callback. CRITICAL: Never fail service creation for metrics issues.
+        if let Err(err) = component.start_scraping_nats_service_component_metrics() {
+            tracing::debug!(
+                "Metrics registration failed for '{}': {}",
+                component.service_name(),
+                err
+            );
+        }
 
         Ok(component)
     }
