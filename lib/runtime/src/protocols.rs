@@ -121,23 +121,28 @@ impl From<&str> for EndpointId {
         let p2 = parts.next();
         let p3 = parts.next();
 
-        // String::new does not allocate yet
-        let mut namespace = String::new();
-        let mut component = String::new();
-        let mut name = String::new();
+        let namespace;
+        let component;
+        let name;
 
         match (p1, p2, p3) {
             (None, _, _) => {
                 // 0 elements: all fields remain empty.
                 // Should this be an error?
+                namespace = DEFAULT_NAMESPACE.to_string();
+                component = DEFAULT_COMPONENT.to_string();
+                name = DEFAULT_ENDPOINT.to_string();
             }
             (Some(c), None, _) => {
+                namespace = DEFAULT_NAMESPACE.to_string();
                 component = c.to_string();
+                name = DEFAULT_ENDPOINT.to_string();
             }
             (Some(ns), Some(c), None) => {
                 // 2 elements: namespace, component
                 namespace = ns.to_string();
                 component = c.to_string();
+                name = DEFAULT_ENDPOINT.to_string();
             }
             (Some(ns), Some(c), Some(ep)) => {
                 namespace = ns.to_string();
