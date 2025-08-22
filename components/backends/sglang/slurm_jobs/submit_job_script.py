@@ -63,6 +63,13 @@ def print_welcome_message(job_id: str):
 {border}
 """
 
+    # Print with some flair
+    print("\n" + "🎉" * 40)
+    for line in message.split('\n'):
+        if line.strip():
+            print(line)
+    print("🎉" * 40 + "\n")
+
 
 def setup_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(
