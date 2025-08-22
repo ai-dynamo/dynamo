@@ -101,7 +101,7 @@ pub mod kserve_test {
             let stream = stream! {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 for word in word_list {
-                    yield Annotated::from_data(generator.create_choice(0, Some(format!("{word}")), None, None));
+                    yield Annotated::from_data(generator.create_choice(0, Some(word.to_string()), None, None));
                 }
             };
 
@@ -663,7 +663,7 @@ pub mod kserve_test {
                     let request = ModelInferRequest {
                         model_name: model_name.into(),
                         model_version: "1".into(),
-                        id: format!("{idx}").into(),
+                        id: format!("{idx}"),
                         inputs: vec![text_input.clone()],
                         ..Default::default()
                     };
