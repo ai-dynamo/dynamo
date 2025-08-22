@@ -12,11 +12,11 @@ use std::sync::{Arc, OnceLock};
 
 use super::*;
 use crate::llm::block_manager::distributed::get_barrier_id;
-use dynamo_runtime::metrics::prometheus_names::kvbm_connector_namespace;
 use crate::{
     llm::block_manager::distributed::VllmTensor, to_pyerr,
     DistributedRuntime as PyDistributedRuntime,
 };
+use dynamo_runtime::metrics::prometheus_names::kvbm_connector_namespace;
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
@@ -92,7 +92,10 @@ impl KvConnectorWorker {
         )?
         .detach();
 
-        let kvbm_metrics = KvbmMetrics::new(&drt.namespace(kvbm_connector_namespace::KVBM_CONNECTOR_WORKER).unwrap());
+        let kvbm_metrics = KvbmMetrics::new(
+            &drt.namespace(kvbm_connector_namespace::KVBM_CONNECTOR_WORKER)
+                .unwrap(),
+        );
 
         tracing::info!(
             "KvConnectorWorker initialized with worker_id: {}",
