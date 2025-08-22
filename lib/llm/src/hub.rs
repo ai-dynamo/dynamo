@@ -38,68 +38,77 @@ fn is_weight_file(filename: &str) -> bool {
         || filename.ends_with(".ckpt.index")
 }
 
-/// Attempt to download a model from Hugging Face using ModelExpress client if configured, otherwise hf-hub
+/// Attempt to download a model from Hugging Face using ModelExpress client
+/// Only called when model-express feature is enabled, otherwise it will fall back to homonymous hf-hub function
 /// Returns the directory it is in
 /// If ignore_weights is true, model weight files will be skipped
+#[cfg(feature = "model-express")]
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
-    #[cfg(feature = "model-express")]
-    {
-        // Only use ModelExpress if the environment variable is explicitly set
-        if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
-            tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {model_name}");
+    // Only use ModelExpress if the environment variable is explicitly set
+    if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
+        tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {model_name}");
 
-            let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
+        let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
 
-            let result = match MxClient::new(config.clone()).await {
-                Ok(mut client) => {
-                    tracing::info!("Successfully connected to ModelExpress server");
-                    match client
-                        .request_model_with_provider_and_fallback(
-                            &model_name,
-                            MxModelProvider::HuggingFace,
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::info!("Server download succeeded for model: {model_name}");
-                            get_mx_model_path_from_cache(&model_name)
-                        }
-                        Err(e) => {
-                            tracing::warn!("Server download failed for model '{model_name}': {e}. Falling back to direct download.");
-                            mx_download_direct(&model_name).await
-                        }
+        let result = match MxClient::new(config.clone()).await {
+            Ok(mut client) => {
+                tracing::info!("Successfully connected to ModelExpress server");
+                match client
+                    .request_model_with_provider_and_fallback(
+                        &model_name,
+                        MxModelProvider::HuggingFace,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!("Server download succeeded for model: {model_name}");
+                        get_mx_model_path_from_cache(&model_name)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Server download failed for model '{model_name}': {e}. Falling back to direct download.");
+                        mx_download_direct(&model_name).await
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "Cannot connect to ModelExpress server: {e}. Using direct download."
-                    );
-                    mx_download_direct(&model_name).await
-                }
-            };
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Cannot connect to ModelExpress server: {e}. Using direct download."
+                );
+                mx_download_direct(&model_name).await
+            }
+        };
 
-            match result {
-                Ok(path) => {
-                    tracing::info!(
-                        "ModelExpress download completed successfully for model: {model_name}"
-                    );
-                    return Ok(path);
-                }
-                Err(e) => {
-                    tracing::warn!("ModelExpress download failed for model '{model_name}': {e}. Falling back to hf-hub.");
-                }
+        match result {
+            Ok(path) => {
+                tracing::info!(
+                    "ModelExpress download completed successfully for model: {model_name}"
+                );
+                return Ok(path);
+            }
+            Err(e) => {
+                tracing::warn!("ModelExpress download failed for model '{model_name}': {e}. Falling back to hf-hub.");
             }
         }
     }
 
-    #[cfg(not(feature = "model-express"))]
-    {
-        if env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).is_ok() {
-            tracing::warn!("ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub.");
-        }
+    tracing::info!("Using hf-hub for model: {model_name}");
+    download_with_hf_hub(&model_name, ignore_weights).await
+}
+
+/// Attempt to download a model from Hugging Face using hf-hub directly
+/// Called when model-express feature is not enabled
+/// Returns the directory it is in
+/// If ignore_weights is true, model weight files will be skipped
+#[cfg(not(feature = "model-express"))]
+pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
+    let name = name.as_ref();
+    let model_name = name.display().to_string();
+
+    if env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).is_ok() {
+        tracing::warn!("ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub.");
     }
 
     tracing::info!("Using hf-hub for model: {model_name}");

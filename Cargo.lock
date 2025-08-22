@@ -2044,6 +2044,7 @@ dependencies = [
  "tonic-build",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "unicode-segmentation",
  "url",
  "uuid 1.18.0",
