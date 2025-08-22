@@ -202,6 +202,7 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
@@ -392,6 +393,7 @@ impl LocalModel {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
+
         card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;

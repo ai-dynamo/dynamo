@@ -13,6 +13,10 @@ pub struct ModelRuntimeConfig {
 
     pub max_num_batched_tokens: Option<u64>,
 
+    pub tool_call_parser: Option<String>,
+
+    pub reasoning_parser: Option<String>,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
