@@ -5,7 +5,7 @@ This guide demonstrates two setups.
 The basic setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
 
 The EPP-aware setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker.
-It first uses the plugin to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker. EPP’s default approach is token-aware only `by approximation` because it relies on the non-tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+EPP’s default approach is token-aware only `by approximation` because it relies on the non-tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -76,7 +76,7 @@ kubectl get gateway inference-gateway -n my-model
 # inference-gateway   kgateway   x.x.x.x   True         1m
 ```
 
-3. **Deploy model**
+3. **Deploy Your Model**
 
 Follow the steps in [model deployment](../../components/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
@@ -85,6 +85,7 @@ Sample commands to deploy model:
 cd <dynamo-source-root>/components/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
+Take a note of or change the DYNAMO_IMAGE in the model deployment file.
 
 4. **Install Dynamo GAIE helm chart**
 
@@ -92,36 +93,52 @@ The Inference Gateway is configured through the `inference-gateway-resources.yam
 
 Deploy the Inference Gateway resources to your Kubernetes cluster by running one of the commands below.
 
-For the EPP-unaware black box integration run:
+***Basic Black Box Integration***
+
+For the basic black box integration run:
 
 ```bash
 cd deploy/inference-gateway
 helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
 ```
 
-For the EPP-aware integration run:
+***EPP-aware integration with the custom Dynamo plugin***
+
+1. Build the EPP image and push to your docker registry:
+```bash
+git clone --branch upstream/v0.5.1 \
+  https://github.com/atchernych/gateway-api-inference-extension-dynamo.git
+
+# Build the image <your-docker-registry/dynamo-custom-epp:<your-tag> and then manually push
+make image-local-load \
+  IMAGE_REGISTRY=<your-docker-registry> \
+  IMAGE_NAME=dynamo-custom-epp \
+  EXTRA_TAG=<your-tag>
+
+# Or run the command below to build push to your registry
+make image-local-push \
+  IMAGE_REGISTRY=<your-docker-registry> \
+  IMAGE_NAME=dynamo-custom-epp \
+  EXTRA_TAG=<your-tag>
+
+```
+
+2. Install through helm
 
 ```bash
 cd deploy/inference-gateway
 
-helm install dynamo-gaie ./helm/dynamo-gaie \
+# Export the Dynamo image you have used when deploying your model in Step 3.
+export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie \
   -n my-model \
   -f ./vllm_agg_qwen.yaml \
-  -f ./values-epp-aware.yaml
-```
-
-Or customize the EPP further using flags, i.e:
-
-```bash
-helm install dynamo-gaie ./helm/dynamo-gaie \
-  -n my-model \
-  -f ./vllm_agg_qwen.yaml \
+  -f ./values-epp-aware.yaml \
   --set eppAware.enabled=true \
-  --set eppAware.eppImage=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v5-4 \
-  --set imagePullSecrets='{docker-imagepullsecret}' \
-  --set-string epp.extraEnv[0].name=USE_STREAMING \
-  --set-string epp.extraEnv[0].value=true
+  --set-string eppAware.eppImage=<your-epp-image>
+  --set-string eppAware.sidecar.image=$DYNAMO_IMAGE
 ```
+
 
 Key configurations include:
 - An InferenceModel resource for the Qwen model
