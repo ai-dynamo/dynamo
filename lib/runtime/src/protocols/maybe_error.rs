@@ -46,8 +46,8 @@ mod tests {
                 message: err.to_string(),
             }
         }
-        fn err(&self) -> Option<Box<anyhow::Error>> {
-            Some(anyhow::Error::msg(self.message.clone()).into())
+        fn err(&self) -> Option<anyhow::Error> {
+            Some(anyhow::Error::msg(self.message.clone()))
         }
     }
 
