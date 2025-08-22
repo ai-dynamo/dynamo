@@ -60,10 +60,12 @@ fi
 echo "Master IP address (node 1): $MASTER_IP"
 echo "Nginx node (node 0): $NGINX_NODE"
 
-# Generate frontend host list for nginx config
+# Generate frontend IP list for nginx config
 frontend_hosts=()
+frontend_ips=()
 # Node 1 always has a frontend (with NATS/ETCD)
 frontend_hosts+=("$MASTER_NODE")
+frontend_ips+=("$MASTER_IP")
 
 # Add additional frontends based on num_additional_frontends
 {% endraw %}ADDITIONAL_FRONTENDS={{ num_additional_frontends }}{% raw %}
@@ -75,20 +77,24 @@ if [ "$ADDITIONAL_FRONTENDS" -gt 0 ]; then
     
     for i in $(seq 1 $ADDITIONAL_FRONTENDS); do
         if [ $frontend_node_idx -lt $TOTAL_NODES ]; then
-            frontend_hosts+=("${nodes[$frontend_node_idx]}")
-            echo "Additional frontend $i on node $frontend_node_idx: ${nodes[$frontend_node_idx]}"
+            node_name=${nodes[$frontend_node_idx]}
+            node_ip=$(srun --nodes=1 --ntasks=1 --nodelist=$node_name ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+            frontend_hosts+=("$node_name")
+            frontend_ips+=("$node_ip")
+            echo "Additional frontend $i on node $frontend_node_idx: $node_name ($node_ip)"
             frontend_node_idx=$((frontend_node_idx + nodes_per_frontend))
         fi
     done
 fi
 
 echo "Frontend hosts: ${frontend_hosts[@]}"
+echo "Frontend IPs: ${frontend_ips[@]}"
 
 # Generate nginx configuration
 # Build a Python list literal of frontend hosts from the bash array
-FRONTEND_LIST=$(printf "'%s'," "${frontend_hosts[@]}")
+FRONTEND_LIST=$(printf "'%s'," "${frontend_ips[@]}")
 FRONTEND_LIST="[${FRONTEND_LIST%,}]"
-export FRONTEND_LIST
+export FRONTEND_LIST SCRIPT_DIR LOG_DIR
 python3 - <<'PY'
 import os
 from jinja2 import Template
@@ -124,8 +130,8 @@ echo "Master IP address: $MASTER_IP"
 {% endraw %}
 {% if enable_multiple_frontends %}
 {% raw %}
-# With multiple frontends: node 0 = nginx, workers start from node 1
-WORKER_NODE_OFFSET=1
+# With multiple frontends: keep offset 0; nginx coexists on node 0
+WORKER_NODE_OFFSET=0
 {% endraw %}
 {% else %}
 {% raw %}
