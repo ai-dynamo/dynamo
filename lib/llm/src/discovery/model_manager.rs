@@ -248,14 +248,15 @@ impl ModelManager {
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
-        self.entries
-            .lock()
-            .unwrap()
-            .values()
-            .find(|entry| entry.name == model)
-            .and_then(|entry| entry.runtime_config.as_ref())
-            .and_then(|config| config.tool_call_parser.clone())
-            .map(|parser| parser.to_string())
+        match self.entries.lock() {
+            Ok(entries) => entries
+                .values()
+                .find(|entry| entry.name == model)
+                .and_then(|entry| entry.runtime_config.as_ref())
+                .and_then(|config| config.tool_call_parser.clone())
+                .map(|parser| parser.to_string()),
+            Err(_) => None,
+        }
     }
 }
 
