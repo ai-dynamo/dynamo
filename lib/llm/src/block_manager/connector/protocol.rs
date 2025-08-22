@@ -194,12 +194,12 @@ impl TransferCompletionHandle for ScheduledTransferCompletionHandle {
     }
 
     async fn mark_complete(&self, result: anyhow::Result<()>) {
-        if let Some(completion_tx) = self.completion_tx.lock().unwrap().take() {
-            if completion_tx.send(result).is_err() {
-                tracing::error!(
-                    "failed to send completion status; this could lead to silent data corruption"
-                );
-            }
+        if let Some(completion_tx) = self.completion_tx.lock().unwrap().take()
+            && completion_tx.send(result).is_err()
+        {
+            tracing::error!(
+                "failed to send completion status; this could lead to silent data corruption"
+            );
         }
     }
 }
