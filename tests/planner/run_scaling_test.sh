@@ -73,14 +73,14 @@ check_prerequisites() {
         read -r response
         if [[ "$response" =~ ^[Yy]$ ]]; then
             log_info "Installing genai-perf and perf_analyzer..."
-            if pip install nvidia-ml-py3 genai-perf tritonclient[all]; then
+            if pip install nvidia-ml-py3 genai-perf; then
                 log_success "genai-perf and perf_analyzer installed successfully"
             else
-                log_error "Failed to install genai-perf. Please install it manually: pip install nvidia-ml-py3 genai-perf tritonclient[all]"
+                log_error "Failed to install genai-perf. Please install it manually: pip install nvidia-ml-py3 genai-perf"
                 exit 1
             fi
         else
-            log_error "genai-perf is required for the scaling test. Please install it: pip install nvidia-ml-py3 genai-perf tritonclient[all]"
+            log_error "genai-perf is required for the scaling test. Please install it: pip install nvidia-ml-py3 genai-perf"
             exit 1
         fi
     fi
