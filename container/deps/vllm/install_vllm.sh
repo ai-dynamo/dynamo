@@ -20,10 +20,10 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="aab549870df50edf0512f0a59b574f692f546465"  # from v0.10.1
+VLLM_REF="1da94e673c257373280026f75ceb4effac80e892"  # from v0.10.1.1
 # When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
 # aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
-VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1-cp38-abi3-manylinux1_x86_64.whl"
+VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1.1-cp38-abi3-manylinux1_x86_64.whl"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
