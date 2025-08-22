@@ -107,38 +107,59 @@ impl From<&str> for EndpointId {
     /// assert_eq!(endpoint.component, "component");
     /// assert_eq!(endpoint.name, "endpoint");
     /// ```
-    fn from(input: &str) -> Self {
-        let mut result = EndpointId::default();
+    fn from(s: &str) -> Self {
+        let input = s.strip_prefix(ENDPOINT_SCHEME).unwrap_or(s);
 
         // Split the input string on either '.' or '/'
-        let elements: Vec<&str> = input
+        let mut parts = input
             .trim_matches([' ', '/', '.'])
             .split(['.', '/'])
-            .filter(|x| !x.is_empty())
-            .collect();
+            .filter(|x| !x.is_empty());
 
-        match elements.len() {
-            0 => {}
-            1 => {
-                result.component = elements[0].to_string();
+        // Extract the first three potential components.
+        let p1 = parts.next();
+        let p2 = parts.next();
+        let p3 = parts.next();
+
+        // String::new does not allocate yet
+        let mut namespace = String::new();
+        let mut component = String::new();
+        let mut name = String::new();
+
+        match (p1, p2, p3) {
+            (None, _, _) => {
+                // 0 elements: all fields remain empty.
+                // Should this be an error?
             }
-            2 => {
-                result.namespace = elements[0].to_string();
-                result.component = elements[1].to_string();
+            (Some(c), None, _) => {
+                component = c.to_string();
             }
-            3 => {
-                result.namespace = elements[0].to_string();
-                result.component = elements[1].to_string();
-                result.name = elements[2].to_string();
+            (Some(ns), Some(c), None) => {
+                // 2 elements: namespace, component
+                namespace = ns.to_string();
+                component = c.to_string();
             }
-            x if x > 3 => {
-                result.namespace = elements[0].to_string();
-                result.component = elements[1].to_string();
-                result.name = elements[2..].join("_");
+            (Some(ns), Some(c), Some(ep)) => {
+                namespace = ns.to_string();
+                component = c.to_string();
+
+                // For the 'name' field, we need to handle 'n' and any remaining parts.
+                // Instead of collecting into a Vec and then joining, we can build the string directly.
+                let mut endpoint_buf = String::from(ep); // Start with the third part
+                for part in parts {
+                    // 'parts' iterator continues from where p3 left off
+                    endpoint_buf.push('_');
+                    endpoint_buf.push_str(part);
+                }
+                name = endpoint_buf;
             }
-            _ => unreachable!(),
         }
-        result
+
+        EndpointId {
+            namespace,
+            component,
+            name,
+        }
     }
 }
 
@@ -166,8 +187,7 @@ impl FromStr for EndpointId {
     /// assert_eq!(endpoint.name, "endpoint");
     /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let cleaned = s.strip_prefix(ENDPOINT_SCHEME).unwrap_or(s);
-        Ok(EndpointId::from(cleaned))
+        Ok(EndpointId::from(s))
     }
 }
 
