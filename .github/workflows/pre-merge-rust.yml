@@ -34,6 +34,10 @@ on:
     - 'Cargo.toml'
     - 'Cargo.lock'
 
+env:
+  # Arbitrary identifier in cache key to invalidate cache on-demand
+  CACHE_VERSION: 1
+
 jobs:
   pre-merge-rust:
     runs-on: ubuntu-latest
@@ -72,8 +76,8 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           ${{ matrix.dir }}/target/
-        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
+        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ env.CACHE_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ env.CACHE_VERSION }}-
 
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
@@ -97,14 +101,30 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+
+    - name: Check disk space
+      run: df -h
+
     # Have an explicit step to build tests first to separate time spent on build vs execution.
+    # NOTE: Use --release flag everywhere to reduce build size and avoid disk space issues on runners.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run
+      run: cargo test --locked --no-run --release
+
+    - name: Check disk space
+      run: df -h
+
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo doc --no-deps && cargo test --locked --doc
+      run: cargo doc --no-deps --release && cargo test --locked --doc --release
+
+    - name: Check disk space
+      run: df -h
+
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      run: cargo test --locked --all-targets --release
+
+    - name: Check disk space
+      run: df -h
