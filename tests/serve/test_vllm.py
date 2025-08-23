@@ -153,7 +153,7 @@ class VLLMProcess(ManagedProcess):
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
-        directory="/home/ubuntu/dynamo/components/backends/vllm",
+        directory="/workspace/components/backends/vllm",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
