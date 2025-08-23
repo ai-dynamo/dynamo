@@ -34,16 +34,28 @@ impl KvbmMetrics {
             .create_intcounter("offload_requests", "The number of offload requests", &[])
             .unwrap();
         let offload_blocks_d2h = mr
-            .create_intcounter("offload_blocks_d2h", "The number of offload blocks from device to host", &[])
+            .create_intcounter(
+                "offload_blocks_d2h",
+                "The number of offload blocks from device to host",
+                &[],
+            )
             .unwrap();
         let onboard_requests = mr
             .create_intcounter("onboard_requests", "The number of onboard requests", &[])
             .unwrap();
         let onboard_blocks_h2d = mr
-            .create_intcounter("onboard_blocks_h2d", "The number of onboard blocks from host to device", &[])
+            .create_intcounter(
+                "onboard_blocks_h2d",
+                "The number of onboard blocks from host to device",
+                &[],
+            )
             .unwrap();
         let onboard_blocks_d2d = mr
-            .create_intcounter("onboard_blocks_d2d", "The number of onboard blocks from disk to device", &[])
+            .create_intcounter(
+                "onboard_blocks_d2d",
+                "The number of onboard blocks from disk to device",
+                &[],
+            )
             .unwrap();
         let save_kv_layer_requests = mr
             .create_intcounter(
