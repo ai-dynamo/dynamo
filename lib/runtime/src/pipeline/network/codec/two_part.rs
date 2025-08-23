@@ -455,6 +455,8 @@ mod tests {
 
     /// Test decoding of a message with checksum mismatch.
     #[test]
+    // Checksum only computed in debug mode, so only test in debug mode.
+    #[cfg(debug_assertions)]
     fn test_checksum_mismatch() {
         // Create a message
         let header_data = Bytes::from("header data");
@@ -646,6 +648,8 @@ mod tests {
 
     /// Test handling of corrupted data in a stream
     #[tokio::test]
+    // Checksum only computed in debug mode, so only test in debug mode.
+    #[cfg(debug_assertions)]
     async fn test_streaming_corrupted_data() {
         // Create messages
         let header_data = Bytes::from("header data");
