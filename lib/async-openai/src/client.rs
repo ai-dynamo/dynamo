@@ -11,20 +11,20 @@
 use std::pin::Pin;
 
 use bytes::Bytes;
-use futures::{stream::StreamExt, Stream};
+use futures::{Stream, stream::StreamExt};
 use reqwest::multipart::Form;
 use reqwest_eventsource::{Event, EventSource, RequestBuilderExt};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
+    Assistants, Audio, AuditLogs, Batches, Chat, Completions, Embeddings, FineTuning, Invites,
+    Models, Projects, Responses, Threads, Uploads, Users, VectorStores,
     config::{Config, OpenAIConfig},
-    error::{map_deserialization_error, ApiError, OpenAIError, WrappedError},
+    error::{ApiError, OpenAIError, WrappedError, map_deserialization_error},
     file::Files,
     image::Images,
     moderation::Moderations,
     traits::AsyncTryFrom,
-    Assistants, Audio, AuditLogs, Batches, Chat, Completions, Embeddings, FineTuning, Invites,
-    Models, Projects, Responses, Threads, Uploads, Users, VectorStores,
 };
 
 #[derive(Debug, Clone, Default)]

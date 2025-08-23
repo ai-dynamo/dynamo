@@ -10,8 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
-use base64::{engine::general_purpose, Engine as _};
-use rand::{distr::Alphanumeric, Rng};
+use base64::{Engine as _, engine::general_purpose};
+use rand::{Rng, distr::Alphanumeric};
 use reqwest::Url;
 
 use crate::error::OpenAIError;

@@ -11,13 +11,13 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
         CreateMessageRequest, DeleteMessageResponse, ListMessagesResponse, MessageObject,
         ModifyMessageRequest,
     },
-    Client,
 };
 
 /// Represents a message within a [thread](https://platform.openai.com/docs/api-reference/threads).

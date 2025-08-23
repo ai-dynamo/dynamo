@@ -21,30 +21,30 @@ use dynamo_llm::http::{
         GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient, PureOpenAIClient,
     },
     service::{
-        error::HttpError,
-        metrics::{Endpoint, RequestType, Status, FRONTEND_METRIC_PREFIX},
-        service_v2::HttpService,
         Metrics,
+        error::HttpError,
+        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        service_v2::HttpService,
     },
 };
 use dynamo_llm::protocols::{
+    Annotated,
     codec::SseLineCodec,
     convert_sse_stream,
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
-    Annotated,
 };
 use dynamo_runtime::{
+    CancellationToken,
     engine::AsyncEngineContext,
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
-    CancellationToken,
 };
 use futures::StreamExt;
-use prometheus::{proto::MetricType, Registry};
+use prometheus::{Registry, proto::MetricType};
 use reqwest::StatusCode;
 use std::{io::Cursor, sync::Arc};
 use tokio::time::timeout;
@@ -1232,23 +1232,23 @@ async fn test_request_id_annotation() {
     let mut annotated_stream = std::pin::pin!(annotated_stream);
     while let Some(annotated_response) = annotated_stream.next().await {
         // Check if this is a request_id annotation
-        if let Some(event) = &annotated_response.event {
-            if event == "request_id" {
-                found_request_id_annotation = true;
-                // Extract the request ID from the annotation
-                if let Some(comments) = &annotated_response.comment {
-                    if let Some(comment) = comments.first() {
-                        // The comment contains a JSON-encoded string, so we need to parse it
-                        if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
-                            received_request_id = Some(parsed_value);
-                        } else {
-                            // Fallback: remove quotes manually if JSON parsing fails
-                            received_request_id = Some(comment.trim_matches('"').to_string());
-                        }
-                    }
+        if let Some(event) = &annotated_response.event
+            && event == "request_id"
+        {
+            found_request_id_annotation = true;
+            // Extract the request ID from the annotation
+            if let Some(comments) = &annotated_response.comment
+                && let Some(comment) = comments.first()
+            {
+                // The comment contains a JSON-encoded string, so we need to parse it
+                if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
+                    received_request_id = Some(parsed_value);
+                } else {
+                    // Fallback: remove quotes manually if JSON parsing fails
+                    received_request_id = Some(comment.trim_matches('"').to_string());
                 }
-                break;
             }
+            break;
         }
     }
 

@@ -78,5 +78,5 @@ unsafe fn memcpy(src_ptr: *const u8, dst_ptr: *mut u8, size: usize) {
         "Source and destination memory regions must not overlap for copy_nonoverlapping"
     );
 
-    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
+    unsafe { std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size) };
 }

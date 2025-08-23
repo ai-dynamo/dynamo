@@ -26,13 +26,13 @@ use std::sync::Arc;
 use clap::Parser;
 
 use dynamo_llm::kv_router::{
+    KvRouter, WorkerSelector,
     protocols::WorkerSelectionResult,
     scheduler::{DefaultWorkerSelector, KvSchedulerError, SchedulingRequest},
-    KvRouter, WorkerSelector,
 };
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::{
-    logging, pipeline::network::Ingress, DistributedRuntime, Result, Runtime, Worker,
+    DistributedRuntime, Result, Runtime, Worker, logging, pipeline::network::Ingress,
 };
 
 #[derive(Parser)]
