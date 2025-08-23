@@ -335,38 +335,6 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn test_uptime_gauge_updates() {
-        // Test that the uptime gauge is properly updated and increases over time
-        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
-            let drt = create_test_drt_async().await;
-
-            // Get initial uptime
-            let initial_uptime = drt.system_health.lock().unwrap().uptime();
-
-            // Update the gauge with initial value
-            drt.system_health.lock().unwrap().update_uptime_gauge();
-
-            // Sleep for 100ms
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-            // Get uptime after sleep
-            let uptime_after_sleep = drt.system_health.lock().unwrap().uptime();
-
-            // Update the gauge again
-            drt.system_health.lock().unwrap().update_uptime_gauge();
-
-            // Verify uptime increased by at least 100ms
-            let elapsed = uptime_after_sleep - initial_uptime;
-            assert!(
-                elapsed >= std::time::Duration::from_millis(100),
-                "Uptime should have increased by at least 100ms after sleep, but only increased by {:?}",
-                elapsed
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn test_http_requests_fail_when_system_disabled() {
         // Test that system status server is not running when disabled
         temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {

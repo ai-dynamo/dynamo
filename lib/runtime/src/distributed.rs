@@ -368,26 +368,35 @@ mod tests {
     use super::distributed_test_utils::create_test_drt_async;
 
     #[tokio::test]
-    async fn test_drt_uptime_after_delay_system_disabled() {
-        // Test uptime with system status server disabled
+    async fn test_uptime_gauge_updates_and_system_disabled() {
+        // Test uptime functionality and gauge updates with system status server disabled
         temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
-            // Start a DRT
             let drt = create_test_drt_async().await;
 
-            // Wait 50ms
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            // Get initial uptime
+            let initial_uptime = drt.system_health.lock().unwrap().uptime();
 
-            // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            // Update the gauge with initial value
+            drt.system_health.lock().unwrap().update_uptime_gauge();
+
+            // Wait 50ms
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // Get uptime after sleep and update gauge
+            let uptime_after_sleep = drt.system_health.lock().unwrap().uptime();
+            drt.system_health.lock().unwrap().update_uptime_gauge();
+
+            // Verify uptime increased by at least 50ms
+            let elapsed = uptime_after_sleep - initial_uptime;
             assert!(
-                uptime >= std::time::Duration::from_millis(50),
-                "Expected uptime to be at least 50ms, but got {:?}",
-                uptime
+                elapsed >= std::time::Duration::from_millis(50),
+                "Uptime should have increased by at least 50ms after sleep, but only increased by {:?}",
+                elapsed
             );
 
             println!(
                 "✓ DRT uptime test passed (system disabled): uptime = {:?}",
-                uptime
+                uptime_after_sleep
             );
         })
         .await;
@@ -395,25 +404,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_drt_uptime_after_delay_system_enabled() {
-        // Test uptime with system status server enabled
+        // Test uptime functionality and gauge updates with system status server enabled
         temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
-            // Start a DRT
             let drt = create_test_drt_async().await;
+
+            // Get initial uptime
+            let initial_uptime = drt.system_health.lock().unwrap().uptime();
+
+            // Update the gauge with initial value
+            drt.system_health.lock().unwrap().update_uptime_gauge();
 
             // Wait 50ms
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-            // Check that uptime is 50+ ms
-            let uptime = drt.system_health.lock().unwrap().uptime();
+            // Get uptime after sleep and update gauge
+            let uptime_after_sleep = drt.system_health.lock().unwrap().uptime();
+            drt.system_health.lock().unwrap().update_uptime_gauge();
+
+            // Verify uptime increased by at least 50ms
+            let elapsed = uptime_after_sleep - initial_uptime;
             assert!(
-                uptime >= std::time::Duration::from_millis(50),
-                "Expected uptime to be at least 50ms, but got {:?}",
-                uptime
+                elapsed >= std::time::Duration::from_millis(50),
+                "Uptime should have increased by at least 50ms after sleep, but only increased by {:?}",
+                elapsed
             );
 
             println!(
                 "✓ DRT uptime test passed (system enabled): uptime = {:?}",
-                uptime
+                uptime_after_sleep
             );
         })
         .await;
