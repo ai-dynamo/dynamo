@@ -22,12 +22,12 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 ## Installation Steps
 
-1. **Install Dynamo Platform**
+### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 
 
-2. **Deploy Inference Gateway**
+### 2. Deploy Inference Gateway ###
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
 You can use the script below or follow the steps manually.
@@ -76,7 +76,7 @@ kubectl get gateway inference-gateway -n my-model
 # inference-gateway   kgateway   x.x.x.x   True         1m
 ```
 
-3. **Deploy Your Model**
+### 3. Deploy Your Model ###
 
 Follow the steps in [model deployment](../../components/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
@@ -87,13 +87,13 @@ kubectl apply -f agg.yaml -n my-model
 ```
 Take a note of or change the DYNAMO_IMAGE in the model deployment file.
 
-4. **Install Dynamo GAIE helm chart**
+### 4. Install Dynamo GAIE helm chart ###
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 
 Deploy the Inference Gateway resources to your Kubernetes cluster by running one of the commands below.
 
-***Basic Black Box Integration***
+#### Basic Black Box Integration ####
 
 For the basic black box integration run:
 
@@ -102,13 +102,29 @@ cd deploy/inference-gateway
 helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
 ```
 
-***EPP-aware integration with the custom Dynamo plugin***
+#### EPP-aware Integration with the custom Dynamo Plugin ####
 
-1. Build the EPP image and push to your docker registry:
+##### 1. Build the custom EPP image #####
+
+We provide git patches for you to use.
+
+##### 1.1 Clone the official GAIE repo in a separate folder #####
+
 ```bash
-git clone --branch upstream/v0.5.1 \
-  https://github.com/atchernych/gateway-api-inference-extension-dynamo.git
+git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git
+cd gateway-api-inference-extension
+git checkout v0.5.1
+```
 
+##### 1.2 Apply patch(es) #####
+
+```bash
+git apply <dynamo-folder>/deploy/inference-gateway/epp-patches/v0.5.1-1/epp-v0.5.1-dyn1.patch
+```
+
+##### 1.3 Build the custom EPP image #####
+
+```bash
 # Build the image <your-docker-registry/dynamo-custom-epp:<your-tag> and then manually push
 make image-local-load \
   IMAGE_REGISTRY=<your-docker-registry> \
@@ -120,10 +136,9 @@ make image-local-push \
   IMAGE_REGISTRY=<your-docker-registry> \
   IMAGE_NAME=dynamo-custom-epp \
   EXTRA_TAG=<your-tag>
-
 ```
 
-2. Install through helm
+##### 2. Install through helm #####
 
 ```bash
 cd deploy/inference-gateway
@@ -148,7 +163,7 @@ Key configurations include:
 - Required RBAC roles and bindings
 - RBAC permissions
 
-5. **Verify Installation**
+### 5. Verify Installation ###
 
 Check that all resources are properly deployed:
 
@@ -176,11 +191,11 @@ NAME        HOSTNAMES   AGE
 qwen-route               33m
 ```
 
-## Usage
+### 6. Usage ###
 
 The Inference Gateway provides HTTP endpoints for model inference.
 
-### 1: Populate gateway URL for your k8s cluster
+#### 1: Populate gateway URL for your k8s cluster ####
 ```bash
 export GATEWAY_URL=<Gateway-URL>
 ```
@@ -206,7 +221,7 @@ kubectl port-forward svc/inference-gateway 8000:80 -n my-model
 GATEWAY_URL=http://localhost:8000
 ```
 
-### 2: Check models deployed to inference gateway
+#### 2: Check models deployed to inference gateway ####
 
 
 a. Query models:
