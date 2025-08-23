@@ -149,14 +149,14 @@ def display_version_summary(
             print(f"{name:<25} {old_ver:<20} {dev_version:<20}")
         else:
             status = "❌ Error" if isinstance(name, dict) or isinstance(old_ver, dict) else "⚠️  Missing"
-            print(f"{file_path.name:<25} {status:<20} {dev_version:<20}")
+            print(f"{file_path:<25} {status:<20} {dev_version:<20}")
     
     # Display dependencies alignment
     print("\n🔗 DEPENDENCIES ALIGNMENT")
     print("-" * 80)
     for i, (file_path, old_deps, new_deps) in enumerate(zip(pyproject_files, current_dependencies, updated_dependencies)):
         if old_deps and not isinstance(old_deps, dict):
-            print(f"\n📁 {file_path.name}:")
+            print(f"\n📁 {file_path}:")
             print("  Before → After:")
             for old_dep, new_dep in zip(old_deps, new_deps):
                 if old_dep != new_dep:
@@ -164,7 +164,7 @@ def display_version_summary(
                 else:
                     print(f"    {old_dep:<30} → (unchanged)")
         elif isinstance(old_deps, dict):
-            print(f"\n📁 {file_path.name}: ❌ Error reading dependencies")
+            print(f"\n📁 {file_path}: ❌ Error reading dependencies")
     
     print("\n" + "="*80)
     print("SUMMARY")
