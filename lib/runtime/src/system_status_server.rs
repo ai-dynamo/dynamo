@@ -19,9 +19,9 @@ use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use std::collections::HashMap;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -268,7 +268,7 @@ mod tests {
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     use super::*;
-    use crate::distributed::test_helpers::create_test_drt_async;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
     use crate::metrics::MetricsRegistry;
     use anyhow::Result;
     use rstest::rstest;
@@ -362,6 +362,24 @@ mod integration_tests {
                 "Uptime should have increased by at least 100ms after sleep, but only increased by {:?}",
                 elapsed
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_http_requests_fail_when_system_disabled() {
+        // Test that system status server is not running when disabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            let drt = create_test_drt_async().await;
+
+            // Verify that system status server info is None when disabled
+            let system_info = drt.system_status_server_info();
+            assert!(
+                system_info.is_none(),
+                "System status server should not be running when DYN_SYSTEM_ENABLED=false"
+            );
+
+            println!("✓ System status server correctly disabled when DYN_SYSTEM_ENABLED=false");
         })
         .await;
     }

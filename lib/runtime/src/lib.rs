@@ -92,7 +92,7 @@ pub struct SystemHealth {
     health_path: String,
     live_path: String,
     start_time: Instant,
-    uptime_gauge: Option<prometheus::Gauge>,
+    uptime_gauge: OnceLock<prometheus::Gauge>,
 }
 
 impl SystemHealth {
@@ -113,7 +113,7 @@ impl SystemHealth {
             health_path,
             live_path,
             start_time: Instant::now(),
-            uptime_gauge: None,
+            uptime_gauge: OnceLock::new(),
         }
     }
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -153,26 +153,18 @@ impl SystemHealth {
 
     /// Initialize the uptime gauge using the provided metrics registry
     pub fn initialize_uptime_gauge<T: crate::metrics::MetricsRegistry>(
-        &mut self,
+        &self,
         registry: &T,
     ) -> anyhow::Result<()> {
-        match registry.create_gauge(
+        let gauge = registry.create_gauge(
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
-        ) {
-            Ok(gauge) => {
-                self.uptime_gauge = Some(gauge);
-                Ok(())
-            }
-            Err(e) if e.to_string().contains("Duplicate metrics") => {
-                // Log warning for duplicate metrics (common in tests) but don't fail
-                tracing::warn!("uptime_seconds metric already registered: {}", e);
-                // Leave uptime_gauge as None - updates will be no-ops
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+        )?;
+        self.uptime_gauge
+            .set(gauge)
+            .map_err(|_| anyhow::anyhow!("uptime_gauge already initialized"))?;
+        Ok(())
     }
 
     /// Get the current uptime as a Duration
@@ -182,7 +174,7 @@ impl SystemHealth {
 
     /// Update the uptime gauge with the current uptime value
     pub fn update_uptime_gauge(&self) {
-        if let Some(ref gauge) = self.uptime_gauge {
+        if let Some(gauge) = self.uptime_gauge.get() {
             gauge.set(self.uptime().as_secs_f64());
         }
     }
