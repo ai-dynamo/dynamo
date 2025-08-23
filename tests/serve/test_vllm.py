@@ -62,12 +62,14 @@ def create_payload_for_config(config: "VLLMConfig") -> Payload:
                 ],
                 "max_tokens": 150,
                 "temperature": 0.1,
+                "stream": False,
             },
             payload_completions={
                 "model": config.model,
                 "prompt": text_prompt,
                 "max_tokens": 150,
                 "temperature": 0.1,
+                "stream": False,
             },
             repeat_count=1,
             expected_log=[],
@@ -132,9 +134,8 @@ class VLLMProcess(ManagedProcess):
         except Exception:
             return False
 
-    def _check_url(self, url, timeout=30, sleep=2.0):
-        """Override to use a more reasonable retry interval"""
-        return super()._check_url(url, timeout, sleep)
+    def _check_url(self, url, timeout=30, sleep=1.0, log_interval=10):
+        return super()._check_url(url, timeout, sleep, log_interval)
 
     def check_response(
         self, payload, response, response_handler, logger=logging.getLogger()
@@ -147,83 +148,12 @@ class VLLMProcess(ManagedProcess):
         for expected in payload.expected_response:
             assert expected in content, "Expected '%s' not found in response" % expected
 
-    def wait_for_ready(self, payload, logger=logging.getLogger()):
-        url = f"http://localhost:{self.port}/{self.config.endpoints[0]}"
-        start_time = time.time()
-        retry_delay = 5
-        elapsed = 0.0
-        logger.info("Waiting for Deployment Ready")
-        json_payload = (
-            payload.payload_chat
-            if self.config.endpoints[0] == "v1/chat/completions"
-            else payload.payload_completions
-        )
-
-        while time.time() - start_time < self.config.timeout:
-            elapsed = time.time() - start_time
-            try:
-                response = requests.post(
-                    url,
-                    json=json_payload,
-                    timeout=self.config.timeout - elapsed,
-                )
-            except (requests.RequestException, requests.Timeout) as e:
-                logger.warning("Retrying due to Request failed: %s", e)
-                time.sleep(retry_delay)
-                continue
-            logger.info("Response%r", response)
-            if response.status_code == 500:
-                error = response.json().get("error", "")
-                if "no instances" in error:
-                    logger.warning("Retrying due to no instances available")
-                    time.sleep(retry_delay)
-                    continue
-                elif (
-                    "multimodal" in self.config.name
-                    and "Failed to fold chat completions stream" in error
-                ):
-                    logger.warning("Retrying due to endpoint not ready for multimodal")
-                    time.sleep(retry_delay)
-                    continue
-            if response.status_code == 404:
-                error = response.json().get("error", "")
-                if "Model not found" in error:
-                    logger.warning("Retrying due to model not found")
-                    time.sleep(retry_delay)
-                    continue
-            # Process the response
-            if response.status_code != 200:
-                logger.error(
-                    "Service returned status code %s: %s",
-                    response.status_code,
-                    response.text,
-                )
-                pytest.fail(
-                    "Service returned status code %s: %s"
-                    % (response.status_code, response.text)
-                )
-            else:
-                break
-        else:
-            logger.error(
-                "Service did not return a successful response within %s s",
-                self.config.timeout,
-            )
-            pytest.fail(
-                "Service did not return a successful response within %s s"
-                % self.config.timeout
-            )
-
-        self.check_response(payload, response, self.config.response_handlers[0], logger)
-
-        logger.info("Deployment Ready")
-
 
 # vLLM test configurations
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
-        directory="/workspace/components/backends/vllm",
+        directory="/home/ubuntu/dynamo/components/backends/vllm",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
@@ -233,6 +163,7 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
+        timeout=300,
     ),
     "agg-router": VLLMConfig(
         name="agg-router",
@@ -246,6 +177,7 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
+        timeout=300,
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
@@ -259,6 +191,7 @@ vllm_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
+        timeout=300,
     ),
     "deepep": VLLMConfig(
         name="deepep",
@@ -300,6 +233,7 @@ vllm_configs = {
         model="llava-hf/llava-1.5-7b-hf",
         delayed_start=45,
         args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        timeout=300,
     ),
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
@@ -348,8 +282,6 @@ def test_serve_deployment(vllm_config_test, request, runtime_services):
     logger.info("Script: %s", config.script_name)
 
     with VLLMProcess(config, request) as server_process:
-        server_process.wait_for_ready(payload, logger)
-
         for endpoint, response_handler in zip(
             config.endpoints, config.response_handlers
         ):
