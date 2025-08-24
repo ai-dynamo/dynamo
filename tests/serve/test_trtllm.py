@@ -72,8 +72,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
-        timeout=300,
+        delayed_start=0,
+        timeout=360,
     ),
     "disaggregated": TRTLLMConfig(
         name="disaggregated",
@@ -86,8 +86,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
-        timeout=300,
+        delayed_start=0,
+        timeout=360,
     ),
     # TODO: These are sanity tests that the kv router examples launch
     # and inference without error, but do not do detailed checks on the
@@ -103,8 +103,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
-        timeout=300,
+        delayed_start=0,
+        timeout=360,
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
@@ -117,8 +117,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
-        timeout=300,
+        delayed_start=0,
+        timeout=360,
     ),
 }
 
