@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
     OnceLock::new();
 
-pub fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
+fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING
         .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
 }
