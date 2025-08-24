@@ -4392,3 +4392,140 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateBasePodSpec_Worker(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+
+	tests := []struct {
+		name            string
+		component       *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		expectedPodSpec *corev1.PodSpec
+	}{
+		{
+			name: "Planner component should have planner service account",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					Envs: []corev1.EnvVar{
+						{Name: "ANOTHER_COMPONENTENV", Value: "true"},
+					},
+					ComponentType: commonconsts.ComponentTypeWorker,
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.worker"},
+							Env: []corev1.EnvVar{
+								{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
+							},
+						},
+					},
+				},
+			},
+			expectedPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.worker"},
+						Env: []corev1.EnvVar{
+							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
+							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
+							{Name: "DYN_NAMESPACE", Value: ""},
+							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
+							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
+							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
+							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
+							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
+						},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "shared-memory",
+								MountPath: "/dev/shm",
+							},
+						},
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/live",
+									Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+								},
+							},
+							PeriodSeconds:    5,
+							TimeoutSeconds:   30,
+							FailureThreshold: 1,
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/health",
+									Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+								},
+							},
+							PeriodSeconds:    10,
+							TimeoutSeconds:   30,
+							FailureThreshold: 60,
+						},
+						StartupProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/live",
+									Port: intstr.FromString(commonconsts.DynamoSystemPortName),
+								},
+							},
+							PeriodSeconds:    10,
+							TimeoutSeconds:   5,
+							FailureThreshold: 60,
+						},
+						Ports: []corev1.ContainerPort{
+							{
+								Name:          commonconsts.DynamoSystemPortName,
+								ContainerPort: int32(commonconsts.DynamoSystemPort),
+								Protocol:      corev1.ProtocolTCP,
+							},
+						},
+					},
+				},
+				RestartPolicy:                 corev1.RestartPolicyAlways,
+				TerminationGracePeriodSeconds: ptr.To(int64(60)),
+				Volumes: []corev1.Volume{
+					{
+						Name: "shared-memory",
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{
+								Medium:    corev1.StorageMediumMemory,
+								SizeLimit: func() *resource.Quantity { q := resource.MustParse("512Mi"); return &q }(),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkSGLang,
+				secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() error = %v", err)
+				return
+			}
+
+			diff := cmp.Diff(tt.expectedPodSpec, podSpec)
+			if diff != "" {
+				t.Errorf("GenerateBasePodSpec() podSpec = %v, want %v, diff = %v", podSpec, tt.expectedPodSpec, diff)
+			}
+		})
+	}
+}
