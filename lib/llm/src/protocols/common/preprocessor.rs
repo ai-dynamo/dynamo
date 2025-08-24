@@ -13,14 +13,10 @@ use crate::protocols::TokenIdType;
 pub struct PreprocessedRequest {
     /// ID of the model to use
     pub model: String,
-
-    /// Type of prompt
-    pub token_ids: Vec<TokenIdType>,
-
-    /// Batch Token Ids = for batch completion requests (i.e using ArrayOfIntegerArray type from OpenAI /completions)
-    #[builder(default)]
-    pub batch_token_ids: Option<Vec<Vec<TokenIdType>>>,
-
+    /// Token IDs for prompt(s) - supports both single and batch requests
+    /// Single request: [[1,2,3]] (wrapped in outer Vec)
+    /// Batch request: [[1,2,3], [4,5,6]] (multiple token sequences)
+    pub token_ids: Vec<Vec<TokenIdType>>,
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
 

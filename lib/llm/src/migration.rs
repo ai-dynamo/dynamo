@@ -159,8 +159,10 @@ impl RetryManager {
             self.request.stop_conditions.max_tokens =
                 Some(max_tokens.saturating_sub(llm_engine_output.token_ids.len() as u32));
         }
-        for token_id in llm_engine_output.token_ids.iter() {
-            self.request.token_ids.push(*token_id);
+        if !self.request.token_ids.is_empty() {
+            for token_id in llm_engine_output.token_ids.iter() {
+                self.request.token_ids[0].push(*token_id);
+            }
         }
     }
 }
@@ -178,8 +180,7 @@ mod tests {
     fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
         PreprocessedRequest {
             model: "mock".to_string(),
-            token_ids: vec![1, 2, 3],
-            batch_token_ids: None,
+            token_ids: vec![vec![1, 2, 3]],
             stop_conditions: StopConditions {
                 max_tokens: Some(max_tokens),
                 ..Default::default()
@@ -261,10 +262,13 @@ mod tests {
             // Calculate how many responses we've already generated based on request token_ids
             // Initial request has [1, 2, 3], so anything beyond that are generated responses
             let initial_tokens = 3; // [1, 2, 3]
-            let responses_already_generated = preprocessed_request
-                .token_ids
-                .len()
-                .saturating_sub(initial_tokens);
+            let responses_already_generated = if preprocessed_request.token_ids.is_empty() {
+                0
+            } else {
+                preprocessed_request.token_ids[0]
+                    .len()
+                    .saturating_sub(initial_tokens)
+            };
 
             // Assert that max_tokens reflects the expected remaining tokens
             let expected_max_tokens =

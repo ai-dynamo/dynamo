@@ -161,15 +161,10 @@ impl OpenAIPreprocessor {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
-                            builder.token_ids(tokens);
+                            builder.token_ids(vec![tokens]);
                         }
                         TokenInput::Batch(token_batches) => {
-                            if token_batches.len() == 1 {
-                                builder.token_ids(token_batches[0].clone());
-                            } else {
-                                builder.batch_token_ids(Some(token_batches));
-                                builder.token_ids(vec![]);
-                            }
+                            builder.token_ids(token_batches);
                         }
                     }
                 }
@@ -210,7 +205,7 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids().to_vec());
+                            builder.token_ids(vec![encoding.token_ids().to_vec()]);
                         }
                         TextInput::Batch(texts) => {
                             let token_batches: Vec<Vec<u32>> = texts
@@ -221,8 +216,7 @@ impl OpenAIPreprocessor {
                                         .map(|encoded| encoded.token_ids().to_vec())
                                 })
                                 .collect::<Result<Vec<_>>>()?;
-                            builder.batch_token_ids(Some(token_batches));
-                            builder.token_ids(vec![]);
+                            builder.token_ids(token_batches);
                         }
                     }
                 }
@@ -500,8 +494,9 @@ impl
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // update isl - sum all sequences in the batch for total token count
+        let total_tokens: usize = common_request.token_ids.iter().map(|seq| seq.len()).sum();
+        response_generator.update_isl(total_tokens as u32);
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -553,8 +548,9 @@ impl
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // update isl - sum all sequences in the batch for total token count
+        let total_tokens: usize = common_request.token_ids.iter().map(|seq| seq.len()).sum();
+        response_generator.update_isl(total_tokens as u32);
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);

@@ -345,8 +345,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
 
         // Convert PreprocessedRequest to DirectRequest for scheduler
+        // For mock engine, we'll use the first sequence if it's a batch, or the single sequence
+        let tokens = if request.token_ids.is_empty() {
+            vec![]
+        } else {
+            request.token_ids[0].clone() // Use first sequence from the batch
+        };
         let direct_request = DirectRequest {
-            tokens: request.token_ids.clone(),
+            // tokens: request.token_ids.clone(),
+            tokens,
             max_output_tokens: request
                 .stop_conditions
                 .max_tokens
@@ -634,8 +641,8 @@ mod integration_tests {
         // Create test requests for both DP workers
         let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
             model: "mock".to_string(),
-            token_ids: tokens,
-            batch_token_ids: None,
+            token_ids: vec![tokens],
+            // batch_token_ids: None,
             stop_conditions: StopConditions {
                 max_tokens: Some(TOKENS_PER_REQUEST as u32),
                 ..Default::default()

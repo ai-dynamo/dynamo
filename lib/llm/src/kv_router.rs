@@ -351,13 +351,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
+                let tokens_for_lookup = request.token_ids.first().unwrap();
                 let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
                     // If instance_id is set, use it
                     (id, 0)
                 } else {
                     // Otherwise, find the best match
                     self.chooser
-                        .find_best_match(&context_id, &request.token_ids)
+                        .find_best_match(&context_id, tokens_for_lookup)
                         .await?
                 };
 

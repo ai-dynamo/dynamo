@@ -87,7 +87,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let output = stream! {
             for tok in request.token_ids {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                yield delta_core(tok);
+                for token in tok {
+                    yield delta_core(token);
+                }
             }
             yield Annotated::from_data(LLMEngineOutput::stop());
         };
