@@ -2043,7 +2043,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
  "uuid 1.17.0",
 ]

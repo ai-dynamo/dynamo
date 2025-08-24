@@ -34,5 +34,4 @@ uuid = { workspace = true }
 
 regex = "1"
 openai-harmony = "0.0.3"
-tokio.workspace = true
 lazy_static = "1.5.0"
