@@ -100,7 +100,9 @@ impl ReasoningParserType {
                     parser: Box::new(parser),
                 },
                 Err(e) => {
-                    tracing::warn!("GptOssReasoningParser could not be initialized, falling back to Basic Reasoning Parser: {e}");
+                    tracing::warn!(
+                        "GptOssReasoningParser could not be initialized, falling back to Basic Reasoning Parser: {e}"
+                    );
                     ReasoningParserWrapper {
                         parser: Box::new(BasicReasoningParser::new(
                             "<think>".into(),

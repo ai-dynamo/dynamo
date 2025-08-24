@@ -6,9 +6,9 @@ use std::fmt::Debug;
 use crate::ParserResult;
 use crate::ReasoningParser;
 
-use openai_harmony::chat::TextContent;
 use openai_harmony::StreamableParser;
-use openai_harmony::{chat::Role, load_harmony_encoding, HarmonyEncoding, HarmonyEncodingName};
+use openai_harmony::chat::TextContent;
+use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, chat::Role, load_harmony_encoding};
 
 ///// Static initialization of harmony encoder to not affect performance every time a parser is created
 /// This is because load_harmony_encoding downloads some tiktoken files into a directory and we don't want to do this every time we create a parser.
@@ -231,7 +231,10 @@ mod tests {
         let token_ids = parser.enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
         let result = parser.detect_and_parse_reasoning("Test text", &token_ids);
         assert!(result.normal_text == "The capital of Brazil is Brasília.");
-        assert!(result.reasoning_text == "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.");
+        assert!(
+            result.reasoning_text
+                == "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
+        );
     }
 
     #[test]
@@ -247,6 +250,9 @@ mod tests {
             reasoning_text_incr.push_str(&result.reasoning_text);
         }
         assert!(normal_text_incr == "The capital of Brazil is Brasília.");
-        assert!(reasoning_text_incr == "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.");
+        assert!(
+            reasoning_text_incr
+                == "The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed."
+        );
     }
 }
