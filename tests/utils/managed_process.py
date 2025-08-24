@@ -278,7 +278,7 @@ class ManagedProcess:
         self._logger.info("Checking URL %s", url)
         elapsed = 0.0
         attempt = 0
-        last_log_time = 0
+        last_log_time = 0.0
 
         while elapsed < timeout:
             self._check_process_alive("while waiting for health check")
