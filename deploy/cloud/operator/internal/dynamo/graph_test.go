@@ -1235,7 +1235,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(536870912, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -1337,7 +1337,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      "shared-memory",
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 												Ports: []corev1.ContainerPort{
@@ -1378,7 +1378,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(536870912, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -1471,7 +1471,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													},
 													{
 														Name:      "shared-memory",
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},
@@ -1733,7 +1733,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -1812,7 +1812,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 												LivenessProbe: &corev1.Probe{
@@ -1883,7 +1883,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -1962,7 +1962,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},
@@ -1989,7 +1989,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -2098,7 +2098,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},
@@ -2134,7 +2134,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -2225,7 +2225,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													},
 													{
 														Name:      "shared-memory",
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},
@@ -2509,7 +2509,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -2590,7 +2590,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 												ReadinessProbe: &corev1.Probe{
@@ -2648,7 +2648,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -2728,7 +2728,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},
@@ -2755,7 +2755,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -2864,7 +2864,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},
@@ -2899,7 +2899,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													EmptyDir: &corev1.EmptyDirVolumeSource{
 														Medium:    corev1.StorageMediumMemory,
-														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+														SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 													},
 												},
 											},
@@ -2991,7 +2991,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													},
 													{
 														Name:      "shared-memory",
-														MountPath: "/dev/shm",
+														MountPath: commonconsts.DefaultSharedMemoryMountPath,
 													},
 												},
 											},

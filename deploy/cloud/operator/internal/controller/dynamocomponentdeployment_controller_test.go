@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
@@ -699,18 +698,18 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &common.Resources{
-									Requests: &common.ResourceItem{
+								Resources: &dynamoCommon.Resources{
+									Requests: &dynamoCommon.ResourceItem{
 										CPU:    "300m",
 										Memory: "500Mi",
 									},
-									Limits: &common.ResourceItem{
+									Limits: &dynamoCommon.ResourceItem{
 										GPU:    "1",
 										Memory: "20Gi",
 										CPU:    "10",
 									},
 								},
-								ExtraPodMetadata: &common.ExtraPodMetadata{
+								ExtraPodMetadata: &dynamoCommon.ExtraPodMetadata{
 									Annotations: map[string]string{
 										"nvidia.com/annotation1": "annotation1",
 									},
@@ -793,7 +792,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeSource: corev1.VolumeSource{
 											EmptyDir: &corev1.EmptyDirVolumeSource{
 												Medium:    corev1.StorageMediumMemory,
-												SizeLimit: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5gi (calculated from memory limit / 4)
+												SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 											},
 										},
 									},
@@ -814,7 +813,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeMounts: []corev1.VolumeMount{
 											{
 												Name:      "shared-memory",
-												MountPath: "/dev/shm",
+												MountPath: commonconsts.DefaultSharedMemoryMountPath,
 											},
 										},
 										Resources: corev1.ResourceRequirements{
@@ -893,7 +892,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeSource: corev1.VolumeSource{
 											EmptyDir: &corev1.EmptyDirVolumeSource{
 												Medium:    corev1.StorageMediumMemory,
-												SizeLimit: resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5gi (calculated from memory limit / 4)
+												SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 											},
 										},
 									},
@@ -914,7 +913,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										VolumeMounts: []corev1.VolumeMount{
 											{
 												Name:      "shared-memory",
-												MountPath: "/dev/shm",
+												MountPath: commonconsts.DefaultSharedMemoryMountPath,
 											},
 										},
 										Resources: corev1.ResourceRequirements{
@@ -956,8 +955,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &common.Resources{
-									Limits: &common.ResourceItem{
+								Resources: &dynamoCommon.Resources{
+									Limits: &dynamoCommon.ResourceItem{
 										GPU: "1",
 									},
 								},
@@ -1000,8 +999,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
-								Resources: &common.Resources{
-									Limits: &common.ResourceItem{
+								Resources: &dynamoCommon.Resources{
+									Limits: &dynamoCommon.ResourceItem{
 										GPU: "1",
 									},
 								},
