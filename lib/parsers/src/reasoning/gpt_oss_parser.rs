@@ -23,7 +23,6 @@ fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
 }
 
 pub struct GptOssReasoningParser {
-    enc: HarmonyEncoding,
     parser: StreamableParser,
 }
 
@@ -32,53 +31,39 @@ impl Debug for GptOssReasoningParser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GptOssReasoningParser")
             .field("parser", &self.parser.state_json())
-            .field("enc", &self.enc.name())
             .finish()
     }
 }
 
 impl GptOssReasoningParser {
     pub fn new() -> anyhow::Result<Self> {
-        let enc = match get_harmony_encoding() {
-            Ok(enc) => enc.clone(),
+        let parser = match get_harmony_encoding().as_ref() {
+            Ok(enc) => match StreamableParser::new(enc.clone(), Some(Role::Assistant)) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("Harmony StreamableParser init failed for GPT OSS: {e}");
+                    return Err(anyhow::anyhow!(
+                        "Failed to load Harmony StreamableParser: {e}"
+                    ));
+                }
+            },
             Err(e) => {
                 tracing::warn!("Failed to load Harmony encoding for GPT OSS: {e}");
                 return Err(anyhow::anyhow!("Failed to load Harmony encoding: {e}"));
             }
         };
-        let parser = match StreamableParser::new(enc.clone(), Some(Role::Assistant)) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Harmony StreamableParser init failed for GPT OSS: {e}");
-                return Err(anyhow::anyhow!(
-                    "Failed to load Harmony StreamableParser: {e}"
-                ));
-            }
-        };
-        Ok(Self {
-            enc: enc.clone(),
-            parser,
-        })
+        Ok(Self { parser })
     }
 }
 
 impl ReasoningParser for GptOssReasoningParser {
-    fn detect_and_parse_reasoning(&self, _text: &str, token_ids: &[u32]) -> ParserResult {
+    fn detect_and_parse_reasoning(&mut self, _text: &str, token_ids: &[u32]) -> ParserResult {
         tracing::debug!(
             "detect_and_parse_reasoning called with {} token_ids",
             token_ids.len()
         );
 
-        let mut parser = match StreamableParser::new(self.enc.clone(), Some(Role::Assistant)) {
-            Ok(p) => {
-                tracing::debug!("StreamableParser created successfully");
-                p
-            }
-            Err(e) => {
-                tracing::warn!("Harmony StreamableParser init failed for GPT OSS: {e}");
-                return ParserResult::default();
-            }
-        };
+        let parser = &mut self.parser;
 
         for (i, token_id) in token_ids.iter().enumerate() {
             tracing::debug!(
@@ -226,9 +211,12 @@ mod tests {
 
     #[test]
     fn test_gpt_oss_reasoning_parser() {
-        let parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
-        let token_ids = parser.enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
         let result = parser.detect_and_parse_reasoning("Test text", &token_ids);
         assert!(result.normal_text == "The capital of Brazil is Brasília.");
         assert!(
@@ -240,8 +228,11 @@ mod tests {
     #[test]
     fn test_gpt_oss_reasoning_parser_streaming() {
         let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
+        let enc = get_harmony_encoding()
+            .as_ref()
+            .expect("Failed to get encoding");
         let text = "<|channel|>analysis<|message|>The user asks a simple factual question: capital of Brazil. The answer is Brasília. No additional explanation needed.<|end|><|start|>assistant<|channel|>final<|message|>The capital of Brazil is Brasília.";
-        let token_ids = parser.enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
+        let token_ids = enc.tokenizer().encode_with_special_tokens(text); // Example token IDs
         let mut reasoning_text_incr = String::new();
         let mut normal_text_incr = String::new();
         for token in token_ids.iter() {

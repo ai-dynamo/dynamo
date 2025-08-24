@@ -33,7 +33,7 @@ impl ReasoningParser for DeepseekR1ReasoningParser {
             .parse_reasoning_streaming_incremental(text, token_ids)
     }
 
-    fn detect_and_parse_reasoning(&self, text: &str, token_ids: &[u32]) -> ParserResult {
+    fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
         self.base.detect_and_parse_reasoning(text, token_ids)
     }
 }
