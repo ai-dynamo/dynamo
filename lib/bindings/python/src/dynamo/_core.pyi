@@ -246,6 +246,24 @@ class Client:
 
     ...
 
+    def instance_ids(self) -> List[int]:
+        """
+        Get list of current instance IDs.
+
+        Returns:
+            A list of currently available instance IDs
+        """
+        ...
+
+    async def wait_for_instances(self) -> List[int]:
+        """
+        Wait for instances to be available for work and return their IDs.
+
+        Returns:
+            A list of instance IDs that are available for work
+        """
+        ...
+
     async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
         """
         Pick a random instance of the endpoint and issue the request
