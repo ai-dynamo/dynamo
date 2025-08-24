@@ -1012,7 +1012,7 @@ func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 	}
 
 	if len(detected) == 0 {
-		return "", fmt.Errorf("no backend framework detected from command: %q", fullCommand)
+		return BackendFrameworkNoop, nil
 	}
 
 	if len(detected) > 1 {
@@ -1059,13 +1059,13 @@ func determineBackendFramework(
 	}
 
 	// Validate consistency if both detected and explicit exist
-	if detectedFramework != "" && explicitFramework != "" && detectedFramework != explicitFramework {
+	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop && explicitFramework != "" && detectedFramework != explicitFramework {
 		return "", fmt.Errorf("backend framework mismatch: detected %q from command but explicitly configured as %q",
 			detectedFramework, explicitFramework)
 	}
 
 	// Return in order of preference: detected > explicit > error
-	if detectedFramework != "" {
+	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop {
 		return detectedFramework, nil
 	}
 
@@ -1079,7 +1079,7 @@ func determineBackendFramework(
 	}
 
 	// No command/args to detect from and no explicit config
-	return "", fmt.Errorf("backend framework must be specified explicitly or detectable from command/args")
+	return BackendFrameworkNoop, nil
 }
 
 // getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:

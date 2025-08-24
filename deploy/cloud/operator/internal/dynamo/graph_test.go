@@ -3626,10 +3626,10 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 			expected: BackendFrameworkSGLang,
 		},
 		{
-			name:        "no backend detected",
-			command:     []string{"/bin/sh", "-c"},
-			args:        []string{"echo hello world"},
-			expectError: true,
+			name:     "no backend detected",
+			command:  []string{"/bin/sh", "-c"},
+			args:     []string{"echo hello world"},
+			expected: BackendFrameworkNoop,
 		},
 		{
 			name:        "multiple backends detected",
@@ -3709,17 +3709,17 @@ func TestDetermineBackendFramework(t *testing.T) {
 			errorContains:            "backend framework mismatch",
 		},
 		{
-			name:          "worker with no detection, no explicit - returns error",
+			name:          "worker with no detection, no explicit - returns noop",
 			componentType: "worker",
-			expectError:   true,
-			errorContains: "backend framework must be specified explicitly or detectable from command/args",
+			expected:      BackendFrameworkNoop,
+			expectError:   false,
 		},
 		{
-			name:          "worker with detection failure, no explicit - returns error",
+			name:          "worker with detection failure, no explicit - returns noop",
 			componentType: "worker",
 			args:          []string{"echo hello world"},
-			expectError:   true,
-			errorContains: "could not determine backend framework",
+			expected:      BackendFrameworkNoop,
+			expectError:   false,
 		},
 	}
 
@@ -3843,18 +3843,18 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 			expected:   BackendFrameworkNoop,
 		},
 		{
-			name: "worker with no detection, no explicit - returns error",
+			name: "worker with no detection, no explicit - returns noop",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: "worker", // Worker component
 				},
 			},
-			deployment:    &v1alpha1.DynamoGraphDeployment{},
-			expectError:   true,
-			errorContains: "backend framework must be specified explicitly or detectable from command/args",
+			deployment:  &v1alpha1.DynamoGraphDeployment{},
+			expected:    BackendFrameworkNoop,
+			expectError: false,
 		},
 		{
-			name: "worker with detection failure, no explicit - returns error",
+			name: "worker with detection failure, no explicit - returns noop",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: "worker", // Worker component
@@ -3865,9 +3865,9 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 					},
 				},
 			},
-			deployment:    &v1alpha1.DynamoGraphDeployment{},
-			expectError:   true,
-			errorContains: "could not determine backend framework",
+			deployment:  &v1alpha1.DynamoGraphDeployment{},
+			expected:    BackendFrameworkNoop,
+			expectError: false,
 		},
 	}
 
