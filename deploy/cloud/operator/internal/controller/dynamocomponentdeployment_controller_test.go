@@ -681,6 +681,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "test-lws-deploy",
 							Namespace: "default",
+							OwnerReferences: []metav1.OwnerReference{
+								{
+									Kind: "DynamoGraphDeployment",
+									Name: "test-lws-deploy",
+								},
+							},
 						},
 						Spec: v1alpha1.DynamoComponentDeploymentSpec{
 							DynamoComponent:  "test-lws-component",
@@ -805,7 +811,16 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
-										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
+										Env: []corev1.EnvVar{
+											{Name: "DYN_NAMESPACE", Value: "default"},
+											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
+											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
+											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
+											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
+											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: `["generate"]`},
+											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
+											{Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"},
+										},
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
@@ -905,7 +920,16 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
-										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
+										Env: []corev1.EnvVar{
+											{Name: "DYN_NAMESPACE", Value: "default"},
+											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
+											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
+											{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
+											{Name: "DYN_SYSTEM_PORT", Value: "9090"},
+											{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: `["generate"]`},
+											{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"},
+											{Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"},
+										},
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
