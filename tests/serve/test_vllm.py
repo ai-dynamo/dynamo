@@ -5,26 +5,26 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from typing import List, Optional
 
 import pytest
-import requests
 
+from tests.serve.common import EngineConfig
+from tests.serve.common import create_payload_for_config as base_create_payload
 from tests.utils.deployment_graph import (
     Payload,
     chat_completions_response_handler,
     completions_response_handler,
 )
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.engine_process import EngineProcess
 
 logger = logging.getLogger(__name__)
-
-text_prompt = "Tell me a short joke about AI."
 
 
 def create_payload_for_config(config: "VLLMConfig") -> Payload:
     """Create a payload using the model from the vLLM config"""
     if "multimodal" in config.name:
+        # Special handling for multimodal models
         return Payload(
             payload_chat={
                 "model": config.model,
@@ -51,49 +51,18 @@ def create_payload_for_config(config: "VLLMConfig") -> Payload:
             expected_response=["bus"],
         )
     else:
-        return Payload(
-            payload_chat={
-                "model": config.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": text_prompt,
-                    }
-                ],
-                "max_tokens": 150,
-                "temperature": 0.1,
-                "stream": False,
-            },
-            payload_completions={
-                "model": config.model,
-                "prompt": text_prompt,
-                "max_tokens": 150,
-                "temperature": 0.1,
-                "stream": False,
-            },
-            repeat_count=1,
-            expected_log=[],
-            expected_response=["AI"],
-        )
+        # Use base implementation for standard text models
+        return base_create_payload(config)
 
 
 @dataclass
-class VLLMConfig:
+class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
-    name: str
-    directory: str
-    script_name: str
-    marks: List[Any]
-    endpoints: List[str]
-    response_handlers: List[Callable[[Any], str]]
-    model: str
-    timeout: int = 120
-    delayed_start: int = 0
     args: Optional[List[str]] = None
 
 
-class VLLMProcess(ManagedProcess):
+class VLLMProcess(EngineProcess):
     """Simple process manager for vllm shell scripts"""
 
     def __init__(self, config: VLLMConfig, request):
@@ -124,36 +93,12 @@ class VLLMProcess(ManagedProcess):
             log_dir=request.node.name,
         )
 
-    def _check_models_api(self, response):
-        """Check if models API is working and returns models"""
-        try:
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            return data.get("data") and len(data["data"]) > 0
-        except Exception:
-            return False
-
-    def _check_url(self, url, timeout=30, sleep=1.0, log_interval=10):
-        return super()._check_url(url, timeout, sleep, log_interval)
-
-    def check_response(
-        self, payload, response, response_handler, logger=logging.getLogger()
-    ):
-        assert response.status_code == 200, "Response Error"
-        content = response_handler(response)
-        logger.info("Received Content: %s", content)
-        # Check for expected responses
-        assert content, "Empty response content"
-        for expected in payload.expected_response:
-            assert expected in content, "Expected '%s' not found in response" % expected
-
 
 # vLLM test configurations
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
-        directory="/workspace/components/backends/vllm",
+        directory="/home/ubuntu/dynamo/components/backends/vllm",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
@@ -162,7 +107,7 @@ vllm_configs = {
             completions_response_handler,
         ],
         model="Qwen/Qwen3-0.6B",
-        delayed_start=45,
+        delayed_start=0,
         timeout=300,
     ),
     "agg-router": VLLMConfig(
@@ -298,11 +243,7 @@ def test_serve_deployment(vllm_config_test, request, runtime_services):
             for _ in range(payload.repeat_count):
                 elapsed = time.time() - start_time
 
-                response = requests.post(
-                    url,
-                    json=request_body,
-                    timeout=config.timeout - elapsed,
+                response = server_process.send_request(
+                    url, payload=request_body, timeout=config.timeout - elapsed
                 )
-                server_process.check_response(
-                    payload, response, response_handler, logger
-                )
+                server_process.check_response(payload, response, response_handler)

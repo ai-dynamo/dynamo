@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 import shutil
@@ -290,12 +291,29 @@ class ManagedProcess:
                 response = requests.get(url, timeout=timeout - elapsed)
                 if response.status_code == 200:
                     if response_check is None or response_check(response):
-                        self._logger.info(
-                            "SUCCESS: Check URL: %s (attempt=%d, elapsed=%.1fs)",
-                            url,
-                            attempt,
-                            elapsed,
-                        )
+                        # Try to format JSON response nicely, otherwise show raw text
+                        try:
+                            response_data = response.json()
+                            response_str = json.dumps(response_data, indent=2)
+                            self._logger.info(
+                                "SUCCESS: Check URL: %s (attempt=%d, elapsed=%.1fs)\nResponse:\n%s",
+                                url,
+                                attempt,
+                                elapsed,
+                                response_str,
+                            )
+                        except (json.JSONDecodeError, Exception):
+                            # If not JSON or any error, show raw text (truncated if too long)
+                            response_text = response.text
+                            if len(response_text) > 500:
+                                response_text = response_text[:500] + "... (truncated)"
+                            self._logger.info(
+                                "SUCCESS: Check URL: %s (attempt=%d, elapsed=%.1fs)\nResponse: %s",
+                                url,
+                                attempt,
+                                elapsed,
+                                response_text,
+                            )
                         return time.time() - start_time
                     else:
                         check_failed = True

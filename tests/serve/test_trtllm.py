@@ -5,66 +5,27 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List
 
 import pytest
-import requests
 
+from tests.serve.common import EngineConfig, create_payload_for_config
 from tests.utils.deployment_graph import (
-    Payload,
     chat_completions_response_handler,
     completions_response_handler,
 )
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.engine_process import EngineProcess
 
 logger = logging.getLogger(__name__)
 
-text_prompt = "Tell me a short joke about AI."
 
-
-def create_payload_for_config(config: "TRTLLMConfig") -> Payload:
-    """Create a payload using the model from the trtllm config"""
-    return Payload(
-        payload_chat={
-            "model": config.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": text_prompt,
-                }
-            ],
-            "max_tokens": 150,
-            "temperature": 0.1,
-        },
-        payload_completions={
-            "model": config.model,
-            "prompt": text_prompt,
-            "max_tokens": 150,
-            "temperature": 0.1,
-        },
-        repeat_count=1,
-        expected_log=[],
-        expected_response=["AI"],
-    )
-
-
-# TODO: Unify with vllm/sglang tests to reduce code duplication
 @dataclass
-class TRTLLMConfig:
+class TRTLLMConfig(EngineConfig):
     """Configuration for trtllm test scenarios"""
 
-    name: str
-    directory: str
-    script_name: str
-    marks: List[Any]
-    endpoints: List[str]
-    response_handlers: List[Callable[[Any], str]]
-    model: str
     timeout: int = 60
-    delayed_start: int = 0
 
 
-class TRTLLMProcess(ManagedProcess):
+class TRTLLMProcess(EngineProcess):
     """Simple process manager for trtllm shell scripts"""
 
     def __init__(self, config: TRTLLMConfig, request):
@@ -96,31 +57,6 @@ class TRTLLMProcess(ManagedProcess):
             stragglers=[],  # Don't kill any stragglers automatically
             log_dir=request.node.name,
         )
-
-    def _check_models_api(self, response):
-        """Check if models API is working and returns models"""
-        try:
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            return data.get("data") and len(data["data"]) > 0
-        except Exception:
-            return False
-
-    def _check_url(self, url, timeout=30, sleep=1.0, log_interval=10):
-        """Override to use a more reasonable retry interval"""
-        return super()._check_url(url, timeout, sleep, log_interval)
-
-    def check_response(
-        self, payload, response, response_handler, logger=logging.getLogger()
-    ):
-        assert response.status_code == 200, "Response Error"
-        content = response_handler(response)
-        logger.info(f"Received Content: {content}")
-        # Check for expected responses
-        assert content, "Empty response content"
-        for expected in payload.expected_response:
-            assert expected in content, f"Expected '{expected}' not found in response"
 
 
 # trtllm test configurations
@@ -234,11 +170,7 @@ def test_deployment(trtllm_config_test, request, runtime_services):
             for _ in range(payload.repeat_count):
                 elapsed = time.time() - start_time
 
-                response = requests.post(
-                    url,
-                    json=request_body,
-                    timeout=config.timeout - elapsed,
+                response = server_process.send_request(
+                    url, payload=request_body, timeout=config.timeout - elapsed
                 )
-                server_process.check_response(
-                    payload, response, response_handler, logger
-                )
+                server_process.check_response(payload, response, response_handler)
