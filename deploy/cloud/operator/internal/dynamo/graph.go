@@ -701,13 +701,14 @@ func GenerateBasePodSpec(
 		main := component.ExtraPodSpec.MainContainer.DeepCopy()
 		if main != nil {
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
+			containerEnvs := container.Env
 			err = mergo.Merge(&container, *main, mergo.WithOverride)
 			if err != nil {
 				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
 
 			// main container fields that require special handling
-			container.Env = MergeEnvs(component.Envs, container.Env)
+			container.Env = MergeEnvs(containerEnvs, container.Env)
 			// Note: startup probe does not have its own top level field so it must be passed in extraPodSpec.MainContainer
 			// We want to overwrite entirely if provided rather than merge
 			if main.StartupProbe != nil {
@@ -715,6 +716,7 @@ func GenerateBasePodSpec(
 			}
 		}
 	}
+	container.Env = MergeEnvs(component.Envs, container.Env)
 
 	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {
