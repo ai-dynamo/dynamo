@@ -91,7 +91,7 @@ impl DeltaGenerator {
         // Reasoning parser type
         // This is hardcoded for now, but can be made configurable later.
         // TODO: Make parser type configurable once front-end integration is determined
-        let reasoning_parser_type = ReasoningParserType::Basic;
+        let reasoning_parser_type = ReasoningParserType::GptOss;
 
         // Reasoning parser wrapper
         let reasoning_parser = reasoning_parser_type.get_reasoning_parser();

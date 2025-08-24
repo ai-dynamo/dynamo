@@ -95,8 +95,21 @@ impl ReasoningParserType {
                     true,
                 )),
             },
-            ReasoningParserType::GptOss => ReasoningParserWrapper {
-                parser: Box::new(GptOssReasoningParser::default()),
+            ReasoningParserType::GptOss => match GptOssReasoningParser::new() {
+                Ok(parser) => ReasoningParserWrapper {
+                    parser: Box::new(parser),
+                },
+                Err(e) => {
+                    tracing::warn!("GptOssReasoningParser could not be initialized, falling back to Basic Reasoning Parser: {e}");
+                    ReasoningParserWrapper {
+                        parser: Box::new(BasicReasoningParser::new(
+                            "<think>".into(),
+                            "</think>".into(),
+                            false,
+                            true,
+                        )),
+                    }
+                }
             },
         }
     }

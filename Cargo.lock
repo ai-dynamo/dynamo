@@ -2038,10 +2038,12 @@ version = "0.4.1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
+ "lazy_static",
  "openai-harmony",
  "regex",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid 1.17.0",
 ]
