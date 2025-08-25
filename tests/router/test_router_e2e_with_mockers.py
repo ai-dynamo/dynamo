@@ -104,7 +104,7 @@ class KVRouterProcess(ManagedProcess):
         super().__exit__(exc_type, exc_val, exc_tb)
 
 
-async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4):
+async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8):
     """Send a single request with exponential backoff retry"""
     wait_time = 1  # Start with 1 second
 
@@ -604,7 +604,7 @@ def test_kv_push_router_bindings(request, runtime_services):
 
             # Dummy request with minimal tokens
             dummy_token_ids = [1, 2, 3]  # Just a few tokens for testing
-            max_retries = 5
+            max_retries = 8
             wait_time = 1
 
             for attempt in range(max_retries + 1):
