@@ -2034,6 +2034,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-oscar"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "bytes",
+ "dynamo-runtime",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+ "uuid 1.17.0",
+]
+
+[[package]]
 name = "dynamo-parsers"
 version = "0.4.1"
 dependencies = [
