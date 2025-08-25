@@ -35,15 +35,18 @@
    API/nixl_connect/read_operation.md
    API/nixl_connect/write_operation.md
 
-   examples/README.md
    guides/dynamo_deploy/create_deployment.md
    guides/dynamo_deploy/sla_planner_deployment.md
-
    guides/dynamo_deploy/gke_setup.md
+   guides/dynamo_deploy/grove.md
+   guides/dynamo_deploy/k8s_metrics.md
    guides/dynamo_deploy/README.md
    guides/dynamo_run.md
-
    guides/metrics.md
-   guides/deploy/k8s_metrics.md
+   guides/run_kvbm_in_vllm.md
+
    architecture/request_migration.md
 
+   examples/README.md
+
+   components/router/README.md
