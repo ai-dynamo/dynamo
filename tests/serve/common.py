@@ -23,7 +23,7 @@ class EngineConfig:
     endpoints: List[str]
     response_handlers: List[Callable[[Any], str]]
     model: str
-    timeout: int = 120
+    timeout: int = 600
     delayed_start: int = 0
 
 
