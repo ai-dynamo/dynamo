@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use super::tokcfg::{raise_exception, strftime_now, tojson, ChatTemplate};
+use super::tokcfg::{ChatTemplate, raise_exception, strftime_now, tojson};
 use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
 use minijinja::Environment;
@@ -60,7 +60,9 @@ impl HfTokenizerConfigJsonFormatter {
         match &chat_template.0 {
             Either::Left(x) => {
                 if x.contains("add_generation_prompt") {
-                    tracing::debug!("Chat template contains `add_generation_prompt` key. This model supports add_generation_prompt.");
+                    tracing::debug!(
+                        "Chat template contains `add_generation_prompt` key. This model supports add_generation_prompt."
+                    );
                     supports_add_generation_prompt = Some(true);
                 }
                 env.add_template_owned("default", x.to_string())?;
@@ -72,11 +74,15 @@ impl HfTokenizerConfigJsonFormatter {
                         if v.contains("add_generation_prompt") {
                             match supports_add_generation_prompt {
                                 Some(true) | None => {
-                                    tracing::debug!("Chat template contains `add_generation_prompt` key. This model supports add_generation_prompt.");
+                                    tracing::debug!(
+                                        "Chat template contains `add_generation_prompt` key. This model supports add_generation_prompt."
+                                    );
                                     supports_add_generation_prompt = Some(true);
                                 }
                                 Some(false) => {
-                                    tracing::warn!("Not all templates contain `add_generation_prompt` key. This model does not support add_generation_prompt.");
+                                    tracing::warn!(
+                                        "Not all templates contain `add_generation_prompt` key. This model does not support add_generation_prompt."
+                                    );
                                 }
                             }
                         } else {
@@ -86,7 +92,9 @@ impl HfTokenizerConfigJsonFormatter {
                     }
                 }
                 if env.templates().count() == 0 {
-                    anyhow::bail!("Chat template does not contain a `tool_use` or `default` key. Please ensure it contains at least a `default` key, although `tool_use` should be specified for using tools.");
+                    anyhow::bail!(
+                        "Chat template does not contain a `tool_use` or `default` key. Please ensure it contains at least a `default` key, although `tool_use` should be specified for using tools."
+                    );
                 }
             }
         }

@@ -1,17 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+
+use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -46,7 +36,7 @@ pub struct DeltaGeneratorOptions {
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DeltaGenerator {
     /// Unique identifier for the chat completion session.
     id: String,
@@ -54,7 +44,6 @@ pub struct DeltaGenerator {
     object: String,
     /// Timestamp (Unix epoch) when the response was created.
     created: u32,
-    /// Model name used for generating responses.
     model: String,
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
@@ -66,6 +55,10 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
+
+    /// Reasoning Parser object
+    /// This is used to parse reasoning content in the response.
+    reasoning_parser: ReasoningParserWrapper,
 }
 
 impl DeltaGenerator {
@@ -95,6 +88,14 @@ impl DeltaGenerator {
             completion_tokens_details: None,
         };
 
+        // Reasoning parser type
+        // This is hardcoded for now, but can be made configurable later.
+        // TODO: Make parser type configurable once front-end integration is determined
+        let reasoning_parser_type = ReasoningParserType::Basic;
+
+        // Reasoning parser wrapper
+        let reasoning_parser = reasoning_parser_type.get_reasoning_parser();
+
         Self {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
             object: "chat.completion.chunk".to_string(),
@@ -105,6 +106,7 @@ impl DeltaGenerator {
             usage,
             msg_counter: 0,
             options,
+            reasoning_parser,
         }
     }
 
@@ -181,6 +183,15 @@ impl DeltaGenerator {
         })
     }
 
+    fn create_reasoning_content(&mut self, text: Option<String>) -> Option<ParserResult> {
+        let text = text?;
+        let parser_result = self
+            .reasoning_parser
+            .parse_reasoning_streaming_incremental(&text);
+
+        Some(parser_result)
+    }
+
     /// Creates a choice within a chat completion response.
     ///
     /// # Arguments
@@ -193,14 +204,20 @@ impl DeltaGenerator {
     /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
     #[allow(deprecated)]
     pub fn create_choice(
-        &self,
+        &mut self,
         index: u32,
         text: Option<String>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
-    ) -> dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+    ) -> NvCreateChatCompletionStreamResponse {
+        let reasoning_parser_result = self.create_reasoning_content(text).unwrap_or_default();
+
+        let (normal_text, reasoning_content) = (
+            reasoning_parser_result.get_some_normal_text(),
+            reasoning_parser_result.get_some_reasoning(),
+        );
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text,
+            content: normal_text,
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
@@ -209,7 +226,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
-            reasoning_content: None,
+            reasoning_content,
         };
 
         let choice = dynamo_async_openai::types::ChatChoiceStream {

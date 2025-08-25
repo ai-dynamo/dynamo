@@ -32,12 +32,12 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
+import dynamo.nixl_connect as connect
 from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
 from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import connect
 from publisher import StatLoggerFactory
 from utils.args import (
     Config,
@@ -140,7 +140,8 @@ class VllmBaseWorker:
 
         # Create vLLM engine with metrics logger and KV event publisher attached
         self.stats_logger = StatLoggerFactory(
-            component, self.engine_args.data_parallel_rank or 0
+            component,
+            self.engine_args.data_parallel_rank or 0,
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
@@ -249,7 +250,7 @@ class VllmPDWorker(VllmBaseWorker):
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         parsed_namespace, _, _ = parse_endpoint(self.endpoint)
-        self._connector = connect.Connector(runtime=runtime, namespace=parsed_namespace)
+        self._connector = connect.Connector()
         await self._connector.initialize()
 
         # embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
@@ -353,7 +354,9 @@ class VllmPDWorker(VllmBaseWorker):
                 extra_args.pop("serialized_request", None)
                 decode_request.sampling_params.extra_args = extra_args
                 logger.debug("Decode request: %s", decode_request)
-                async for decode_response in await self.decode_worker_client.round_robin(
+                async for (
+                    decode_response
+                ) in await self.decode_worker_client.round_robin(
                     decode_request.model_dump_json()
                 ):
                     output = MyRequestOutput.model_validate_json(decode_response.data())

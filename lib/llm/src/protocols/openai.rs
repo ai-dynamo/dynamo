@@ -1,24 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
+    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 
@@ -32,7 +20,7 @@ pub mod responses;
 pub mod validate;
 
 use validate::{
-    validate_range, FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE,
+    FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -159,10 +147,10 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
 
-        if let Some(stop) = &stop {
-            if stop.len() > 4 {
-                anyhow::bail!("stop conditions must be less than 4")
-            }
+        if let Some(stop) = &stop
+            && stop.len() > 4
+        {
+            anyhow::bail!("stop conditions must be less than 4")
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -194,8 +182,8 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
     }
 }
 
-pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debug>:
-    Send + Sync + 'static
+pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
+    Send + 'static
 {
     fn choice_from_postprocessor(
         &mut self,
@@ -204,4 +192,20 @@ pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debu
 
     /// Gets the current prompt token count (Input Sequence Length).
     fn get_isl(&self) -> Option<u32>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ParsingOptions {
+    pub tool_call_parser: Option<String>,
+
+    pub reasoning_parser: Option<String>,
+}
+
+impl ParsingOptions {
+    pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
+        Self {
+            tool_call_parser,
+            reasoning_parser,
+        }
+    }
 }

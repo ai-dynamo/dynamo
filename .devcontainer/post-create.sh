@@ -99,12 +99,12 @@ $HOME/dynamo/deploy/dynamo_check.py --import-check-only
 { set +x; } 2>/dev/null
 
 # Check SSH agent forwarding status
-echo "🔍 Checking SSH agent forwarding status..."
 if [ -n "$SSH_AUTH_SOCK" ]; then
     if ssh-add -l > /dev/null 2>&1; then
-        echo "SSH agent forwarding is working - found $(ssh-add -l | wc -l) key(s)"
+        echo "SSH agent forwarding is working - found $(ssh-add -l | wc -l) key(s):"
+        ssh-add -l
     else
-        echo "⚠️  SSH_AUTH_SOCK is set but ssh-add failed - agent may not be accessible"
+        echo "⚠️ SSH_AUTH_SOCK is set but ssh-add failed - agent may not be accessible"
     fi
 else
     echo "⚠️ SSH agent forwarding not configured - SSH_AUTH_SOCK is not set"

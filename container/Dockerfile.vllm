@@ -83,7 +83,7 @@ RUN apt-get update -y && \
     curl tar ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-ARG NIXL_UCX_REF=v1.19.x
+ARG NIXL_UCX_REF=v1.19.0
 ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
@@ -238,7 +238,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.87.0
+    RUST_VERSION=1.89.0
 
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
@@ -291,7 +291,7 @@ RUN uv pip install maturin[patchelf]
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
+ENV PYTHONPATH=$PYTHONPATH:$HOME/dynamo/components/planner/src
 ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
 
@@ -462,11 +462,14 @@ RUN apt-get update && \
         cuda-toolkit-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
-### COPY NATS & ETCD ###
+### COPY NATS & ETCD & PROMETHEUS ###
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd/:$PATH
+
+# Copy prometheus from base image
+COPY --from=base /usr/local/bin/prometheus /usr/local/bin/prometheus
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image

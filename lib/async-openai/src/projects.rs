@@ -11,11 +11,11 @@
 use serde::Serialize;
 
 use crate::{
+    Client, ProjectServiceAccounts, ProjectUsers,
     config::Config,
     error::OpenAIError,
     project_api_keys::ProjectAPIKeys,
     types::{Project, ProjectCreateRequest, ProjectListResponse, ProjectUpdateRequest},
-    Client, ProjectServiceAccounts, ProjectUsers,
 };
 
 /// Manage the projects within an organization includes creation, updating, and archiving or projects.

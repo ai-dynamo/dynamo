@@ -11,7 +11,7 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 
 **Step 1**: Use the provided helper script to generate commands to start NATS/ETCD on your head prefill node. This script will also give you environment variables to export on each other node. You will need the IP addresses of your head prefill and head decode node to run this script.
 ```bash
-./components/backends/sglang/src/dynamo/sglang/utils/gen_env_vars.sh
+./utils/gen_env_vars.sh
 ```
 
 **Step 2**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
@@ -78,7 +78,7 @@ python3 -m dynamo.sglang \
 
 Node 4: Run the remaining 8 shards of the decode worker
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \

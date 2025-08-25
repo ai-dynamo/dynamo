@@ -9,13 +9,14 @@ use anyhow::Result;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
+        SingleIn, async_trait,
     },
     prelude::*,
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
@@ -29,12 +30,12 @@ pub mod scoring;
 pub mod sequence;
 
 use crate::{
-    discovery::{ModelEntry, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
-            compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
-            KvRouterError, OverlapScores, RouterEvent,
+            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
@@ -73,7 +74,7 @@ pub trait WorkerSelector {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 

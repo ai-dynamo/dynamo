@@ -17,7 +17,6 @@
 import json
 from typing import Any, List, Literal, Optional, Union
 
-import connect
 import msgspec
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_core import core_schema
@@ -26,6 +25,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import PromptLogprobs, RequestMetrics
+
+import dynamo.nixl_connect as connect
 
 
 class Request(BaseModel):
@@ -127,7 +128,7 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: Optional[str] = None
     # image_features: Optional[List[List[List[float]]]] = None # Remove once have NIXL support
-    serialized_request: Optional[connect.SerializedRequest] = None
+    serialized_request: Optional[connect.RdmaMetadata] = None
 
 
 class EncodeRequest(BaseModel):
@@ -138,7 +139,7 @@ class EncodeRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: str
     request_id: str
-    serialized_request: Optional[connect.SerializedRequest] = None
+    serialized_request: Optional[connect.RdmaMetadata] = None
 
 
 class EncodeResponse(BaseModel):
@@ -146,7 +147,7 @@ class EncodeResponse(BaseModel):
     request_id: str
     image_grid_thw: Optional[List[Any]] = None
     image_sizes: Optional[List[Any]] = None
-    serialized_request: Optional[connect.SerializedRequest] = None
+    serialized_request: Optional[connect.RdmaMetadata] = None
     image_features: List[List[List[float]]]  # Remove once have NIXL support
 
 

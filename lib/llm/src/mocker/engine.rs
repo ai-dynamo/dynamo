@@ -22,18 +22,18 @@ use crate::kv_router::publisher::WorkerMetricsPublisher;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::TokenIdType;
-use dynamo_runtime::protocols::annotated::Annotated;
+use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::protocols::annotated::Annotated;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
+    Result,
     component::Component,
     engine::AsyncEngineContextProvider,
-    pipeline::{async_trait, AsyncEngine, Error, ManyOut, ResponseStream, SingleIn},
+    pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
-    Result,
 };
 
 use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
@@ -43,7 +43,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -189,7 +189,7 @@ impl MockVllmEngine {
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
-                    if let Err(e) = publisher.create_endpoint(comp.clone()).await {
+                    if let Err(e) = publisher.create_endpoint(comp.clone(), None).await {
                         tracing::error!("Metrics endpoint failed: {e}");
                     }
                 }
@@ -440,7 +440,7 @@ impl AnnotatedMockEngine {
     pub fn new(
         inner: MockVllmEngine,
         distributed_runtime: DistributedRuntime,
-        endpoint: dynamo_runtime::protocols::Endpoint,
+        endpoint_id: dynamo_runtime::protocols::EndpointId,
     ) -> Self {
         let inner = Arc::new(inner);
         let inner_clone = inner.clone();
@@ -449,13 +449,13 @@ impl AnnotatedMockEngine {
         tokio::spawn(async move {
             loop {
                 // Try to create component
-                let Ok(namespace) = distributed_runtime.namespace(&endpoint.namespace) else {
+                let Ok(namespace) = distributed_runtime.namespace(&endpoint_id.namespace) else {
                     tracing::debug!("Namespace not available yet, retrying...");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 };
 
-                let Ok(component) = namespace.component(&endpoint.component) else {
+                let Ok(component) = namespace.component(&endpoint_id.component) else {
                     tracing::debug!("Component not available yet, retrying...");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -509,13 +509,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 /// Create a mocker engine as ExecutionContext
 pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
-    endpoint: dynamo_runtime::protocols::Endpoint,
+    endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
     tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
-        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint);
+        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
 }
@@ -523,14 +523,14 @@ pub async fn make_mocker_engine(
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::kv_router::indexer::RouterEvent;
     use crate::kv_router::KV_EVENT_SUBJECT;
+    use crate::kv_router::indexer::RouterEvent;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::{
-        pipeline::Context,
-        pipeline::{network::Ingress, PushRouter},
-        traits::events::EventSubscriber,
         DistributedRuntime, Worker,
+        pipeline::Context,
+        pipeline::{PushRouter, network::Ingress},
+        traits::events::EventSubscriber,
     };
     use futures::StreamExt;
     use tokio::time::timeout;
