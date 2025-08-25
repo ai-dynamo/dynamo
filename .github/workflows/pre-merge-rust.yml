@@ -25,14 +25,15 @@ on:
   pull_request:
     paths:
     - .github/workflows/pre-merge-rust.yml
-    - 'lib/runtime/**'
-    - 'lib/llm/**'
-    - 'lib/bindings/**'
-    - 'launch/**'
-    - 'components/**'
     - '**.rs'
     - 'Cargo.toml'
     - 'Cargo.lock'
+
+env:
+  # Arbitrary identifier in cache key to invalidate cache on-demand
+  CACHE_VERSION: v1
+  # Disable optimizations for faster build times
+  CARGO_PROFILE_DEV_OPT_LEVEL: 0
 
 jobs:
   pre-merge-rust:
@@ -72,8 +73,11 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           ${{ matrix.dir }}/target/
-        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
+        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ env.CACHE_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ env.CACHE_VERSION }}-
+
+    - name: Check disk space
+      run: df -h
 
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
@@ -84,27 +88,58 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Check disk space
+      run: df -h
+
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt clippy
+
+    - name: Check disk space
+      run: df -h
+
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
+
+    - name: Check disk space
+      run: df -h
+
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+
+    - name: Check disk space
+      run: df -h
+
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+
+    - name: Check disk space
+      run: df -h
+
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --no-run
+
+    - name: Check disk space
+      run: df -h
+
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
+
+    - name: Check disk space
+      run: df -h
+
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+
+    - name: Check disk space
+      run: df -h
