@@ -8,11 +8,12 @@ This module defines the core BaseLogitsProcessor interface that all
 logits processors must implement.
 """
 
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, runtime_checkable
 
 import torch
 
 
+@runtime_checkable
 class BaseLogitsProcessor(Protocol):
     """
     Protocol for logits processors in Dynamo.

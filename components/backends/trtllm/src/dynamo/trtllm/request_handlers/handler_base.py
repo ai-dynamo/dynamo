@@ -23,9 +23,11 @@ import torch
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 
+from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.logits_processing import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.utils.disagg_utils import (
@@ -181,6 +183,11 @@ class HandlerBase:
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
         model_name = request.get("model", "unknown_model")
+
+        # TODO: Just for testing. Hardcoding the hello world processor.
+        processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
+        adapters = create_trtllm_adapters(processors)
+        sampling_params.logits_processor = adapters
 
         # NEW: Updated engine call to include multimodal data
         async for res in self.engine.llm.generate_async(
