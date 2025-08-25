@@ -68,6 +68,13 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance_id: Option<i64>,
+
+    /// Pre-tokenized data to use instead of tokenizing the prompt
+    /// If provided along with backend_instance_id, these tokens will be used directly
+    /// and tokenization will be skipped.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_data: Option<Vec<u32>>,
     /// Guided Decoding Options
     /// If specified, the output will be a JSON object. Can be a string, an object, or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
