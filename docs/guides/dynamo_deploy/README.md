@@ -36,7 +36,7 @@ Each backend has deployment examples and configuration options:
 
 ```bash
 # Set same namespace from platform install
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=<your-namespace-name>
 
 # Deploy any example (this uses vLLM with Qwen model using aggregated serving)
 kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
@@ -48,6 +48,34 @@ kubectl get dynamoGraphDeployment -n ${NAMESPACE}
 kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
+
+### Container Images
+
+Before deploying, you'll need to specify which container images to use in the CRD. You have several options:
+
+**Option 1: Use Public Images**
+The easiest way is to use public images from the [NVIDIA NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo). Simply update the image field in your deployment YAML:
+
+```yaml
+# In your deployment YAML:
+image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version> # vLLM
+image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:<version> # SGLang
+image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<version> # TensorRT-LLM
+```
+
+**Option 2: Build Your Own**
+For customization or private deployments, build containers from source:
+
+```bash
+# Build from source
+./container/build.sh
+
+# Tag and push to your registry
+docker tag dynamo-runtime:latest your-registry/dynamo-runtime:latest
+docker push your-registry/dynamo-runtime:latest
+```
+
+> **Note**: We're working to update all example YAMLs to default to public images with `:latest` tags for easier deployment.
 
 ## What's a DynamoGraphDeployment?
 
