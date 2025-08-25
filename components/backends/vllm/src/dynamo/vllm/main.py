@@ -31,6 +31,11 @@ from .args import (
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .publisher import StatLoggerFactory
 
+from nvidia_resiliency_ext.shared_utils.health_check import (
+    GPUHealthCheck,
+    NicHealthCheck,
+)
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,48 @@ async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
+
+
+# TODO ADD A SMART INTERVAL CALCULATION LOGIC
+async def health_monitor(
+    logger,
+    device_ids,
+    runtime,
+    nic_names=None,
+    gpu_check_interval=30,
+    nic_check_interval=60,
+):
+    async def make_gpu_check(did: int):
+        async def on_fail():
+            logger.error(f"GPU health check FAILED on device {did}")
+            logger.critical(
+                f"Triggering shutdown due to GPU {did} health check failure"
+            )
+            # Use the existing graceful shutdown mechanism
+            await graceful_shutdown(runtime)
+
+        return GPUHealthCheck(
+            interval=gpu_check_interval, device_id=did, on_failure=on_fail
+        ).async_check()
+
+    async def make_nic_check(nic: str):
+        async def on_fail():
+            logger.error(f"NIC health check FAILED on {nic}")
+            # For NIC failures, you might want to just log or handle differently
+            # Uncomment the next three lines if you also want to trigger shutdown on NIC failures:
+            # logger.critical(f"Triggering shutdown due to NIC {nic} health check failure")
+            # await graceful_shutdown(runtime)
+
+        return NicHealthCheck(
+            interval=nic_check_interval, nic_name=nic, on_failure=on_fail
+        ).async_check()
+
+    tasks = [await make_gpu_check(d) for d in device_ids]
+    if nic_names:
+        tasks += [await make_nic_check(n) for n in nic_names]
+
+    logger.info(f"Health monitoring GPUs={device_ids}, NICs={nic_names or []}")
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @dynamo_worker(static=False)
@@ -138,11 +185,17 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, _, default_sampling_params = setup_vllm_engine(config)
+    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
+    device_ids = getattr(vllm_config.device_config, "device_ids", None)
+    if not device_ids:
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        device_ids = [int(x) for x in vis.split(",") if x != ""]
 
     # TODO register_prefill in similar vein to register_llm
 
     handler = PrefillWorkerHandler(component, engine_client, default_sampling_params)
+
+    nic_names = None  # TODO ADD THE NIC CONFIG FILE
 
     try:
         await asyncio.gather(
@@ -157,6 +210,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
+            health_monitor(
+                logger,
+                device_ids=device_ids,
+                runtime=runtime,
+                nic_names=nic_names,
             ),
         )
     except Exception as e:
@@ -247,6 +306,13 @@ async def init(runtime: DistributedRuntime, config: Config):
             runtime_config=runtime_config,
         )
 
+    device_ids = getattr(vllm_config.device_config, "device_ids", None)
+    if not device_ids:
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        device_ids = [int(x) for x in vis.split(",") if x != ""]
+
+    nic_names = None  # TODO ADD THE NIC CONFIG FILE
+
     try:
         await asyncio.gather(
             # for decode, we want to transfer the in-flight requests to other decode engines,
@@ -258,6 +324,12 @@ async def init(runtime: DistributedRuntime, config: Config):
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
+            health_monitor(
+                logger,
+                device_ids=device_ids,
+                runtime=runtime,
+                nic_names=nic_names,
             ),
         )
     except Exception as e:
