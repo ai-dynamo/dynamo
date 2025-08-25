@@ -49,6 +49,7 @@ jobs:
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         run: |
           ./container/build.sh --tag ${{ matrix.framework }}:latest \
             --target ${{ matrix.target }} \
