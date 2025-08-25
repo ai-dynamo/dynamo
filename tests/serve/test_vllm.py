@@ -166,8 +166,8 @@ vllm_configs = {
         ],
         timeout=560,
     ),
-    "multimodal_agg": VLLMConfig(
-        name="multimodal_agg",
+    "multimodal_agg_llava": VLLMConfig(
+        name="multimodal_agg_llava",
         directory="/workspace/examples/multimodal",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.vllm],
@@ -178,6 +178,20 @@ vllm_configs = {
         model="llava-hf/llava-1.5-7b-hf",
         delayed_start=0,
         args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        timeout=360,
+    ),
+    "multimodal_agg_qwen": VLLMConfig(
+        name="multimodal_agg_qwen",
+        directory="/workspace/examples/multimodal",
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
+        endpoints=["v1/chat/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+        ],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        delayed_start=0,
+        args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         timeout=360,
     ),
     # TODO: Enable this test case when we have 4 GPUs runners.
