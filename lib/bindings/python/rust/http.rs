@@ -168,6 +168,10 @@ impl HttpAsyncEngine {
     pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
         Ok(PythonAsyncEngine::new(generator, event_loop)?.into())
     }
+
+    pub fn block_until_stream_item(&mut self, enabled: bool) {
+        self.0.block_until_stream_item(enabled);
+    }
 }
 
 #[async_trait]
