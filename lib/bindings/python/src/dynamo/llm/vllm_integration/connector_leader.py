@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Optional
 
+import nvtx
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -55,35 +56,41 @@ class KvConnectorLeader:
     """
 
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
-        drt = kwargs.get("drt", None)
-        if drt is None:
-            find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
-            self.drt = DistributedRuntime.detached()
-        else:
-            self.drt = drt
+        with nvtx.annotate("KvConnectorLeader.__init__", color="blue"):
+            with nvtx.annotate("KvConnectorLeader.init_runtime"):
+                drt = kwargs.get("drt", None)
+                if drt is None:
+                    find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
+                    self.drt = DistributedRuntime.detached()
+                else:
+                    self.drt = drt
 
-        self.vllm_config = vllm_config
-        world_size = vllm_config.parallel_config.world_size
-        bytes_per_block = CacheEngine.get_cache_block_size(
-            vllm_config.cache_config,
-            vllm_config.model_config,
-            vllm_config.parallel_config,
-        )
-        total_bytes = bytes_per_block * world_size
+            with nvtx.annotate("KvConnectorLeader.config_setup"):
+                self.vllm_config = vllm_config
+                world_size = vllm_config.parallel_config.world_size
+                bytes_per_block = CacheEngine.get_cache_block_size(
+                    vllm_config.cache_config,
+                    vllm_config.model_config,
+                    vllm_config.parallel_config,
+                )
+                total_bytes = bytes_per_block * world_size
 
-        leader = KvbmLeader(total_bytes, world_size, drt=self.drt)
+            with nvtx.annotate("KvConnectorLeader.create_leader"):
+                leader = KvbmLeader(total_bytes, world_size, drt=self.drt)
 
-        block_manager = BlockManager(
-            0,
-            leader,
-            vllm_config.cache_config.block_size,
-            disable_device_pool=True,
-        )
+            with nvtx.annotate("KvConnectorLeader.create_block_manager"):
+                block_manager = BlockManager(
+                    0,
+                    leader,
+                    vllm_config.cache_config.block_size,
+                    disable_device_pool=True,
+                )
 
-        print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
-        self._connector = RustKvConnectorLeader(
-            engine_id, self.drt, block_manager, leader
-        )
+            with nvtx.annotate("KvConnectorLeader.create_rust_connector"):
+                print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
+                self._connector = RustKvConnectorLeader(
+                    engine_id, self.drt, block_manager, leader
+                )
 
     # KV Connector
 
@@ -108,20 +115,34 @@ class KvConnectorLeader:
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps).
         """
-        self._create_slot(request)
-        return self._connector.get_num_new_matched_tokens(
-            request.request_id,
-            request.num_tokens,
-            num_computed_tokens,
-        )
+        with nvtx.annotate(
+            f"KvConnectorLeader.get_num_new_matched_tokens[{request.request_id}]",
+            color="green",
+        ):
+            with nvtx.annotate("KvConnectorLeader.create_slot_if_needed"):
+                self._create_slot(request)
+
+            with nvtx.annotate("KvConnectorLeader.rust_get_num_new_matched_tokens"):
+                return self._connector.get_num_new_matched_tokens(
+                    request.request_id,
+                    request.num_tokens,
+                    num_computed_tokens,
+                )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        block_ids = blocks.get_block_ids()[0]
-        self._connector.update_state_after_alloc(
-            request.request_id, block_ids, num_external_tokens
-        )
+        with nvtx.annotate(
+            f"KvConnectorLeader.update_state_after_alloc[{request.request_id}]",
+            color="yellow",
+        ):
+            with nvtx.annotate("KvConnectorLeader.extract_block_ids"):
+                block_ids = blocks.get_block_ids()[0]
+
+            with nvtx.annotate("KvConnectorLeader.rust_update_state_after_alloc"):
+                self._connector.update_state_after_alloc(
+                    request.request_id, block_ids, num_external_tokens
+                )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
         """
@@ -133,45 +154,58 @@ class KvConnectorLeader:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        output = RustSchedulerOutput()
+        with nvtx.annotate("KvConnectorLeader.build_connector_meta", color="red"):
+            with nvtx.annotate("KvConnectorLeader.create_rust_output"):
+                output = RustSchedulerOutput()
 
-        for req in scheduler_output.scheduled_new_reqs:
-            output.add_new_request(
-                req.req_id,
-                req.prompt_token_ids,
-                req.block_ids[0],
-                req.num_computed_tokens,
-            )
+            with nvtx.annotate("KvConnectorLeader.process_new_requests"):
+                for req in scheduler_output.scheduled_new_reqs:
+                    with nvtx.annotate(
+                        f"KvConnectorLeader.add_new_request[{req.req_id}]"
+                    ):
+                        output.add_new_request(
+                            req.req_id,
+                            req.prompt_token_ids,
+                            req.block_ids[0],
+                            req.num_computed_tokens,
+                        )
 
-        for (
-            req_id,
-            resumed_from_preemption,
-            new_token_ids,
-            new_block_ids,
-            num_computed_tokens,
-        ) in zip(
-            scheduler_output.scheduled_cached_reqs.req_ids,
-            scheduler_output.scheduled_cached_reqs.resumed_from_preemption,
-            scheduler_output.scheduled_cached_reqs.new_token_ids,
-            scheduler_output.scheduled_cached_reqs.new_block_ids,
-            scheduler_output.scheduled_cached_reqs.num_computed_tokens,
-        ):
-            output.add_cached_request(
-                request_id=req_id,
-                resumed_from_preemption=resumed_from_preemption,
-                new_token_ids=new_token_ids,
-                new_block_ids=new_block_ids[0],
-                num_computed_tokens=num_computed_tokens,
-            )
+            with nvtx.annotate("KvConnectorLeader.process_cached_requests"):
+                for (
+                    req_id,
+                    resumed_from_preemption,
+                    new_token_ids,
+                    new_block_ids,
+                    num_computed_tokens,
+                ) in zip(
+                    scheduler_output.scheduled_cached_reqs.req_ids,
+                    scheduler_output.scheduled_cached_reqs.resumed_from_preemption,
+                    scheduler_output.scheduled_cached_reqs.new_token_ids,
+                    scheduler_output.scheduled_cached_reqs.new_block_ids,
+                    scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+                ):
+                    with nvtx.annotate(
+                        f"KvConnectorLeader.add_cached_request[{req_id}]"
+                    ):
+                        output.add_cached_request(
+                            request_id=req_id,
+                            resumed_from_preemption=resumed_from_preemption,
+                            new_token_ids=new_token_ids,
+                            new_block_ids=new_block_ids[0],
+                            num_computed_tokens=num_computed_tokens,
+                        )
 
-        output.add_num_scheduled_tokens(scheduler_output.num_scheduled_tokens)
+            with nvtx.annotate("KvConnectorLeader.add_scheduled_tokens"):
+                output.add_num_scheduled_tokens(scheduler_output.num_scheduled_tokens)
 
-        assert (
-            scheduler_output.total_num_scheduled_tokens
-            == output.get_num_scheduled_tokens()
-        ), "Total number of scheduled tokens does not match"
+            with nvtx.annotate("KvConnectorLeader.validate_scheduled_tokens"):
+                assert (
+                    scheduler_output.total_num_scheduled_tokens
+                    == output.get_num_scheduled_tokens()
+                ), "Total number of scheduled tokens does not match"
 
-        return self._connector.build_connector_metadata(output)
+            with nvtx.annotate("KvConnectorLeader.rust_build_connector_metadata"):
+                return self._connector.build_connector_metadata(output)
 
     def request_finished(
         self,
@@ -188,31 +222,42 @@ class KvConnectorLeader:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        # note our worker can communication with us oob and we can use that to know
-        # ahead of time if the request is finished.
-        status = self._connector.request_finished(request.request_id, block_ids)
-        return status, None
+        with nvtx.annotate(
+            f"KvConnectorLeader.request_finished[{request.request_id}]", color="purple"
+        ):
+            # note our worker can communication with us oob and we can use that to know
+            # ahead of time if the request is finished.
+            with nvtx.annotate("KvConnectorLeader.rust_request_finished"):
+                status = self._connector.request_finished(request.request_id, block_ids)
+            return status, None
 
     # Utility functions
 
     def _create_slot(self, request: Request) -> None:
         """Create a slot for the request"""
+        with nvtx.annotate(
+            f"KvConnectorLeader._create_slot[{request.request_id}]", color="orange"
+        ):
+            with nvtx.annotate("KvConnectorLeader.check_slot_exists"):
+                if self._connector.has_slot(request.request_id):
+                    return None
 
-        if self._connector.has_slot(request.request_id):
-            return None
+            with nvtx.annotate("KvConnectorLeader.validate_request"):
+                if bool(request.mm_positions):
+                    raise ValueError("Unsupported request - requires mm extra keys")
 
-        if bool(request.mm_positions):
-            raise ValueError("Unsupported request - requires mm extra keys")
+            with nvtx.annotate("KvConnectorLeader.extract_token_ids"):
+                all_token_ids = request.all_token_ids
 
-        all_token_ids = request.all_token_ids
+            with nvtx.annotate("KvConnectorLeader.create_kvbm_request"):
+                # extract the critial aspects of the request that effect how the tokens are hashed
+                request = KvbmRequest(
+                    request_id=request.request_id,
+                    lora_name=request.lora_request.lora_name()
+                    if request.lora_request
+                    else None,
+                    salt_hash=request.cache_salt,
+                )
 
-        # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
-            request_id=request.request_id,
-            lora_name=request.lora_request.lora_name()
-            if request.lora_request
-            else None,
-            salt_hash=request.cache_salt,
-        )
-
-        self._connector.create_slot(request, all_token_ids)
+            with nvtx.annotate("KvConnectorLeader.rust_create_slot"):
+                self._connector.create_slot(request, all_token_ids)

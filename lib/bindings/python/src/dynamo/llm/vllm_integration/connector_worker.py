@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+import nvtx
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -43,16 +44,21 @@ class DynamoConnectorMetadata(KVConnectorMetadata):
 
 class KvConnectorWorker:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
-        drt = kwargs.get("drt", None)
-        if drt is None:
-            # this is needed to avoid metrics port conflict with KVBM leader side DRT if metrics is enabled
-            find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
-            self.drt = DistributedRuntime.detached()
-        else:
-            self.drt = drt
+        with nvtx.annotate("KvConnectorWorker.__init__", color="blue"):
+            with nvtx.annotate("KvConnectorWorker.init_runtime"):
+                drt = kwargs.get("drt", None)
+                if drt is None:
+                    # this is needed to avoid metrics port conflict with KVBM leader side DRT if metrics is enabled
+                    find_and_set_available_port_from_env("DYN_SYSTEM_PORT")
+                    self.drt = DistributedRuntime.detached()
+                else:
+                    self.drt = drt
 
-        self.vllm_config = vllm_config
-        self._connector = RustKvConnectorWorker(self.drt, engine_id)
+            with nvtx.annotate("KvConnectorWorker.config_setup"):
+                self.vllm_config = vllm_config
+
+            with nvtx.annotate("KvConnectorWorker.create_rust_connector"):
+                self._connector = RustKvConnectorWorker(self.drt, engine_id)
 
     # Worker
 
@@ -64,66 +70,75 @@ class KvConnectorWorker:
         Args: kv_caches:
             dictionary of layer names, kv cache
         """
-        print(
-            f"KvConnectorWorker.register_kv_caches called with {len(kv_caches)} kv_caches"
-        )
-        cache_config = self.vllm_config.cache_config
+        with nvtx.annotate("KvConnectorWorker.register_kv_caches", color="green"):
+            with nvtx.annotate("KvConnectorWorker.log_registration"):
+                print(
+                    f"KvConnectorWorker.register_kv_caches called with {len(kv_caches)} kv_caches"
+                )
 
-        # Create ordered list of (layer_name, tensor) tuples sorted by layer index
-        ordered_kv_caches = [
-            (layer_name, tensor)
-            for layer_name, tensor in sorted(
-                kv_caches.items(), key=lambda item: extract_layer_index(item[0])
-            )
-        ]
+            with nvtx.annotate("KvConnectorWorker.get_cache_config"):
+                cache_config = self.vllm_config.cache_config
 
-        events = [
-            torch.cuda.Event(enable_timing=False, interprocess=False)
-            for _ in range(len(ordered_kv_caches))
-        ]
+            with nvtx.annotate("KvConnectorWorker.create_ordered_caches"):
+                # Create ordered list of (layer_name, tensor) tuples sorted by layer index
+                ordered_kv_caches = [
+                    (layer_name, tensor)
+                    for layer_name, tensor in sorted(
+                        kv_caches.items(), key=lambda item: extract_layer_index(item[0])
+                    )
+                ]
 
-        # events are lazy, if we don't record them once here, the raw handles we pass to rust will be null
-        for event in events:
-            event.record(torch.cuda.current_stream())
+            with nvtx.annotate("KvConnectorWorker.create_cuda_events"):
+                events = [
+                    torch.cuda.Event(enable_timing=False, interprocess=False)
+                    for _ in range(len(ordered_kv_caches))
+                ]
 
-        raw_event_handles = [event.cuda_event for event in events]
+                # events are lazy, if we don't record them once here, the raw handles we pass to rust will be null
+                for event in events:
+                    event.record(torch.cuda.current_stream())
 
-        self.events = {
-            layer_name: event
-            for (layer_name, _tensor), event in zip(ordered_kv_caches, events)
-        }
+                raw_event_handles = [event.cuda_event for event in events]
 
-        # Get first tensor to extract common properties
-        first_tensor = ordered_kv_caches[0][1]
-        shape = first_tensor.shape
+                self.events = {
+                    layer_name: event
+                    for (layer_name, _tensor), event in zip(ordered_kv_caches, events)
+                }
 
-        # Validate all tensors have same shape
-        if not all(t.shape == shape for t in kv_caches.values()):
-            raise NotImplementedError(
-                "Hybrid models with different KV cache shapes are not supported yet."
-            )
+            with nvtx.annotate("KvConnectorWorker.extract_tensor_properties"):
+                # Get first tensor to extract common properties
+                first_tensor = ordered_kv_caches[0][1]
+                shape = first_tensor.shape
 
-        # Extract parameters
-        # TODO: Assume the block dimension is within the first 2. This will break if you're doing something weird like having 1 or 2 device blocks.
-        num_device_blocks = max(shape[0], shape[1])
-        page_size = cache_config.block_size
-        device_id = first_tensor.device.index
+                # Validate all tensors have same shape
+                if not all(t.shape == shape for t in kv_caches.values()):
+                    raise NotImplementedError(
+                        "Hybrid models with different KV cache shapes are not supported yet."
+                    )
 
-        # Determine cache dtype
-        if cache_config.cache_dtype == "auto":
-            kv_cache_dtype = self.vllm_config.model_config.dtype
-        else:
-            kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+            with nvtx.annotate("KvConnectorWorker.compute_cache_parameters"):
+                # Extract parameters
+                # TODO: Assume the block dimension is within the first 2. This will break if you're doing something weird like having 1 or 2 device blocks.
+                num_device_blocks = max(shape[0], shape[1])
+                page_size = cache_config.block_size
+                device_id = first_tensor.device.index
 
-        # Register with connector using ordered data
-        self._connector.register_kv_caches(
-            num_device_blocks,
-            page_size,
-            device_id,
-            kv_cache_dtype.itemsize,
-            ordered_kv_caches,
-            raw_event_handles,
-        )
+                # Determine cache dtype
+                if cache_config.cache_dtype == "auto":
+                    kv_cache_dtype = self.vllm_config.model_config.dtype
+                else:
+                    kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+            with nvtx.annotate("KvConnectorWorker.rust_register_kv_caches"):
+                # Register with connector using ordered data
+                self._connector.register_kv_caches(
+                    num_device_blocks,
+                    page_size,
+                    device_id,
+                    kv_cache_dtype.itemsize,
+                    ordered_kv_caches,
+                    raw_event_handles,
+                )
 
     def bind_connector_metadata(self, data: bytes) -> None:
         """Set the connector metadata from the scheduler.
@@ -135,7 +150,9 @@ class KvConnectorWorker:
         Args:
             connector_metadata (dict): the connector metadata.
         """
-        self._connector.bind_connector_metadata(data)
+        with nvtx.annotate("KvConnectorWorker.bind_connector_metadata", color="yellow"):
+            with nvtx.annotate("KvConnectorWorker.rust_bind_connector_metadata"):
+                self._connector.bind_connector_metadata(data)
 
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
@@ -143,7 +160,11 @@ class KvConnectorWorker:
         This function should be called by the model runner every time
         after the model execution.
         """
-        self._connector.clear_connector_metadata()
+        with nvtx.annotate(
+            "KvConnectorWorker.clear_connector_metadata", color="orange"
+        ):
+            with nvtx.annotate("KvConnectorWorker.rust_clear_connector_metadata"):
+                self._connector.clear_connector_metadata()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
@@ -160,7 +181,9 @@ class KvConnectorWorker:
             the same.
 
         """
-        pass
+        with nvtx.annotate("KvConnectorWorker.start_load_kv", color="cyan"):
+            # Currently a no-op implementation
+            pass
 
     def save_kv_layer(
         self,
@@ -181,8 +204,14 @@ class KvConnectorWorker:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        self.events[layer_name].record(torch.cuda.current_stream())
-        self._connector.save_kv_layer(layer_name, kv_layer)
+        with nvtx.annotate(
+            f"KvConnectorWorker.save_kv_layer[{layer_name}]", color="red"
+        ):
+            with nvtx.annotate("KvConnectorWorker.record_cuda_event"):
+                self.events[layer_name].record(torch.cuda.current_stream())
+
+            with nvtx.annotate("KvConnectorWorker.rust_save_kv_layer"):
+                self._connector.save_kv_layer(layer_name, kv_layer)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -200,6 +229,10 @@ class KvConnectorWorker:
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        # finished_ids = [id for id in finished_req_ids]
-        # return set(sending_ids), set(receiving_ids)
-        return self._connector.get_finished(finished_req_ids)
+        with nvtx.annotate(
+            f"KvConnectorWorker.get_finished[{len(finished_req_ids)}]", color="purple"
+        ):
+            # finished_ids = [id for id in finished_req_ids]
+            # return set(sending_ids), set(receiving_ids)
+            with nvtx.annotate("KvConnectorWorker.rust_get_finished"):
+                return self._connector.get_finished(finished_req_ids)
