@@ -334,7 +334,7 @@ impl GrpcInferenceService for KserveService {
     ) -> Result<Response<ModelMetadataResponse>, Status> {
         let models = self.state.manager().list_completions_models();
         let request_model_name = &request.into_inner().name;
-        for model_name in models.into_iter().filter(|n| request_model_name == n) {
+        if let Some(model_name) = models.into_iter().find(|n| request_model_name == n) {
             return Ok(Response::new(ModelMetadataResponse {
                 name: model_name,
                 versions: vec!["1".to_string()],
@@ -377,7 +377,7 @@ impl GrpcInferenceService for KserveService {
     ) -> Result<Response<ModelConfigResponse>, Status> {
         let models = self.state.manager().list_completions_models();
         let request_model_name = &request.into_inner().name;
-        for model_name in models.into_iter().filter(|n| request_model_name == n) {
+        if let Some(model_name) = models.into_iter().find(|n| request_model_name == n) {
             let config = ModelConfig {
                 name: model_name,
                 platform: "dynamo".to_string(),

@@ -35,7 +35,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
-    use dynamo_async_openai::types::{Model, Prompt};
+    use dynamo_async_openai::types::Prompt;
 
     struct SplitEngine {}
 
