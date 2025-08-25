@@ -15,7 +15,7 @@
 
 
 import json
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Union, Tuple
 
 import connect
 import msgspec
@@ -126,8 +126,9 @@ class MultiModalRequest(BaseModel):
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     image_url: Optional[str] = None
-    # image_features: Optional[List[List[List[float]]]] = None # Remove once have NIXL support
     serialized_request: Optional[connect.SerializedRequest] = None
+    image_grid_thw: Optional[List[Any]] = None
+    embeddings_shape: Optional[Tuple[int, int, int]] = None
 
 
 class EncodeRequest(BaseModel):
@@ -139,15 +140,6 @@ class EncodeRequest(BaseModel):
     image_url: str
     request_id: str
     serialized_request: Optional[connect.SerializedRequest] = None
-
-
-class EncodeResponse(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    request_id: str
-    image_grid_thw: Optional[List[Any]] = None
-    image_sizes: Optional[List[Any]] = None
-    serialized_request: Optional[connect.SerializedRequest] = None
-    image_features: List[List[List[float]]]  # Remove once have NIXL support
 
 
 class MyRequestOutput(BaseModel):
