@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{transports::etcd, Result};
+use crate::{Result, transports::etcd};
 
 pub use etcd::Lease;
 

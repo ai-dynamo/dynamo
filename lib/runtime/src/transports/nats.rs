@@ -28,10 +28,10 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
-use crate::{metrics::MetricsRegistry, Result};
+use crate::{Result, metrics::MetricsRegistry};
 
 use async_nats::connection::State;
-use async_nats::{client, jetstream, Subscriber};
+use async_nats::{Subscriber, client, jetstream};
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
@@ -342,6 +342,12 @@ impl ClientOptions {
         .await?;
 
         let js_ctx = jetstream::new(client.clone());
+
+        // Validate JetStream is available
+        js_ctx
+            .query_account()
+            .await
+            .map_err(|e| anyhow::anyhow!("JetStream not available: {e}"))?;
 
         Ok(Client { client, js_ctx })
     }

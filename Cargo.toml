@@ -10,7 +10,6 @@ members = [
     "lib/runtime",
     "lib/tokens",
     "lib/async-openai",
-    "lib/async-openai-macros",
     "lib/parsers",
     "lib/bindings/c",
     "lib/engines/*",
@@ -19,7 +18,7 @@ resolver = "3"
 
 [workspace.package]
 version = "0.4.1"
-edition = "2021"
+edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
 license = "Apache-2.0"

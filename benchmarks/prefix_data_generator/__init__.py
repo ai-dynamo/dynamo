@@ -13,25 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-backend: pytorch
-tensor_parallel_size: 8
-moe_expert_parallel_size: 8
-max_batch_size: 1
-max_num_tokens: 8192
-max_seq_len: 8192
-print_iter_log: true
-disable_overlap_scheduler: true
+from prefix_data_generator.cli import main as cli_main
 
-# Enable Speculative Decoding in the model engine
-speculative_config:
-  decoding_type: Eagle
-  max_draft_len: 3
-  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: True
 
-kv_cache_config:
-  free_gpu_memory_fraction: 0.5
-  enable_block_reuse: false
-
-cache_transceiver_config:
-  backend: default
+def main():
+    cli_main()

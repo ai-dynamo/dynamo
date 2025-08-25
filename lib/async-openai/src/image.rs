@@ -9,12 +9,12 @@
 // Licensed under Apache 2.0
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
         CreateImageEditRequest, CreateImageRequest, CreateImageVariationRequest, ImagesResponse,
     },
-    Client,
 };
 
 /// Given a prompt and/or an input image, the model will generate a new image.

@@ -26,18 +26,16 @@ Before you begin, ensure you have the following installed:
 - [Docker](https://docs.docker.com/get-started/get-docker/) installed and configured on your host system
 - IDEs: Use either the VS Code or Cursor. Both have Dev Containers extensions
 - Appropriate NVIDIA drivers (compatible with CUDA 12.8+)
-- For models that require authentication, set your Hugging Face token env var `HF_TOKEN` in your local startup (.bashrc, .zshrc or .profile file). Many public models do not require this token.
+- For models that require authentication, set your Hugging Face token env var `HF_TOKEN` in your local startup (.profile or .zprofile file). Many public models do not require this token.
 
 ### Required Files and Directories
 
-The following files and directories are required on your host system for the devcontainer to work properly:
+You must have the following path on your host.
 
-- **`.gitconfig`**: Must exist in your home directory (`~/.gitconfig`). This file is mounted into the container for Git configuration.
-- **`~/.cache/huggingface`**: This directory is mounted into the container for Hugging Face model caching. If it doesn't exist, it will be created automatically.
+- **`~/.cache/huggingface`**: This directory is mounted into the container for Hugging Face model caching.
 
-If these files/directories are missing, you may encounter Docker mount errors when starting the devcontainer.
 
-## Quick Start Guide
+## Steps to Get Started
 
 Follow these steps to get your NVIDIA Dynamo development environment up and running:
 
@@ -54,12 +52,13 @@ The container will be built and give certain file permissions to your local uid 
 
 ### Step 2: Install Dev Containers Extension
 
-**For VS Code:**
-- Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) from Microsoft marketplace
-
 **For Cursor:**
 - Press `Cmd+Shift+X` (Mac) or `Ctrl+Shift+X` (Linux/Windows) to open Extensions
 - Search for "Dev Containers" and install the one by **Anysphere** (Do not download the version from Microsoft as it is not compatible with Cursor)
+
+**For VS Code:**
+- Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) from Microsoft marketplace
+
 
 ### Step 3: Launch the Development Environment
 
@@ -67,17 +66,28 @@ The container will be built and give certain file permissions to your local uid 
 2. Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
 3. Select "Dev Containers: Open Folder in Container", select your `dynamo` folder and open.
 
-### Step 4: Optional - Custom Hugging Face Cache
+### Step 4: Optional But Highly Recommended Setup
 
-If you want to mount a different Hugging Face cache directory than the default ~/.cache/huggingface, you can do something like below:
+For the best development experience, we recommend configuring the following:
 
-1. Go to `.devcontainer` folder
-2. Add this line in the mounts section:
-   ```json
-   "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind",
-   // Mount from your custom HF_HOME to the container.
-   ```
-3. Make sure HF_HOME is sourced in your .bashrc or .zshenv and your IDE default terminal is set properly
+#### Git Configuration
+- **Personal `.gitconfig`**: If not done already, make your own `~/.gitconfig` file with your name, email, and preferred Git settings
+- **Dev Container Integration**: Enable the `Copy the .gitconfig file to the devcontainer` setting by going to IDE Settings → Extensions → Dev Containers → **☑ Copy the .gitconfig file to the devcontainer**
+
+#### SSH Authentication
+To enable seamless Git operations (push/pull) via SSH:
+
+1. **Configure ssh-agent on your host**: Search online for "how to set up ssh-agent on Ubuntu on .profile" and ensure it's configured in your `~/.profile` so the ssh-agent runs before Cursor launches
+
+2. **Enable SSH forwarding in IDE**:
+   Dev Containers set up -> check **☑ Dev Containers: Enable SSHAgent Forwarding**
+
+3. **Verify SSH forwarding works**:
+   - The post-create.sh script will check and report SSH agent status
+   - You should see "SSH agent forwarding is working" when the container starts
+
+This setup allows you to use Git commands normally within the container without additional authentication steps.
+
 
 ### Step 5: Wait for Initialization
 
@@ -103,12 +113,12 @@ $ cargo metadata --format-version=1 | jq -r '.target_directory'
 /home/ubuntu/dynamo/.build/target  <-- this is the target path
 ```
 
-If cargo is not installed and configured property, you will see an error, such as the following:
+If cargo is not installed and configured properly, you will see one or more errors, such as the following:
 ```
 error: could not find `Cargo.toml` in $HOME or any parent directory
 ```
 
-Before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
+Lastly, before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
 
 ### Updating Python Bindings
 
@@ -175,12 +185,13 @@ git config --local gpg.program gpg1
 You can create a custom devcontainer configuration by copying the main configuration to another directory inside the `.devcontainer` directory. Below is an example where the custom name is `jensen_dev`, but feel free to name the directory whatever you want:
 
 ```bash
-# Copy the main devcontainer configuration and then edit the new json file
+# By convention, Dev Container will look at the project's .devcontainer/<path>/devcontainer.json file.
+# Example: copy the main devcontainer configuration and then edit the new json file
 mkdir -p .devcontainer/jensen_dev
 cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 ```
 
-Common customizations include additional mounts, environment variables, VS Code extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/*/devcontainer.json` files available.
+Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
 
 ### SSH Keys for Git Operations
 
@@ -191,18 +202,63 @@ If you have ssh-agent running on the host, then `git push` should just work. If 
 
 ### Environment Variables Not Set in Container?
 
-If your environment variables are not being set in your devcontainer (e.g., `echo $HF_TOKEN` returns empty), and these variables are defined in your `~/.bashrc`, there are two ways to ensure they are properly sourced:
+Dev containers have limited access to host environment variables for security reasons. Here's how to properly pass environment variables:
 
-1. Add `source ~/.bashrc` to your `~/.bash_profile`, OR
-2. Add `source ~/.bashrc` to your `~/.profile` AND ensure `~/.bash_profile` does not exist
+#### Method 1: Use devcontainer.json
+Add environment variables to `.devcontainer/devcontainer.json`:
+```json
+{
+  "remoteEnv": {
+    "HF_TOKEN": "${localEnv:HF_TOKEN}",
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}"
+  }
+}
+```
 
-Note: If both `~/.bash_profile` and `~/.profile` exist, bash will only read `~/.bash_profile` for login shells. Therefore, if you choose option 2, you must remove or rename `~/.bash_profile` to ensure `~/.profile` (and consequently `~/.bashrc`) is sourced.
+#### Method 2: Host Shell Configuration
+In order to ensure your host environment variables are available to the Dev Containers:
+
+**For bash users:**
+- Put variables in `~/.profile` (for login shells)
+- Ensure `~/.bash_profile` sources `~/.bashrc` if both exist
+- Some users report that variables in `~/.bashrc` aren't picked up by dev containers, so try moving them to `~/.profile` to see if that solves the problem
+
+**For zsh users:**
+- Put variables in `~/.zprofile` (for login shells)
+- Some users report that variables in `~/.zshrc` aren't picked up by dev containers, so try moving them to `~/.zprofile` to see if that solves the problem
+
+#### Method 3: Environment File
+Create a `.env` file in your project root and reference it in devcontainer.json:
+
+**Example .env file:**
+```bash
+# API Tokens
+HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Development settings
+DEBUG=true
+LOG_LEVEL=debug
+
+# Custom paths
+CUSTOM_MODEL_PATH=/path/to/models
+```
+
+**Reference in devcontainer.json:**
+```json
+{
+  "remoteEnv": {
+    "ENV_FILE": "${localWorkspaceFolder}/.env"
+  }
+}
+```
 
 See VS Code Dev Containers [documentation](https://code.visualstudio.com/docs/devcontainers/containers) for more details.
 
 ### Build Issues
 
-If you encounter build errors or strange compilation issues, try running `cargo clean` to clear the build cache and rebuild from scratch.
+If you encounter build errors or strange compilation issues, try running `cargo clean`, then rebuild from scratch.
 
 If `cargo clean` doesn't resolve the issue, it is possible that some of the files were created by root (using the `run.sh` script). You can manually remove the build target by going to your host (outside the container), and remove the target:
 
@@ -283,7 +339,7 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker ps -a --filter "label=devcontainer.local_folder=$(pwd)" -q | xargs docker rm -f
    docker images | grep "^vsc-" | awk '{print $3}' | xargs docker rmi
    ```
-  Then rebuild without cache. In VS Code or Cursor command:
+  Then rebuild without cache. In your IDE:
   *Dev Containers: Rebuild Without Cache and Reopen in Container*
 
 ### devcontainer.json Changes Not Being Picked Up
@@ -293,11 +349,11 @@ If you've made changes to `devcontainer.json`, `post-create.sh`, or other devcon
 **Solution: Force Devcontainer Rebuild**
 
 1. **Rebuild Container (Recommended):**
-   In VS Code or Cursor Command Palette (Ctrl+Shift+P):
+   In your IDE Command Palette (Ctrl+Shift+P):
    *Dev Containers: Rebuild Container*
 
 2. **If that doesn't work, rebuild without cache:**
-   In VS Code or Cursor Command Palette (Ctrl+Shift+P):
+   In your IDE Command Palette (Ctrl+Shift+P):
    *Dev Containers: Rebuild Without Cache and Reopen Container*
 
 3. **For persistent issues, manually remove the devcontainer image:**
@@ -305,10 +361,10 @@ If you've made changes to `devcontainer.json`, `post-create.sh`, or other devcon
    # List devcontainer images
    docker images | grep devcontainer
 
-   # And remove all VS Code devcontainer images (more thorough)
+   # And remove all IDE devcontainer images (more thorough)
    docker images | grep "^vsc-" | awk '{print $3}' | xargs docker rmi
 
-   # Then rebuild in VS Code
+   # Then rebuild in your IDE
    Dev Containers: Rebuild Container
    ```
 

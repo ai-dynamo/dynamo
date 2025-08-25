@@ -101,7 +101,7 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         &self,
         layer_idx: usize,
         outer_idx: usize,
-    ) -> BlockResult<view::LayerView<S>> {
+    ) -> BlockResult<view::LayerView<'_, S>> {
         let mr = self
             .layout
             .memory_region(self.block_idx, layer_idx, outer_idx)?;
@@ -113,14 +113,14 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         &mut self,
         layer_idx: usize,
         outer_idx: usize,
-    ) -> BlockResult<view::LayerViewMut<S>> {
+    ) -> BlockResult<view::LayerViewMut<'_, S>> {
         let mr = self
             .layout
             .memory_region(self.block_idx, layer_idx, outer_idx)?;
         unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size(), mr.storage_type()) }
     }
 
-    fn local_block_view(&self) -> BlockResult<view::BlockView<S>> {
+    fn local_block_view(&self) -> BlockResult<view::BlockView<'_, S>> {
         if self.is_fully_contiguous() {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
@@ -134,7 +134,7 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         }
     }
 
-    fn local_block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<S>> {
+    fn local_block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<'_, S>> {
         if self.is_fully_contiguous() {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
