@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import sglang as sgl
 import zmq
@@ -25,10 +25,15 @@ class DynamoSglangStatPublisher:
     Handles SGLang metrics reception and publishing.
     """
 
-    def __init__(self, engine: sgl.Engine, component: Component) -> None:
+    def __init__(
+        self,
+        engine: sgl.Engine,
+        component: Component,
+        metrics_labels: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
         self.engine = engine
         self.inner = WorkerMetricsPublisher()
-        self.inner.create_endpoint(component)
+        self.inner.create_endpoint(component, metrics_labels)
 
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024
@@ -127,11 +132,12 @@ class DynamoSglangStatPublisher:
 async def setup_sgl_metrics(
     engine: sgl.Engine,
     component: Component,
+    metrics_labels: Optional[List[Tuple[str, str]]] = None,
 ) -> tuple[DynamoSglangStatPublisher, asyncio.Task]:
     """
     Convenience bootstrap: create endpoint, publish an initial update, and start the metrics loop.
     """
-    publisher = DynamoSglangStatPublisher(engine, component)
+    publisher = DynamoSglangStatPublisher(engine, component, metrics_labels)
     publisher.init_publish()
 
     task = asyncio.create_task(publisher.run())

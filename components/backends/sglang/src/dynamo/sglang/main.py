@@ -64,8 +64,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             .endpoint("generate")
             .client()
         )
-
-    publisher, metrics_task = await setup_sgl_metrics(engine, component)
+    metrics_labels = [("model", server_args.model_path)]
+    publisher, metrics_task = await setup_sgl_metrics(engine, component, metrics_labels)
 
     kv_publisher = None
     if server_args.kv_events_config:
@@ -92,7 +92,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     try:
         # TODO: add in native endpoints
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
+            generate_endpoint.serve_endpoint(
+                handler.generate, graceful_shutdown=False, metrics_labels=metrics_labels
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -121,7 +123,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     handler = PrefillWorkerHandler(component, engine, config)
 
-    tasks = [generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True)]
+    tasks = [
+        generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.model_path)],
+        )
+    ]
 
     try:
         await asyncio.gather(*tasks)
