@@ -3,10 +3,12 @@
 
 mod base_parser;
 mod deepseek_r1_parser;
+mod gpt_oss_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
 pub use deepseek_r1_parser::DeepseekR1ReasoningParser;
+pub use gpt_oss_parser::GptOssReasoningParser;
 
 #[derive(Debug, Clone, Default)]
 pub struct ParserResult {
@@ -39,12 +41,16 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
     /// Parses a standalone, non-streaming input chunk. Implementations may reset or ignore
     /// internal streaming state and should return the split of normal vs reasoning text for
     /// this complete input. Marker tokens must not be included in either output.
-    fn detect_and_parse_reasoning(&self, text: &str) -> ParserResult;
+    fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult;
 
     /// Parses a streaming chunk and updates internal state. The return value should be the
     /// delta: only the newly discovered normal and reasoning text attributable to this chunk
     /// (not the cumulative totals). Marker tokens must not be included in either output.
-    fn parse_reasoning_streaming_incremental(&mut self, text: &str) -> ParserResult;
+    fn parse_reasoning_streaming_incremental(
+        &mut self,
+        text: &str,
+        token_ids: &[u32],
+    ) -> ParserResult;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +58,7 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
 pub enum ReasoningParserType {
     DeepseekR1,
     Basic,
+    GptOss,
 }
 
 #[derive(std::fmt::Debug)]
@@ -60,12 +67,17 @@ pub struct ReasoningParserWrapper {
 }
 
 impl ReasoningParser for ReasoningParserWrapper {
-    fn detect_and_parse_reasoning(&self, text: &str) -> ParserResult {
-        self.parser.detect_and_parse_reasoning(text)
+    fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
+        self.parser.detect_and_parse_reasoning(text, token_ids)
     }
 
-    fn parse_reasoning_streaming_incremental(&mut self, text: &str) -> ParserResult {
-        self.parser.parse_reasoning_streaming_incremental(text)
+    fn parse_reasoning_streaming_incremental(
+        &mut self,
+        text: &str,
+        token_ids: &[u32],
+    ) -> ParserResult {
+        self.parser
+            .parse_reasoning_streaming_incremental(text, token_ids)
     }
 }
 
@@ -82,6 +94,24 @@ impl ReasoningParserType {
                     false,
                     true,
                 )),
+            },
+            ReasoningParserType::GptOss => match GptOssReasoningParser::new() {
+                Ok(parser) => ReasoningParserWrapper {
+                    parser: Box::new(parser),
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "GptOssReasoningParser could not be initialized, falling back to Basic Reasoning Parser: {e}"
+                    );
+                    ReasoningParserWrapper {
+                        parser: Box::new(BasicReasoningParser::new(
+                            "<think>".into(),
+                            "</think>".into(),
+                            false,
+                            true,
+                        )),
+                    }
+                }
             },
         }
     }
