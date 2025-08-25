@@ -19,6 +19,10 @@ jobs:
           - framework: vllm
             target: runtime
             pytest_marks: "e2e and vllm and gpu_1 and not slow"
+    # Do not cancel main branch runs
+    concurrency:
+      group: backends-build-test-${{ github.ref_name || github.run_id }}
+      cancel-in-progress: ${{ github.ref_name != 'main' }}
 
     name: Build and Test - ${{ matrix.framework }}
     env:
