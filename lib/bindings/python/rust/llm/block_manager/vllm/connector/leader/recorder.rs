@@ -124,12 +124,13 @@ impl KvConnectorLeaderRecorder {
                 block_manager.clone(),
                 leader,
                 drt.clone(),
-                kvbm_metrics,
+                kvbm_metrics.clone(),
             ),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
+            kvbm_metrics,
         };
 
         let (unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
