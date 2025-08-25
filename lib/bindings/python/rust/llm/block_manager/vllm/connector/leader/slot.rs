@@ -197,7 +197,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
                 xfer_engine
-                    .execute(cancellation_token, drt_for_task, kvbm_metrics.clone())
+                    .execute(cancellation_token, drt_for_task, kvbm_metrics)
                     .await
             },
             primary_token,
@@ -1042,6 +1042,9 @@ impl LocalTransferEngine {
         let leader_offload = Arc::clone(&self.leader);
         let leader_onboard = Arc::clone(&self.leader);
 
+        let kvbm_metrics_onboard = kvbm_metrics.clone();
+        let kvbm_metrics_offload = kvbm_metrics.clone();
+
         let onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token_onboard| async move {
                 while let Some(req) = onboard_rx.recv().await {
@@ -1049,7 +1052,10 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOnboardTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) = process_onboard_request(req, &leader_onboard).await {
+                    if let Err(e) =
+                        process_onboard_request(req, &leader_onboard, kvbm_metrics_onboard.clone())
+                            .await
+                    {
                         tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
                     }
                 }
@@ -1071,7 +1077,7 @@ impl LocalTransferEngine {
                         req,
                         &block_manager_offload,
                         &leader_offload,
-                        kvbm_metrics.clone(),
+                        kvbm_metrics_offload.clone(),
                     )
                     .await
                     {
@@ -1145,6 +1151,9 @@ async fn process_offload_request(
     kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
     kvbm_metrics.offload_requests.inc();
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(offload_req.block_ids.len() as u64);
 
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
@@ -1154,7 +1163,6 @@ async fn process_offload_request(
         offload_req.block_ids.len()
     );
 
-    // TODO: Implement actual offload logic
     // 1. Acquire mutable host blocks
     let host_blocks = block_manager
         .host()
@@ -1250,7 +1258,19 @@ async fn process_offload_request(
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
     leader: &Arc<KvbmLeader>,
+    kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
+    kvbm_metrics.onboard_requests.inc();
+    if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
+        kvbm_metrics
+            .onboard_blocks_h2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    } else if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Disk {
+        kvbm_metrics
+            .onboard_blocks_d2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    }
+
     let request_id = &onboard_req.request_id;
     let operation_id = &onboard_req.operation_id;
 

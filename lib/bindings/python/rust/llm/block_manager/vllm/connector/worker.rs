@@ -265,7 +265,6 @@ impl Worker for KvConnectorWorker {
     /// Trigger layer-wise completion signals.
     /// Trigger block-wise completion signals afer last layer.
     fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
-        self.kvbm_metrics.save_kv_layer_requests.inc();
         self.layers_complete += 1;
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
@@ -278,6 +277,7 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
+        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 
