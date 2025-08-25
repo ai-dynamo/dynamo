@@ -76,7 +76,7 @@ The `model_type` can be:
 
 See `components/backends` for full code examples.
 
-### Component names
+## Component names
 
 A worker needs three names to register itself: namespace.component.endpoint
 
