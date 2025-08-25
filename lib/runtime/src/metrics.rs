@@ -33,14 +33,14 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    build_metric_name, labels, name_prefix, nats_client, nats_service, work_handler,
-    COMPONENT_NATS_METRICS, DRT_NATS_METRICS,
+    COMPONENT_NATS_METRICS, DRT_NATS_METRICS, build_metric_name, labels, name_prefix, nats_client,
+    nats_service, work_handler,
 };
 
 // Pipeline imports for endpoint creation
 use crate::pipeline::{
-    async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-    ResponseStream, SingleIn,
+    AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn, async_trait,
+    network::Ingress,
 };
 use crate::protocols::annotated::Annotated;
 use crate::stream;
@@ -392,7 +392,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
         registry
             .drt()
-            .add_prometheus_metric(&current_hierarchy, &metric_name, collector)?;
+            .add_prometheus_metric(&current_hierarchy, collector)?;
     }
 
     Ok(prometheus_metric)
@@ -985,9 +985,11 @@ mod test_metricsregistry_prefixes {
 
         // Valid namespace works
         let valid_namespace = drt.namespace("ns567").unwrap();
-        assert!(valid_namespace
-            .create_counter("test_counter", "A test counter", &[])
-            .is_ok());
+        assert!(
+            valid_namespace
+                .create_counter("test_counter", "A test counter", &[])
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1042,8 +1044,8 @@ mod test_metricsregistry_prefixes {
 #[cfg(test)]
 mod test_metricsregistry_prometheus_fmt_outputs {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{nats_client, nats_service};
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
+    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
     use crate::distributed::test_helpers::create_test_drt_async;
     use prometheus::Counter;
@@ -1289,9 +1291,11 @@ dynamo_component_nats_service_total_errors 5"#;
         // Test extract_metrics (only actual metric lines, excluding help/type)
         let metrics_only = super::test_helpers::extract_metrics(test_input);
         assert_eq!(metrics_only.len(), 6); // 6 actual metric lines (excluding help/type)
-        assert!(metrics_only
-            .iter()
-            .all(|line| line.starts_with("dynamo_component") && !line.starts_with("#")));
+        assert!(
+            metrics_only
+                .iter()
+                .all(|line| line.starts_with("dynamo_component") && !line.starts_with("#"))
+        );
 
         println!("✓ All refactored filter functions work correctly!");
     }
@@ -1301,13 +1305,13 @@ dynamo_component_nats_service_total_errors 5"#;
 #[cfg(test)]
 mod test_metricsregistry_nats {
     use super::prometheus_names::name_prefix;
-    use super::prometheus_names::{nats_client, nats_service};
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
+    use super::prometheus_names::{nats_client, nats_service};
     use super::*;
     use crate::distributed::test_helpers::create_test_drt_async;
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
     #[tokio::test]
     async fn test_drt_nats_metrics() {
         // Setup real DRT and registry using the test-friendly constructor
@@ -1361,8 +1365,7 @@ mod test_metricsregistry_nats {
 
         // Compare the sorted lists
         assert_eq!(
-            actual_drt_nats_metrics_sorted,
-            expect_drt_nats_metrics_sorted,
+            actual_drt_nats_metrics_sorted, expect_drt_nats_metrics_sorted,
             "DRT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
         );
 
@@ -1380,6 +1383,9 @@ mod test_metricsregistry_nats {
         // Create a namespace and components from the DRT
         let namespace = drt.namespace("ns789").unwrap();
         let components = namespace.component("comp789").unwrap();
+
+        // Create a service to trigger metrics callback registration
+        let _service = components.service_builder().create().await.unwrap();
 
         // Get components output which should include NATS client metrics
         // Additional checks for NATS client metrics (without checking specific values)
@@ -1429,8 +1435,7 @@ mod test_metricsregistry_nats {
 
         // Compare the sorted lists
         assert_eq!(
-            actual_component_nats_metrics_sorted,
-            expect_component_nats_metrics_sorted,
+            actual_component_nats_metrics_sorted, expect_component_nats_metrics_sorted,
             "COMPONENT_NATS_METRICS with prefix and expected_nats_metrics should be identical when sorted"
         );
 
@@ -1514,15 +1519,15 @@ mod test_metricsregistry_nats {
             (build_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
             (
                 build_metric_name(nats_client::IN_TOTAL_BYTES),
-                400.0,
-                1500.0,
-            ), // Wide range around 923
+                800.0,
+                4000.0,
+            ), // Wide range around observed value of 1888
             (build_metric_name(nats_client::IN_MESSAGES), 0.0, 5.0), // Wide range around 2
             (
                 build_metric_name(nats_client::OUT_OVERHEAD_BYTES),
-                700.0,
-                2500.0,
-            ), // Wide range around 1633
+                1500.0,
+                5000.0,
+            ), // Wide range around observed value of 2752
             (build_metric_name(nats_client::OUT_MESSAGES), 0.0, 5.0), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (build_metric_name(nats_service::AVG_PROCESSING_MS), 0.0, 0.0), // No processing yet

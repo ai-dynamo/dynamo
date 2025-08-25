@@ -53,7 +53,7 @@
 //!
 //! [`SchedulerOutput`] is transform
 
-use super::scheduler::{SchedulingDecision, DISCONNECTED_WARNING};
+use super::scheduler::{DISCONNECTED_WARNING, SchedulingDecision};
 use super::*;
 
 use tokio::sync::oneshot;
@@ -194,12 +194,12 @@ impl TransferCompletionHandle for ScheduledTransferCompletionHandle {
     }
 
     async fn mark_complete(&self, result: anyhow::Result<()>) {
-        if let Some(completion_tx) = self.completion_tx.lock().unwrap().take() {
-            if completion_tx.send(result).is_err() {
-                tracing::error!(
-                    "failed to send completion status; this could lead to silent data corruption"
-                );
-            }
+        if let Some(completion_tx) = self.completion_tx.lock().unwrap().take()
+            && completion_tx.send(result).is_err()
+        {
+            tracing::error!(
+                "failed to send completion status; this could lead to silent data corruption"
+            );
         }
     }
 }
@@ -256,8 +256,8 @@ impl TransferCompletionHandle for ImmediateTransferCompletionHandle {
             let mut guard = self.completion_tx.lock().unwrap();
             guard.take()
         };
-        if let Some(completion_tx) = completion_tx {
-            if completion_tx
+        if let Some(completion_tx) = completion_tx
+            && completion_tx
                 .send(TransferToSchedulerMessage::ImmediateResult(
                     ImmediateTransferResult {
                         request_id: self.request_id.clone(),
@@ -267,9 +267,8 @@ impl TransferCompletionHandle for ImmediateTransferCompletionHandle {
                 ))
                 .await
                 .is_err()
-            {
-                tracing::error!(DISCONNECTED_WARNING);
-            }
+        {
+            tracing::error!(DISCONNECTED_WARNING);
         }
     }
 }

@@ -17,7 +17,7 @@ use crate::config::HealthStatus;
 use crate::logging::make_request_span;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -74,6 +74,8 @@ impl SystemStatusState {
     /// Create new system status server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
         // Note: This metric is created at the DRT level (no namespace), so it will be prefixed with "dynamo_component_"
+        // TODO(keiven): this is part of another upcoming refactor, where we will no longer
+        //               have this duplicate DRT (and Duplicate metrics error).
         let uptime_gauge = match drt.as_ref().create_gauge(
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",

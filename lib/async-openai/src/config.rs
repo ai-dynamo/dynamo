@@ -9,7 +9,7 @@
 // Licensed under Apache 2.0
 
 //! Client configurations: [OpenAIConfig] for OpenAI, [AzureConfig] for Azure OpenAI Service.
-use reqwest::header::{HeaderMap, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -251,10 +251,10 @@ impl Config for AzureConfig {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::Client;
     use crate::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage, CreateChatCompletionRequest,
     };
-    use crate::Client;
     use std::sync::Arc;
     #[test]
     fn test_client_creation() {

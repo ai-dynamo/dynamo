@@ -43,22 +43,22 @@ pub struct SchedulerRequest<T> {
 mod tests {
     use super::*;
 
-    use crate::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
+    use crate::block_manager::KvBlockManager;
     use crate::block_manager::block::BasicMetadata;
+    use crate::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
     use crate::block_manager::config::*;
     use crate::block_manager::locality::Logical;
     use crate::block_manager::storage::{
-        torch::{TorchDevice, TorchTensor},
         DeviceAllocator, Storage, StorageAllocator,
+        torch::{TorchDevice, TorchTensor},
     };
-    use crate::block_manager::KvBlockManager;
 
     use anyhow::Result;
     use rstest::*;
 
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use tokio_util::sync::CancellationToken;
 

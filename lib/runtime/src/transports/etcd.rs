@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{error, CancellationToken, ErrorContext, Result, Runtime};
+use crate::{CancellationToken, ErrorContext, Result, Runtime, error};
 
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
@@ -21,7 +21,7 @@ use derive_getters::Dissolve;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use validator::Validate;
 
 use etcd_client::{
@@ -29,7 +29,7 @@ use etcd_client::{
     TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 mod lease;
 mod path;
@@ -605,7 +605,7 @@ impl KvCache {
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
-    use crate::{distributed::DistributedConfig, DistributedRuntime};
+    use crate::{DistributedRuntime, distributed::DistributedConfig};
 
     use super::*;
 
