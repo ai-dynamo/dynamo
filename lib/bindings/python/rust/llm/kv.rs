@@ -890,7 +890,8 @@ impl KvPushRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -899,6 +900,7 @@ impl KvPushRouter {
         stop_conditions: Option<PyObject>,
         sampling_options: Option<PyObject>,
         output_options: Option<PyObject>,
+        router_config_override: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -919,6 +921,13 @@ impl KvPushRouter {
             OutputOptions::default()
         };
 
+        let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+            if let Some(obj) = router_config_override {
+                Some(Python::with_gil(|py| depythonize(obj.bind(py))).map_err(to_pyerr)?)
+            } else {
+                None
+            };
+
         // Build the PreprocessedRequest
         let request = llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder()
             .model(model)
@@ -926,6 +935,7 @@ impl KvPushRouter {
             .stop_conditions(stop_conditions)
             .sampling_options(sampling_options)
             .output_options(output_options)
+            .router_config_override(router_config_override)
             .build()
             .map_err(to_pyerr)?;
 

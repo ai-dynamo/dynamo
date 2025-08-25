@@ -634,21 +634,20 @@ mod integration_tests {
         tracing::info!("✓ Router created");
 
         // Create test requests for both DP workers
-        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
-            model: "mock".to_string(),
-            token_ids: tokens,
-            batch_token_ids: None,
-            stop_conditions: StopConditions {
-                max_tokens: Some(TOKENS_PER_REQUEST as u32),
-                ..Default::default()
-            },
-            sampling_options: SamplingOptions::default(),
-            output_options: OutputOptions::default(),
-            eos_token_ids: vec![],
-            mdc_sum: None,
-            annotations: vec![format!("dp_rank:{dp_rank}")],
-            estimated_prefix_hit_num_blocks: None,
-            backend_instance_id: None,
+        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(TOKENS_PER_REQUEST as u32),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .eos_token_ids(vec![])
+                .annotations(vec![format!("dp_rank:{dp_rank}")])
+                .build()
+                .unwrap()
         };
 
         let requests = vec![

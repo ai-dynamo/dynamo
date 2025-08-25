@@ -685,14 +685,24 @@ def test_kv_push_router_bindings(request, runtime_services):
 
             output_options = {"include_input_tokens": False, "return_full_text": False}
 
+            # Test with router config overrides
+            router_config_override = {
+                "overlap_score_weight": 0.5,  # Override the default weight
+                "router_temperature": 0.5,  # Override the default temperature
+            }
+
             # Call generate method
-            logger.info("Calling generate method on KvPushRouter")
+            logger.info(
+                "Calling generate method on KvPushRouter with router config overrides"
+            )
+            logger.info(f"Router config overrides: {router_config_override}")
             stream = await kv_push_router.generate(
                 token_ids=token_ids,
                 model=MODEL_NAME,
                 stop_conditions=stop_conditions,
                 sampling_options=sampling_options,
                 output_options=output_options,
+                router_config_override=router_config_override,
             )
 
             # Collect tokens from the SSE stream
@@ -719,7 +729,54 @@ def test_kv_push_router_bindings(request, runtime_services):
                 f"Tokens: {generated_tokens}"
             )
 
-            logger.info("Successfully verified 20 tokens generated via KvPushRouter")
+            logger.info(
+                "Successfully verified 20 tokens generated via KvPushRouter with overrides"
+            )
+
+            # Test again without overrides
+            logger.info("Testing again without router config overrides")
+            stream = await kv_push_router.generate(
+                token_ids=token_ids[:50],  # Use fewer tokens for second test
+                model=MODEL_NAME,
+                stop_conditions={"max_tokens": 10},
+                sampling_options=sampling_options,
+                output_options=output_options,
+                # No router_config_override this time
+            )
+
+            generated_tokens_no_override = []
+            async for response in stream:
+                if isinstance(response, dict) and "token_ids" in response:
+                    generated_tokens_no_override.extend(response["token_ids"])
+
+            assert (
+                len(generated_tokens_no_override) == 10
+            ), f"Expected 10 tokens but got {len(generated_tokens_no_override)}"
+            logger.info("Successfully verified generation without overrides")
+
+            # Test with partial override (only temperature)
+            logger.info(
+                "Testing with partial router config override (temperature only)"
+            )
+            partial_override = {"router_temperature": 0.1}
+            stream = await kv_push_router.generate(
+                token_ids=token_ids[:30],  # Use even fewer tokens
+                model=MODEL_NAME,
+                stop_conditions={"max_tokens": 5},
+                sampling_options=sampling_options,
+                output_options=output_options,
+                router_config_override=partial_override,
+            )
+
+            generated_tokens_partial = []
+            async for response in stream:
+                if isinstance(response, dict) and "token_ids" in response:
+                    generated_tokens_partial.extend(response["token_ids"])
+
+            assert (
+                len(generated_tokens_partial) == 5
+            ), f"Expected 5 tokens but got {len(generated_tokens_partial)}"
+            logger.info("Successfully verified generation with partial override")
 
         # Run the async test
         asyncio.run(test_kv_push_router())
