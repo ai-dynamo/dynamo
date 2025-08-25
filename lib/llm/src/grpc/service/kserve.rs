@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
-use crate::http::service::metrics;
 use crate::http::service::Metrics;
+use crate::http::service::metrics;
 
 use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
@@ -21,8 +21,8 @@ use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::grpc::service::openai::completion_response_stream;
-use tonic::{transport::Server, Request, Response, Status};
+use crate::grpc::service::openai::{completion_response_stream, get_parsing_options};
+use tonic::{Request, Response, Status, transport::Server};
 
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -206,14 +206,18 @@ impl GrpcInferenceService for KserveService {
             }
         }
 
+        let model = completion_request.inner.model.clone();
+        let parsing_options = get_parsing_options(self.state.manager(), &model);
+
         let stream = completion_response_stream(self.state_clone(), completion_request).await?;
 
-        let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to fold completions stream: {:?}", e);
-                Status::internal("Failed to fold completions stream")
-            })?;
+        let completion_response =
+            NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to fold completions stream: {:?}", e);
+                    Status::internal("Failed to fold completions stream")
+                })?;
 
         let mut reply: ModelInferResponse = completion_response
             .try_into()
@@ -272,6 +276,9 @@ impl GrpcInferenceService for KserveService {
                     }
                 }
 
+                let model = completion_request.inner.model.clone();
+                let parsing_options = get_parsing_options(state.manager(), &model);
+
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
                 let stream = completion_response_stream(state.clone(), completion_request).await?;
@@ -295,7 +302,7 @@ impl GrpcInferenceService for KserveService {
                         }
                     }
                 } else {
-                    let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream)
+                    let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
                         .await
                         .map_err(|e| {
                             tracing::error!(

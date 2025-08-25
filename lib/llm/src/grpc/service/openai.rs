@@ -6,11 +6,13 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
-use futures::{stream, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
-use crate::protocols::openai::completions::{
-    NvCreateCompletionRequest, NvCreateCompletionResponse,
+use crate::discovery::ModelManager;
+use crate::protocols::openai::{
+    ParsingOptions,
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
 };
 use crate::types::Annotated;
 
@@ -18,7 +20,7 @@ use super::kserve;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
-    disconnect::{create_connection_monitor, ConnectionHandle},
+    disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{Endpoint, ResponseMetricCollector},
 };
 use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
@@ -186,4 +188,11 @@ fn get_or_create_request_id(primary: Option<&str>) -> String {
     // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
     let uuid = uuid::Uuid::new_v4();
     uuid.to_string()
+}
+
+pub fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
+    let tool_call_parser = manager.get_model_tool_call_parser(model);
+    let reasoning_parser = None; // TODO: Implement reasoning parser
+
+    ParsingOptions::new(tool_call_parser, reasoning_parser)
 }

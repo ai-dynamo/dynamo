@@ -25,25 +25,25 @@ pub mod kserve_test {
     use async_stream::stream;
     use dynamo_llm::grpc::service::kserve::KserveService;
     use dynamo_llm::protocols::{
+        Annotated,
         openai::{
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
-        Annotated,
     };
     use dynamo_runtime::{
-        pipeline::{
-            async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
-        },
         CancellationToken,
+        pipeline::{
+            AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
+        },
     };
     use rstest::*;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::time::timeout;
-    use tonic::{transport::Channel, Request, Response};
+    use tonic::{Request, Response, transport::Channel};
 
     use dynamo_async_openai::types::Prompt;
 
