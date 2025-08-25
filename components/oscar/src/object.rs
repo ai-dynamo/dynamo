@@ -143,7 +143,7 @@ impl SharedObject {
         if size > crate::MAX_OBJECT_SIZE {
             return Err(OscarError::ObjectTooLarge {
                 size,
-                max: crate::MAX_OBJECT_SIZE,
+                max_size: crate::MAX_OBJECT_SIZE,
             });
         }
 
