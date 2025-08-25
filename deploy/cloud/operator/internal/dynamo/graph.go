@@ -677,6 +677,8 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
 // Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
 // Deployment-specific environment merging should be handled by the caller
+//
+//nolint:gocyclo
 func GenerateBasePodSpec(
 	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
 	backendFramework BackendFramework,
@@ -701,13 +703,14 @@ func GenerateBasePodSpec(
 		main := component.ExtraPodSpec.MainContainer.DeepCopy()
 		if main != nil {
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
+			containerEnvs := container.Env
 			err = mergo.Merge(&container, *main, mergo.WithOverride)
 			if err != nil {
 				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
 
 			// main container fields that require special handling
-			container.Env = MergeEnvs(component.Envs, container.Env)
+			container.Env = MergeEnvs(containerEnvs, container.Env)
 			// Note: startup probe does not have its own top level field so it must be passed in extraPodSpec.MainContainer
 			// We want to overwrite entirely if provided rather than merge
 			if main.StartupProbe != nil {
@@ -715,6 +718,7 @@ func GenerateBasePodSpec(
 			}
 		}
 	}
+	container.Env = MergeEnvs(component.Envs, container.Env)
 
 	// Merge probes entirely if they are passed (no partial merge)
 	if component.LivenessProbe != nil {
@@ -778,9 +782,10 @@ func GenerateBasePodSpec(
 			MountPath: *component.PVC.MountPoint,
 		})
 	}
-	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(&container.Resources)
-	volumes = append(volumes, shmVolume)
-	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
+	if shmVol, shmMount := generateSharedMemoryVolumeAndMount(component.SharedMemory); shmVol != nil && shmMount != nil {
+		volumes = append(volumes, *shmVol)
+		container.VolumeMounts = append(container.VolumeMounts, *shmMount)
+	}
 
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
@@ -1012,7 +1017,7 @@ func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 	}
 
 	if len(detected) == 0 {
-		return "", fmt.Errorf("no backend framework detected from command: %q", fullCommand)
+		return BackendFrameworkNoop, nil
 	}
 
 	if len(detected) > 1 {
@@ -1059,13 +1064,13 @@ func determineBackendFramework(
 	}
 
 	// Validate consistency if both detected and explicit exist
-	if detectedFramework != "" && explicitFramework != "" && detectedFramework != explicitFramework {
+	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop && explicitFramework != "" && detectedFramework != explicitFramework {
 		return "", fmt.Errorf("backend framework mismatch: detected %q from command but explicitly configured as %q",
 			detectedFramework, explicitFramework)
 	}
 
 	// Return in order of preference: detected > explicit > error
-	if detectedFramework != "" {
+	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop {
 		return detectedFramework, nil
 	}
 
@@ -1079,7 +1084,7 @@ func determineBackendFramework(
 	}
 
 	// No command/args to detect from and no explicit config
-	return "", fmt.Errorf("backend framework must be specified explicitly or detectable from command/args")
+	return BackendFrameworkNoop, nil
 }
 
 // getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
@@ -1179,36 +1184,29 @@ func GenerateBasePodSpecForController(
 	return podSpec, nil
 }
 
-func generateSharedMemoryVolumeAndMount(resources *corev1.ResourceRequirements) (corev1.Volume, corev1.VolumeMount) {
-	sharedMemorySizeLimit := resource.MustParse("512Mi")
-	// Check if we have memory limits to work with
-	memoryLimit := resources.Limits[corev1.ResourceMemory]
-	if !memoryLimit.IsZero() {
-		// Use 1/4 of memory limit
-		calculatedSize := resource.NewQuantity(memoryLimit.Value()/4, resource.BinarySI)
-		// Apply bounds: minimum 512Mi, maximum 8Gi
-		minSize := resource.MustParse("512Mi")
-		maxSize := resource.MustParse("8Gi")
-
-		if calculatedSize.Cmp(minSize) > 0 && calculatedSize.Cmp(maxSize) < 0 {
-			sharedMemorySizeLimit = *calculatedSize
-		} else if calculatedSize.Cmp(maxSize) >= 0 {
-			sharedMemorySizeLimit = maxSize // Cap at maximum
+func generateSharedMemoryVolumeAndMount(spec *v1alpha1.SharedMemorySpec) (*corev1.Volume, *corev1.VolumeMount) {
+	// default: enabled=true, size=8Gi
+	size := resource.MustParse(commonconsts.DefaultSharedMemorySize)
+	if spec != nil {
+		if spec.Disabled {
+			return nil, nil
 		}
-		// If calculatedSize < minSize, keep the 512Mi base
+		if !spec.Size.IsZero() {
+			size = spec.Size
+		}
 	}
 	volume := corev1.Volume{
 		Name: commonconsts.KubeValueNameSharedMemory,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
 				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &sharedMemorySizeLimit,
+				SizeLimit: &size,
 			},
 		},
 	}
 	volumeMount := corev1.VolumeMount{
 		Name:      commonconsts.KubeValueNameSharedMemory,
-		MountPath: "/dev/shm",
+		MountPath: commonconsts.DefaultSharedMemoryMountPath,
 	}
-	return volume, volumeMount
+	return &volume, &volumeMount
 }

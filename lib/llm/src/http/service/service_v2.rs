@@ -4,14 +4,14 @@
 use std::collections::HashMap;
 use std::env::var;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
-use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
+use super::metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;

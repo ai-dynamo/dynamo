@@ -109,6 +109,10 @@ impl KvConnectorLeaderRecorder {
         let output_path = "/tmp/records.jsonl";
         tracing::info!("recording events to {}", output_path);
 
+        let ns = drt.namespace("kvbm_connector_leader").unwrap();
+
+        let kvbm_metrics = KvbmMetrics::new(&ns);
+
         let recorder = drt
             .runtime()
             .primary()
@@ -116,7 +120,12 @@ impl KvConnectorLeaderRecorder {
             .unwrap();
 
         let connector_leader = KvConnectorLeader {
-            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone()),
+            slot_manager: ConnectorSlotManager::new(
+                block_manager.clone(),
+                leader,
+                drt.clone(),
+                kvbm_metrics,
+            ),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),

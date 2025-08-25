@@ -11,13 +11,13 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
         CreateVectorStoreFileRequest, DeleteVectorStoreFileResponse, ListVectorStoreFilesResponse,
         VectorStoreFileContentResponse, VectorStoreFileObject,
     },
-    Client,
 };
 
 /// Vector store files represent files inside a vector store.

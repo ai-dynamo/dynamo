@@ -17,7 +17,7 @@ mod local;
 mod logical;
 mod resources;
 
-use crate::block_manager::block::{factory::IntoBlocks, MutableBlock};
+use crate::block_manager::block::{MutableBlock, factory::IntoBlocks};
 use crate::block_manager::locality::LogicalResources;
 use crate::block_manager::offload::request::BlockResult;
 
@@ -26,8 +26,8 @@ use super::*;
 // use super::offload::OffloadManager;
 use super::{
     block::{
-        factory::LocalBlockDataFactory, locality::LocalityProvider, Block, GlobalRegistry,
-        ImmutableBlock,
+        Block, GlobalRegistry, ImmutableBlock, factory::LocalBlockDataFactory,
+        locality::LocalityProvider,
     },
     config::NixlOptions,
     events::{EventManager, NullEventManager},
