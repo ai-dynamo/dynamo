@@ -140,6 +140,10 @@ class VllmEncodeWorker:
                         self.vision_encoder.device
                     )
                     vision_outputs = self.vision_encoder(pixel_values)
+                    if self.projector is None:
+                        raise ValueError(
+                            f"Projector not found for LLaVA model: {self.model}"
+                        )
                     embeddings = self.projector(vision_outputs.last_hidden_state)
                 elif "qwen" in self.model.lower():
                     embeddings = self.get_qwen_image_features(
