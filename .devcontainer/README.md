@@ -41,7 +41,7 @@ graph TB
             TOOLS["rust-analyzer<br/>cargo<br/>etc."]
         end
 
-        IMAGE["Docker Image<br/>dynamo:latest-vllm-dev"]
+        IMAGE["Docker Image<br/>dynamo:latest-vllm-local-dev"]
 
         IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
     end
@@ -92,7 +92,7 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 ### Step 1: Build the Development Container Image
 
 Build `dynamo:latest-vllm-local-dev` from scratch from the source:
-- Note that currently, `local-dev` are only implemented for `--framework VLLM` and `--framework SGLANG`, for now.
+- Note that currently, `local-dev` is only implemented.
 
 ```bash
 ./container/build.sh --target local-dev
