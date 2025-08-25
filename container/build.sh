@@ -616,13 +616,13 @@ if [[ $FRAMEWORK == "VLLM" ]]; then
     # Define base image tag before using it
     DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
     
-    # Start base image build in background
+    # Start base image build
     echo "======================================"
     echo "Starting Build 1: Base Image"
     echo "======================================"
     $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
     
-    # Start framework build in background  
+    # Start framework build
     echo "======================================"
     echo "Starting Build 2: Framework Image"
     echo "======================================"
