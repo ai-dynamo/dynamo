@@ -59,12 +59,14 @@ flowchart LR
   pd_worker --> encode_worker
 ```
 
-***Note*** Only the LLaVA 1.5 7B model is supported. Qwen2.5-VL and Phi3V support will be added in the future.
+***Note*** Only the LLaVA 1.5 7B model is supported. Phi3V support will be added in the future.
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
 # Serve a LLaVA 1.5 7B model:
 bash launch/agg.sh --model llava-hf/llava-1.5-7b-hf
+# Serve a Qwen2.5-VL model:
+bash launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
 ### Client
