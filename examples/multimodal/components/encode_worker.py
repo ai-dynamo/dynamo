@@ -36,7 +36,6 @@ from utils.encode_utils import encode_image_embeddings, get_encoder_components
 from utils.image_loader import ImageLoader
 from utils.model import load_vision_model
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
-from utils.model import load_vision_model
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -83,18 +82,21 @@ class VllmEncodeWorker:
     def cleanup(self):
         pass
 
-    
     def get_qwen_image_features(self, vision_encoder, image_embeds):
         pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
-        
+
         grid_thw = image_embeds.get("image_grid_thw", None)
         if grid_thw is not None:
             grid_thw = grid_thw.to(vision_encoder.device)
             logger.debug(f"Qwen grid_thw shape: {grid_thw.shape}")
         else:
             raise ValueError("grid_thw is not provided")
-        
-        return vision_encoder.get_image_features(pixel_values, grid_thw) if grid_thw is not None else vision_encoder.get_image_features(pixel_values)
+
+        return (
+            vision_encoder.get_image_features(pixel_values, grid_thw)
+            if grid_thw is not None
+            else vision_encoder.get_image_features(pixel_values)
+        )
 
     async def generate(
         self, request: vLLMMultimodalRequest
