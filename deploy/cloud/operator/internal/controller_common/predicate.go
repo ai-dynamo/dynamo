@@ -37,11 +37,16 @@ type GroveConfig struct {
 	TerminationDelay time.Duration
 }
 
+type LWSConfig struct {
+	// Enabled is automatically determined by checking if LWS CRDs are installed in the cluster
+	Enabled bool
+}
+
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
-	EnableLWS           bool
 	Grove               GroveConfig
+	LWS                 LWSConfig
 	EtcdAddress         string
 	NatsAddress         string
 	IngressConfig       IngressConfig
@@ -61,40 +66,47 @@ func (i *IngressConfig) UseVirtualService() bool {
 // DetectGroveAvailability checks if Grove is available by checking if the Grove API group is registered
 // This approach uses the discovery client which is simpler and more reliable
 func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "grove.io")
+}
+
+// DetectLWSAvailability checks if LWS is available by checking if the LWS API group is registered
+// This approach uses the discovery client which is simpler and more reliable
+func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io")
+}
+
+// detectAPIGroupAvailability checks if a specific API group is registered in the cluster
+func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName string) bool {
 	logger := log.FromContext(ctx)
 
-	// Use the discovery client to check if Grove API groups are available
 	cfg := mgr.GetConfig()
 	if cfg == nil {
-		logger.Info("Grove detection failed, no discovery client available")
+		logger.Info("detection failed, no discovery client available", "group", groupName)
 		return false
 	}
 
-	// Try to create a discovery client
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		logger.Error(err, "Grove detection failed, could not create discovery client")
+		logger.Error(err, "detection failed, could not create discovery client", "group", groupName)
 		return false
 	}
 
-	// Check if grove.io API group is available
 	apiGroups, err := discoveryClient.ServerGroups()
 	if err != nil {
-		logger.Error(err, "Grove detection failed, could not list server groups")
+		logger.Error(err, "detection failed, could not list server groups", "group", groupName)
 		return false
 	}
 
 	for _, group := range apiGroups.Groups {
-		if group.Name == "grove.io" {
-			logger.Info("Grove is available, grove.io API group found")
+		if group.Name == groupName {
+			logger.Info("API group is available", "group", groupName)
 			return true
 		}
 	}
 
-	logger.Info("Grove not available, grove.io API group not found")
+	logger.Info("API group not available", "group", groupName)
 	return false
 }
-
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		l := log.FromContext(context.Background())
