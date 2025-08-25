@@ -30,6 +30,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "0.4.1" }
 dynamo-llm = { path = "lib/llm", version = "0.4.1" }
+dynamo-tokens = { path = "lib/tokens", version = "0.4.1" }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.4.1", features = ["byot", "rustls"]}
 dynamo-parsers = { path = "lib/parsers", version = "0.4.1" }
 
