@@ -22,6 +22,7 @@
    API/nixl_connect/writable_operation.md
    API/nixl_connect/read_operation.md
    API/nixl_connect/write_operation.md
+   API/nixl_connect/README.md
 
    guides/dynamo_deploy/create_deployment.md
    guides/dynamo_deploy/sla_planner_deployment.md
@@ -29,19 +30,19 @@
    guides/dynamo_deploy/grove.md
    guides/dynamo_deploy/k8s_metrics.md
    guides/dynamo_deploy/README.md
+   guides/dynamo_deploy/quickstart.md
    guides/dynamo_run.md
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
 
+   architecture/kv_cache_routing.md
    architecture/request_migration.md
 
-   examples/README.md
+   components/backends/trtllm/multinode/multinode-examples.md
+   components/backends/sglang/docs/multinode-examples.md
 
-   API/nixl_connect/README.md
-   architecture/kv_cache_routing.md
+   examples/README.md
    examples/runtime/hello_world/README.md
-   guides/dynamo_deploy/quickstart.md
-   guides/planner_benchmark/README.md
 
    architecture/distributed_runtime.md
    architecture/dynamo_flow.md

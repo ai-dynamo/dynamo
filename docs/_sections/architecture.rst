@@ -7,4 +7,5 @@ Overview
 .. toctree::
    :hidden:
 
+   Overview <self>
    Disaggregated Serving <../architecture/disagg_serving>

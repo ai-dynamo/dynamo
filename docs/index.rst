@@ -28,6 +28,10 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 
    This guide is a snapshot at a specfic point in time. For the latest information and examples, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo>`_.
 
+Quickstart
+==========
+.. include:: _includes/quick_start_local.rst
+
 ..
    Sidebar
 ..
@@ -36,24 +40,27 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    :hidden:
    :caption: Getting Started
 
-   Overview <self>
-   Quickstart <_sections/quickstart>
+   Quickstart <self>
    Installation <_sections/installation>
-   Examples <_sections/examples>
    Support Matrix <support_matrix.md>
+   Architecture <_sections/architecture>
+   Examples <_sections/examples>
 
 .. toctree::
    :hidden:
-   :caption: Deployment
+   :caption: Kubernetes Deployment
 
-   Kubernetes <_sections/kubernetes>
-   Slurm <_sections/slurm>
+   Quickstart (K8s) <../guides/dynamo_deploy/dynamo_cloud.md>
+   Dynamo Operator <../guides/dynamo_deploy/dynamo_operator.md>
+   Metrics <../guides/dynamo_deploy/k8s_metrics.md>
+   Model Caching <../guides/dynamo_deploy/model_caching_with_fluid.md>
+   Multinode <../guides/dynamo_deploy/multinode-deployment.md>
+   Minikube Setup <../guides/dynamo_deploy/minikube.md>
 
 .. toctree::
    :hidden:
-   :caption: Architecture
+   :caption: Components
 
-   Overview <_sections/architecture>
    Backends <_sections/backends>
    Router <components/router/README>
    Planner <architecture/planner_intro>
