@@ -85,15 +85,21 @@ async def init(runtime: DistributedRuntime, config: Config):
         component, engine, config, publisher, kv_publisher, prefill_client
     )
 
+    # Start serving endpoint first (this does instance registration)
+    # TODO: add in native endpoints
+    serve_task = asyncio.create_task(
+        generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False)
+    )
+    
+    # Wait for endpoint to be fully established then do model registration
+    await asyncio.sleep(2.5)
     await register_llm_with_runtime_config(
         engine, generate_endpoint, server_args, dynamo_args.migration_limit
     )
 
     try:
-        # TODO: add in native endpoints
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
-        )
+        # Wait for serving to complete
+        await serve_task
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
