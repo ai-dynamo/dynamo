@@ -263,17 +263,15 @@ impl LocalModelBuilder {
         }
 
         // Override runtime configs with mocker engine args
-        if self.is_mocker {
-            if let Some(path) = &self.extra_engine_args {
-                let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                    .expect("Failed to load mocker engine args for runtime config overriding.");
-                self.runtime_config.total_kv_blocks =
-                    Some(mocker_engine_args.num_gpu_blocks as u64);
-                self.runtime_config.max_num_seqs =
-                    mocker_engine_args.max_num_seqs.map(|v| v as u64);
-                self.runtime_config.max_num_batched_tokens =
-                    mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            }
+        if self.is_mocker
+            && let Some(path) = &self.extra_engine_args
+        {
+            let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                .expect("Failed to load mocker engine args for runtime config overriding.");
+            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
+            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
+            self.runtime_config.max_num_batched_tokens =
+                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
         }
 
         card.migration_limit = self.migration_limit;

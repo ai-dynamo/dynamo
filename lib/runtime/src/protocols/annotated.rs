@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::{error, Result};
+use crate::{Result, error};
 use maybe_error::MaybeError;
 
 pub trait AnnotationsProvider {
@@ -68,13 +68,13 @@ impl<R> Annotated<R> {
     /// Convert to a [`Result<Self, String>`]
     /// If [`Self::event`] is "error", return an error message(s) held by [`Self::comment`]
     pub fn ok(self) -> Result<Self, String> {
-        if let Some(event) = &self.event {
-            if event == "error" {
-                return Err(self
-                    .comment
-                    .unwrap_or(vec!["unknown error".to_string()])
-                    .join(", "));
-            }
+        if let Some(event) = &self.event
+            && event == "error"
+        {
+            return Err(self
+                .comment
+                .unwrap_or(vec!["unknown error".to_string()])
+                .join(", "));
         }
         Ok(self)
     }
@@ -125,10 +125,11 @@ impl<R> Annotated<R> {
         match self.data {
             Some(data) => Ok(Some(data)),
             None => match self.event {
-                Some(event) if event == "error" => Err(error!(self
-                    .comment
-                    .unwrap_or(vec!["unknown error".to_string()])
-                    .join(", ")))?,
+                Some(event) if event == "error" => Err(error!(
+                    self.comment
+                        .unwrap_or(vec!["unknown error".to_string()])
+                        .join(", ")
+                ))?,
                 _ => Ok(None),
             },
         }
@@ -145,10 +146,10 @@ where
 
     fn err(&self) -> Option<anyhow::Error> {
         if self.is_error() {
-            if let Some(comment) = &self.comment {
-                if !comment.is_empty() {
-                    return Some(anyhow::Error::msg(comment.join("; ")));
-                }
+            if let Some(comment) = &self.comment
+                && !comment.is_empty()
+            {
+                return Some(anyhow::Error::msg(comment.join("; ")));
             }
             Some(anyhow::Error::msg("unknown error"))
         } else {

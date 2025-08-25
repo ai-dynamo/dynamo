@@ -16,8 +16,8 @@
 use tokenizers::tokenizer::Tokenizer as HfTokenizer;
 
 use super::{
-    traits::{Decoder, Encoder, Tokenizer},
     Encoding, Error, Result, TokenIdType,
+    traits::{Decoder, Encoder, Tokenizer},
 };
 
 pub struct HuggingFaceTokenizer {

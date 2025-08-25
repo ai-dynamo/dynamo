@@ -14,10 +14,10 @@
 // limitations under the License.
 
 use crate::{
-    transports::etcd::{Client, WatchEvent},
     DistributedRuntime,
+    transports::etcd::{Client, WatchEvent},
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;

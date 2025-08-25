@@ -28,21 +28,21 @@ use crate::tokenizers::Encoding;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    async_trait, AsyncEngineContext, Error, ManyOut, Operator, SingleIn,
+    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
     common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
+        DeltaGeneratorExt,
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         nvext::NvExtProvider,
-        DeltaGeneratorExt,
     },
 };
-use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
+use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -487,11 +487,7 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
@@ -545,11 +541,7 @@ impl
         &self,
         request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
@@ -603,10 +595,10 @@ impl
         request: SingleIn<NvCreateEmbeddingRequest>,
         next: Arc<
             dyn AsyncEngine<
-                SingleIn<PreprocessedEmbeddingRequest>,
-                ManyOut<Annotated<EmbeddingsEngineOutput>>,
-                Error,
-            >,
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
         // Unpack request
