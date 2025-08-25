@@ -1,25 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_runtime::component::Component;
-use dynamo_runtime::prelude::DistributedRuntimeProvider;
-use dynamo_runtime::slug::Slug;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, RwLock},
+};
 
-use crate::discovery::ModelEntry;
+use anyhow::Context;
+use dynamo_runtime::{component::Component, prelude::DistributedRuntimeProvider, slug::Slug};
 
-use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
-    kv_router::KvRouter,
+    discovery::ModelEntry,
+    kv_router::{KvRouter, KvRouterConfig, scheduler::DefaultWorkerSelector},
     types::openai::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
     },
-};
-use std::collections::HashSet;
-use std::sync::RwLock;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +25,9 @@ pub enum ModelManagerError {
 
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
+
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(&'static str),
 }
 
 // Don't implement Clone for this, put it in an Arc instead.
@@ -60,33 +59,58 @@ impl ModelManager {
         }
     }
 
-    pub fn get_model_entries(&self) -> Vec<ModelEntry> {
-        self.entries.lock().unwrap().values().cloned().collect()
+    pub fn get_model_entries(&self) -> Result<Vec<ModelEntry>, ModelManagerError> {
+        let guard = self
+            .entries
+            .lock()
+            .map_err(|_| ModelManagerError::LockPoisoned("entries"))?;
+        Ok(guard.values().cloned().collect())
     }
 
-    pub fn has_model_any(&self, model: &str) -> bool {
-        self.chat_completion_engines.read().unwrap().contains(model)
-            || self.completion_engines.read().unwrap().contains(model)
+    pub fn has_model_any(&self, model: &str) -> Result<bool, ModelManagerError> {
+        let chat = self
+            .chat_completion_engines
+            .read()
+            .map_err(|_| ModelManagerError::LockPoisoned("chat_completion_engines"))?;
+        if chat.contains(model) {
+            return Ok(true);
+        }
+        let comp = self
+            .completion_engines
+            .read()
+            .map_err(|_| ModelManagerError::LockPoisoned("completion_engines"))?;
+        Ok(comp.contains(model))
     }
 
-    pub fn model_display_names(&self) -> HashSet<String> {
-        self.list_chat_completions_models()
-            .into_iter()
-            .chain(self.list_completions_models())
-            .chain(self.list_embeddings_models())
-            .collect()
+    pub fn model_display_names(&self) -> Result<HashSet<String>, ModelManagerError> {
+        let chat = self.list_chat_completions_models()?;
+        let comp = self.list_completions_models()?;
+        let embed = self.list_embeddings_models()?;
+        Ok(chat.into_iter().chain(comp).chain(embed).collect())
     }
 
-    pub fn list_chat_completions_models(&self) -> Vec<String> {
-        self.chat_completion_engines.read().unwrap().list()
+    pub fn list_chat_completions_models(&self) -> Result<Vec<String>, ModelManagerError> {
+        let guard = self
+            .chat_completion_engines
+            .read()
+            .map_err(|_| ModelManagerError::LockPoisoned("chat_completion_engines"))?;
+        Ok(guard.list())
     }
 
-    pub fn list_completions_models(&self) -> Vec<String> {
-        self.completion_engines.read().unwrap().list()
+    pub fn list_completions_models(&self) -> Result<Vec<String>, ModelManagerError> {
+        let guard = self
+            .completion_engines
+            .read()
+            .map_err(|_| ModelManagerError::LockPoisoned("completion_engines"))?;
+        Ok(guard.list())
     }
 
-    pub fn list_embeddings_models(&self) -> Vec<String> {
-        self.embeddings_engines.read().unwrap().list()
+    pub fn list_embeddings_models(&self) -> Result<Vec<String>, ModelManagerError> {
+        let guard = self
+            .embeddings_engines
+            .read()
+            .map_err(|_| ModelManagerError::LockPoisoned("embeddings_engines"))?;
+        Ok(guard.list())
     }
 
     pub fn add_completions_model(
@@ -94,7 +118,10 @@ impl ModelManager {
         model: &str,
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.completion_engines.write().unwrap();
+        let mut clients = self
+            .completion_engines
+            .write()
+            .map_err(|_| ModelManagerError::LockPoisoned("completion_engines"))?;
         clients.add(model, engine)
     }
 
@@ -103,7 +130,10 @@ impl ModelManager {
         model: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.chat_completion_engines.write().unwrap();
+        let mut clients = self
+            .chat_completion_engines
+            .write()
+            .map_err(|_| ModelManagerError::LockPoisoned("chat_completion_engines"))?;
         clients.add(model, engine)
     }
 
@@ -112,22 +142,34 @@ impl ModelManager {
         model: &str,
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.embeddings_engines.write().unwrap();
+        let mut clients = self
+            .embeddings_engines
+            .write()
+            .map_err(|_| ModelManagerError::LockPoisoned("embeddings_engines"))?;
         clients.add(model, engine)
     }
 
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.completion_engines.write().unwrap();
+        let mut clients = self
+            .completion_engines
+            .write()
+            .map_err(|_| ModelManagerError::LockPoisoned("completion_engines"))?;
         clients.remove(model)
     }
 
     pub fn remove_chat_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.chat_completion_engines.write().unwrap();
+        let mut clients = self
+            .chat_completion_engines
+            .write()
+            .map_err(|_| ModelManagerError::LockPoisoned("chat_completion_engines"))?;
         clients.remove(model)
     }
 
     pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.embeddings_engines.write().unwrap();
+        let mut clients = self
+            .embeddings_engines
+            .write()
+            .map_err(|_| ModelManagerError::LockPoisoned("embeddings_engines"))?;
         clients.remove(model)
     }
 
@@ -137,7 +179,7 @@ impl ModelManager {
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.embeddings_engines
             .read()
-            .unwrap()
+            .map_err(|_| ModelManagerError::LockPoisoned("embeddings_engines"))?
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
@@ -149,7 +191,7 @@ impl ModelManager {
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
         self.completion_engines
             .read()
-            .unwrap()
+            .map_err(|_| ModelManagerError::LockPoisoned("completion_engines"))?
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
@@ -161,7 +203,7 @@ impl ModelManager {
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.chat_completion_engines
             .read()
-            .unwrap()
+            .map_err(|_| ModelManagerError::LockPoisoned("chat_completion_engines"))?
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
@@ -169,13 +211,22 @@ impl ModelManager {
 
     /// Save a ModelEntry under an instance's etcd `models/` key so we can fetch it later when the key is
     /// deleted from etcd.
-    pub fn save_model_entry(&self, key: &str, entry: ModelEntry) {
-        self.entries.lock().unwrap().insert(key.to_string(), entry);
+    pub fn save_model_entry(&self, key: &str, entry: ModelEntry) -> Result<(), ModelManagerError> {
+        let mut guard = self
+            .entries
+            .lock()
+            .map_err(|_| ModelManagerError::LockPoisoned("entries"))?;
+        guard.insert(key.to_string(), entry);
+        Ok(())
     }
 
     /// Remove and return model entry for this instance's etcd key. We do this when the instance stops.
-    pub fn remove_model_entry(&self, key: &str) -> Option<ModelEntry> {
-        self.entries.lock().unwrap().remove(key)
+    pub fn remove_model_entry(&self, key: &str) -> Result<Option<ModelEntry>, ModelManagerError> {
+        let mut guard = self
+            .entries
+            .lock()
+            .map_err(|_| ModelManagerError::LockPoisoned("entries"))?;
+        Ok(guard.remove(key))
     }
 
     pub async fn kv_chooser_for(
@@ -185,7 +236,10 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
+        if let Some(kv_chooser) = self
+            .get_kv_chooser(model_name)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        {
             // Check if the existing router has a different block size
             if kv_chooser.block_size() != kv_cache_block_size {
                 tracing::warn!(
@@ -202,8 +256,12 @@ impl ModelManager {
             .await
     }
 
-    fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().unwrap().get(model_name).cloned()
+    fn get_kv_chooser(&self, model_name: &str) -> Result<Option<Arc<KvRouter>>, ModelManagerError> {
+        let guard = self
+            .kv_choosers
+            .lock()
+            .map_err(|_| ModelManagerError::LockPoisoned("kv_choosers"))?;
+        Ok(guard.get(model_name).cloned())
     }
 
     /// Create and return a KV chooser for this component and model
@@ -242,7 +300,8 @@ impl ModelManager {
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .unwrap()
+            .map_err(|_| ModelManagerError::LockPoisoned("kv_choosers"))
+            .context("failed to acquire kv_choosers lock for insert")?
             .insert(model_name.to_string(), new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }

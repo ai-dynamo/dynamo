@@ -83,7 +83,7 @@ impl ModelWatcher {
     pub async fn wait_for_chat_model(&self) -> String {
         // Loop in case it gets added and immediately deleted
         loop {
-            if let Some(model_name) = self.manager.list_chat_completions_models().first() {
+            if let Some(model_name) = self.manager.list_chat_completions_models().unwrap().first() {
                 return model_name.to_owned();
             }
             self.notify_on_model.notified().await
@@ -117,7 +117,7 @@ impl ModelWatcher {
                             continue;
                         }
                     };
-                    self.manager.save_model_entry(key, model_entry.clone());
+                    let _ = self.manager.save_model_entry(key, model_entry.clone());
 
                     if let Some(tx) = &self.model_update_tx {
                         tx.send(ModelUpdate::Added(model_entry.model_type))
@@ -125,7 +125,7 @@ impl ModelWatcher {
                             .ok();
                     }
 
-                    if self.manager.has_model_any(&model_entry.name) {
+                    if self.manager.has_model_any(&model_entry.name).unwrap() {
                         tracing::trace!(name = model_entry.name, "New endpoint for existing model");
                         self.notify_on_model.notify_waiters();
                         continue;
@@ -164,7 +164,7 @@ impl ModelWatcher {
     /// Returns the name of the model we just deleted, if any.
     async fn handle_delete(&self, kv: &KeyValue) -> anyhow::Result<Option<String>> {
         let key = kv.key_str()?;
-        let model_entry = match self.manager.remove_model_entry(key) {
+        let model_entry = match self.manager.remove_model_entry(key)? {
             Some(entry) => entry,
             None => {
                 anyhow::bail!("Missing ModelEntry for {key}");
@@ -179,26 +179,26 @@ impl ModelWatcher {
             let mut update_tx = true;
             let mut model_type: ModelType = model_entry.model_type;
             if model_entry.model_type == ModelType::Chat
-                && self.manager.list_chat_completions_models().is_empty()
+                && self.manager.list_chat_completions_models()?.is_empty()
             {
                 self.manager.remove_chat_completions_model(&model_name).ok();
                 model_type = ModelType::Chat;
             } else if model_entry.model_type == ModelType::Completion
-                && self.manager.list_completions_models().is_empty()
+                && self.manager.list_completions_models()?.is_empty()
             {
                 self.manager.remove_completions_model(&model_name).ok();
                 model_type = ModelType::Completion;
             } else if model_entry.model_type == ModelType::Embedding
-                && self.manager.list_embeddings_models().is_empty()
+                && self.manager.list_embeddings_models()?.is_empty()
             {
                 self.manager.remove_embeddings_model(&model_name).ok();
                 model_type = ModelType::Embedding;
             } else if model_entry.model_type == ModelType::Backend {
-                if self.manager.list_chat_completions_models().is_empty() {
+                if self.manager.list_chat_completions_models()?.is_empty() {
                     self.manager.remove_chat_completions_model(&model_name).ok();
                     model_type = ModelType::Chat;
                 }
-                if self.manager.list_completions_models().is_empty() {
+                if self.manager.list_completions_models()?.is_empty() {
                     self.manager.remove_completions_model(&model_name).ok();
                     if model_type == ModelType::Chat {
                         model_type = ModelType::Backend;
@@ -228,14 +228,17 @@ impl ModelWatcher {
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
 
-        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
+        if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models()?.is_empty()
+        {
             chat_model_removed = true;
         }
-        if completions_model_remove_err.is_ok() && self.manager.list_completions_models().is_empty()
+        if completions_model_remove_err.is_ok()
+            && self.manager.list_completions_models()?.is_empty()
         {
             completions_model_removed = true;
         }
-        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
+        if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models()?.is_empty()
+        {
             embeddings_model_removed = true;
         }
 

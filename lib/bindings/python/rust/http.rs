@@ -78,11 +78,19 @@ impl HttpService {
     }
 
     pub fn list_chat_completions_models(&self) -> PyResult<Vec<String>> {
-        Ok(self.inner.model_manager().list_chat_completions_models())
+        Ok(self
+            .inner
+            .model_manager()
+            .list_chat_completions_models()
+            .unwrap())
     }
 
     pub fn list_completions_models(&self) -> PyResult<Vec<String>> {
-        Ok(self.inner.model_manager().list_completions_models())
+        Ok(self
+            .inner
+            .model_manager()
+            .list_completions_models()
+            .unwrap())
     }
 
     fn run<'p>(&self, py: Python<'p>, token: CancellationToken) -> PyResult<Bound<'p, PyAny>> {

@@ -927,7 +927,7 @@ async fn list_models_openai(
         .as_secs();
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state.manager().model_display_names();
+    let models: HashSet<String> = state.manager().model_display_names().unwrap();
     for model_name in models {
         data.push(ModelListing {
             id: model_name.clone(),

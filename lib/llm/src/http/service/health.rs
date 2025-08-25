@@ -52,7 +52,7 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    let model_entries = state.manager().get_model_entries();
+    let model_entries = state.manager().get_model_entries().unwrap();
     let instances = if let Some(etcd_client) = state.etcd_client() {
         match list_all_instances(etcd_client).await {
             Ok(instances) => instances,
