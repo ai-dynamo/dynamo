@@ -92,7 +92,7 @@ export IMAGE_TAG=<your-pick>
 ./container/build.sh
 docker tag dynamo:latest-vllm <your-registry>/dynamo-base:$IMAGE_TAG
 docker login <your-registry>
-docker push <your-registry>/dynamo-base:latest-vllm
+docker push <your-registry>/dynamo-base:$IMAGE_TAG
 ```
 
 ### Install Dynamo Cloud
