@@ -913,7 +913,7 @@ mod test_metricsregistry_units {
 #[cfg(test)]
 mod test_metricsregistry_prefixes {
     use super::*;
-    use crate::distributed::test_helpers::create_test_drt_async;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
     use prometheus::core::Collector;
 
     #[tokio::test]
@@ -1047,7 +1047,7 @@ mod test_metricsregistry_prometheus_fmt_outputs {
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
     use super::prometheus_names::{nats_client, nats_service};
     use super::*;
-    use crate::distributed::test_helpers::create_test_drt_async;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
     use prometheus::Counter;
     use std::sync::Arc;
 
@@ -1308,7 +1308,7 @@ mod test_metricsregistry_nats {
     use super::prometheus_names::{COMPONENT_NATS_METRICS, DRT_NATS_METRICS};
     use super::prometheus_names::{nats_client, nats_service};
     use super::*;
-    use crate::distributed::test_helpers::create_test_drt_async;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
     use crate::pipeline::PushRouter;
     use crate::{DistributedRuntime, Runtime};
     use tokio::time::{Duration, sleep};
