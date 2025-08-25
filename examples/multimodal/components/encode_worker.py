@@ -32,7 +32,6 @@ from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import connect
 from utils.args import Config, base_parse_args, parse_endpoint
 from utils.image_loader import ImageLoader
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
