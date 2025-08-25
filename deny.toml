@@ -32,7 +32,8 @@ allow = [
     "BSL-1.0",
     "MPL-2.0",
     "CDLA-Permissive-2.0",
-    "Zlib"
+    "Zlib",
+    "NCSA"
 ]
 
 # TODO exceptions
