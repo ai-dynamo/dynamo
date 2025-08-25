@@ -7,7 +7,9 @@ pub mod kserve_test {
         tonic::include_proto!("inference");
     }
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
-    use inference::{ModelInferRequest, ModelInferResponse, ModelMetadataRequest,  ModelConfigRequest, DataType};
+    use inference::{
+        DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,
+    };
 
     use anyhow::Error;
     use async_stream::stream;
@@ -873,7 +875,7 @@ pub mod kserve_test {
             Arc<SplitEngine>,
             Arc<AlwaysFailEngine>,
             Arc<LongRunningEngine>,
-        )
+        ),
     ) {
         // start server
         let _running = RunningService::spawn(service_with_engines.0);
@@ -944,11 +946,7 @@ pub mod kserve_test {
                         io.datatype, "BOOL",
                         "Expected 'streaming' to have datatype 'BOOL'"
                     );
-                    assert_eq!(
-                        io.shape,
-                        vec![1],
-                        "Expected 'streaming' to have shape [1]"
-                    );
+                    assert_eq!(io.shape, vec![1], "Expected 'streaming' to have shape [1]");
                 }
                 _ => panic!("Unexpected output name: {}", io.name),
             }
@@ -988,13 +986,17 @@ pub mod kserve_test {
             version: "1".into(),
         });
 
-        let response = client.model_config(request).await.unwrap().into_inner().config;
+        let response = client
+            .model_config(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .config;
         let Some(config) = response else {
-          panic!("Expected Some(config), got None");
+            panic!("Expected Some(config), got None");
         };
         assert_eq!(
-            config.name,
-            model_name,
+            config.name, model_name,
             "Expected response of the same model name",
         );
         // input
@@ -1002,25 +1004,19 @@ pub mod kserve_test {
             match io.name.as_str() {
                 "text_input" => {
                     assert_eq!(
-                        io.data_type, DataType::TypeString as i32,
+                        io.data_type,
+                        DataType::TypeString as i32,
                         "Expected 'text_input' to have datatype 'TYPE_STRING'"
                     );
-                    assert_eq!(
-                        io.dims,
-                        vec![1],
-                        "Expected 'text_output' to have shape [1]"
-                    );
+                    assert_eq!(io.dims, vec![1], "Expected 'text_output' to have shape [1]");
                 }
                 "streaming" => {
                     assert_eq!(
-                        io.data_type, DataType::TypeBool as i32,
+                        io.data_type,
+                        DataType::TypeBool as i32,
                         "Expected 'streaming' to have datatype 'TYPE_BOOL'"
                     );
-                    assert_eq!(
-                        io.dims,
-                        vec![1],
-                        "Expected 'streaming' to have shape [1]"
-                    );
+                    assert_eq!(io.dims, vec![1], "Expected 'streaming' to have shape [1]");
                 }
                 _ => panic!("Unexpected output name: {}", io.name),
             }
@@ -1030,7 +1026,8 @@ pub mod kserve_test {
             match io.name.as_str() {
                 "text_output" => {
                     assert_eq!(
-                        io.data_type, DataType::TypeString as i32,
+                        io.data_type,
+                        DataType::TypeString as i32,
                         "Expected 'text_output' to have datatype 'TYPE_STRING'"
                     );
                     assert_eq!(
@@ -1041,7 +1038,8 @@ pub mod kserve_test {
                 }
                 "finish_reason" => {
                     assert_eq!(
-                        io.data_type, DataType::TypeString as i32,
+                        io.data_type,
+                        DataType::TypeString as i32,
                         "Expected 'finish_reason' to have datatype 'TYPE_STRING'"
                     );
                     assert_eq!(
