@@ -20,7 +20,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use tokio::time::{self, sleep_until, Duration, Instant, Sleep};
+use tokio::time::{self, Duration, Instant, Sleep, sleep_until};
 
 pub struct DeadlineStream<S> {
     stream: S,

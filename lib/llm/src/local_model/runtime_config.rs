@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelRuntimeConfig {

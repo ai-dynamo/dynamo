@@ -26,7 +26,7 @@ use tokio::sync::Mutex;
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{list_afinet_netifas, local_ip, local_ipv6, Error};
+use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::AsyncWriteExt,
@@ -41,14 +41,14 @@ use super::{
 };
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
+    PipelineError,
     network::{
+        ResponseService, ResponseStreamPrologue,
         codec::{TwoPartMessage, TwoPartMessageType},
         tcp::StreamType,
-        ResponseService, ResponseStreamPrologue,
     },
-    PipelineError,
 };
-use crate::{error, ErrorContext, Result};
+use crate::{ErrorContext, Result, error};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -461,7 +461,9 @@ async fn tcp_listener(
             }))
             .is_err()
         {
-            return Err(error!("The requester of the stream has been dropped before the connection was established"));
+            return Err(error!(
+                "The requester of the stream has been dropped before the connection was established"
+            ));
         }
 
         let (control_tx, control_rx) = mpsc::channel::<ControlMessage>(1);
@@ -539,13 +541,12 @@ async fn tcp_listener(
                                 }
                             }
 
-                            if !data.is_empty() {
-                                if let Err(err) = response_tx.send(data).await {
+                            if !data.is_empty()
+                                && let Err(err) = response_tx.send(data).await {
                                     tracing::debug!("forwarding body/data message to response channel failed: {}", err);
                                     control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
                                     break;
                                 };
-                            }
                         }
                         Some(Err(_)) => {
                             // TODO(#171) - address fatal errors

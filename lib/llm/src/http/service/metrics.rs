@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
 use std::{
     sync::Arc,
@@ -538,7 +538,7 @@ async fn handler_metrics(State(registry): State<Arc<Registry>>) -> impl IntoResp
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to encode metrics",
             )
-                .into_response()
+                .into_response();
         }
     };
 

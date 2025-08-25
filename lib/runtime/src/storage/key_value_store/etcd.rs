@@ -186,11 +186,10 @@ impl EtcdBucket {
         // Key already existed, get its version
         if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
             result.op_responses().into_iter().next()
+            && let Some(kv) = get_resp.kvs().first()
         {
-            if let Some(kv) = get_resp.kvs().first() {
-                let version = kv.version() as u64;
-                return Ok(StorageOutcome::Exists(version));
-            }
+            let version = kv.version() as u64;
+            return Ok(StorageOutcome::Exists(version));
         }
         // Shouldn't happen, but handle edge case
         Err(StorageError::EtcdError(
@@ -259,7 +258,7 @@ fn make_key(bucket_name: &str, key: &str) -> String {
 #[cfg(test)]
 mod concurrent_create_tests {
     use super::*;
-    use crate::{distributed::DistributedConfig, DistributedRuntime, Runtime};
+    use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use std::sync::Arc;
     use tokio::sync::Barrier;
 

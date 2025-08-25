@@ -7,8 +7,8 @@ use crate::{
     component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
     pipeline::{
-        error::{PipelineError, PipelineErrorExt},
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+        error::{PipelineError, PipelineErrorExt},
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
@@ -23,8 +23,8 @@ use std::{
     future::Future,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tokio_stream::StreamExt;
@@ -242,10 +242,10 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                    if matches!(req_err.kind(), NatsNoResponders) {
-                        self.client.report_instance_down(instance_id);
-                    }
+                if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
+                    && matches!(req_err.kind(), NatsNoResponders)
+                {
+                    self.client.report_instance_down(instance_id);
                 }
                 Err(err)
             }

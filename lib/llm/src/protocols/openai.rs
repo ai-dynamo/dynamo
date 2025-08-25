@@ -5,8 +5,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
+    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
 use crate::protocols::openai::common_ext::CommonExtProvider;
 
@@ -20,7 +20,7 @@ pub mod responses;
 pub mod validate;
 
 use validate::{
-    validate_range, FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE,
+    FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -147,10 +147,10 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
 
-        if let Some(stop) = &stop {
-            if stop.len() > 4 {
-                anyhow::bail!("stop conditions must be less than 4")
-            }
+        if let Some(stop) = &stop
+            && stop.len() > 4
+        {
+            anyhow::bail!("stop conditions must be less than 4")
         }
 
         // Use the trait method to get ignore_eos, which handles precedence

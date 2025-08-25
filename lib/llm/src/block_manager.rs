@@ -38,18 +38,18 @@ pub mod controller;
 
 pub use crate::common::dtype::DType;
 pub use block::{
+    BasicMetadata, BlockMetadata, Blocks, ImmutableBlock, MutableBlock,
     locality::{self, LocalityProvider, LogicalResources},
     nixl::{BlockDescriptorList, IsImmutable, IsMutable, MutabilityKind, RemoteBlock},
-    BasicMetadata, BlockMetadata, Blocks, ImmutableBlock, MutableBlock,
 };
 pub use config::*;
 
-pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
+pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
 pub use offload::request::BlockResult;
 pub use pool::{BlockPool, ManagedBlockPool};
 pub use storage::{
-    nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
-    StorageAllocator,
+    DeviceStorage, DiskStorage, PinnedStorage, Storage, StorageAllocator,
+    nixl::NixlRegisterableStorage,
 };
 pub use tokio_util::sync::CancellationToken;
 

@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig},
     kv_router::{KvPushRouter, KvRouter},
@@ -15,15 +15,16 @@ use crate::{
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     types::{
+        Annotated,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             OpenAIChatCompletionsStreamingEngine,
         },
-        Annotated,
     },
 };
 
 use dynamo_runtime::{
+    DistributedRuntime, Runtime,
     component::Client,
     distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
@@ -31,7 +32,6 @@ use dynamo_runtime::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
         ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
-    DistributedRuntime, Runtime,
 };
 use std::sync::Arc;
 
@@ -191,11 +191,11 @@ where
     Req: Data,
     Resp: Data,
     OpenAIPreprocessor: Operator<
-        Context<Req>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-        Context<PreprocessedRequest>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-    >,
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
 {
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor = OpenAIPreprocessor::new((*card).clone())
@@ -224,11 +224,11 @@ where
     Req: Data,
     Resp: Data,
     OpenAIPreprocessor: Operator<
-        Context<Req>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-        Context<PreprocessedRequest>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-    >,
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();

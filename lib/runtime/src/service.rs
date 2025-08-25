@@ -20,13 +20,13 @@
 // component's "service state"
 
 use crate::{
+    DistributedRuntime, Result,
     component::Component,
     error,
-    metrics::{prometheus_names, prometheus_names::nats_service, MetricsRegistry},
+    metrics::{MetricsRegistry, prometheus_names, prometheus_names::nats_service},
     traits::*,
     transports::nats,
     utils::stream,
-    DistributedRuntime, Result,
 };
 
 use async_nats::Message;
@@ -35,7 +35,7 @@ use bytes::Bytes;
 use derive_getters::Dissolve;
 use futures::stream::{StreamExt, TryStreamExt};
 use prometheus;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::time::Duration;
 
 pub struct ServiceClient {

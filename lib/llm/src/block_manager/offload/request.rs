@@ -18,7 +18,7 @@ use std::sync::Weak;
 use tokio::sync::oneshot;
 
 use crate::block_manager::block::{
-    locality::LocalityProvider, BlockMetadata, ImmutableBlock, MutableBlock,
+    BlockMetadata, ImmutableBlock, MutableBlock, locality::LocalityProvider,
 };
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::Storage;

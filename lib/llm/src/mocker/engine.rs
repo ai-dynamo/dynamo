@@ -22,18 +22,18 @@ use crate::kv_router::publisher::WorkerMetricsPublisher;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::TokenIdType;
-use dynamo_runtime::protocols::annotated::Annotated;
+use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::protocols::annotated::Annotated;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
+    Result,
     component::Component,
     engine::AsyncEngineContextProvider,
-    pipeline::{async_trait, AsyncEngine, Error, ManyOut, ResponseStream, SingleIn},
+    pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
-    Result,
 };
 
 use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
@@ -43,7 +43,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -523,14 +523,14 @@ pub async fn make_mocker_engine(
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::kv_router::indexer::RouterEvent;
     use crate::kv_router::KV_EVENT_SUBJECT;
+    use crate::kv_router::indexer::RouterEvent;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::{
-        pipeline::Context,
-        pipeline::{network::Ingress, PushRouter},
-        traits::events::EventSubscriber,
         DistributedRuntime, Worker,
+        pipeline::Context,
+        pipeline::{PushRouter, network::Ingress},
+        traits::events::EventSubscriber,
     };
     use futures::StreamExt;
     use tokio::time::timeout;

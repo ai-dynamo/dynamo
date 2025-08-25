@@ -18,7 +18,7 @@ use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
 };
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;

@@ -9,18 +9,18 @@ use crate::{
     model_type::ModelType,
     preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
+        Annotated,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        Annotated,
     },
 };
 
 use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
-    network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
+    Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source, network::Ingress,
 };
-use dynamo_runtime::{protocols::EndpointId, DistributedRuntime};
+use dynamo_runtime::{DistributedRuntime, protocols::EndpointId};
 
 use crate::entrypoint::EngineConfig;
 
@@ -125,13 +125,12 @@ pub async fn run(
     result?;
 
     // Cleanup on shutdown
-    if let Some(mut card) = card {
-        if let Err(err) = card
+    if let Some(mut card) = card
+        && let Err(err) = card
             .delete_from_nats(distributed_runtime.nats_client())
             .await
-        {
-            tracing::error!(%err, "delete_from_nats error on shutdown");
-        }
+    {
+        tracing::error!(%err, "delete_from_nats error on shutdown");
     }
 
     Ok(())

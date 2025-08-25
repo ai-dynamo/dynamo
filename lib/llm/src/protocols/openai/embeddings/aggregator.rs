@@ -15,8 +15,9 @@
 
 use super::NvCreateEmbeddingResponse;
 use crate::protocols::{
+    Annotated,
     codec::{Message, SseCodecError},
-    convert_sse_stream, Annotated,
+    convert_sse_stream,
 };
 
 use dynamo_runtime::engine::DataStream;
@@ -71,24 +72,23 @@ impl DeltaAggregator {
                     }
                 };
 
-                if aggregator.error.is_none() {
-                    if let Some(response) = delta.data {
-                        // For embeddings, we typically expect a single complete response
-                        // or we accumulate data from multiple responses
-                        match &mut aggregator.response {
-                            Some(existing) => {
-                                // Merge embedding data if we have multiple responses
-                                existing.inner.data.extend(response.inner.data);
+                if aggregator.error.is_none()
+                    && let Some(response) = delta.data
+                {
+                    // For embeddings, we typically expect a single complete response
+                    // or we accumulate data from multiple responses
+                    match &mut aggregator.response {
+                        Some(existing) => {
+                            // Merge embedding data if we have multiple responses
+                            existing.inner.data.extend(response.inner.data);
 
-                                // Update usage statistics
-                                existing.inner.usage.prompt_tokens +=
-                                    response.inner.usage.prompt_tokens;
-                                existing.inner.usage.total_tokens +=
-                                    response.inner.usage.total_tokens;
-                            }
-                            None => {
-                                aggregator.response = Some(response);
-                            }
+                            // Update usage statistics
+                            existing.inner.usage.prompt_tokens +=
+                                response.inner.usage.prompt_tokens;
+                            existing.inner.usage.total_tokens += response.inner.usage.total_tokens;
+                        }
+                        None => {
+                            aggregator.response = Some(response);
                         }
                     }
                 }

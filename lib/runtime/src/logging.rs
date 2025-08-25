@@ -30,43 +30,43 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
 
 use figment::{
-    providers::{Format, Serialized, Toml},
     Figment,
+    providers::{Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::time::LocalTime;
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::time::UtcTime;
-use tracing_subscriber::fmt::{format::Writer, FormattedFields};
 use tracing_subscriber::fmt::{FmtContext, FormatFields};
+use tracing_subscriber::fmt::{FormattedFields, format::Writer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
 use axum::http;
-use axum::http::request::Parts;
 use axum::http::Request;
+use axum::http::request::Parts;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::time::Instant;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
-use tracing::field::Field;
-use tracing::span;
 use tracing::Id;
 use tracing::Span;
+use tracing::field::Field;
+use tracing::span;
+use tracing_subscriber::Layer;
+use tracing_subscriber::Registry;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanData;
-use tracing_subscriber::Layer;
-use tracing_subscriber::Registry;
 use uuid::Uuid;
 
 /// ENV used to set the log level
@@ -340,18 +340,15 @@ where
                 x_dynamo_request_id = Some(x_request_id_input.to_string());
             }
 
-            if parent_id.is_none() {
-                if let Some(parent_span_id) = ctx.current_span().id() {
-                    if let Some(parent_span) = ctx.span(parent_span_id) {
-                        let parent_ext = parent_span.extensions();
-                        if let Some(parent_tracing_context) =
-                            parent_ext.get::<DistributedTraceContext>()
-                        {
-                            trace_id = Some(parent_tracing_context.trace_id.clone());
-                            parent_id = Some(parent_tracing_context.span_id.clone());
-                            tracestate = parent_tracing_context.tracestate.clone();
-                        }
-                    }
+            if parent_id.is_none()
+                && let Some(parent_span_id) = ctx.current_span().id()
+                && let Some(parent_span) = ctx.span(parent_span_id)
+            {
+                let parent_ext = parent_span.extensions();
+                if let Some(parent_tracing_context) = parent_ext.get::<DistributedTraceContext>() {
+                    trace_id = Some(parent_tracing_context.trace_id.clone());
+                    parent_id = Some(parent_tracing_context.span_id.clone());
+                    tracestate = parent_tracing_context.tracestate.clone();
                 }
             }
 
@@ -787,7 +784,7 @@ impl tracing::field::Visit for JsonVisitor {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use chrono::{DateTime, Utc};
     use jsonschema::{Draft, JSONSchema};
     use serde_json::Value;
@@ -1009,14 +1006,20 @@ pub mod tests {
 
                 // Parent span has no parent_id
                 for log_line in &lines {
-                    if log_line.get("span_name").unwrap().as_str().unwrap() == "parent" {
+                    if let Some(span_name) = log_line.get("span_name")
+                        && let Some(span_name_str) = span_name.as_str()
+                        && span_name_str == "parent"
+                    {
                         assert!(log_line.get("parent_id").is_none());
                     }
                 }
 
                 // Child span's parent_id is parent_span_id
                 for log_line in &lines {
-                    if log_line.get("span_name").unwrap().as_str().unwrap() == "child" {
+                    if let Some(span_name) = log_line.get("span_name")
+                        && let Some(span_name_str) = span_name.as_str()
+                        && span_name_str == "child"
+                    {
                         assert_eq!(
                             log_line.get("parent_id").unwrap().as_str().unwrap(),
                             &parent_span_id
@@ -1026,7 +1029,10 @@ pub mod tests {
 
                 // Grandchild span's parent_id is child_span_id
                 for log_line in &lines {
-                    if log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild" {
+                    if let Some(span_name) = log_line.get("span_name")
+                        && let Some(span_name_str) = span_name.as_str()
+                        && span_name_str == "grandchild"
+                    {
                         assert_eq!(
                             log_line.get("parent_id").unwrap().as_str().unwrap(),
                             &child_span_id

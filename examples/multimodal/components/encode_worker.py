@@ -28,7 +28,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 import dynamo.nixl_connect as connect
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -56,8 +56,13 @@ CACHE_SIZE_MAXIMUM = 8
 
 
 class VllmEncodeWorker:
-    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs) -> None:
-        self.downstream_endpoint = args.downstream_endpoint
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        engine_args: AsyncEngineArgs,
+        pd_worker_client: Client,
+    ) -> None:
+        self.pd_worker_client = pd_worker_client
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
@@ -178,16 +183,6 @@ class VllmEncodeWorker:
 
     async def async_init(self, runtime: DistributedRuntime):
         logger.info("Startup started.")
-        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-            self.downstream_endpoint
-        )
-        self.pd_worker_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         self._connector = connect.Connector()
@@ -262,8 +257,21 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     generate_endpoint = component.endpoint(config.endpoint)
 
-    handler = VllmEncodeWorker(args, config.engine_args)
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        args.downstream_endpoint
+    )
+    pd_worker_client = (
+        await runtime.namespace(parsed_namespace)
+        .component(parsed_component_name)
+        .endpoint(parsed_endpoint_name)
+        .client()
+    )
+
+    handler = VllmEncodeWorker(args, config.engine_args, pd_worker_client)
     await handler.async_init(runtime)
+
+    logger.info("Waiting for PD Worker Instances ...")
+    await pd_worker_client.wait_for_instances()
 
     logger.info(f"Starting to serve the {args.endpoint} endpoint...")
 

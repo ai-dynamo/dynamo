@@ -17,7 +17,7 @@
 //
 use async_nats::error::Error as NatsError;
 
-pub use anyhow::{anyhow, anyhow as error, bail, ensure, Context, Error, Result};
+pub use anyhow::{Context, Error, Result, anyhow, anyhow as error, bail, ensure};
 
 pub trait PipelineErrorExt {
     /// Downcast the [`Error`] to a [`PipelineError`]

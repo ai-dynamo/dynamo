@@ -19,8 +19,8 @@ use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::info_span;
 use tracing::Instrument;
+use tracing::info_span;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
@@ -175,9 +175,9 @@ where
                                 .with_label_values(&["deserialization"])
                                 .inc();
                         }
-                        return Err(PipelineError::DeserializationError(
-                            format!("Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"),
-                        ));
+                        return Err(PipelineError::DeserializationError(format!(
+                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
+                        )));
                     }
                 };
                 let request: T = serde_json::from_slice(&data)?;
@@ -189,7 +189,9 @@ where
                         .with_label_values(&["invalid_message"])
                         .inc();
                 }
-                return Err(PipelineError::Generic(String::from("Unexpected message from work queue; unable extract a TwoPartMessage with a header and data")));
+                return Err(PipelineError::Generic(String::from(
+                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
+                )));
             }
         };
 

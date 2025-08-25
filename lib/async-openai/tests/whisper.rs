@@ -9,7 +9,7 @@
 // Licensed under Apache 2.0
 
 use dynamo_async_openai::types::CreateTranslationRequestArgs;
-use dynamo_async_openai::{types::CreateTranscriptionRequestArgs, Client};
+use dynamo_async_openai::{Client, types::CreateTranscriptionRequestArgs};
 use tokio_test::assert_err;
 
 #[tokio::test]

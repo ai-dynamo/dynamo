@@ -11,6 +11,7 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
@@ -18,7 +19,6 @@ use crate::{
         ProjectServiceAccountCreateResponse, ProjectServiceAccountDeleteResponse,
         ProjectServiceAccountListResponse,
     },
-    Client,
 };
 
 /// Manage service accounts within a project. A service account is a bot user that is not

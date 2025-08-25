@@ -11,10 +11,10 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{ListRunStepsResponse, RunStepObject},
-    Client,
 };
 
 /// Represents a step in execution of a run.

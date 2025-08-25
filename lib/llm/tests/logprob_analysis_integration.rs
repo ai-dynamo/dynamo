@@ -235,8 +235,8 @@ fn create_multi_choice_stream() -> Arc<RecordedStream<NvCreateChatCompletionStre
 //         record_stream_with_context(Box::pin(filtered_stream), ctx, RecordingMode::Sink);
 // }
 
-fn create_stream_with_multiple_close_tokens(
-) -> Arc<RecordedStream<NvCreateChatCompletionStreamResponse>> {
+fn create_stream_with_multiple_close_tokens()
+-> Arc<RecordedStream<NvCreateChatCompletionStreamResponse>> {
     let start_time = Instant::now();
     let responses = vec![TimestampedResponse::new(
         create_response_with_linear_probs(

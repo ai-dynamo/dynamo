@@ -11,13 +11,13 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
         CreateFineTuningJobRequest, FineTuningJob, ListFineTuningJobCheckpointsResponse,
         ListFineTuningJobEventsResponse, ListPaginatedFineTuningJobsResponse,
     },
-    Client,
 };
 
 /// Manage fine-tuning jobs to tailor a model to your specific training data.

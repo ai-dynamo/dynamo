@@ -148,19 +148,18 @@ impl EndpointConfigBuilder {
 
         let info = serde_json::to_vec_pretty(&info)?;
 
-        if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
-            if let Err(e) = etcd_client
+        if let Some(etcd_client) = &endpoint.component.drt.etcd_client
+            && let Err(e) = etcd_client
                 .kv_create(
                     &endpoint.etcd_path_with_lease_id(lease_id),
                     info,
                     Some(lease_id),
                 )
                 .await
-            {
-                tracing::error!("Failed to register discoverable service: {:?}", e);
-                cancel_token.cancel();
-                return Err(error!("Failed to register discoverable service"));
-            }
+        {
+            tracing::error!("Failed to register discoverable service: {:?}", e);
+            cancel_token.cancel();
+            return Err(error!("Failed to register discoverable service"));
         }
         task.await??;
 

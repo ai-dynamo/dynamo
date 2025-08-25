@@ -11,13 +11,13 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
         ProjectUser, ProjectUserCreateRequest, ProjectUserDeleteResponse, ProjectUserListResponse,
         ProjectUserUpdateRequest,
     },
-    Client,
 };
 
 /// Manage users within a project, including adding, updating roles, and removing users.

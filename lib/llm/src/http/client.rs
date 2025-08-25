@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use derive_getters::Dissolve;
-use dynamo_async_openai::{config::OpenAIConfig, error::OpenAIError, Client};
+use dynamo_async_openai::{Client, config::OpenAIConfig, error::OpenAIError};
 use futures::Stream;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -22,10 +22,10 @@ use tracing;
 use uuid::Uuid;
 
 // Import our existing recording infrastructure
+use crate::protocols::Annotated;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
-use crate::protocols::Annotated;
 use dynamo_runtime::engine::{
     AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data, DataStream,
 };
@@ -523,7 +523,7 @@ impl GenericBYOTClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn test_http_request_context_creation() {

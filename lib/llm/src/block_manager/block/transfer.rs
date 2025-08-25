@@ -22,8 +22,8 @@ mod strategy;
 use super::*;
 
 use crate::block_manager::storage::{
-    nixl::{NixlRegisterableStorage, NixlStorage},
     DeviceStorage, DiskStorage, PinnedStorage, SystemStorage,
+    nixl::{NixlRegisterableStorage, NixlStorage},
 };
 
 use cudarc::driver::CudaStream;
