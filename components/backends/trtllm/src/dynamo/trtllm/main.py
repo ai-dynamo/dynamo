@@ -266,7 +266,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.info(
                 f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
             )
-            next_client.wait_for_instances()
+            await next_client.wait_for_instances()
 
         if is_first_worker(config):
             # Register the model with runtime config
