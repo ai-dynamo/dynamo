@@ -14,7 +14,7 @@ Use this approach when installing from pre-built helm charts and docker images p
 
 ```bash
 export NAMESPACE=dynamo-cloud
-export RELEASE_VERSION=0.4.0
+export RELEASE_VERSION=0.4.1
 ```
 
 Install `envsubst`, `kubectl`, `helm`

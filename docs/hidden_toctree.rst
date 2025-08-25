@@ -29,6 +29,7 @@
    guides/dynamo_deploy/gke_setup.md
    guides/dynamo_deploy/grove.md
    guides/dynamo_deploy/k8s_metrics.md
+   guides/dynamo_deploy/model_caching_with_fluid.md
    guides/dynamo_deploy/README.md
    guides/dynamo_deploy/quickstart.md
    guides/dynamo_run.md
@@ -36,6 +37,7 @@
    guides/run_kvbm_in_vllm.md
 
    architecture/kv_cache_routing.md
+   architecture/load_planner.md
    architecture/request_migration.md
 
    components/backends/trtllm/multinode/multinode-examples.md

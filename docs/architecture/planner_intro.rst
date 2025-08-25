@@ -72,6 +72,5 @@ Key features include:
 
    Overview <self>
    Pre-Deployment Profiling <pre_deployment_profiling.md>
-   Load-based Planner <load_planner.md>
    SLA-based Planner <sla_planner.md>
    Planner Benchmark <../guides/planner_benchmark/README.md>
