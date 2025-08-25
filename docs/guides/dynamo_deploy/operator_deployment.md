@@ -1,1 +1,0 @@
-../../../guides/dynamo_deploy/operator_deployment.md
