@@ -86,6 +86,7 @@ python benchmarks/sin_load_generator/sin_synth.py \
 
 The dataset starts at 12 requests/s, increases to 36 requests/s at t=300s, decreases back to 12 requests/s at t=600s, and repeats.
 The total duration is 30 minutes or 1800 seconds.
+
 ## Planner Dry Run
 
 Before testing SLA planner on real deployments, we provide a dry run feature to test the autoscaling behavior on a given dataset. Specifically, in dry run mode,
@@ -129,3 +130,49 @@ The second plot shows the actual ISL/OSL and the predicted ISL/OSL. The first tw
 The third plot shows the actual prefill throughput, number of prefill workers that planner scales, and the safe throughput limit with the number of prefill workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the TTFT SLA. Note that in the real deployment, due to other factors such as queueing, load balancing, KV cache transfer latency, and ISL variance, it is not guaranteed that the actual deployment can adhere the TTFT SLA.
 
 The fourth plot, similar to the third plot, shows the actual decode throughput, number of decode workers that planner scales, and the safe throughput limit with the number of decode workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the ITL SLA. Note that in the real deployment, due to other factors such as load balancing and OSL variance, it is not guaranteed that the actual deployment can adhere the ITL SLA.
+
+## Scaling Tests
+
+This directory contains comprehensive tests for validating the SLA planner's scaling behavior. The tests validate both the replica calculation logic and end-to-end scaling behavior.
+
+### Test Types
+
+1. **Unit Tests** (`test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
+2. **End-to-End Tests** (`run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
+
+### Quick Start
+
+#### Run Unit Tests Only
+Test the replica calculation logic without requiring Kubernetes:
+
+```bash
+python -m pytest test_replica_calculation.py -v
+```
+
+#### Run Full End-to-End Test
+Test complete scaling behavior including Kubernetes deployment and load generation:
+
+```bash
+./run_scaling_test.sh
+```
+
+With custom namespace:
+```bash
+./run_scaling_test.sh --namespace production
+```
+
+### Test Scenario
+
+The main test scenario validates scaling for **H200 with 1P1D configuration**:
+- **Phase 1**: 10 req/s (maintains 1P1D)
+- **Phase 2**: 20 req/s (scales to 2P1D - 2 prefill workers, 1 decode worker)
+- **ISL/OSL**: 3000/150 tokens
+
+### Prerequisites for E2E Tests
+
+- Kubernetes cluster with GPU nodes
+- kubectl configured and accessible
+- genai-perf available in PATH
+- Python dependencies installed
+
+For detailed configuration, troubleshooting, and architecture information, see [README_scaling_tests.md](README_scaling_tests.md).
