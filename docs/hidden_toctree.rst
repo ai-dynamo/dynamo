@@ -31,7 +31,6 @@
    guides/dynamo_deploy/k8s_metrics.md
    guides/dynamo_deploy/model_caching_with_fluid.md
    guides/dynamo_deploy/README.md
-   guides/dynamo_deploy/quickstart.md
    guides/dynamo_run.md
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
