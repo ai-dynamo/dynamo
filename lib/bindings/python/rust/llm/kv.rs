@@ -903,30 +903,40 @@ impl KvPushRouter {
         router_config_override: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
-        let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
-            Python::with_gil(|py| depythonize(obj.bind(py))).map_err(to_pyerr)?
-        } else {
-            StopConditions::default()
-        };
+        let (stop_conditions, sampling_options, output_options, router_config_override) =
+            Python::with_gil(|py| {
+                let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?
+                } else {
+                    StopConditions::default()
+                };
 
-        let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
-            Python::with_gil(|py| depythonize(obj.bind(py))).map_err(to_pyerr)?
-        } else {
-            SamplingOptions::default()
-        };
+                let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?
+                } else {
+                    SamplingOptions::default()
+                };
 
-        let output_options: OutputOptions = if let Some(obj) = output_options {
-            Python::with_gil(|py| depythonize(obj.bind(py))).map_err(to_pyerr)?
-        } else {
-            OutputOptions::default()
-        };
+                let output_options: OutputOptions = if let Some(obj) = output_options {
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?
+                } else {
+                    OutputOptions::default()
+                };
 
-        let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
-            if let Some(obj) = router_config_override {
-                Some(Python::with_gil(|py| depythonize(obj.bind(py))).map_err(to_pyerr)?)
-            } else {
-                None
-            };
+                let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+                    if let Some(obj) = router_config_override {
+                        Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+                    } else {
+                        None
+                    };
+
+                Ok::<_, PyErr>((
+                    stop_conditions,
+                    sampling_options,
+                    output_options,
+                    router_config_override,
+                ))
+            })?;
 
         // Build the PreprocessedRequest
         let request = llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder()
