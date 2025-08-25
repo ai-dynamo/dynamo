@@ -31,3 +31,7 @@ Currently, this will install lightweight tools for:
 Detailed information are provided in the `prefix_data_generator` directory.
 
 The benchmarking scripts for the core dynamo components are to come soon (e.g. routing, disagg, Planner).
+
+## Benchmarking Dynamo in Kubernetes
+
+To benchmark Dynamo deployments running on Kubernetes, follow the guide [here](../docs/benchmarks/benchmarking.md).

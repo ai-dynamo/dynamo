@@ -23,10 +23,6 @@ import numpy as np
 import yaml
 from utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
-from utils.dynamo_deployment import (
-    DynamoDeploymentClient,
-    cleanup_remaining_deployments,
-)
 from utils.genai_perf import benchmark_decode, benchmark_prefill
 from utils.plot import plot_decode_performance, plot_prefill_performance
 from utils.profile_cache import (
@@ -37,6 +33,11 @@ from utils.profile_cache import (
 )
 from utils.profile_decode import profile_decode
 from utils.profile_prefill import profile_prefill
+
+from deploy.utils.dynamo_deployment import (
+    DynamoDeploymentClient,
+    cleanup_remaining_deployments,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

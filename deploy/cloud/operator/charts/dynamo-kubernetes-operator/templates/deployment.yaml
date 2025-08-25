@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dynamo-kubernetes-operator.fullname" . }}-dynamo-controller-manager
+  labels:
+    app.kubernetes.io/component: manager
+    app.kubernetes.io/created-by: dynamo-kubernetes-operator
+    app.kubernetes.io/part-of: dynamo-kubernetes-operator
+    control-plane: controller-manager
+  {{- include "dynamo-kubernetes-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dynamoControllerManager.replicas }}
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+    {{- include "dynamo-kubernetes-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+      {{- include "dynamo-kubernetes-operator.selectorLabels" . | nindent 8 }}
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+    spec:
+      containers:
+      - args: {{- toYaml .Values.dynamoControllerManager.kubeRbacProxy.args | nindent 8
+          }}
+        env:
+        - name: KUBERNETES_CLUSTER_DOMAIN
+          value: {{ quote .Values.kubernetesClusterDomain }}
+        image: '{{ .Values.dynamoControllerManager.kubeRbacProxy.image.repository }}:{{
+          .Values.dynamoControllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
+          }}'
+        name: kube-rbac-proxy
+        ports:
+        - containerPort: 8443
+          name: https
+          protocol: TCP
+        resources: {{- toYaml .Values.dynamoControllerManager.kubeRbacProxy.resources |
+          nindent 10 }}
+        securityContext: {{- toYaml .Values.dynamoControllerManager.kubeRbacProxy.containerSecurityContext
+          | nindent 10 }}
+      - args: {{- toYaml .Values.dynamoControllerManager.manager.args | nindent 8 }}
+        command:
+        - /manager
+        env:
+        - name: KUBERNETES_CLUSTER_DOMAIN
+          value: {{ quote .Values.kubernetesClusterDomain }}
+        envFrom:
+        - secretRef:
+            name: dynamo-deployment-env
+        image: {{ .Values.dynamoControllerManager.manager.image.repository }}:{{ .Values.dynamoControllerManager.manager.image.tag
+          | default .Chart.AppVersion }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources: {{- toYaml .Values.dynamoControllerManager.manager.resources | nindent
+          10 }}
+        securityContext: {{- toYaml .Values.dynamoControllerManager.manager.containerSecurityContext
+          | nindent 10 }}
+      imagePullSecrets: {{ .Values.imagePullSecrets | default list | toJson }}
+      securityContext: {{- toYaml .Values.dynamoControllerManager.podSecurityContext |
+        nindent 8 }}
+      serviceAccountName: {{ include "dynamo-kubernetes-operator.fullname" . }}-controller-manager
+      terminationGracePeriodSeconds: 10

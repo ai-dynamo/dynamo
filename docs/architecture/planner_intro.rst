@@ -73,6 +73,6 @@ Key features include:
 .. toctree::
    :hidden:
 
-   Pre-Deployment Profiling <pre_deployment_profiling.md>
+   Pre-Deployment Profiling <../benchmarks/pre_deployment_profiling.md>
    Load-based Planner <load_planner.md>
    SLA-based Planner <sla_planner.md>

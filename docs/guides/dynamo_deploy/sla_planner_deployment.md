@@ -25,7 +25,7 @@ flowchart LR
 ## Prerequisites
 - Kubernetes cluster with GPU nodes
 - `hf-token-secret` created in target namespace
-- [Pre-Deployment Profiling](../../architecture/pre_deployment_profiling.md) results saved to `profiling-pvc` PVC.
+- [Pre-Deployment Profiling](../../benchmarks/pre_deployment_profiling.md) results saved to `dynamo-pvc` PVC.
 - Prefill and decode worker uses the best parallelization mapping suggested by the pre-deployment profiling script.
 
 ```bash
