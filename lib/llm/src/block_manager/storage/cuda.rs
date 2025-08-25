@@ -86,7 +86,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use cudarc::driver::{sys, CudaContext};
+use cudarc::driver::{CudaContext, sys};
 
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}

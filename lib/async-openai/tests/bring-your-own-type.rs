@@ -12,9 +12,9 @@
 //! The purpose of this test to make sure that all _byot methods compiles with custom types.
 use std::pin::Pin;
 
-use dynamo_async_openai::{error::OpenAIError, Client};
+use dynamo_async_openai::{Client, error::OpenAIError};
 use futures::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 impl dynamo_async_openai::traits::AsyncTryFrom<MyJson> for reqwest::multipart::Form {
     type Error = OpenAIError;

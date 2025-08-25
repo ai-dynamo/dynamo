@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelRuntimeConfig {
@@ -12,6 +12,10 @@ pub struct ModelRuntimeConfig {
     pub max_num_seqs: Option<u64>,
 
     pub max_num_batched_tokens: Option<u64>,
+
+    pub tool_call_parser: Option<String>,
+
+    pub reasoning_parser: Option<String>,
 
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

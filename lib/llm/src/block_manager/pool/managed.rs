@@ -589,7 +589,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
 #[cfg(test)]
 mod tests {
     use crate::block_manager::block::{BasicMetadata, Blocks};
-    use crate::block_manager::layout::{tests::setup_layout, FullyContiguous, LayoutConfig};
+    use crate::block_manager::layout::{FullyContiguous, LayoutConfig, tests::setup_layout};
 
     use crate::block_manager::locality::Local;
     use crate::tokens::{TokenBlockSequence, Tokens};

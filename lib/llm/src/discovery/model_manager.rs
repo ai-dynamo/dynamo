@@ -7,7 +7,7 @@ use dynamo_runtime::slug::Slug;
 
 use crate::discovery::ModelEntry;
 
-use crate::kv_router::{scheduler::DefaultWorkerSelector, KvRouterConfig};
+use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
     types::openai::{
@@ -245,6 +245,18 @@ impl ModelManager {
             .unwrap()
             .insert(model_name.to_string(), new_kv_chooser.clone());
         Ok(new_kv_chooser)
+    }
+
+    pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
+        match self.entries.lock() {
+            Ok(entries) => entries
+                .values()
+                .find(|entry| entry.name == model)
+                .and_then(|entry| entry.runtime_config.as_ref())
+                .and_then(|config| config.tool_call_parser.clone())
+                .map(|parser| parser.to_string()),
+            Err(_) => None,
+        }
     }
 }
 

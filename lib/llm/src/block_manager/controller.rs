@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use dynamo_runtime::{
     pipeline::{
-        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
     },
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,

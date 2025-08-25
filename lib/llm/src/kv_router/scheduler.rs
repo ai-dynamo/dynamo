@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
+use super::KV_HIT_RATE_SUBJECT;
+use super::KvRouterConfig;
+use super::WorkerSelector;
 use super::indexer::OverlapScores;
 use super::protocols::WorkerSelectionResult;
 use super::sequence::ActiveSequencesMultiWorker;
-use super::KvRouterConfig;
-use super::WorkerSelector;
-use super::KV_HIT_RATE_SUBJECT;
 
 use crate::tokens::SequenceHash;
 
@@ -293,7 +293,7 @@ fn softmax_sample(logits: &HashMap<i64, f64>, temperature: f64) -> i64 {
         // Collect all keys with the minimum logit value (to handle ties)
         let min_keys: Vec<_> = logits
             .iter()
-            .filter(|(_, &v)| v == min_logit)
+            .filter(|&(_, &v)| v == min_logit)
             .map(|(k, _)| *k)
             .collect();
 

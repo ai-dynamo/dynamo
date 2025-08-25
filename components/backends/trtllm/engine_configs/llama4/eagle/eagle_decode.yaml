@@ -17,23 +17,21 @@ backend: pytorch
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
 max_batch_size: 256
-max_num_tokens: 512
+max_num_tokens: 1024
 # 8704 = 8192 ISL + 512 OSL
 max_seq_len: 8704
 disable_overlap_scheduler: true
-enable_autotuner: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
   decoding_type: Eagle
-  max_draft_len: 1
+  max_draft_len: 3
   speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: false
+  eagle3_one_model: true
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
   enable_block_reuse: false
-  dtype: fp8
 
 cuda_graph_config:
   enable_padding: true

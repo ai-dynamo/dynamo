@@ -31,8 +31,8 @@ pub use network::egress::push_router::{PushRouter, RouterMode};
 pub mod registry;
 
 pub use crate::engine::{
-    self as engine, async_trait, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data,
-    DataStream, Engine, EngineStream, EngineUnary, ResponseStream,
+    self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream,
+    Engine, EngineStream, EngineUnary, ResponseStream, async_trait,
 };
 pub use anyhow::Error;
 pub use context::Context;

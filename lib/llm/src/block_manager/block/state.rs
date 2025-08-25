@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use derive_getters::Getters;
 
-use super::registry::{BlockHandle, RegistrationHandle};
 use super::Result;
+use super::registry::{BlockHandle, RegistrationHandle};
 use crate::tokens::{PartialTokenBlock, SaltHash, Token, TokenBlock, Tokens};
 
 #[derive(Debug, thiserror::Error)]

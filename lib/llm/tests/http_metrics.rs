@@ -15,7 +15,7 @@ use ports::get_random_port;
 #[serial]
 async fn metrics_prefix_default_then_env_override() {
     // Case 1: default prefix
-    env::remove_var(metrics::METRICS_PREFIX_ENV);
+    unsafe { env::remove_var(metrics::METRICS_PREFIX_ENV) };
     let p1 = get_random_port().await;
     let svc1 = HttpService::builder().port(p1).build().unwrap();
     let token1 = CancellationToken::new();
@@ -42,7 +42,7 @@ async fn metrics_prefix_default_then_env_override() {
     let _ = h1.await; // ensure port is released
 
     // Case 2: env override to prefix
-    env::set_var(metrics::METRICS_PREFIX_ENV, "custom_prefix");
+    unsafe { env::set_var(metrics::METRICS_PREFIX_ENV, "custom_prefix") };
     let p2 = get_random_port().await;
     let svc2 = HttpService::builder().port(p2).build().unwrap();
     let token2 = CancellationToken::new();
@@ -69,7 +69,7 @@ async fn metrics_prefix_default_then_env_override() {
     let _ = h2.await;
 
     // Case 3: invalid env prefix is sanitized
-    env::set_var(metrics::METRICS_PREFIX_ENV, "nv-llm/http service");
+    unsafe { env::set_var(metrics::METRICS_PREFIX_ENV, "nv-llm/http service") };
     let p3 = get_random_port().await;
     let svc3 = HttpService::builder().port(p3).build().unwrap();
     let token3 = CancellationToken::new();
@@ -94,7 +94,7 @@ async fn metrics_prefix_default_then_env_override() {
     let _ = h3.await;
 
     // Cleanup env to avoid leaking state
-    env::remove_var(metrics::METRICS_PREFIX_ENV);
+    unsafe { env::remove_var(metrics::METRICS_PREFIX_ENV) };
 }
 
 // Poll /metrics until ready or timeout

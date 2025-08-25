@@ -6,8 +6,8 @@
 // different types of workers to define their own load metrics and busy thresholds.
 
 use crate::component::{Client, InstanceSource};
-use crate::traits::events::EventSubscriber;
 use crate::traits::DistributedRuntimeProvider;
+use crate::traits::events::EventSubscriber;
 use crate::utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

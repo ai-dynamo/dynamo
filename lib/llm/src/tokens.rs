@@ -603,7 +603,11 @@ impl TokenBlockSequence {
             Some(range) => {
                 // Since we only added one token, the range can only be empty or have one element.
                 // If it's not empty, it must be `n..(n+1)`.
-                assert_eq!(range.len(), 1, "Appending a single token completed more than one block, which should be impossible.");
+                assert_eq!(
+                    range.len(),
+                    1,
+                    "Appending a single token completed more than one block, which should be impossible."
+                );
                 Ok(Some(range.start))
             }
         }
@@ -1108,7 +1112,7 @@ mod tests {
         let tokens2 = Tokens::from(vec![5, 6, 7, 8]);
         let chunk2 = TokenBlockChunk::new(tokens2.clone(), salt);
         let block2 = TokenBlock::from_chunk(chunk2, block1.parent_sequence_hash()); // Incorrect parent
-                                                                                    // Sequence hash should differ if parent is wrong
+        // Sequence hash should differ if parent is wrong
         assert_ne!(block2.sequence_hash(), SEQ_HASH_5_8);
 
         let chunk2_correct = TokenBlockChunk::new(tokens2.clone(), salt);

@@ -9,10 +9,10 @@
 // Licensed under Apache 2.0
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::responses::{CreateResponse, Response, ResponseStream},
-    Client,
 };
 
 /// Given text input or a list of context items, the model will generate a response.

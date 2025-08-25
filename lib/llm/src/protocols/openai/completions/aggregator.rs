@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::collections::HashMap;
 
@@ -20,9 +8,11 @@ use futures::{Stream, StreamExt};
 
 use super::NvCreateCompletionResponse;
 use crate::protocols::{
+    Annotated, DataStream,
     codec::{Message, SseCodecError},
     common::FinishReason,
-    convert_sse_stream, Annotated, DataStream,
+    convert_sse_stream,
+    openai::ParsingOptions,
 };
 
 /// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].
@@ -65,7 +55,9 @@ impl DeltaAggregator {
     /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateCompletionResponse> {
+        tracing::debug!("Tool Call Parser: {:?}", parsing_options.tool_call_parser); // TODO: remove this once completion has tool call support
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 let delta = match delta.ok() {
@@ -177,15 +169,17 @@ impl From<DeltaChoice> for dynamo_async_openai::types::Choice {
 impl NvCreateCompletionResponse {
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateCompletionResponse> {
         let stream = convert_sse_stream::<NvCreateCompletionResponse>(stream);
-        NvCreateCompletionResponse::from_annotated_stream(stream).await
+        NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
 
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateCompletionResponse> {
-        DeltaAggregator::apply(stream).await
+        DeltaAggregator::apply(stream, parsing_options).await
     }
 }
 
@@ -241,7 +235,7 @@ mod tests {
         let stream: DataStream<Annotated<NvCreateCompletionResponse>> = Box::pin(stream::empty());
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -265,7 +259,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -305,7 +299,7 @@ mod tests {
         let stream = Box::pin(stream::iter(annotated_deltas));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -365,7 +359,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());

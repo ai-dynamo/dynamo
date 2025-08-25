@@ -5,7 +5,7 @@ pub use super::response::*;
 
 // Import json_parser from postprocessor module
 pub use super::json_parser::*;
-pub use super::parsers::{detect_and_parse_tool_call, ToolCallConfig};
+pub use super::parsers::{ToolCallConfig, detect_and_parse_tool_call};
 
 /// Try parsing a string as a structured tool call, for aggregation usage.
 ///
@@ -14,6 +14,11 @@ pub fn try_tool_call_parse_aggregate(
     message: &str,
     parser_str: Option<&str>,
 ) -> anyhow::Result<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>> {
+    if parser_str.is_none() {
+        tracing::info!("No tool parser provided. Trying parsing with default parser.");
+    } else {
+        tracing::info!("Using tool parser: {:?}", parser_str);
+    }
     let parsed = detect_and_parse_tool_call(message, parser_str)?;
     if parsed.is_empty() {
         return Ok(vec![]);

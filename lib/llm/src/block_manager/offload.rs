@@ -45,8 +45,8 @@
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
 use super::block::{
-    locality::LocalityProvider, transfer::TransferContext, BlockError, BlockMetadata, BlockState,
-    ImmutableBlock, MutableBlock,
+    BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
+    locality::LocalityProvider, transfer::TransferContext,
 };
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::{BlockPool, BlockPoolError};
@@ -56,8 +56,9 @@ use nixl_sys::Agent as NixlAgent;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{
+    Mutex,
     mpsc::{self, error::TryRecvError},
-    oneshot, Mutex,
+    oneshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -320,20 +321,21 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     if let Ok(blocks) = target_pool
                         .match_sequence_hashes(vec![request.sequence_hash].as_slice())
                         .await
+                        && !blocks.is_empty()
                     {
-                        if !blocks.is_empty() {
-                            continue;
-                        }
+                        continue;
                     }
 
                     let target_block = 'target_block: {
-                        if let Ok(blocks) = target_pool.allocate_blocks(1).await {
-                            if let Some(block) = blocks.into_iter().next() {
-                                break 'target_block Some(block);
-                            }
+                        if let Ok(blocks) = target_pool.allocate_blocks(1).await
+                            && let Some(block) = blocks.into_iter().next()
+                        {
+                            break 'target_block Some(block);
                         }
 
-                        tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
+                        tracing::warn!(
+                            "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
+                        );
                         None
                     };
 
@@ -504,14 +506,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
         }
 
-        if let Some(targets) = targets.as_ref() {
-            if targets.len() != blocks.len() {
-                tx.send(Err(BlockPoolError::BlockError(BlockError::Other(
-                    anyhow::anyhow!("Number of targets does not match number of blocks."),
-                ))))
-                .unwrap();
-                return rx;
-            }
+        if let Some(targets) = targets.as_ref()
+            && targets.len() != blocks.len()
+        {
+            tx.send(Err(BlockPoolError::BlockError(BlockError::Other(
+                anyhow::anyhow!("Number of targets does not match number of blocks."),
+            ))))
+            .unwrap();
+            return rx;
         }
 
         if blocks.is_empty() {
@@ -582,16 +584,16 @@ mod tests {
     use super::*;
 
     use crate::block_manager::{
+        LayoutConfig, NixlRegisterableStorage,
         block::{
-            locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock,
+            BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock, locality::Local,
         },
-        layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
+        layout::{FullyContiguous, LayerSeparate, LayoutType, nixl::NixlLayout},
         pool::{BlockRegistrationDuplicationSetting, ManagedBlockPool},
         storage::{
             DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
             PinnedStorage, StorageAllocator, StorageType,
         },
-        LayoutConfig, NixlRegisterableStorage,
     };
     use crate::tokens::{TokenBlockSequence, Tokens};
     use nixl_sys::{MemoryRegion, NixlDescriptor};

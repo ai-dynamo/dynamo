@@ -7,7 +7,7 @@
 //! the entire distributed system, complementing the component-specific
 //! instance listing in `component.rs`.
 
-use crate::component::{Instance, INSTANCE_ROOT_PATH};
+use crate::component::{INSTANCE_ROOT_PATH, Instance};
 use crate::transports::etcd::Client as EtcdClient;
 
 pub async fn list_all_instances(etcd_client: &EtcdClient) -> anyhow::Result<Vec<Instance>> {

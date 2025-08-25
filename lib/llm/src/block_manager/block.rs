@@ -21,7 +21,7 @@ pub mod registry;
 pub mod state;
 pub mod transfer;
 
-pub use data::{view, BlockData, BlockDataExt, BlockDataProvider, BlockDataProviderMut};
+pub use data::{BlockData, BlockDataExt, BlockDataProvider, BlockDataProviderMut, view};
 pub use locality::LocalityProvider;
 
 pub use crate::tokens::TokenBlockError;
@@ -37,10 +37,10 @@ use crate::block_manager::{
 use crate::tokens::{SaltHash, SequenceHash, Token, TokenBlock, Tokens};
 
 use super::{
+    WorkerID,
     events::PublishHandle,
     layout::{BlockLayout, LayoutError, LayoutType},
     storage::StorageType,
-    WorkerID,
 };
 
 use derive_getters::Getters;
@@ -158,7 +158,7 @@ pub trait AsBlockMutSlice<'a, B: 'a> {
 pub trait IntoWritableBlocks<Locality: LocalityProvider, M: BlockMetadata> {
     type Output: WritableBlocks;
     fn into_writable_blocks(self, manager: &BlockManager<Locality, M>)
-        -> BlockResult<Self::Output>;
+    -> BlockResult<Self::Output>;
 }
 
 impl<T: WritableBlocks, Locality: LocalityProvider, M: BlockMetadata>
@@ -176,7 +176,7 @@ impl<T: WritableBlocks, Locality: LocalityProvider, M: BlockMetadata>
 pub trait IntoReadableBlocks<Locality: LocalityProvider, M: BlockMetadata> {
     type Output: ReadableBlocks;
     fn into_readable_blocks(self, manager: &BlockManager<Locality, M>)
-        -> BlockResult<Self::Output>;
+    -> BlockResult<Self::Output>;
 }
 
 impl<T: ReadableBlocks, Locality: LocalityProvider, M: BlockMetadata>
@@ -657,10 +657,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Debug for Muta
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Drop for MutableBlock<S, L, M> {
     fn drop(&mut self) {
         tracing::debug!("drop: {:?}", self);
-        if let Some(block) = self.block.take() {
-            if self.return_tx.send(block).is_err() {
-                tracing::warn!("block pool shutdown before block was returned");
-            }
+        if let Some(block) = self.block.take()
+            && self.return_tx.send(block).is_err()
+        {
+            tracing::warn!("block pool shutdown before block was returned");
         }
     }
 }
@@ -957,9 +957,9 @@ pub mod nixl {
     use super::view::{BlockKind, Kind, LayerKind};
 
     use super::super::{
+        WorkerID,
         layout::nixl::{NixlLayout, SerializedNixlBlockLayout},
         storage::nixl::{MemType, NixlRegisterableStorage, NixlStorage},
-        WorkerID,
     };
 
     use derive_getters::{Dissolve, Getters};
@@ -1360,9 +1360,7 @@ pub mod nixl {
         #[error("Input block list cannot be empty")]
         EmptyInput,
 
-        #[error(
-            "Blocks in the input list are not homogeneous (worker_id, block_set_idx mismatch)"
-        )]
+        #[error("Blocks in the input list are not homogeneous (worker_id, block_set_idx mismatch)")]
         NotHomogeneous,
 
         #[error("Serialization failed: {0}")]

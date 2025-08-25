@@ -24,7 +24,6 @@ use crate::{
 use bytes::Bytes;
 
 use super::{
-    responses::{CodeInterpreterContainer, Input, InputContent, Role as ResponsesRole},
     AddUploadPartRequest, AudioInput, AudioResponseFormat, ChatCompletionFunctionCall,
     ChatCompletionFunctions, ChatCompletionNamedToolChoice, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestDeveloperMessage,
@@ -40,6 +39,7 @@ use super::{
     EmbeddingInput, FileInput, FilePurpose, FunctionName, Image, ImageInput, ImageModel,
     ImageResponseFormat, ImageSize, ImageUrl, ImagesResponse, ModerationInput, Prompt, Role, Stop,
     TimestampGranularity,
+    responses::{CodeInterpreterContainer, Input, InputContent, Role as ResponsesRole},
 };
 
 /// for `impl_from!(T, Enum)`, implements

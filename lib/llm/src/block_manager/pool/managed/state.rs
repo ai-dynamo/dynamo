@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use crate::block_manager::{
-    block::{registry::BlockRegistrationError, BlockState, PrivateBlockExt},
+    block::{BlockState, PrivateBlockExt, registry::BlockRegistrationError},
     events::Publisher,
 };
 
@@ -266,18 +266,16 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                     }
                 }
                 BlockRegistrationDuplicationSetting::Disabled => {
-                    if let Some(block) = duplicate {
-                        if let Some(raw_blocks) = block.try_take_block(private::PrivateToken) {
-                            self.inactive.return_blocks(raw_blocks);
-                        }
+                    if let Some(block) = duplicate
+                        && let Some(raw_blocks) = block.try_take_block(private::PrivateToken)
+                    {
+                        self.inactive.return_blocks(raw_blocks);
                     }
                 }
             }
 
-            if offload {
-                if let Some(priority) = immutable.metadata().offload_priority() {
-                    immutable.enqueue_offload(priority).await.unwrap();
-                }
+            if offload && let Some(priority) = immutable.metadata().offload_priority() {
+                immutable.enqueue_offload(priority).await.unwrap();
             }
 
             immutable_blocks.push(immutable);

@@ -13,13 +13,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tmq::{
-    publish::{publish, Publish},
-    pull::{pull, Pull},
-    push::{push, Push},
-    subscribe::{subscribe, Subscribe},
     Context, Message, Multipart,
+    publish::{Publish, publish},
+    pull::{Pull, pull},
+    push::{Push, push},
+    subscribe::{Subscribe, subscribe},
 };
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use futures_util::{SinkExt, StreamExt};

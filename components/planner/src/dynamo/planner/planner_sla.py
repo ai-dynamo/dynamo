@@ -19,7 +19,7 @@ import logging
 from pydantic import BaseModel
 
 from dynamo.planner.defaults import SLAPlannerDefaults
-from dynamo.planner.utils.argparse import create_sla_planner_parser
+from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 

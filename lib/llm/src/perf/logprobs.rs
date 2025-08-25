@@ -568,7 +568,7 @@ mod tests {
     type TestTokenAlternative = (&'static str, f32);
     type TestTokenData = (&'static str, f32, Vec<TestTokenAlternative>);
     type TestTokenDataVec = Vec<TestTokenData>;
-    use crate::perf::{record_stream_with_context, RecordingMode, TimestampedResponse};
+    use crate::perf::{RecordingMode, TimestampedResponse, record_stream_with_context};
     use crate::protocols::codec::create_message_stream;
     use crate::protocols::convert_sse_stream;
     use approx::assert_abs_diff_eq;
