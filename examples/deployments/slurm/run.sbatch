@@ -129,8 +129,8 @@ srun --job-name="prepare_huggingface" -N $SLURM_JOB_NUM_NODES --ntasks-per-node=
 # Load container 
 srun --job-name="load_container" -N $SLURM_JOB_NUM_NODES --ntasks-per-node=1 --container-image=${DYNAMO_CONTAINER} --container-name=dynamo hostname > /dev/null
 
-# Start metrics
-docker-compose -f /mtrsysgwork/eshukrun/dynamo/deploy/metrics/docker-compose.yml up -d
+# Start metrics - use https://github.com/ai-dynamo/dynamo/blob/main/deploy/docker-compose.yml
+docker-compose -f /path/to/dynamo/deploy/metrics/docker-compose.yml up -d
 
 ##### Start serving  #####
 srun -N 1 \
