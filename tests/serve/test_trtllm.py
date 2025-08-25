@@ -5,66 +5,27 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List
 
 import pytest
-import requests
 
+from tests.serve.common import EngineConfig, create_payload_for_config
 from tests.utils.deployment_graph import (
-    Payload,
     chat_completions_response_handler,
     completions_response_handler,
 )
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.engine_process import EngineProcess
 
 logger = logging.getLogger(__name__)
 
-text_prompt = "Tell me a short joke about AI."
 
-
-def create_payload_for_config(config: "TRTLLMConfig") -> Payload:
-    """Create a payload using the model from the trtllm config"""
-    return Payload(
-        payload_chat={
-            "model": config.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": text_prompt,
-                }
-            ],
-            "max_tokens": 150,
-            "temperature": 0.1,
-        },
-        payload_completions={
-            "model": config.model,
-            "prompt": text_prompt,
-            "max_tokens": 150,
-            "temperature": 0.1,
-        },
-        repeat_count=1,
-        expected_log=[],
-        expected_response=["AI"],
-    )
-
-
-# TODO: Unify with vllm/sglang tests to reduce code duplication
 @dataclass
-class TRTLLMConfig:
+class TRTLLMConfig(EngineConfig):
     """Configuration for trtllm test scenarios"""
 
-    name: str
-    directory: str
-    script_name: str
-    marks: List[Any]
-    endpoints: List[str]
-    response_handlers: List[Callable[[Any], str]]
-    model: str
     timeout: int = 60
-    delayed_start: int = 0
 
 
-class TRTLLMProcess(ManagedProcess):
+class TRTLLMProcess(EngineProcess):
     """Simple process manager for trtllm shell scripts"""
 
     def __init__(self, config: TRTLLMConfig, request):
@@ -97,87 +58,6 @@ class TRTLLMProcess(ManagedProcess):
             log_dir=request.node.name,
         )
 
-    def _check_models_api(self, response):
-        """Check if models API is working and returns models"""
-        try:
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            return data.get("data") and len(data["data"]) > 0
-        except Exception:
-            return False
-
-    def _check_url(self, url, timeout=30, sleep=2.0):
-        """Override to use a more reasonable retry interval"""
-        return super()._check_url(url, timeout, sleep)
-
-    def check_response(
-        self, payload, response, response_handler, logger=logging.getLogger()
-    ):
-        assert response.status_code == 200, "Response Error"
-        content = response_handler(response)
-        logger.info(f"Received Content: {content}")
-        # Check for expected responses
-        assert content, "Empty response content"
-        for expected in payload.expected_response:
-            assert expected in content, f"Expected '{expected}' not found in response"
-
-    def wait_for_ready(self, payload, logger=logging.getLogger()):
-        url = f"http://localhost:{self.port}/{self.config.endpoints[0]}"
-        start_time = time.time()
-        retry_delay = 5
-        elapsed = 0.0
-        logger.info("Waiting for Deployment Ready")
-        json_payload = (
-            payload.payload_chat
-            if self.config.endpoints[0] == "v1/chat/completions"
-            else payload.payload_completions
-        )
-
-        while (elapsed := time.time() - start_time) < self.config.timeout:
-            try:
-                response = requests.post(
-                    url,
-                    json=json_payload,
-                    timeout=self.config.timeout - elapsed,
-                )
-            except (requests.RequestException, requests.Timeout) as e:
-                logger.warning(f"Retrying due to Request failed: {e}")
-                time.sleep(retry_delay)
-                continue
-            logger.info(f"Response: {response}")
-            if response.status_code == 500:
-                error = response.json().get("error", "")
-                if "no instances" in error:
-                    logger.warning(
-                        f"Retrying due to no instances available for model '{self.config.model}'"
-                    )
-                    time.sleep(retry_delay)
-                    continue
-            if response.status_code == 404:
-                error = response.json().get("error", "")
-                if "Model not found" in error:
-                    logger.warning(
-                        f"Retrying due to model not found for model '{self.config.model}'"
-                    )
-                    time.sleep(retry_delay)
-                    continue
-            # Process the response
-            if response.status_code != 200:
-                pytest.fail(
-                    f"Service returned status code {response.status_code}: {response.text}"
-                )
-            else:
-                break
-        else:
-            pytest.fail(
-                f"Service did not return a successful response within {self.config.timeout} s"
-            )
-
-        self.check_response(payload, response, self.config.response_handlers[0], logger)
-
-        logger.info("Deployment Ready")
-
 
 # trtllm test configurations
 trtllm_configs = {
@@ -192,7 +72,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
+        delayed_start=0,
+        timeout=360,
     ),
     "disaggregated": TRTLLMConfig(
         name="disaggregated",
@@ -205,7 +86,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
+        delayed_start=0,
+        timeout=360,
     ),
     # TODO: These are sanity tests that the kv router examples launch
     # and inference without error, but do not do detailed checks on the
@@ -221,7 +103,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
+        delayed_start=0,
+        timeout=360,
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
@@ -234,7 +117,8 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=60,
+        delayed_start=0,
+        timeout=360,
     ),
 }
 
@@ -269,8 +153,6 @@ def test_deployment(trtllm_config_test, request, runtime_services):
     logger.info(f"Script: {config.script_name}")
 
     with TRTLLMProcess(config, request) as server_process:
-        server_process.wait_for_ready(payload, logger)
-
         assert len(config.endpoints) == len(config.response_handlers)
         for endpoint, response_handler in zip(
             config.endpoints, config.response_handlers
@@ -288,11 +170,7 @@ def test_deployment(trtllm_config_test, request, runtime_services):
             for _ in range(payload.repeat_count):
                 elapsed = time.time() - start_time
 
-                response = requests.post(
-                    url,
-                    json=request_body,
-                    timeout=config.timeout - elapsed,
+                response = server_process.send_request(
+                    url, payload=request_body, timeout=config.timeout - elapsed
                 )
-                server_process.check_response(
-                    payload, response, response_handler, logger
-                )
+                server_process.check_response(payload, response, response_handler)
