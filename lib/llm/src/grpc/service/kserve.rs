@@ -333,39 +333,37 @@ impl GrpcInferenceService for KserveService {
         request: Request<ModelMetadataRequest>,
     ) -> Result<Response<ModelMetadataResponse>, Status> {
         let models = self.state.manager().list_completions_models();
-        let request_model_name = request.into_inner().name;
-        for model_name in models {
-            if request_model_name == model_name {
-                return Ok(Response::new(ModelMetadataResponse {
-                    name: model_name,
-                    versions: vec!["1".to_string()],
-                    platform: "dynamo".to_string(),
-                    inputs: vec![
-                        inference::model_metadata_response::TensorMetadata {
-                            name: "text_input".to_string(),
-                            datatype: "BYTES".to_string(),
-                            shape: vec![1],
-                        },
-                        inference::model_metadata_response::TensorMetadata {
-                            name: "streaming".to_string(),
-                            datatype: "BOOL".to_string(),
-                            shape: vec![1],
-                        },
-                    ],
-                    outputs: vec![
-                        inference::model_metadata_response::TensorMetadata {
-                            name: "text_output".to_string(),
-                            datatype: "BYTES".to_string(),
-                            shape: vec![-1],
-                        },
-                        inference::model_metadata_response::TensorMetadata {
-                            name: "finish_reason".to_string(),
-                            datatype: "BYTES".to_string(),
-                            shape: vec![-1],
-                        },
-                    ],
-                }));
-            }
+        let request_model_name = &request.into_inner().name;
+        for model_name in models.into_iter().filter(|n| request_model_name == n) {
+            return Ok(Response::new(ModelMetadataResponse {
+                name: model_name,
+                versions: vec!["1".to_string()],
+                platform: "dynamo".to_string(),
+                inputs: vec![
+                    inference::model_metadata_response::TensorMetadata {
+                        name: "text_input".to_string(),
+                        datatype: "BYTES".to_string(),
+                        shape: vec![1],
+                    },
+                    inference::model_metadata_response::TensorMetadata {
+                        name: "streaming".to_string(),
+                        datatype: "BOOL".to_string(),
+                        shape: vec![1],
+                    },
+                ],
+                outputs: vec![
+                    inference::model_metadata_response::TensorMetadata {
+                        name: "text_output".to_string(),
+                        datatype: "BYTES".to_string(),
+                        shape: vec![-1],
+                    },
+                    inference::model_metadata_response::TensorMetadata {
+                        name: "finish_reason".to_string(),
+                        datatype: "BYTES".to_string(),
+                        shape: vec![-1],
+                    },
+                ],
+            }));
         }
         Err(Status::not_found(format!(
             "Model '{}' not found",
@@ -378,48 +376,46 @@ impl GrpcInferenceService for KserveService {
         request: Request<ModelConfigRequest>,
     ) -> Result<Response<ModelConfigResponse>, Status> {
         let models = self.state.manager().list_completions_models();
-        let request_model_name = request.into_inner().name;
-        for model_name in models {
-            if request_model_name == model_name {
-                let config = ModelConfig {
-                    name: model_name,
-                    platform: "dynamo".to_string(),
-                    backend: "dynamo".to_string(),
-                    input: vec![
-                        ModelInput {
-                            name: "text_input".to_string(),
-                            data_type: DataType::TypeString as i32,
-                            dims: vec![1],
-                            ..Default::default()
-                        },
-                        ModelInput {
-                            name: "streaming".to_string(),
-                            data_type: DataType::TypeBool as i32,
-                            dims: vec![1],
-                            optional: true,
-                            ..Default::default()
-                        },
-                    ],
-                    output: vec![
-                        ModelOutput {
-                            name: "text_output".to_string(),
-                            data_type: DataType::TypeString as i32,
-                            dims: vec![-1],
-                            ..Default::default()
-                        },
-                        ModelOutput {
-                            name: "finish_reason".to_string(),
-                            data_type: DataType::TypeString as i32,
-                            dims: vec![-1],
-                            ..Default::default()
-                        },
-                    ],
-                    ..Default::default()
-                };
-                return Ok(Response::new(ModelConfigResponse {
-                    config: Some(config),
-                }));
-            }
+        let request_model_name = &request.into_inner().name;
+        for model_name in models.into_iter().filter(|n| request_model_name == n) {
+            let config = ModelConfig {
+                name: model_name,
+                platform: "dynamo".to_string(),
+                backend: "dynamo".to_string(),
+                input: vec![
+                    ModelInput {
+                        name: "text_input".to_string(),
+                        data_type: DataType::TypeString as i32,
+                        dims: vec![1],
+                        ..Default::default()
+                    },
+                    ModelInput {
+                        name: "streaming".to_string(),
+                        data_type: DataType::TypeBool as i32,
+                        dims: vec![1],
+                        optional: true,
+                        ..Default::default()
+                    },
+                ],
+                output: vec![
+                    ModelOutput {
+                        name: "text_output".to_string(),
+                        data_type: DataType::TypeString as i32,
+                        dims: vec![-1],
+                        ..Default::default()
+                    },
+                    ModelOutput {
+                        name: "finish_reason".to_string(),
+                        data_type: DataType::TypeString as i32,
+                        dims: vec![-1],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            return Ok(Response::new(ModelConfigResponse {
+                config: Some(config),
+            }));
         }
         Err(Status::not_found(format!(
             "Model '{}' not found",

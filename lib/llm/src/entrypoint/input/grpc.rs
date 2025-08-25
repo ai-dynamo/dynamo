@@ -18,7 +18,7 @@ use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
-/// Build and run an HTTP service
+/// Build and run an KServe gRPC service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
@@ -34,7 +34,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             match etcd_client {
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
-                    // Listen for models registering themselves in etcd, add them to HTTP service
+                    // Listen for models registering themselves in etcd, add them to gRPC service
                     run_watcher(
                         distributed_runtime,
                         grpc_service.state().manager_clone(),

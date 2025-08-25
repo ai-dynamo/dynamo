@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 pub mod kserve_test {
     // For using gRPC client for test
@@ -19,7 +7,7 @@ pub mod kserve_test {
         tonic::include_proto!("inference");
     }
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
-    use inference::{ModelInferRequest, ModelInferResponse};
+    use inference::{ModelInferRequest, ModelInferResponse, ModelMetadataRequest,  ModelConfigRequest, DataType};
 
     use anyhow::Error;
     use async_stream::stream;
@@ -45,7 +33,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
-    use dynamo_async_openai::types::Prompt;
+    use dynamo_async_openai::types::{Model, Prompt};
 
     struct SplitEngine {}
 
@@ -285,6 +273,7 @@ pub mod kserve_test {
         StreamInferSuccess = 8991,
         InferCancellation = 8992,
         StreamInferCancellation = 8993,
+        ModelInfo = 8994,
     }
 
     #[rstest]
@@ -874,5 +863,195 @@ pub mod kserve_test {
             long_running.was_cancelled(),
             "Expected long running engine to be cancelled"
         );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_model_info(
+        #[with(TestPort::ModelInfo as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        )
+    ) {
+        // start server
+        let _running = RunningService::spawn(service_with_engines.0);
+
+        // create client and send request to unregistered model
+        let mut client = get_ready_client(TestPort::ModelInfo as u16, 5).await;
+
+        // Failure unknown_model
+        let request = tonic::Request::new(ModelMetadataRequest {
+            name: "Tonic".into(),
+            version: "".into(),
+        });
+
+        let response = client.model_metadata(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::NotFound,
+            "Expected NotFound error for unregistered model, get {}",
+            err
+        );
+
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: "Tonic".into(),
+            version: "".into(),
+        });
+
+        let response = client.model_config(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::NotFound,
+            "Expected NotFound error for unregistered model, get {}",
+            err
+        );
+
+        // Success metadata
+        let model_name = "split";
+        let request = tonic::Request::new(ModelMetadataRequest {
+            name: model_name.into(),
+            version: "1".into(),
+        });
+
+        let response = client.model_metadata(request).await.unwrap();
+        assert_eq!(
+            response.get_ref().name,
+            model_name,
+            "Expected response of the same model name",
+        );
+        // input
+        for io in &response.get_ref().inputs {
+            match io.name.as_str() {
+                "text_input" => {
+                    assert_eq!(
+                        io.datatype, "BYTES",
+                        "Expected 'text_input' to have datatype 'BYTES'"
+                    );
+                    assert_eq!(
+                        io.shape,
+                        vec![1],
+                        "Expected 'text_output' to have shape [1]"
+                    );
+                }
+                "streaming" => {
+                    assert_eq!(
+                        io.datatype, "BOOL",
+                        "Expected 'streaming' to have datatype 'BOOL'"
+                    );
+                    assert_eq!(
+                        io.shape,
+                        vec![1],
+                        "Expected 'streaming' to have shape [1]"
+                    );
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+        // output
+        for io in &response.get_ref().outputs {
+            match io.name.as_str() {
+                "text_output" => {
+                    assert_eq!(
+                        io.datatype, "BYTES",
+                        "Expected 'text_output' to have datatype 'BYTES'"
+                    );
+                    assert_eq!(
+                        io.shape,
+                        vec![-1],
+                        "Expected 'text_output' to have shape [-1]"
+                    );
+                }
+                "finish_reason" => {
+                    assert_eq!(
+                        io.datatype, "BYTES",
+                        "Expected 'finish_reason' to have datatype 'BYTES'"
+                    );
+                    assert_eq!(
+                        io.shape,
+                        vec![-1],
+                        "Expected 'finish_reason' to have shape [-1]"
+                    );
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+
+        // success config
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: model_name.into(),
+            version: "1".into(),
+        });
+
+        let response = client.model_config(request).await.unwrap().into_inner().config;
+        let Some(config) = response else {
+          panic!("Expected Some(config), got None");
+        };
+        assert_eq!(
+            config.name,
+            model_name,
+            "Expected response of the same model name",
+        );
+        // input
+        for io in &config.input {
+            match io.name.as_str() {
+                "text_input" => {
+                    assert_eq!(
+                        io.data_type, DataType::TypeString as i32,
+                        "Expected 'text_input' to have datatype 'TYPE_STRING'"
+                    );
+                    assert_eq!(
+                        io.dims,
+                        vec![1],
+                        "Expected 'text_output' to have shape [1]"
+                    );
+                }
+                "streaming" => {
+                    assert_eq!(
+                        io.data_type, DataType::TypeBool as i32,
+                        "Expected 'streaming' to have datatype 'TYPE_BOOL'"
+                    );
+                    assert_eq!(
+                        io.dims,
+                        vec![1],
+                        "Expected 'streaming' to have shape [1]"
+                    );
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+        // output
+        for io in &config.output {
+            match io.name.as_str() {
+                "text_output" => {
+                    assert_eq!(
+                        io.data_type, DataType::TypeString as i32,
+                        "Expected 'text_output' to have datatype 'TYPE_STRING'"
+                    );
+                    assert_eq!(
+                        io.dims,
+                        vec![-1],
+                        "Expected 'text_output' to have shape [-1]"
+                    );
+                }
+                "finish_reason" => {
+                    assert_eq!(
+                        io.data_type, DataType::TypeString as i32,
+                        "Expected 'finish_reason' to have datatype 'TYPE_STRING'"
+                    );
+                    assert_eq!(
+                        io.dims,
+                        vec![-1],
+                        "Expected 'finish_reason' to have shape [-1]"
+                    );
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
     }
 }
