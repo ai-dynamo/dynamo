@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "components/metrics",
+    "components/oscar",
     "components/router",
     "launch/*",
     "lib/llm",
@@ -33,6 +34,7 @@ dynamo-llm = { path = "lib/llm", version = "0.4.1" }
 dynamo-tokens = { path = "lib/tokens", version = "0.4.1" }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.4.1", features = ["byot", "rustls"]}
 dynamo-parsers = { path = "lib/parsers", version = "0.4.1" }
+dynamo-oscar = { path = "components/oscar", version = "0.4.1" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -49,6 +51,7 @@ either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.16", features = ["tls"] }
 futures = { version = "0.3" }
 hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
+hex = { version = "0.4" }
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }
