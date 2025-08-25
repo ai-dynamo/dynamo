@@ -23,6 +23,11 @@ ARG ENABLE_KVBM=false
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+# sccache configuration
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
+
 
 ##################################
 ########## Base Image ############
@@ -109,13 +114,39 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
+# Install sccache if requested
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
+RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        SCCACHE_VERSION="v0.8.2" && \
+        wget --tries=3 --waitretry=5 "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" && \
+        tar -xzf "sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" && \
+        mv "sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/ && \
+        rm -rf sccache*; \
+    fi
+
+# Set sccache environment variables if USE_SCCACHE is set
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+    RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+
 ### UCX EFA Setup ###
+# Keep CC and CXX environment variables set to sccache if USE_SCCACHE is set to true for UCX build since this requirement is specific to UCX
 RUN rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
     cd /usr/local/src && \
     git clone https://github.com/openucx/ucx.git && \
     cd ucx && git checkout $NIXL_UCX_REF && \
+    CC=${USE_SCCACHE:+sccache gcc} && \
+    CXX=${USE_SCCACHE:+sccache g++} && \
+    export CC=${CC} && \
+    export CXX=${CXX} && \
     ./autogen.sh && \
     ./configure \
       --prefix=/usr/local/ucx \
@@ -133,6 +164,8 @@ RUN rm -rf /opt/hpcx/ucx && \
       --enable-mt && \
     make -j$(nproc) &&                              \
     make -j$(nproc) install-strip &&                \
+    echo "=== sccache stats AFTER UCX build ===" && \
+    sccache --show-stats && \
     echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
     echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
     ldconfig && \
@@ -155,6 +188,8 @@ RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.
     fi && \
     meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
     ninja -C build/ -j$(nproc) && \
+    echo "=== sccache stats AFTER NIXL build ===" && \
+    sccache --show-stats && \
     ninja -C build/ install && \
     echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
@@ -218,7 +253,11 @@ COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
-ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
+
+ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH:/usr/local/bin/sccache
+
+# Copy sccache from base stage if it was installed
+COPY --from=base /usr/local/bin/sccache /usr/local/bin/sccache
 
 # Copy configuration files first for better layer caching
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -227,10 +266,22 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
+# Redeclare sccache ARGs for wheel_builder stage
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
+
+# Set sccache environment variables if USE_SCCACHE is set
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
+    echo "RUSTC_WRAPPER set to: $RUSTC_WRAPPER" && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         maturin build --release --features block-manager --out /opt/dynamo/dist; \
     else \
@@ -240,7 +291,9 @@ RUN uv build --wheel --out-dir /opt/dynamo/dist && \
         # do not enable KVBM feature, ensure compatibility with lower glibc
         uv run --python 3.11 maturin build --release --out /opt/dynamo/dist && \
         uv run --python 3.10 maturin build --release --out /opt/dynamo/dist; \
-    fi
+    fi && \
+    echo "=== sccache stats after dynamo build ===" && \
+    sccache --show-stats
 
 ##############################################
 ########## Dev entrypoint image ##############
