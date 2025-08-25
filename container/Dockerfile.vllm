@@ -49,6 +49,20 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 ########################################################
 ########## Framework Development Image ################
 ########################################################
+#
+# PURPOSE: Framework development and vLLM compilation
+#
+# This stage builds and compiles framework dependencies including:
+# - vLLM inference engine with CUDA support
+# - DeepGEMM and FlashInfer optimizations
+# - All necessary build tools and compilation dependencies
+# - Framework-level Python packages and extensions
+#
+# Use this stage when you need to:
+# - Build vLLM from source with custom modifications
+# - Develop or debug framework-level components
+# - Create custom builds with specific optimization flags
+#
 
 # Use dynamo base image (see /container/Dockerfile for more details)
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
@@ -128,6 +142,21 @@ $LD_LIBRARY_PATH
 ##################################################
 ########## Runtime Image ########################
 ##################################################
+#
+# PURPOSE: Production runtime environment
+#
+# This stage creates a lightweight production-ready image containing:
+# - Pre-compiled vLLM and framework dependencies
+# - Dynamo runtime libraries and Python packages
+# - Essential runtime dependencies and configurations
+# - Optimized for inference workloads and deployment
+#
+# Use this stage when you need:
+# - Production deployment of Dynamo with vLLM
+# - Minimal runtime footprint without build tools
+# - Ready-to-run inference server environment
+# - Base for custom application containers
+#
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
@@ -250,10 +279,35 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
 #######################################
-########## Local Development ##########
+########## Local Development/CI #######
 #######################################
+# 
+# PURPOSE: Local development and CI image
+# 
+# This stage adds development tools, utilities, and dependencies specifically
+# needed for:
+# - Local development and debugging
+# - Automated testing and CI/CD pipelines  
+# - QA test scripts and internal model testing
+# - vscode/cursor development
+# 
+# Use this stage when you need a full development environment with additional
+# tooling beyond the base runtime image.
 
 FROM runtime AS local-dev
+
+# Install utilities
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    tmux \
+    vim \
+    autoconf \
+    automake \
+    libtool \
+    net-tools \
+    rm -rf /var/lib/apt/lists/*
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Will use the default ubuntu user, but give sudo access
@@ -294,29 +348,6 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
 RUN mkdir -p /home/$USERNAME/.cache/
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-
-
-##########################################
-########## Development/CI image ##########
-##########################################
-
-FROM runtime AS dev
-
-
-# Install utilities
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-    # Install utilities
-    nvtop \
-    tmux \
-    vim \
-    autoconf \
-    automake \
-    libtool \
-    net-tools \
-    rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
