@@ -20,10 +20,10 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="aab549870df50edf0512f0a59b574f692f546465"  # from v0.10.1
+VLLM_REF="1da94e673c257373280026f75ceb4effac80e892"  # from v0.10.1.1
 # When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
 # aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
-VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1-cp38-abi3-manylinux1_x86_64.whl"
+VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1.1-cp38-abi3-manylinux1_x86_64.whl"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
@@ -86,13 +86,13 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
-            echo f"  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
-            echo f"  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
+            echo "  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
+            echo "  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
-            echo f"  --installation-dir DIR  Directory to install vllm (default: ${INSTALLATION_DIR})"
-            echo f"  --deepgemm-ref REF  Git reference for DeepGEMM (default: ${DEEPGEMM_REF})"
-            echo f"  --flashinf-ref REF  Git reference for Flash Infer (default: ${FLASHINF_REF})"
-            echo f"  --torch-backend BACKEND  Torch backend to use (default: ${TORCH_BACKEND})"
+            echo "  --installation-dir DIR  Directory to install vllm (default: ${INSTALLATION_DIR})"
+            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: ${DEEPGEMM_REF})"
+            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: ${FLASHINF_REF})"
+            echo "  --torch-backend BACKEND  Torch backend to use (default: ${TORCH_BACKEND})"
             exit 0
             ;;
         *)
