@@ -5,6 +5,7 @@ use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, Reasoni
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
+    local_model::runtime_config,
     protocols::common::{self},
     types::TokenIdType,
 };
@@ -15,11 +16,15 @@ impl NvCreateChatCompletionRequest {
     ///
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
-    pub fn response_generator(&self) -> DeltaGenerator {
+    pub fn response_generator(
+        &self,
+        runtime_config: runtime_config::ModelRuntimeConfig,
+    ) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
             enable_usage: true,
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
+            runtime_config,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options)
@@ -33,6 +38,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
+
+    pub runtime_config: runtime_config::ModelRuntimeConfig,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
@@ -92,10 +99,14 @@ impl DeltaGenerator {
         // This is hardcoded for now, but can be made configurable later.
         // TODO: Make parser type configurable once front-end integration is determined
         // Change to GptOss to test GptOSS parser
-        let reasoning_parser_type = ReasoningParserType::Basic;
-
         // Reasoning parser wrapper
-        let reasoning_parser = reasoning_parser_type.get_reasoning_parser();
+        let reasoning_parser = ReasoningParserType::get_reasoning_parser_from_name(
+            options
+                .runtime_config
+                .reasoning_parser
+                .as_deref()
+                .unwrap_or("basic"),
+        );
 
         Self {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
