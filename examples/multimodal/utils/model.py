@@ -14,27 +14,26 @@
 # limitations under the License.
 
 import logging
-from typing import Any, Dict, Tuple, Optional, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-from transformers import AutoConfig
-from vllm import AsyncEngineArgs
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
-from vllm.worker.worker import Worker
-from transformers import AutoModel, AutoProcessor, AutoModelForCausalLM
-
+from transformers import AutoConfig, AutoModel
 
 logger = logging.getLogger(__name__)
+
 
 def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
-    model = AutoModel.from_pretrained(model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True)
+    model = AutoModel.from_pretrained(
+        model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
+    )
     return model
 
+
 def get_vision_embeddings_info(
-    model_id: str
+    model_id: str,
 ) -> Tuple[Tuple[int, int, int], torch.dtype]:
     """Calculate vision embeddings size and dtype using model config
     Returns a tuple of (batch_size, num_patches, hidden_dim), dtype.

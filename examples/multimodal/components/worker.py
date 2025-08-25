@@ -24,7 +24,6 @@ from typing import Tuple
 
 import torch
 import uvloop
-from transformers import AutoImageProcessor
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
@@ -47,8 +46,8 @@ from utils.args import (
     parse_endpoint,
 )
 from utils.image_loader import ImageLoader
+from utils.model import construct_mm_data, get_vision_embeddings_info
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
-from utils.model import get_vision_embeddings_info, construct_mm_data
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -263,7 +262,9 @@ class VllmPDWorker(VllmBaseWorker):
 
         if self.embeddings_shape[1] != 0:
             embeddings = torch.empty(
-                self.embeddings_shape, dtype=self.EMBEDDINGS_DTYPE, device=self.EMBEDDINGS_DEVICE
+                self.embeddings_shape,
+                dtype=self.EMBEDDINGS_DTYPE,
+                device=self.EMBEDDINGS_DEVICE,
             )
             descriptor = connect.Descriptor(embeddings)
             # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
@@ -290,7 +291,9 @@ class VllmPDWorker(VllmBaseWorker):
         else:
             # If no descriptor is provided, create a new one based on the embedding shape.
             embeddings = torch.empty(
-                request.embeddings_shape, dtype=self.EMBEDDINGS_DTYPE, device=self.EMBEDDINGS_DEVICE
+                request.embeddings_shape,
+                dtype=self.EMBEDDINGS_DTYPE,
+                device=self.EMBEDDINGS_DEVICE,
             )
             descriptor = connect.Descriptor(embeddings)
 
@@ -312,8 +315,9 @@ class VllmPDWorker(VllmBaseWorker):
             )
         else:
             # Use PIL image instead of image embeddings
-            multi_modal_data = {"image": await self.image_loader.load_image(request.image_url)}
-
+            multi_modal_data = {
+                "image": await self.image_loader.load_image(request.image_url)
+            }
 
         # Remove the image features from the request as they are not required
         request.image_url = None
