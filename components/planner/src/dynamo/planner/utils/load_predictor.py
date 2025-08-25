@@ -89,16 +89,26 @@ class ARIMAPredictor(BasePredictor):
         if len(self.data_buffer) < self.minimum_data_points:
             return self.get_last_value()
 
-        # Fit auto ARIMA model
-        self.model = pmdarima.auto_arima(
-            self.data_buffer,
-            suppress_warnings=True,
-            error_action="ignore",
-        )
+        # Check if all values are the same (constant data)
+        # pmdarima will predict 0 for constant data, we need to correct its prediction
+        if len(set(self.data_buffer)) == 1:
+            return self.data_buffer[0]  # Return the constant value
 
-        # Make prediction
-        forecast = self.model.predict(n_periods=1)
-        return forecast[0]
+        try:
+            # Fit auto ARIMA model
+            self.model = pmdarima.auto_arima(
+                self.data_buffer,
+                suppress_warnings=True,
+                error_action="ignore",
+            )
+
+            # Make prediction
+            forecast = self.model.predict(n_periods=1)
+            return forecast[0]
+        except Exception as e:
+            # Log the specific error for debugging
+            logger.warning(f"ARIMA prediction failed: {e}, using last value")
+            return self.get_last_value()
 
 
 # Time-series forecasting model from Meta

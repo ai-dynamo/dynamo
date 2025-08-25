@@ -18,7 +18,7 @@ use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
 };
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
@@ -183,16 +183,16 @@ impl
         incoming_request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
+        let mut deltas = request.response_generator();
         let ctx = context.context();
         let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {
-            async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
                 match user_msg.content {
-                    async_openai::types::ChatCompletionRequestUserMessageContent::Text(prompt) => {
-                        prompt
-                    }
+                    dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        prompt,
+                    ) => prompt,
                     _ => anyhow::bail!("Invalid request content field, expected Content::Text"),
                 }
             }
@@ -204,18 +204,12 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let inner = deltas.create_choice(0, Some(c.to_string()), None, None);
-                let response = NvCreateChatCompletionStreamResponse {
-                    inner,
-                };
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
 
-            let inner = deltas.create_choice(0, None, Some(async_openai::types::FinishReason::Stop), None);
-            let response = NvCreateChatCompletionStreamResponse {
-                inner,
-            };
+            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
         };
 
@@ -247,7 +241,7 @@ impl
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop), None);
+            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::CompletionFinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
 
         };

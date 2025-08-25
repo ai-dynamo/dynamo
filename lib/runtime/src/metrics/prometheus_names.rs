@@ -127,8 +127,17 @@ pub mod work_handler {
     pub const RESPONSE_BYTES_TOTAL: &str = "response_bytes_total";
 
     /// Number of requests currently being processed by work handler
-    pub const CONCURRENT_REQUESTS: &str = "concurrent_requests";
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
     /// Time spent processing requests by work handler (histogram)
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
+}
+
+/// KVBM connector
+pub mod kvbm_connector {
+    /// KVBM connector leader
+    pub const KVBM_CONNECTOR_LEADER: &str = "kvbm_connector_leader";
+
+    /// KVBM connector worker
+    pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
 }

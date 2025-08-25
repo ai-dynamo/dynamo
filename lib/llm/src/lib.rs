@@ -28,7 +28,6 @@ pub mod mocker;
 pub mod model_card;
 pub mod model_type;
 pub mod perf;
-pub mod postprocessor;
 pub mod preprocessor;
 pub mod protocols;
 pub mod recorder;
@@ -239,9 +238,10 @@ mod file_json_field_tests {
         let result: anyhow::Result<String> = file_json_field(&file_path, "non_existent_field");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Field 'non_existent_field' not found"));
+        assert!(
+            err.to_string()
+                .contains("Field 'non_existent_field' not found")
+        );
     }
 
     #[test]
@@ -256,9 +256,10 @@ mod file_json_field_tests {
         let result: anyhow::Result<u32> = file_json_field(&file_path, "count");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Failed to deserialize field 'count'"));
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize field 'count'")
+        );
     }
 
     #[test]

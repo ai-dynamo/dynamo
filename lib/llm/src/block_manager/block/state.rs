@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use derive_getters::Getters;
 
-use super::registry::{BlockHandle, RegistrationHandle};
 use super::Result;
+use super::registry::{BlockHandle, RegistrationHandle};
 use crate::tokens::{PartialTokenBlock, SaltHash, Token, TokenBlock, Tokens};
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +93,9 @@ impl BlockState {
         }
     }
 
+    /// Apply an entry [TokenBlock] to the block.
+    /// The block must be in the reset state on entry. The block will transition to
+    /// the completed state after this call.
     pub fn apply_token_block(&mut self, token_block: TokenBlock) -> Result<()> {
         match self {
             BlockState::Reset => {

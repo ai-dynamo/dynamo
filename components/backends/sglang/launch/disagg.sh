@@ -20,8 +20,8 @@ DYNAMO_PID=$!
 
 # run prefill worker
 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
@@ -32,8 +32,8 @@ PREFILL_PID=$!
 
 # run decode worker
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \

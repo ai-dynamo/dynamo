@@ -9,13 +9,14 @@ use anyhow::Result;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
+        SingleIn, async_trait,
     },
     prelude::*,
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
@@ -29,13 +30,13 @@ pub mod scoring;
 pub mod sequence;
 
 use crate::{
+    discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
-            compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
-            KvRouterError, OverlapScores, RouterEvent,
+            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
-        metrics_aggregator::watch_model_runtime_configs,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
@@ -73,7 +74,7 @@ pub trait WorkerSelector {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 
@@ -177,14 +178,25 @@ impl KvRouter {
             }
         };
 
-        // Create runtime config watcher
+        // Create runtime config watcher using the generic etcd watcher
         // TODO: Migrate to discovery_client() once it exposes kv_get_and_watch_prefix functionality
         let etcd_client = component
             .drt()
             .etcd_client()
             .expect("Cannot KV route without etcd client");
-        let runtime_configs_rx =
-            watch_model_runtime_configs(etcd_client, cancellation_token.clone()).await?;
+
+        use dynamo_runtime::utils::typed_prefix_watcher::{
+            key_extractors, watch_prefix_with_extraction,
+        };
+        let runtime_configs_watcher = watch_prefix_with_extraction(
+            etcd_client,
+            MODEL_ROOT_PATH,
+            key_extractors::lease_id,
+            |model_entry: ModelEntry| model_entry.runtime_config,
+            cancellation_token.clone(),
+        )
+        .await?;
+        let runtime_configs_rx = runtime_configs_watcher.receiver();
 
         let indexer = if kv_router_config.use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
@@ -339,10 +351,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
-                let (instance_id, overlap_amount) = self
-                    .chooser
-                    .find_best_match(&context_id, &request.token_ids)
-                    .await?;
+                let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
+                    // If instance_id is set, use it
+                    (id, 0)
+                } else {
+                    // Otherwise, find the best match
+                    self.chooser
+                        .find_best_match(&context_id, &request.token_ids)
+                        .await?
+                };
+
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();

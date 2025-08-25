@@ -26,8 +26,8 @@
 // SOFTWARE.
 
 use akin::akin;
-use anyhow::ensure;
 use anyhow::Result;
+use anyhow::ensure;
 use candle_core::quantized::gguf_file;
 use std::collections::HashMap;
 use tracing::warn;

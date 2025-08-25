@@ -246,6 +246,24 @@ class Client:
 
     ...
 
+    def instance_ids(self) -> List[int]:
+        """
+        Get list of current instance IDs.
+
+        Returns:
+            A list of currently available instance IDs
+        """
+        ...
+
+    async def wait_for_instances(self) -> List[int]:
+        """
+        Wait for instances to be available for work and return their IDs.
+
+        Returns:
+            A list of instance IDs that are available for work
+        """
+        ...
+
     async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
         """
         Pick a random instance of the endpoint and issue the request
@@ -1128,6 +1146,23 @@ class BlockManager:
         BlockList
             List of allocated blocks
         """
+        ...
+
+class KvbmCacheManager:
+    """
+    A KV cache manager for VLLM
+    """
+
+    def __init__(self, block_manager: BlockManager) -> None:
+        ...
+
+
+class KvbmRequest:
+    """
+    A request for KV cache
+    """
+
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
 class ZmqKvEventListener:

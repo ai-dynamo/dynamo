@@ -25,8 +25,8 @@ use tokio::sync::mpsc;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContext, Data, ResponseStream};
 use dynamo_runtime::pipeline::{
-    context::{Context, StreamContext},
     Error, ManyOut, PipelineError, PipelineIO, SegmentSource, SingleIn,
+    context::{Context, StreamContext},
 };
 
 #[allow(dead_code)]

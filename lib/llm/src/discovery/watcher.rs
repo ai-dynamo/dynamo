@@ -5,16 +5,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
-use tokio::sync::{mpsc::Receiver, Notify};
+use tokio::sync::{Notify, mpsc::Receiver};
 
 use dynamo_runtime::{
+    DistributedRuntime,
     pipeline::{
-        network::egress::push_router::PushRouter, ManyOut, Operator, RouterMode, SegmentSource,
-        ServiceBackend, SingleIn, Source,
+        ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
+        network::egress::push_router::PushRouter,
     },
     protocols::annotated::Annotated,
     transports::etcd::{KeyValue, WatchEvent},
-    DistributedRuntime,
 };
 
 use crate::{
@@ -35,7 +35,7 @@ use crate::{
     },
 };
 
-use super::{ModelEntry, ModelManager, MODEL_ROOT_PATH};
+use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModelUpdate {
@@ -50,6 +50,7 @@ pub struct ModelWatcher {
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     kv_router_config: Option<KvRouterConfig>,
+    busy_threshold: Option<f64>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] =
@@ -61,6 +62,7 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
         kv_router_config: Option<KvRouterConfig>,
+        busy_threshold: Option<f64>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
@@ -69,6 +71,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             kv_router_config,
+            busy_threshold,
         }
     }
 
@@ -210,10 +213,8 @@ impl ModelWatcher {
                 );
                 update_tx = false;
             }
-            if update_tx {
-                if let Some(tx) = &self.model_update_tx {
-                    tx.send(ModelUpdate::Removed(model_type)).await.ok();
-                }
+            if update_tx && let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Removed(model_type)).await.ok();
             }
             return Ok(None);
         }
@@ -248,13 +249,12 @@ impl ModelWatcher {
             );
         } else {
             for model_type in ALL_MODEL_TYPES {
-                if (chat_model_removed && *model_type == ModelType::Chat)
+                if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completion)
-                    || (embeddings_model_removed && *model_type == ModelType::Embedding)
+                    || (embeddings_model_removed && *model_type == ModelType::Embedding))
+                    && let Some(tx) = &self.model_update_tx
                 {
-                    if let Some(tx) = &self.model_update_tx {
-                        tx.send(ModelUpdate::Removed(*model_type)).await.ok();
-                    }
+                    tx.send(ModelUpdate::Removed(*model_type)).await.ok();
                 }
             }
         }
@@ -265,7 +265,7 @@ impl ModelWatcher {
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
     async fn handle_put(&self, model_entry: &ModelEntry) -> anyhow::Result<()> {
-        let endpoint_id = model_entry.endpoint.clone();
+        let endpoint_id = &model_entry.endpoint_id;
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
@@ -316,21 +316,31 @@ impl ModelWatcher {
                     None
                 };
 
-                let chat_engine =
-                    entrypoint::build_routed_pipeline::<
-                        NvCreateChatCompletionRequest,
-                        NvCreateChatCompletionStreamResponse,
-                    >(&card, &client, self.router_mode, kv_chooser.clone())
-                    .await?;
+                let chat_engine = entrypoint::build_routed_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(
+                    &card,
+                    &client,
+                    self.router_mode,
+                    self.busy_threshold,
+                    kv_chooser.clone(),
+                )
+                .await?;
                 self.manager
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
 
-                let completions_engine =
-                    entrypoint::build_routed_pipeline::<
-                        NvCreateCompletionRequest,
-                        NvCreateCompletionResponse,
-                    >(&card, &client, self.router_mode, kv_chooser)
-                    .await?;
+                let completions_engine = entrypoint::build_routed_pipeline::<
+                    NvCreateCompletionRequest,
+                    NvCreateCompletionResponse,
+                >(
+                    &card,
+                    &client,
+                    self.router_mode,
+                    self.busy_threshold,
+                    kv_chooser,
+                )
+                .await?;
                 self.manager
                     .add_completions_model(&model_entry.name, completions_engine)?;
             }
@@ -338,7 +348,9 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client(client, Default::default())
+                >::from_client_with_threshold(
+                    client, Default::default(), self.busy_threshold
+                )
                 .await?;
                 let engine = Arc::new(push_router);
                 self.manager
@@ -348,7 +360,9 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
-                >::from_client(client, Default::default())
+                >::from_client_with_threshold(
+                    client, Default::default(), self.busy_threshold
+                )
                 .await?;
                 let engine = Arc::new(push_router);
                 self.manager
@@ -374,7 +388,9 @@ impl ModelWatcher {
                 let router = PushRouter::<
                     PreprocessedEmbeddingRequest,
                     Annotated<EmbeddingsEngineOutput>,
-                >::from_client(client, self.router_mode)
+                >::from_client_with_threshold(
+                    client, self.router_mode, self.busy_threshold
+                )
                 .await?;
 
                 // Note: Embeddings don't need KV routing complexity

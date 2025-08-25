@@ -1,25 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::logging::TraceParent;
 use crate::protocols::LeaseId;
-use crate::SystemHealth;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
@@ -89,7 +77,10 @@ impl PushEndpoint {
             if let Some(req) = req {
                 let response = "".to_string();
                 if let Err(e) = req.respond(Ok(response.into())).await {
-                    tracing::warn!("Failed to respond to request; this may indicate the request has shutdown: {:?}", e);
+                    tracing::warn!(
+                        "Failed to respond to request; this may indicate the request has shutdown: {:?}",
+                        e
+                    );
                 }
 
                 let ingress = self.service_handler.clone();
@@ -136,7 +127,7 @@ impl PushEndpoint {
                             tracing::trace!(instance_id, "request handled successfully");
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to handle request: {:?}", e);
+                            tracing::warn!("Failed to handle request: {}", e.to_string());
                         }
                     }
 

@@ -45,6 +45,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod context;
 mod engine;
 mod http;
 mod llm;
@@ -103,6 +104,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
+    m.add_class::<context::PyContext>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;
@@ -199,9 +201,16 @@ struct EtcdKvCache {
 
 #[pyclass]
 #[derive(Clone)]
-struct DistributedRuntime {
+pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
+}
+
+impl DistributedRuntime {
+    #[allow(dead_code)]
+    fn inner(&self) -> &rs::DistributedRuntime {
+        &self.inner
+    }
 }
 
 #[pyclass]
@@ -281,6 +290,21 @@ impl DistributedRuntime {
         let inner = inner.map_err(to_pyerr)?;
 
         Ok(DistributedRuntime { inner, event_loop })
+    }
+
+    #[staticmethod]
+    fn detached(py: Python) -> PyResult<Self> {
+        let rt = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
+        let handle = rt.primary();
+
+        let inner = handle
+            .block_on(rs::DistributedRuntime::from_settings(rt))
+            .map_err(to_pyerr)?;
+
+        Ok(DistributedRuntime {
+            inner,
+            event_loop: py.None(),
+        })
     }
 
     fn namespace(&self, name: String) -> PyResult<Namespace> {
@@ -489,19 +513,24 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self.inner.endpoint_builder().handler(ingress);
+        let builder = self
+            .inner
+            .endpoint_builder()
+            .metrics_labels(metrics_labels)
+            .handler(ingress);
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder

@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 use std::{num::NonZero, sync::Arc};
 
-use async_openai::types::FinishReason;
 use async_stream::stream;
 use async_trait::async_trait;
+use dynamo_async_openai::types::FinishReason;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs::{
@@ -25,7 +25,7 @@ use dynamo_runtime::protocols::annotated::Annotated;
 
 use dynamo_llm::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -240,17 +240,16 @@ impl MistralRsEngine {
         }));
 
         // Send warmup request and consume response
-        if let Ok(sender) = engine.mistralrs.get_sender(None) {
-            if let Ok(()) = sender.send(warmup_request).await {
-                if let Some(response) = rx.recv().await {
-                    match response.as_result() {
-                        Ok(r) => {
-                            tracing::debug!(request_id, "Warmup response: {r:?}");
-                        }
-                        Err(err) => {
-                            tracing::error!(request_id, %err, "Failed converting response to result.");
-                        }
-                    }
+        if let Ok(sender) = engine.mistralrs.get_sender(None)
+            && let Ok(()) = sender.send(warmup_request).await
+            && let Some(response) = rx.recv().await
+        {
+            match response.as_result() {
+                Ok(r) => {
+                    tracing::debug!(request_id, "Warmup response: {r:?}");
+                }
+                Err(err) => {
+                    tracing::error!(request_id, %err, "Failed converting response to result.");
                 }
             }
         }
@@ -277,10 +276,10 @@ impl
 
         let mut messages = vec![];
         for m in request.inner.messages {
-            let async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
+            let dynamo_async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
                 continue;
             };
-            let async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
+            let dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
                 inner_m.content
             else {
                 anyhow::bail!("Only Text type chat completion supported");
@@ -396,17 +395,18 @@ impl
                         //tracing::trace!("from_assistant: {from_assistant}");
 
                         #[allow(deprecated)]
-                        let inner = async_openai::types::CreateChatCompletionStreamResponse{
+                        let delta = NvCreateChatCompletionStreamResponse {
                             id: c.id,
-                            choices: vec![async_openai::types::ChatChoiceStream{
+                            choices: vec![dynamo_async_openai::types::ChatChoiceStream{
                                 index: 0,
-                                delta: async_openai::types::ChatCompletionStreamResponseDelta{
+                                delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta{
                                     //role: c.choices[0].delta.role,
-                                    role: Some(async_openai::types::Role::Assistant),
+                                    role: Some(dynamo_async_openai::types::Role::Assistant),
                                     content: Some(from_assistant),
                                     tool_calls: None,
                                     refusal: None,
                                     function_call: None,
+                                    reasoning_content: None,
                                 },
                                 logprobs: None,
                                 finish_reason,
@@ -418,7 +418,6 @@ impl
                             system_fingerprint: Some(c.system_fingerprint),
                             service_tier: None,
                         };
-                        let delta = NvCreateChatCompletionStreamResponse{inner};
                         let ann = Annotated{
                             id: None,
                             data: Some(delta),
@@ -441,10 +440,10 @@ impl
 }
 
 /// openai stop tokens to mistralrs stop tokens
-fn to_stop_tokens(t: async_openai::types::Stop) -> StopTokens {
+fn to_stop_tokens(t: dynamo_async_openai::types::Stop) -> StopTokens {
     match t {
-        async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
-        async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
+        dynamo_async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
+        dynamo_async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
     }
 }
 

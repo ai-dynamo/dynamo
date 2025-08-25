@@ -16,15 +16,15 @@
 pub use crate::component::Component;
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
+    ErrorContext, RuntimeCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
-    ErrorContext, RuntimeCallback,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
@@ -40,6 +40,12 @@ impl MetricsRegistry for DistributedRuntime {
 
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![] // drt is the root, so no parent hierarchy
+    }
+}
+
+impl std::fmt::Debug for DistributedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DistributedRuntime")
     }
 }
 
@@ -158,7 +164,9 @@ impl DistributedRuntime {
                 tracing::warn!("Failed to initialize system status start time: {}", e);
             }
 
-            tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
+            tracing::debug!(
+                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
+            );
         }
 
         Ok(distributed_runtime)
@@ -264,26 +272,16 @@ impl DistributedRuntime {
     pub fn add_prometheus_metric(
         &self,
         hierarchy: &str,
-        metric_name: &str,
         prometheus_metric: Box<dyn prometheus::core::Collector>,
     ) -> anyhow::Result<()> {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         let entry = registries.entry(hierarchy.to_string()).or_default();
 
-        // Try to register the metric and provide better error information
-        match entry.prometheus_registry.register(prometheus_metric) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let error_msg = e.to_string();
-                tracing::error!(
-                    hierarchy = ?hierarchy,
-                    error = ?error_msg,
-                    metric_name = ?metric_name,
-                    "Metric registration failed"
-                );
-                Err(e.into())
-            }
-        }
+        // Try to register the metric
+        entry
+            .prometheus_registry
+            .register(prometheus_metric)
+            .map_err(|e| e.into())
     }
 
     /// Add a callback function to metrics registries for the given hierarchies
@@ -347,5 +345,22 @@ impl DistributedConfig {
         config.etcd_config.attach_lease = false;
 
         config
+    }
+}
+
+#[cfg(test)]
+pub mod test_helpers {
+    //! Common test helper functions for DistributedRuntime tests
+    // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
+
+    /// Helper function to create a DRT instance for tests
+    /// Uses from_current to leverage existing tokio runtime
+    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
+    #[cfg(feature = "integration")]
+    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
+        let rt = crate::Runtime::from_current().unwrap();
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
+            .await
+            .unwrap()
     }
 }

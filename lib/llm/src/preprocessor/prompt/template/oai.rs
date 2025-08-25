@@ -53,7 +53,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         if let Some(last) = self.inner.messages.last() {
             matches!(
                 last,
-                async_openai::types::ChatCompletionRequestMessage::User(_)
+                dynamo_async_openai::types::ChatCompletionRequestMessage::User(_)
             )
         } else {
             true
@@ -70,9 +70,9 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
         self.inner.model.clone()
     }
     fn messages(&self) -> minijinja::value::Value {
-        let message = async_openai::types::ChatCompletionRequestMessage::User(
-            async_openai::types::ChatCompletionRequestUserMessage {
-                content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                     crate::protocols::openai::completions::prompt_to_string(&self.inner.prompt),
                 ),
                 name: None,
@@ -88,16 +88,16 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn prompt_input_type(&self) -> PromptInput {
         match &self.inner.prompt {
-            async_openai::types::Prompt::IntegerArray(_) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Single(vec![]))
             }
-            async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
+            dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Batch(vec![]))
             }
-            async_openai::types::Prompt::String(_) => {
+            dynamo_async_openai::types::Prompt::String(_) => {
                 PromptInput::Text(TextInput::Single(String::new()))
             }
-            async_openai::types::Prompt::StringArray(_) => {
+            dynamo_async_openai::types::Prompt::StringArray(_) => {
                 PromptInput::Text(TextInput::Batch(vec![]))
             }
         }
@@ -105,10 +105,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn extract_tokens(&self) -> Option<TokenInput> {
         match &self.inner.prompt {
-            async_openai::types::Prompt::IntegerArray(tokens) => {
+            dynamo_async_openai::types::Prompt::IntegerArray(tokens) => {
                 Some(TokenInput::Single(tokens.clone()))
             }
-            async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => {
+            dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => {
                 Some(TokenInput::Batch(arrays.clone()))
             }
             _ => None,
@@ -117,8 +117,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn extract_text(&self) -> Option<TextInput> {
         match &self.inner.prompt {
-            async_openai::types::Prompt::String(text) => Some(TextInput::Single(text.to_string())),
-            async_openai::types::Prompt::StringArray(texts) => {
+            dynamo_async_openai::types::Prompt::String(text) => {
+                Some(TextInput::Single(text.to_string()))
+            }
+            dynamo_async_openai::types::Prompt::StringArray(texts) => {
                 Some(TextInput::Batch(texts.to_vec()))
             }
             _ => None,

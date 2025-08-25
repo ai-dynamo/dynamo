@@ -24,7 +24,7 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 
 For sophisticated multinode deployments, Dynamo integrates with advanced Kubernetes orchestration systems:
 
-- **[Grove](https://github.com/NVIDIA/grove/blob/main/docs/getting-started.md)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
+- **[Grove](https://github.com/NVIDIA/grove/blob/main/docs/installation.md)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
 - (optional) **[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)**: Kubernetes native scheduler optimized for AI workloads at scale
 
 These systems provide enhanced scheduling capabilities including topology-aware placement, gang scheduling, and coordinated auto-scaling across multiple nodes.

@@ -8,30 +8,33 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    disconnect::{create_connection_monitor, monitor_for_disconnects, ConnectionHandle},
+    RouteDoc,
+    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{Endpoint, ResponseMetricCollector},
-    service_v2, RouteDoc,
+    service_v2,
 };
 use crate::preprocessor::LLMMetricAnnotation;
+use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -46,6 +49,17 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
+
+// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
+/// Default body limit in bytes (45MB) to support 500k+ token payloads.
+/// Can be configured at compile time using the DYN_FRONTEND_BODY_LIMIT_MB environment variable
+fn get_body_limit() -> usize {
+    std::env::var("DYN_HTTP_BODY_LIMIT_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|mb| mb * 1024 * 1024)
+        .unwrap_or(45 * 1024 * 1024)
+}
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
@@ -108,6 +122,23 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        // First check for PipelineError::ServiceOverloaded
+        if let Some(pipeline_err) =
+            err.downcast_ref::<dynamo_runtime::pipeline::error::PipelineError>()
+            && matches!(
+                pipeline_err,
+                dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
+            )
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorMessage {
+                    error: pipeline_err.to_string(),
+                }),
+            );
+        }
+
+        // Then check for HttpError
         match err.downcast::<HttpError>() {
             Ok(http_error) => ErrorMessage::from_http_error(http_error),
             Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
@@ -135,17 +166,17 @@ impl From<HttpError> for ErrorMessage {
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
-    if let Some(trace_context) = get_distributed_tracing_context() {
-        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-            return x_dynamo_request_id;
-        }
+    if let Some(trace_context) = get_distributed_tracing_context()
+        && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
+    {
+        return x_dynamo_request_id;
     }
 
     // Try to get the request ID from the primary source
-    if let Some(primary) = primary {
-        if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
-            return uuid.to_string();
-        }
+    if let Some(primary) = primary
+        && let Ok(uuid) = uuid::Uuid::parse_str(primary)
+    {
+        return uuid.to_string();
     }
 
     // Try to get the request ID header as a string slice
@@ -162,6 +193,13 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     };
 
     uuid.to_string()
+}
+
+fn get_parsing_options(state: &Arc<service_v2::State>, model: &str) -> ParsingOptions {
+    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+    let reasoning_parser = None; // TODO: Implement reasoning parser
+
+    ParsingOptions::new(tool_call_parser, reasoning_parser)
 }
 
 /// OpenAI Completions Request Handler
@@ -237,6 +275,8 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let parsing_options = get_parsing_options(&state, model);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -295,7 +335,7 @@ async fn completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream)
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -464,6 +504,8 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let parsing_options = get_parsing_options(&state, model);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -523,19 +565,20 @@ async fn chat_completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to fold chat completions stream for: {:?}",
-                    e
-                );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
-            })?;
+        let response =
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        request_id,
+                        "Failed to fold chat completions stream for: {:?}",
+                        e
+                    );
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold chat completions stream: {}",
+                        e
+                    ))
+                })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -696,6 +739,8 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let parsing_options = get_parsing_options(&state, model);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -712,19 +757,20 @@ async fn responses(
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // TODO: handle streaming, currently just unary
-    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id,
-                "Failed to fold chat completions stream for: {:?}",
-                e
-            );
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to fold chat completions stream: {}",
-                e
-            ))
-        })?;
+    let response =
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    request_id,
+                    "Failed to fold chat completions stream for: {:?}",
+                    e
+                );
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold chat completions stream: {}",
+                    e
+                ))
+            })?;
 
     // Convert NvCreateChatCompletionResponse --> NvResponse
     let response: NvResponse = response.try_into().map_err(|e| {
@@ -745,8 +791,10 @@ pub fn validate_response_input_is_text_only(
     request: &NvCreateResponse,
 ) -> Option<impl IntoResponse> {
     match &request.inner.input {
-        async_openai::types::responses::Input::Text(_) => None,
-        _ => Some(ErrorMessage::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
+        dynamo_async_openai::types::responses::Input::Text(_) => None,
+        _ => Some(ErrorMessage::not_implemented_error(
+            "Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.",
+        )),
     }
 }
 
@@ -983,6 +1031,7 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
@@ -998,6 +1047,7 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -1012,6 +1062,7 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1051,12 +1102,12 @@ pub fn responses_router(
 mod tests {
     use std::collections::HashMap;
 
-    use async_openai::types::responses::{
+    use dynamo_async_openai::types::responses::{
         CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
         Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
         ToolChoiceMode, Truncation,
     };
-    use async_openai::types::{
+    use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };
@@ -1147,6 +1198,22 @@ mod tests {
                 BACKUP_ERROR_MESSAGE,
                 other_error_from_engine().unwrap_err()
             )
+        );
+    }
+
+    #[test]
+    fn test_service_overloaded_error_response_from_anyhow() {
+        use dynamo_runtime::pipeline::error::PipelineError;
+
+        let err: anyhow::Error = PipelineError::ServiceOverloaded(
+            "All workers are busy, please retry later".to_string(),
+        )
+        .into();
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.error,
+            "Service temporarily unavailable: All workers are busy, please retry later"
         );
     }
 

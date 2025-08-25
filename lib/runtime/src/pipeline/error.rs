@@ -17,7 +17,7 @@
 //
 use async_nats::error::Error as NatsError;
 
-pub use anyhow::{anyhow, anyhow as error, bail, ensure, Context, Error, Result};
+pub use anyhow::{Context, Error, Result, anyhow, anyhow as error, bail, ensure};
 
 pub trait PipelineErrorExt {
     /// Downcast the [`Error`] to a [`PipelineError`]
@@ -131,6 +131,10 @@ pub enum PipelineError {
 
     #[error("NATS KV Err: {0} for bucket '{1}")]
     KeyValueError(String, String),
+
+    /// All instances are busy and cannot handle new requests
+    #[error("Service temporarily unavailable: {0}")]
+    ServiceOverloaded(String),
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -14,37 +14,37 @@
 // limitations under the License.
 
 use anyhow::Error;
-use async_openai::config::OpenAIConfig;
 use async_stream::stream;
+use dynamo_async_openai::config::OpenAIConfig;
 use dynamo_llm::http::{
     client::{
         GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient, PureOpenAIClient,
     },
     service::{
-        error::HttpError,
-        metrics::{Endpoint, RequestType, Status, FRONTEND_METRIC_PREFIX},
-        service_v2::HttpService,
         Metrics,
+        error::HttpError,
+        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        service_v2::HttpService,
     },
 };
 use dynamo_llm::protocols::{
+    Annotated,
     codec::SseLineCodec,
     convert_sse_stream,
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
-    Annotated,
 };
 use dynamo_runtime::{
+    CancellationToken,
     engine::AsyncEngineContext,
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
-    CancellationToken,
 };
 use futures::StreamExt;
-use prometheus::{proto::MetricType, Registry};
+use prometheus::{Registry, proto::MetricType};
 use reqwest::StatusCode;
 use std::{io::Cursor, sync::Arc};
 use tokio::time::timeout;
@@ -95,16 +95,12 @@ impl
         let max_tokens = request.inner.max_tokens.unwrap_or(0) as u64;
 
         // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
-        let generator = request.response_generator();
+        let mut generator = request.response_generator();
 
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let inner = generator.create_choice(i,Some(format!("choice {i}")), None, None);
-
-                let output = NvCreateChatCompletionStreamResponse {
-                    inner,
-                };
+                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None);
 
                 yield Annotated::from_data(output);
             }
@@ -311,16 +307,16 @@ async fn test_http_service() {
 
     let client = reqwest::Client::new();
 
-    let message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 "hi".to_string(),
             ),
             name: None,
         },
     );
 
-    let mut request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let mut request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![message])
         .build()
@@ -483,7 +479,7 @@ async fn test_http_service() {
     // ==== ChatCompletions / Unary / Error ====
 
     // ==== Completions / Unary / Error ====
-    let mut request = async_openai::types::CreateCompletionRequestArgs::default()
+    let mut request = dynamo_async_openai::types::CreateCompletionRequestArgs::default()
         .model("bar")
         .prompt("hi")
         .build()
@@ -642,14 +638,15 @@ async fn test_pure_openai_client() {
     wait_for_service_ready(port).await;
 
     // Test successful streaming request
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -674,14 +671,15 @@ async fn test_pure_openai_client() {
     assert!(count > 0, "Should receive at least one response");
 
     // Test error case with invalid model
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("bar") // This model will fail
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -707,14 +705,15 @@ async fn test_pure_openai_client() {
 
     // Test context management
     let ctx = HttpRequestContext::new();
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -751,14 +750,15 @@ async fn test_nv_custom_client() {
     wait_for_service_ready(port).await;
 
     // Test successful streaming request
-    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -789,14 +789,15 @@ async fn test_nv_custom_client() {
     assert!(count > 0, "Should receive at least one response");
 
     // Test error case with invalid model
-    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("bar") // This model will fail
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -828,14 +829,15 @@ async fn test_nv_custom_client() {
 
     // Test context management
     let ctx = HttpRequestContext::new();
-    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -987,16 +989,16 @@ async fn test_client_disconnect_cancellation_unary() {
 
     let client = reqwest::Client::new();
 
-    let message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will take a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("slow-model")
         .messages(vec![message])
         .stream(false) // Test unary response
@@ -1078,16 +1080,16 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let client = reqwest::Client::new();
 
-    let message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will stream for a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("slow-stream-model")
         .messages(vec![message])
         .stream(true) // Test streaming response
@@ -1230,23 +1232,23 @@ async fn test_request_id_annotation() {
     let mut annotated_stream = std::pin::pin!(annotated_stream);
     while let Some(annotated_response) = annotated_stream.next().await {
         // Check if this is a request_id annotation
-        if let Some(event) = &annotated_response.event {
-            if event == "request_id" {
-                found_request_id_annotation = true;
-                // Extract the request ID from the annotation
-                if let Some(comments) = &annotated_response.comment {
-                    if let Some(comment) = comments.first() {
-                        // The comment contains a JSON-encoded string, so we need to parse it
-                        if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
-                            received_request_id = Some(parsed_value);
-                        } else {
-                            // Fallback: remove quotes manually if JSON parsing fails
-                            received_request_id = Some(comment.trim_matches('"').to_string());
-                        }
-                    }
+        if let Some(event) = &annotated_response.event
+            && event == "request_id"
+        {
+            found_request_id_annotation = true;
+            // Extract the request ID from the annotation
+            if let Some(comments) = &annotated_response.comment
+                && let Some(comment) = comments.first()
+            {
+                // The comment contains a JSON-encoded string, so we need to parse it
+                if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
+                    received_request_id = Some(parsed_value);
+                } else {
+                    // Fallback: remove quotes manually if JSON parsing fails
+                    received_request_id = Some(comment.trim_matches('"').to_string());
                 }
-                break;
             }
+            break;
         }
     }
 
