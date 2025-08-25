@@ -117,7 +117,7 @@ def parse_args() -> Config:
         "--dyn-reasoning-parser",
         type=str,
         default=None,
-        help="Reasoning parser name for the model.",
+        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss'.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
