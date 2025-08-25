@@ -6324,20 +6324,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "router"
-version = "0.4.1"
-dependencies = [
- "clap 4.5.42",
- "dynamo-llm",
- "dynamo-runtime",
- "rand 0.9.2",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "rstest"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

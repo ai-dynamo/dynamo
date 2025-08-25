@@ -39,7 +39,6 @@
    components/backends/sglang/docs/multinode-examples.md
    components/backends/sglang/docs/sgl-http-server.md
    components/backends/sglang/slurm_jobs/README.md
-   components/router/README.md
    examples/README.md
    guides/dynamo_deploy/create_deployment.md
    guides/dynamo_deploy/sla_planner_deployment.md

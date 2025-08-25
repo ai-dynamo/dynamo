@@ -49,15 +49,6 @@ The frontend component provides the HTTP API layer and request processing:
 - **Router** - Routes requests to appropriate workers based on load and KV cache state
 - **Auto-discovery** - Automatically discovers and registers available workers
 
-### [Router](router/)
-
-A high-performance request router written in Rust that:
-
-- Routes incoming requests to optimal workers based on KV cache state
-- Implements KV-aware routing to minimize cache misses
-- Provides load balancing across multiple worker instances
-- Supports both aggregated and disaggregated serving patterns
-
 ### [Planner](planner/)
 
 The planner component monitors system state and dynamically adjusts worker allocation:
