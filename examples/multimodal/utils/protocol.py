@@ -15,7 +15,7 @@
 
 
 import json
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Union, Tuple
 
 import msgspec
 from pydantic import BaseModel, ConfigDict, field_validator

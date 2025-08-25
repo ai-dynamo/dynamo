@@ -48,6 +48,7 @@ from utils.args import (
 from utils.image_loader import ImageLoader
 from utils.model import construct_mm_data
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+from utils.model import get_vision_embeddings_info, construct_mm_data
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
