@@ -59,7 +59,7 @@ flowchart LR
   pd_worker --> encode_worker
 ```
 
-***Note*** Only the LLaVA 1.5 7B model is supported. Phi3V support will be added in the future.
+***Note*** Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct today. Phi3V support will be added in the future. Disaggregated serving is currently only confirmed for LLaVA (see note below).
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
