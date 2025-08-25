@@ -13,6 +13,7 @@ use tokio::sync::watch;
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
+use super::RouterConfigOverride;
 use super::WorkerSelector;
 use super::indexer::OverlapScores;
 use super::protocols::WorkerSelectionResult;
@@ -52,6 +53,8 @@ pub struct SchedulingRequest {
     pub overlaps: OverlapScores,
     pub decode_blocks: HashMap<i64, usize>,
     pub prefill_tokens: HashMap<i64, usize>,
+    // Router config overrides for this specific request
+    pub router_config_override: Option<RouterConfigOverride>,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -243,6 +246,7 @@ impl KvScheduler {
         isl_tokens: usize,
         token_seq: Vec<SequenceHash>,
         overlaps: OverlapScores,
+        router_config_override: Option<&RouterConfigOverride>,
     ) -> Result<i64, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
@@ -252,6 +256,7 @@ impl KvScheduler {
             overlaps,
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            router_config_override: router_config_override.cloned(),
             resp_tx: Some(resp_tx), // Wrap in Some()
         };
 
@@ -402,14 +407,19 @@ impl WorkerSelector for DefaultWorkerSelector {
                 .unwrap_or(&(potential_prefill_block.floor() as usize))
                 as f64;
 
+            // Use override if provided, otherwise use default config
+            let overlap_weight = request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.overlap_score_weight)
+                .unwrap_or(self.kv_router_config.overlap_score_weight);
+
             // Calculate logit (lower is better)
-            let logit =
-                self.kv_router_config.overlap_score_weight * potential_prefill_block + decode_block;
+            let logit = overlap_weight * potential_prefill_block + decode_block;
             max_logit = max_logit.max(logit);
 
             worker_logits.insert(*worker_id, logit);
 
-            let overlap_weight = self.kv_router_config.overlap_score_weight;
             tracing::info!(
                 "Formula for {worker_id} with {overlap} cached blocks: {logit:.3} \
                  = {overlap_weight:.1} * prefill_blocks + decode_blocks \
@@ -418,7 +428,12 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         // Use softmax sampling to select worker
-        let temperature = self.kv_router_config.router_temperature;
+        // Use override if provided, otherwise use default config
+        let temperature = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.router_temperature)
+            .unwrap_or(self.kv_router_config.router_temperature);
         let best_worker_id = softmax_sample(&worker_logits, temperature);
         let best_logit = worker_logits[&best_worker_id];
 

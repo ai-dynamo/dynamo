@@ -13,8 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
+use tokio_stream::StreamExt;
 
 use super::*;
 use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
@@ -28,6 +30,7 @@ use tracing;
 
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
+use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 #[pyfunction]
 pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
@@ -830,6 +833,191 @@ impl SpecDecodeStats {
             num_draft_tokens,
             num_accepted_tokens,
             num_accepted_tokens_per_pos,
+        })
+    }
+}
+
+#[pyclass]
+pub(crate) struct KvPushRouter {
+    inner: Arc<llm_rs::kv_router::KvPushRouter>,
+}
+
+#[pymethods]
+impl KvPushRouter {
+    #[new]
+    fn new(
+        endpoint: &Endpoint,
+        block_size: usize,
+        kv_router_config: &super::entrypoint::KvRouterConfig,
+    ) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async move {
+            let client = endpoint.inner.client().await.map_err(to_pyerr)?;
+
+            // Create PushRouter with KV router mode
+            let push_router = rs::pipeline::PushRouter::<
+                llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+                rs::protocols::annotated::Annotated<
+                    llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+                >,
+            >::from_client(
+                client,
+                rs::pipeline::network::egress::push_router::RouterMode::KV,
+            )
+            .await
+            .map_err(to_pyerr)?;
+
+            // Get component from endpoint
+            let component = endpoint.inner.component();
+
+            // Create KvRouter
+            let kv_router = llm_rs::kv_router::KvRouter::new(
+                component.clone(),
+                block_size as u32,
+                None, // default selector
+                Some(kv_router_config.inner()),
+            )
+            .await
+            .map_err(to_pyerr)?;
+
+            // Create KvPushRouter
+            let kv_push_router =
+                llm_rs::kv_router::KvPushRouter::new(push_router, Arc::new(kv_router));
+
+            Ok(Self {
+                inner: Arc::new(kv_push_router),
+            })
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None))]
+    fn generate<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        model: String,
+        stop_conditions: Option<PyObject>,
+        sampling_options: Option<PyObject>,
+        output_options: Option<PyObject>,
+        router_config_override: Option<PyObject>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        // Depythonize the options with defaults
+        let (stop_conditions, sampling_options, output_options, router_config_override) =
+            Python::with_gil(|py| {
+                let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?
+                } else {
+                    StopConditions::default()
+                };
+
+                let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?
+                } else {
+                    SamplingOptions::default()
+                };
+
+                let output_options: OutputOptions = if let Some(obj) = output_options {
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?
+                } else {
+                    OutputOptions::default()
+                };
+
+                let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+                    if let Some(obj) = router_config_override {
+                        Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+                    } else {
+                        None
+                    };
+
+                Ok::<_, PyErr>((
+                    stop_conditions,
+                    sampling_options,
+                    output_options,
+                    router_config_override,
+                ))
+            })?;
+
+        // Build the PreprocessedRequest
+        let request = llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder()
+            .model(model)
+            .token_ids(token_ids)
+            .stop_conditions(stop_conditions)
+            .sampling_options(sampling_options)
+            .output_options(output_options)
+            .router_config_override(router_config_override)
+            .build()
+            .map_err(to_pyerr)?;
+
+        let inner = self.inner.clone();
+
+        // Create a Python async generator that wraps the Rust stream
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            use rs::pipeline::{AsyncEngine, SingleIn};
+            use tokio_stream::StreamExt;
+
+            let single_in = SingleIn::new(request);
+            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+            // Spawn a task to process the stream
+            tokio::spawn(async move {
+                let mut stream = stream;
+                while let Some(response) = stream.next().await {
+                    // Convert LLMEngineOutput to PyObject
+                    let py_response = Python::with_gil(|py| {
+                        pythonize(py, &response.data)
+                            .map(|obj| obj.unbind())
+                            .map_err(|e| e.to_string())
+                    });
+
+                    match py_response {
+                        Ok(obj) => {
+                            if tx.send(obj).await.is_err() {
+                                break; // Receiver dropped
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to pythonize response: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Return a Python async generator wrapper
+            Ok(KvPushRouterStream {
+                rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            })
+        })
+    }
+}
+
+// Python async generator wrapper for the stream
+#[pyclass]
+pub(crate) struct KvPushRouterStream {
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PyObject>>>,
+}
+
+#[pymethods]
+impl KvPushRouterStream {
+    #[pyo3(name = "__aiter__")]
+    fn aiter(slf: Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf.clone().into_any().unbind())
+    }
+
+    #[pyo3(name = "__anext__")]
+    fn anext<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let rx = self.rx.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut rx = rx.lock().await;
+            match rx.recv().await {
+                Some(obj) => Ok(obj),
+                None => Err(pyo3::exceptions::PyStopAsyncIteration::new_err(
+                    "Stream exhausted",
+                )),
+            }
         })
     }
 }
