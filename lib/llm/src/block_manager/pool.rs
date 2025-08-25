@@ -23,15 +23,15 @@ use serde::{Deserialize, Serialize};
 pub use super::block::{ImmutableBlock, MutableBlock};
 
 use super::block::{
-    nixl::short_type_name, private, registry::BlockRegistry, Block, BlockError, BlockMetadata,
-    GlobalRegistry, MaybeReturnableBlock,
+    Block, BlockError, BlockMetadata, GlobalRegistry, MaybeReturnableBlock, nixl::short_type_name,
+    private, registry::BlockRegistry,
 };
 use super::events::{EventManager, NullEventManager};
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
-use crate::block_manager::block::locality::LocalityProvider;
 use crate::block_manager::CacheLevel;
+use crate::block_manager::block::locality::LocalityProvider;
 use crate::tokens::{SequenceHash, TokenBlock};
 
 use async_trait::async_trait;

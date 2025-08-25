@@ -23,6 +23,7 @@ metadata:
 spec:
   replicas: 1
   template:
+    terminationDelay: 1h
     cliques:
     {{- range $serviceName, $serviceSpec := .Values.spec.services }}
     - name: {{ $serviceName | lower }}
@@ -64,14 +65,32 @@ spec:
             {{- if $serviceSpec.extraPodSpec.mainContainer.command }}
             command:
             {{- $serviceSpec.extraPodSpec.mainContainer.command | toYaml | nindent 14 }}
+            {{- else }}
+              {{- if $serviceSpec.componentType | eq "frontend" }}
+            command:
+            - python3
+              {{- else }}
+            command:
+            - /bin/sh
+            - -c
+              {{- if not $serviceSpec.extraPodSpec.mainContainer.args }}
+                {{- fail (printf "spec.services[%s].extraPodSpec.mainContainer.args must be set for non-frontend components" $serviceName) }}
+              {{- end }}
+              {{- end }}
             {{- end }}
             {{- if $serviceSpec.extraPodSpec.mainContainer.args }}
             args:
             {{- $serviceSpec.extraPodSpec.mainContainer.args | toYaml | nindent 14 }}
+            {{- else if $serviceSpec.componentType | eq "frontend" }}
+            args:
+            - -m
+            - dynamo.frontend
             {{- end }}
             env:
-            - name: DYNAMO_PORT
-              value: "{{ $.Values.dynamoPort | default 8000 }}"
+            {{- if $.Values.dynamoNamespace }}
+            - name: DYN_NAMESPACE
+              value: {{ $.Values.dynamoNamespace }}
+            {{- end }}
             {{- if $.Values.etcdAddr }}
             - name: ETCD_ENDPOINTS
               value: "{{ $.Values.etcdAddr }}"
@@ -80,41 +99,86 @@ spec:
             - name: NATS_SERVER
               value: "{{ $.Values.natsAddr }}"
             {{- end }}
+            {{- if $serviceSpec.componentType | eq "frontend" }}
+            - name: DYNAMO_PORT
+              value: "{{ $.Values.dynamoPort | default 8000 }}"
+            - name: DYN_HTTP_PORT
+              value: "{{ $.Values.dynamoPort | default 8000 }}"
+            {{- else if $serviceSpec.componentType | eq "worker" }}
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "{{ $.Values.dynamoSystemPort | default 9090 }}"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: "[\"generate\"]"
+            {{- end }}
             {{- if $serviceSpec.envFromSecret }}
             envFrom:
             - secretRef:
                 name: {{ $serviceSpec.envFromSecret }}
             {{- end }}
+            {{- if $serviceSpec.componentType | eq "frontend" }}
             ports:
-            - name: health
-              containerPort: {{ $.Values.healthPort | default 5000 }}
+            - name: http
+              containerPort: {{ $.Values.dynamoPort | default 8000 }}
+              protocol: TCP
+            {{- else if $serviceSpec.componentType | eq "worker" }}
+            ports:
+            - name: system
+              containerPort: {{ $.Values.dynamoSystemPort | default 9090 }}
+              protocol: TCP
+            {{- end }}
+            {{- if and $serviceSpec.componentType (or (eq $serviceSpec.componentType "frontend") (eq $serviceSpec.componentType "worker")) }}
             livenessProbe:
               {{- if $serviceSpec.livenessProbe }}
-              {{ $serviceSpec.livenessProbe | toYaml | nindent 14 }}
+              {{ $serviceSpec.livenessProbe | toYaml | nindent 10 }}
               {{- else }}
               initialDelaySeconds: 60
               periodSeconds: 60
               timeoutSeconds: 5
               failureThreshold: 10
               successThreshold: 1
+              {{- if $serviceSpec.componentType | eq "frontend" }}
+              httpGet:
+                path: /health
+                port: http
+              {{- else if $serviceSpec.componentType | eq "worker" }}
+              httpGet:
+                path: /live
+                port: system
+              {{- else }}
               httpGet:
                 path: /healthz
                 port: health
                 scheme: HTTP
               {{- end }}
+              {{- end }}
             readinessProbe:
               {{- if $serviceSpec.readinessProbe }}
-              {{ $serviceSpec.readinessProbe | toYaml | nindent 14 }}
+              {{ $serviceSpec.readinessProbe | toYaml | nindent 10 }}
               {{- else }}
               initialDelaySeconds: 60
               periodSeconds: 60
               timeoutSeconds: 5
               failureThreshold: 10
               successThreshold: 1
+              {{- if $serviceSpec.componentType | eq "frontend" }}
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - curl -s http://localhost:${DYNAMO_PORT}/health | jq -e ".status == \"healthy\""
+              {{- else if $serviceSpec.componentType | eq "worker" }}
+              httpGet:
+                path: /health
+                port: system
+              {{- else }}
               httpGet:
                 path: /readyz
                 port: health
                 scheme: HTTP
               {{- end }}
+              {{- end }}
+            {{- end }}
     {{- end }}
 {{- end }}

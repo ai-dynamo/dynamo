@@ -1,25 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
+    Annotated,
     codec::{Message, SseCodecError},
-    convert_sse_stream, Annotated,
+    convert_sse_stream,
+    openai::ParsingOptions,
 };
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
@@ -99,6 +89,7 @@ impl DeltaAggregator {
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -174,24 +165,26 @@ impl DeltaAggregator {
 
         // After aggregation, inspect each choice's text for tool call syntax
         for choice in aggregator.choices.values_mut() {
-            if choice.tool_calls.is_none() {
-                if let Ok(tool_calls) = try_tool_call_parse_aggregate(&choice.text, None) {
-                    if tool_calls.is_empty() {
-                        continue;
-                    }
-                    for tool_call in &tool_calls {
-                        tracing::debug!(
-                            tool_call_id = %tool_call.id,
-                            function_name = %tool_call.function.name,
-                            arguments = %tool_call.function.arguments,
-                            "Parsed structured tool call from aggregated content"
-                        );
-                    }
-                    choice.tool_calls = Some(tool_calls);
-                    choice.text.clear();
-                    choice.finish_reason =
-                        Some(dynamo_async_openai::types::FinishReason::ToolCalls);
+            if choice.tool_calls.is_none()
+                && let Ok(tool_calls) = try_tool_call_parse_aggregate(
+                    &choice.text,
+                    parsing_options.tool_call_parser.as_deref(),
+                )
+            {
+                if tool_calls.is_empty() {
+                    continue;
                 }
+                for tool_call in &tool_calls {
+                    tracing::debug!(
+                        tool_call_id = %tool_call.id,
+                        function_name = %tool_call.function.name,
+                        arguments = %tool_call.function.arguments,
+                        "Parsed structured tool call from aggregated content"
+                    );
+                }
+                choice.tool_calls = Some(tool_calls);
+                choice.text.clear();
+                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
             }
         }
 
@@ -262,6 +255,7 @@ pub trait ChatCompletionAggregator {
     /// * `Err(String)` if an error occurs.
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String>;
 
     /// Converts an SSE stream into a [`NvCreateChatCompletionResponse`].
@@ -274,21 +268,24 @@ pub trait ChatCompletionAggregator {
     /// * `Err(String)` if an error occurs.
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String>;
 }
 
 impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompletionResponse {
     async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
-        DeltaAggregator::apply(stream).await
+        DeltaAggregator::apply(stream, parsing_options).await
     }
 
     async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(stream);
-        NvCreateChatCompletionResponse::from_annotated_stream(stream).await
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
 }
 
@@ -347,7 +344,7 @@ mod tests {
             Box::pin(stream::empty());
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -377,7 +374,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -421,7 +418,7 @@ mod tests {
         let stream = Box::pin(stream::iter(annotated_deltas));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -492,7 +489,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
@@ -550,7 +547,7 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());

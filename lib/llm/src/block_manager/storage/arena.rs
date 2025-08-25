@@ -207,7 +207,7 @@ mod nixl {
         S: MemoryRegion,
     {
         unsafe fn as_ptr(&self) -> *const u8 {
-            Storage::as_ptr(self.storage.as_ref())
+            unsafe { Storage::as_ptr(self.storage.as_ref()) }
         }
 
         fn size(&self) -> usize {

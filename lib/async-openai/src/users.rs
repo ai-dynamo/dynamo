@@ -11,10 +11,10 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{User, UserDeleteResponse, UserListResponse, UserRoleUpdateRequest},
-    Client,
 };
 
 /// Manage users and their role in an organization. Users will be automatically added to the Default project.

@@ -18,7 +18,7 @@ use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
 };
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
@@ -204,12 +204,12 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
 
-            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
+            let response = deltas.create_choice(0, None, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
         };
 
