@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from benchmarks.utils.genai import run_concurrency_sweep
+from benchmarks.utils.aiperf import run_concurrency_sweep
 from benchmarks.utils.plot import generate_plots
 from benchmarks.utils.vanilla_client import VanillaVllmClient
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
