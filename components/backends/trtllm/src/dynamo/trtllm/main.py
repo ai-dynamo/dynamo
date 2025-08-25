@@ -272,9 +272,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-            await endpoint.serve_endpoint(
-                handler.generate, metrics_labels=metrics_labels
-            )
+            await endpoint.serve_endpoint(handler.generate)
 
 
 def main():
