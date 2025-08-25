@@ -15,7 +15,7 @@
 
 import logging
 
-from dynamo.planner.utils.argparse import create_sla_planner_parser
+from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
 from dynamo.planner.utils.planner_core import Planner
 
 logger = logging.getLogger(__name__)
