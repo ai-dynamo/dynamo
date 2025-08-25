@@ -178,8 +178,8 @@ def parse_args():
     )
     parser.add_argument(
         "--kserve-grpc-server",
-        type=bool,
         action="store_true",
+        default=False,
         help="Start KServe gRPC server.",
     )
 
