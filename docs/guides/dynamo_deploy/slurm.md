@@ -17,7 +17,7 @@ limitations under the License.
 
 # Deploying Inference Graphs to SLURM
 
-This guide explains how to deploy Dynamo inference graphs on SLURM clusters, using sbatch. A fully working example of a vLLM serving is available [here](../../examples/deployments/slurm/run.sbatch). It should be easy to modify it to serve another type of workload.
+This guide explains how to deploy Dynamo inference graphs on SLURM clusters, using sbatch. A fully working example of a vLLM serving is available [here](../../../examples/deployments/slurm/run.sbatch). It should be easy to modify it to serve another type of workload.
 
 ## Prerequisites
 
