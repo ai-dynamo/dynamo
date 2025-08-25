@@ -179,11 +179,10 @@ fn process_metrics_only<T>(
 /// Get the request ID from a primary source, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>) -> String {
     // Try to get the request ID from the primary source
-    if let Some(primary) = primary {
-        if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
+    if let Some(primary) = primary
+        && let Ok(uuid) = uuid::Uuid::parse_str(primary) {
             return uuid.to_string();
         }
-    }
 
     // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
     let uuid = uuid::Uuid::new_v4();
