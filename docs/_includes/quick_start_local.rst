@@ -23,7 +23,7 @@ Get started with Dynamo locally in just a few commands:
 
 .. code-block:: bash
 
-   # Start the OpenAI compatible frontend
+   # Start the OpenAI compatible frontend (default port is 8080)
    python -m dynamo.frontend
 
    # In another terminal, start an SGLang worker
