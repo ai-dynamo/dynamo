@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import random
-import time
 from typing import Any, Dict
 
 import aiohttp
@@ -588,7 +587,67 @@ def test_kv_push_router_bindings(request, runtime_services):
         for mocker in mocker_processes:
             mocker.__enter__()
 
-        time.sleep(5)
+        # Wait for mockers to be ready by sending a dummy request with retry
+        async def wait_for_mockers_ready():
+            """Send a dummy request to ensure mockers are ready"""
+            runtime = get_runtime()
+            namespace = runtime.namespace("test-namespace")
+            component = namespace.component("mocker")
+            endpoint = component.endpoint("generate")
+
+            kv_router_config = KvRouterConfig()
+            kv_push_router = KvPushRouter(
+                endpoint=endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            # Dummy request with minimal tokens
+            dummy_token_ids = [1, 2, 3]  # Just a few tokens for testing
+            max_retries = 5
+            wait_time = 1
+
+            for attempt in range(max_retries + 1):
+                try:
+                    logger.info(
+                        f"Sending dummy request to check mocker readiness (attempt {attempt + 1})"
+                    )
+                    stream = await kv_push_router.generate(
+                        token_ids=dummy_token_ids,
+                        model=MODEL_NAME,
+                        stop_conditions={"max_tokens": 1},  # Generate just 1 token
+                        sampling_options={"temperature": 0.7},
+                        output_options={
+                            "include_input_tokens": False,
+                            "return_full_text": False,
+                        },
+                    )
+
+                    # Consume the stream to verify it works
+                    token_count = 0
+                    async for response in stream:
+                        if isinstance(response, dict) and "token_ids" in response:
+                            token_count += len(response["token_ids"])
+
+                    logger.info(
+                        f"Mockers are ready! Dummy request succeeded on attempt {attempt + 1}"
+                    )
+                    return True
+
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(wait_time)
+                        wait_time *= 2  # Exponential backoff
+                    else:
+                        raise RuntimeError(
+                            f"Failed to connect to mockers after {max_retries + 1} attempts"
+                        )
+
+            return False
+
+        # Wait for mockers to be ready
+        asyncio.run(wait_for_mockers_ready())
 
         # Run the async test
         async def test_kv_push_router():
