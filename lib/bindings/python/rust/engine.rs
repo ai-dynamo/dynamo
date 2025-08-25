@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::context::{callable_accepts_kwarg, PyContext};
+use super::context::{callable_accepts_kwarg, Context};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
@@ -114,7 +114,7 @@ pub struct PythonServerStreamingEngine {
     _cancel_token: CancellationToken,
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
-    has_pycontext: bool,
+    has_context: bool,
 }
 
 impl PythonServerStreamingEngine {
@@ -123,7 +123,7 @@ impl PythonServerStreamingEngine {
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
     ) -> Self {
-        let has_pycontext = Python::with_gil(|py| {
+        let has_context = Python::with_gil(|py| {
             let callable = generator.bind(py);
             callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
         });
@@ -132,7 +132,7 @@ impl PythonServerStreamingEngine {
             _cancel_token: cancel_token,
             generator,
             event_loop,
-            has_pycontext,
+            has_context,
         }
     }
 }
@@ -175,7 +175,7 @@ where
         let generator = self.generator.clone();
         let event_loop = self.event_loop.clone();
         let ctx_python = ctx.clone();
-        let has_pycontext = self.has_pycontext;
+        let has_context = self.has_context;
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -190,9 +190,9 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(ctx_python.clone()))?;
+                let py_ctx = Py::new(py, Context::new(ctx_python.clone()))?;
 
-                let gen = if has_pycontext {
+                let gen = if has_context {
                     // Pass context as a kwarg
                     let kwarg = PyDict::new(py);
                     kwarg.set_item("context", &py_ctx)?;
