@@ -1,12 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
+
+use parking_lot::Mutex;
+
 use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 use dynamo_runtime::slug::Slug;
 
 use crate::discovery::ModelEntry;
-
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
@@ -14,12 +20,6 @@ use crate::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
     },
-};
-use std::collections::HashSet;
-use std::sync::RwLock;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, thiserror::Error)]
