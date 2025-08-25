@@ -16,8 +16,9 @@ Get started with Dynamo locally in just a few commands:
 
 .. code-block:: bash
 
-   # Start etcd and NATS using Docker Compose
-   docker compose -f deploy/docker-compose.yml up -d
+   # Fetch and start etcd and NATS using Docker Compose
+   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/ai-dynamo/dynamo/release/0.4.1/deploy/docker-compose.yml
+   docker compose -f docker-compose.yml up -d
 
 **3. Run Dynamo**
 
