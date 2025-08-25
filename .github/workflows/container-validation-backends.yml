@@ -63,7 +63,7 @@ jobs:
             --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
         run: |
-          docker run --rm --gpus all -v ${{ github.workspace }}:/workspace -w /workspace \
+          docker run --rm --gpus all -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ matrix.framework }}:latest \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
