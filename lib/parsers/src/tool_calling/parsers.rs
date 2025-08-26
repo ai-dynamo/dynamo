@@ -594,7 +594,6 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-
     #[test]
     fn test_mistralai_mistral_7b_instruct_v03_multiple_with_normal_text() {
         let input = r#"Hey How are you? [{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "fahrenheit"}}]"#;
@@ -1004,7 +1003,8 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[test]
-    fn test_detect_and_parse_tool_call_default_parser_llama3_json_with_python_tag_with_normal_text() {
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_with_python_tag_with_normal_text()
+    {
         let input = r#"Hey How are you? <|python_tag|>{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
         let (result, content) = detect_and_parse_tool_call(input, None).unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
@@ -1057,7 +1057,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[test]
     fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag() {
         let input = r#"{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let (result, content)    = try_tool_call_parse(input, &ToolCallConfig::mistral()).unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral()).unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -1068,9 +1068,10 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[test]
-    fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag_with_normal_text() {
+    fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag_with_normal_text()
+     {
         let input = r#"Hey How are you? { "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let (result, content)    = try_tool_call_parse(input, &ToolCallConfig::mistral()).unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral()).unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -1094,8 +1095,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[test]
     fn test_phi4_single_function_call_with_normal_text() {
-        let input =
-            r#"Hey How are you? functools[{"name": "get_country_capital", "arguments": {"country": "Poland"}}]"#;
+        let input = r#"Hey How are you? functools[{"name": "get_country_capital", "arguments": {"country": "Poland"}}]"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert_eq!(result.len(), 1);
@@ -1122,7 +1122,6 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name2, "get_population");
         assert_eq!(args2["city"], "Warsaw");
     }
-
 
     #[test]
     fn test_phi4_multiple_function_calls_simple_arguments_with_normal_text() {

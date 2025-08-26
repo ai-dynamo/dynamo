@@ -98,22 +98,14 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
     Some(format!("[{}]", items.join(",")))
 }
 
-fn try_parse_normal_text(input: &str, start_token: &str) -> (String, String) {
-
+fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     // If input contains start token, just take the part before it
     if let Some(idx) = input.find(start_token) {
-        return (input[..idx].trim().to_string(), String::new());
+        return input[..idx].trim().to_string();
     }
 
-    // If input does not contain start token, find { or [ patterns
-    if let Some(idx) = input.find(['{', '[']) {
-        return (
-            input[..idx].trim().to_string(),
-            input[idx..].trim().to_string(),
-        );
-    }
-
-    (input.to_string(), String::new())
+    // No start token found, return empty string
+    String::new()
 }
 
 /// Attempts to parse a tool call from a raw LLM message string into a unified [`ToolCallResponse`] format.
@@ -183,49 +175,58 @@ pub fn try_tool_call_parse_json(
     let mut json = trimmed.to_string();
     let mut normal_text = trimmed.to_string();
 
-    for (start_token, end_token) in tool_call_start_tokens
+    // First, check if ANY start token exists in the input
+    let has_start_token = tool_call_start_tokens
         .iter()
-        .zip(tool_call_end_tokens.iter())
-    {
-        // Skip empty tokens
-        if start_token.is_empty() && end_token.is_empty() {
-            continue;
+        .any(|token| !token.is_empty() && normal_text.contains(token));
+
+    if !has_start_token {
+        // No start tokens found, try to extract JSON directly. Everything that starts with { or [ is considered a potential JSON.
+        if let Some(idx) = normal_text.find(['{', '[']) {
+            let extracted_normal = normal_text[..idx].trim().to_string();
+            let extracted_json = normal_text[idx..].trim().to_string();
+            if !extracted_json.is_empty() {
+                normal_text = extracted_normal;
+                json = extracted_json;
+            }
         }
+    } else {
+        // Start tokens exist, use regex-based parsing
+        for (start_token, end_token) in tool_call_start_tokens
+            .iter()
+            .zip(tool_call_end_tokens.iter())
+        {
+            let new_normal_text = try_parse_normal_text(&normal_text, start_token);
 
-        let (new_normal_text, potential_json) = try_parse_normal_text(&normal_text, start_token);
-
-        if !potential_json.is_empty() {
-            normal_text = new_normal_text;
-            json = potential_json;
-            continue;
-        }
-
-        // Process based on token types
-        match (start_token.is_empty(), end_token.is_empty()) {
-            (false, true) => {
-                // Single token case
-                if let Some(content) = handle_single_token_tool_calls(&json, start_token) {
-                    json = content;
-                    normal_text = new_normal_text;
-                    break; // Found content, exit early
+            // Process based on token types
+            match (start_token.is_empty(), end_token.is_empty()) {
+                (false, true) => {
+                    // Single token case
+                    let result = handle_single_token_tool_calls(&json, start_token);
+                    if let Some(content) = result {
+                        json = content;
+                        // For single token case, use the normal text we extracted earlier
+                        normal_text = new_normal_text;
+                        break; // Found content, exit early
+                    }
+                }
+                (false, false) => {
+                    // Start and end token case
+                    let result = extract_tool_call_content(&json, start_token, end_token);
+                    if let Some(content) = result {
+                        json = content;
+                        normal_text = new_normal_text;
+                        break; // Found content, exit early
+                    }
+                }
+                _ => {
+                    continue;
                 }
             }
-            (false, false) => {
-                // Start and end token case
-                if let Some(content) = extract_tool_call_content(&json, start_token, end_token) {
-                    json = content;
-                    normal_text = new_normal_text;
-                    break; // Found content, exit early
-                }
-            }
-            _ => continue,
         }
     }
-
     // Convert json (String) to &str
     let json = json.as_str();
-    tracing::debug!("json: {}", json);
-    tracing::debug!("normal_text: {}", normal_text);
     // Anonymous function to attempt deserialization into a known representation
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
         Ok(ToolCallResponse {
