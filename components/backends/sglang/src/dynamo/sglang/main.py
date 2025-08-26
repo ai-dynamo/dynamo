@@ -89,44 +89,53 @@ async def init(runtime: DistributedRuntime, config: Config):
     # TODO: add in native endpoints
     ready_evt = asyncio.Event()
 
-    async def _gated_generate(request):
-        # Do not process any requests until registration completes.
-        await ready_evt.wait()
-        async for out in handler.generate(request):
-            yield out
+    class GatedHandler:
+        def __init__(self, original_handler, ready_event):
+            self.original_handler = original_handler
+            self.ready_event = ready_event
 
-    serve_task = asyncio.create_task(
-        generate_endpoint.serve_endpoint(_gated_generate, graceful_shutdown=False)
-    )
+        async def generate(self, request):
+            # Do not process any requests until registration completes.
+            await self.ready_event.wait()
+            async for out in self.original_handler.generate(request):
+                yield out
 
-    # Wait for endpoint to be fully established then do model registration
-    await asyncio.sleep(2.5)
-    registration_success = await register_llm_with_runtime_config(
-        engine, generate_endpoint, server_args, dynamo_args.migration_limit
-    )
+    gated_handler = GatedHandler(handler, ready_evt)
 
-    # If registration failed, shut down serving and fail fast
-    if not registration_success:
-        logging.error("Model registration failed; shutting down server")
-        # Trigger graceful shutdown of the runtime
-        runtime.shutdown()
-        serve_task.cancel()
+    async def registration_task():
+        # Wait for endpoint to be fully established then do model registration
         try:
-            import contextlib
+            # Create a client to check if the endpoint is ready
+            client = await generate_endpoint.client()
+            logging.info("Waiting for endpoint instances to be ready...")
+            await client.wait_for_instances()
+            logging.info("Endpoint is ready, proceeding with model registration")
+        except Exception as e:
+            logging.error(f"Failed to wait for endpoint readiness: {e}")
+            raise RuntimeError(f"Endpoint readiness check failed: {e}")
 
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(serve_task, timeout=10)
-        except asyncio.TimeoutError:
-            logging.error("Timed out waiting for serve task to cancel")
-        raise RuntimeError("Model registration failed")
+        registration_success = await register_llm_with_runtime_config(
+            engine, generate_endpoint, server_args, dynamo_args.migration_limit
+        )
 
-    # Registration succeeded; allow traffic to flow
-    ready_evt.set()
-    logging.info("Model registration succeeded; service is ready")
+        # If registration failed, shut down serving and fail fast
+        if not registration_success:
+            logging.error("Model registration failed; shutting down server")
+            # Trigger graceful shutdown of the runtime
+            runtime.shutdown()
+            raise RuntimeError("Model registration failed")
+
+        # Registration succeeded; allow traffic to flow
+        ready_evt.set()
+        logging.info("Model registration succeeded; service is ready")
 
     try:
-        # Wait for serving to complete
-        await serve_task
+        await asyncio.gather(
+            registration_task(),
+            generate_endpoint.serve_endpoint(
+                gated_handler.generate, graceful_shutdown=False
+            ),
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
