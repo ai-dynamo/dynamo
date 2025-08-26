@@ -231,7 +231,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
-        runtime_config = await get_engine_runtime_config(engine, config)
+        runtime_config = ModelRuntimeConfig()
+
+        runtime_config.reasoning_parser = config.reasoning_parser
+        runtime_config.tool_call_parser = config.tool_call_parser
 
         if is_first_worker(config):
             # Register the model with runtime config
