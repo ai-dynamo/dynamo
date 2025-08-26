@@ -22,10 +22,9 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update
 # Values allow podmnonitors to be picked up that are outside of the kube-prometheus-stack helm release
 helm install prometheus prometheus-community/kube-prometheus-stack \
-  --set podMonitorSelectorNilUsesHelmValues=false \
-  --set prometheus.prometheusSpec.podMonitorSelector="{}" \
-  --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}"
-
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}" \
+  --set prometheus.prometheusSpec.probeNamespaceSelector="{}"
 ```
 
 > [!Note]
