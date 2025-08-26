@@ -315,6 +315,7 @@ Send multiple new conversations to see them distributed across replicas:
 ```python
 import asyncio
 from openai import AsyncOpenAI
+import os
 
 if os.environ.get("DYN_FRONTEND_IP"):
     frontend_ip=os.environ.get("DYN_FRONTEND_IP")

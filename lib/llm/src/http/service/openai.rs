@@ -253,8 +253,7 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request.id().to_string();
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -354,13 +353,15 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
     let streaming = false;
@@ -380,10 +381,6 @@ async fn embeddings(
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
-
-    // setup context
-    // todo - inherit request_id from distributed trace details
-    let request = Context::with_id(request, request_id.clone());
 
     // issue the generate call on the engine
     let stream = engine

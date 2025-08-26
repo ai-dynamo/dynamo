@@ -1,28 +1,32 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
-
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
+    local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{self},
     types::TokenIdType,
 };
+use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
     /// Creates a [`DeltaGenerator`] instance based on the chat completion request.
     ///
+    /// # Arguments
+    /// * `request_id` - The request ID to use for the chat completion response ID.
+    ///
     /// # Returns
     /// * [`DeltaGenerator`] configured with model name and response options.
-    pub fn response_generator(&self) -> DeltaGenerator {
+    pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
             enable_usage: true,
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
+            runtime_config: ModelRuntimeConfig::default(),
         };
 
-        DeltaGenerator::new(self.inner.model.clone(), options)
+        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
     }
 }
 
@@ -33,6 +37,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
+
+    pub runtime_config: ModelRuntimeConfig,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
@@ -67,10 +73,11 @@ impl DeltaGenerator {
     /// # Arguments
     /// * `model` - The model name used for response generation.
     /// * `options` - Configuration options for enabling usage and log probabilities.
+    /// * `request_id` - The request ID to use for the chat completion response.
     ///
     /// # Returns
     /// * A new instance of [`DeltaGenerator`].
-    pub fn new(model: String, options: DeltaGeneratorOptions) -> Self {
+    pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -92,13 +99,19 @@ impl DeltaGenerator {
         // This is hardcoded for now, but can be made configurable later.
         // TODO: Make parser type configurable once front-end integration is determined
         // Change to GptOss to test GptOSS parser
-        let reasoning_parser_type = ReasoningParserType::Basic;
-
         // Reasoning parser wrapper
-        let reasoning_parser = reasoning_parser_type.get_reasoning_parser();
+        let reasoning_parser = ReasoningParserType::get_reasoning_parser_from_name(
+            options
+                .runtime_config
+                .reasoning_parser
+                .as_deref()
+                .unwrap_or("basic"),
+        );
+
+        let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         Self {
-            id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+            id: chatcmpl_id,
             object: "chat.completion.chunk".to_string(),
             created: now,
             model,

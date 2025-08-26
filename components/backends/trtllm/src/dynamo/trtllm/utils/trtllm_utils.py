@@ -49,6 +49,9 @@ class Config:
         self.next_endpoint: str = ""
         self.modality: str = "text"
 
+        self.reasoning_parser: Optional[str] = None
+        self.tool_call_parser: Optional[str] = None
+
     def __str__(self) -> str:
         return (
             f"Config(namespace={self.namespace}, "
@@ -73,6 +76,8 @@ class Config:
             f"disaggregation_strategy={self.disaggregation_strategy}, "
             f"next_endpoint={self.next_endpoint}, "
             f"modality={self.modality})"
+            f"reasoning_parser={self.reasoning_parser})"
+            f"tool_call_parser={self.tool_call_parser})"
         )
 
 
@@ -234,6 +239,21 @@ def cmd_line_args():
         default="",
         help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) to send requests to when running in disaggregation mode. Default: {DEFAULT_NEXT_ENDPOINT} if first worker, empty if next worker",
     )
+
+    # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
+    parser.add_argument(
+        "--dyn-tool-call-parser",
+        type=str,
+        default=None,
+        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4'.",
+    )
+    parser.add_argument(
+        "--dyn-reasoning-parser",
+        type=str,
+        default=None,
+        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss'.",
+    )
+
     args = parser.parse_args()
 
     config = Config()
@@ -293,5 +313,8 @@ def cmd_line_args():
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
     config.modality = args.modality
+
+    config.reasoning_parser = args.dyn_reasoning_parser
+    config.tool_call_parser = args.dyn_tool_call_parser
 
     return config
