@@ -582,18 +582,17 @@ impl WorkerMetricsPublisher {
 
     /// Register KvStats Prometheus metrics with the component's registry
     pub fn register_prometheus_metrics(&self, component: &Component) -> Result<()> {
-        // Create new KvStatsPrometheusGauges with registered metrics
-        let new_gauges = Arc::new(KvStatsPrometheusGauges::new(component)?);
+        let mut gauges = self
+            .prometheus_gauges
+            .write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on prometheus_gauges"))?;
 
-        // Use write lock only for initialization (happens once)
-        if let Ok(mut gauges) = self.prometheus_gauges.write() {
-            *gauges = Some(new_gauges);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "Failed to acquire write lock on prometheus_gauges"
-            ))
+        // Only initialize if not already done
+        if gauges.is_none() {
+            *gauges = Some(Arc::new(KvStatsPrometheusGauges::new(component)?));
         }
+
+        Ok(())
     }
 
     pub async fn create_endpoint(
