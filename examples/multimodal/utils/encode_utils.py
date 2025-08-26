@@ -49,9 +49,9 @@ def get_qwen_image_features(
         raise ValueError("grid_thw is not provided")
 
     return (
-        vision_encoder.get_image_features(pixel_values, grid_thw)
+        vision_encoder.get_image_features(pixel_values, grid_thw)  # type: ignore
         if grid_thw is not None
-        else vision_encoder.get_image_features(pixel_values)
+        else vision_encoder.get_image_features(pixel_values)  # type: ignore
     )
 
 
@@ -104,7 +104,7 @@ def encode_image_embeddings(
 
 def get_encoder_components(
     model_name: str, vision_model: torch.nn.Module
-) -> tuple[torch.nn.Module, Optional[torch.nn.Module]]:
+) -> tuple[Any, Optional[Any]]:
     """
     Get the appropriate vision encoder and projector components for a given model.
 
@@ -113,7 +113,7 @@ def get_encoder_components(
         vision_model: The loaded vision model
 
     Returns:
-        Tuple of (vision_encoder, projector)
+        Tuple of (vision_encoder, projector) where types depend on the model
 
     Raises:
         NotImplementedError: If model is not supported
