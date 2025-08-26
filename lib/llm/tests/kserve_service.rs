@@ -80,7 +80,7 @@ pub mod kserve_test {
             let ctx = context.context();
 
             // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
-            let generator = request.response_generator();
+            let generator = request.response_generator(ctx.id().to_string());
 
             let word_list: Vec<String> = match request.inner.prompt {
                 Prompt::String(str) => str.split(' ').map(|s| s.to_string()).collect(),
