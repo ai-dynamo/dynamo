@@ -3,6 +3,7 @@
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
+    local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{self},
     types::TokenIdType,
 };
@@ -22,7 +23,7 @@ impl NvCreateChatCompletionRequest {
             enable_usage: true,
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
-            runtime_config: runtime_config::ModelRuntimeConfig::default(),
+            runtime_config: ModelRuntimeConfig::default(),
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -37,7 +38,7 @@ pub struct DeltaGeneratorOptions {
     /// Determines whether log probabilities should be included in the response.
     pub enable_logprobs: bool,
 
-    pub runtime_config: runtime_config::ModelRuntimeConfig,
+    pub runtime_config: ModelRuntimeConfig,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
