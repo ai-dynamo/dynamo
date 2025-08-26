@@ -22,7 +22,6 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::tokenizers::Encoding;
@@ -95,7 +94,6 @@ pub struct OpenAIPreprocessor {
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
     model_info: Arc<dyn ModelInfo>,
-    runtime_config: ModelRuntimeConfig,
 }
 
 impl OpenAIPreprocessor {
@@ -123,14 +121,11 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info().await?;
 
-        let runtime_config = mdc.runtime_config.clone();
-
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
             model_info,
             mdcsum,
-            runtime_config,
         }))
     }
 
@@ -499,7 +494,7 @@ impl
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator(self.runtime_config.clone());
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
         // convert the chat completion request to a common completion request
@@ -553,7 +548,7 @@ impl
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
