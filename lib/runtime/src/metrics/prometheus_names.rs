@@ -14,108 +14,6 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Sanitizes a Prometheus metric name by converting invalid characters to underscores
-/// and ensuring the first character is valid. Uses regex for clear validation.
-/// Returns an error if the input cannot be sanitized into a valid name.
-///
-/// **Rules**: Pattern `[a-zA-Z_:][a-zA-Z0-9_:]*`. Allows colons and `__` anywhere.
-pub fn sanitize_prometheus_name(raw: &str) -> anyhow::Result<String> {
-    if raw.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Cannot sanitize empty string into valid Prometheus name"
-        ));
-    }
-
-    static INVALID_CHARS_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
-
-    static INVALID_FIRST_CHAR_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^[^a-zA-Z_:]").unwrap());
-
-    // Replace all invalid characters with underscores
-    let mut sanitized = INVALID_CHARS_PATTERN.replace_all(raw, "_").to_string();
-
-    // Ensure first character is valid (letter, underscore, or colon)
-    if INVALID_FIRST_CHAR_PATTERN.is_match(&sanitized) {
-        sanitized = format!("_{}", sanitized);
-    }
-
-    // Check if the result is all underscores (invalid input)
-    if sanitized.chars().all(|c| c == '_') {
-        return Err(anyhow::anyhow!(
-            "Input '{}' contains only invalid characters and cannot be sanitized into a valid Prometheus name",
-            raw
-        ));
-    }
-
-    Ok(sanitized)
-}
-
-/// Sanitizes a Prometheus label name by converting invalid characters to underscores
-/// and ensuring the first character is valid. Uses regex for clear validation.
-/// Label names have stricter rules than metric names (no colons allowed).
-/// Returns an error if the input cannot be sanitized into a valid label name.
-///
-/// **Rules**: Pattern `[a-zA-Z_][a-zA-Z0-9_]*`. No colons, no `__` prefix (reserved).
-pub fn sanitize_prometheus_label(raw: &str) -> anyhow::Result<String> {
-    if raw.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Cannot sanitize empty string into valid Prometheus label"
-        ));
-    }
-
-    static INVALID_CHARS_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_]").unwrap());
-
-    static INVALID_FIRST_CHAR_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^[^a-zA-Z_]").unwrap());
-
-    // Replace all invalid characters with underscores (no colons allowed in labels)
-    let mut sanitized = INVALID_CHARS_PATTERN.replace_all(raw, "_").to_string();
-
-    // Ensure first character is valid (letter or underscore only)
-    if INVALID_FIRST_CHAR_PATTERN.is_match(&sanitized) {
-        sanitized = format!("_{}", sanitized);
-    }
-
-    // Prevent __ prefix (reserved for Prometheus internal use) but allow __ elsewhere
-    if sanitized.starts_with("__") {
-        sanitized = sanitized
-            .strip_prefix("__")
-            .unwrap_or(&sanitized)
-            .to_string();
-        if sanitized.is_empty() || !sanitized.chars().next().unwrap().is_ascii_alphabetic() {
-            sanitized = format!("_{}", sanitized);
-        }
-    }
-
-    // Check if the result is all underscores (invalid input)
-    if sanitized.chars().all(|c| c == '_') {
-        return Err(anyhow::anyhow!(
-            "Input '{}' contains only invalid characters and cannot be sanitized into a valid Prometheus label",
-            raw
-        ));
-    }
-
-    Ok(sanitized)
-}
-
-/// Sanitizes a Prometheus frontend metric prefix by converting invalid characters to underscores
-/// and ensuring the first character is valid. Uses the general prometheus name sanitization
-/// but with frontend-specific fallback behavior.
-pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
-    if raw.is_empty() {
-        return name_prefix::FRONTEND.to_string();
-    }
-
-    // Reuse the general prometheus name sanitization logic, fallback to frontend prefix on error
-    sanitize_prometheus_name(raw).unwrap_or_else(|_| name_prefix::FRONTEND.to_string())
-}
-
-/// Builds a full component metric name by prepending the component prefix
-pub fn build_component_metric_name(metric_name: &str) -> String {
-    format!("{}_{}", name_prefix::COMPONENT, metric_name)
-}
-
 /// Metric name prefixes used across the metrics system
 pub mod name_prefix {
     /// Prefix for all Prometheus metric names.
@@ -346,6 +244,105 @@ pub mod kvbm_connector {
 
     /// KVBM connector worker
     pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
+}
+
+// Shared regex patterns for Prometheus sanitization
+static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
+static LABEL_INVALID_CHARS_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_]").unwrap());
+static INVALID_FIRST_CHAR_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[^a-zA-Z_]").unwrap());
+
+/// Sanitizes a Prometheus metric name by converting invalid characters to underscores
+/// and ensuring the first character is valid. Uses regex for clear validation.
+/// Returns an error if the input cannot be sanitized into a valid name.
+///
+/// **Rules**: Pattern `[a-zA-Z_:][a-zA-Z0-9_:]*`. Allows colons and `__` anywhere.
+pub fn sanitize_prometheus_name(raw: &str) -> anyhow::Result<String> {
+    if raw.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Cannot sanitize empty string into valid Prometheus name"
+        ));
+    }
+
+    // Replace all invalid characters with underscores
+    let mut sanitized = METRIC_INVALID_CHARS_PATTERN.replace_all(raw, "_").to_string();
+
+    // Ensure first character is valid (letter, underscore, or colon)
+    if INVALID_FIRST_CHAR_PATTERN.is_match(&sanitized) {
+        sanitized = format!("_{}", sanitized);
+    }
+
+    // Check if the result is all underscores (invalid input)
+    if sanitized.chars().all(|c| c == '_') {
+        return Err(anyhow::anyhow!(
+            "Input '{}' contains only invalid characters and cannot be sanitized into a valid Prometheus name",
+            raw
+        ));
+    }
+
+    Ok(sanitized)
+}
+
+/// Sanitizes a Prometheus label name by converting invalid characters to underscores
+/// and ensuring the first character is valid. Uses regex for clear validation.
+/// Label names have stricter rules than metric names (no colons allowed).
+/// Returns an error if the input cannot be sanitized into a valid label name.
+///
+/// **Rules**: Pattern `[a-zA-Z_][a-zA-Z0-9_]*`. No colons, no `__` prefix (reserved).
+pub fn sanitize_prometheus_label(raw: &str) -> anyhow::Result<String> {
+    if raw.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Cannot sanitize empty string into valid Prometheus label"
+        ));
+    }
+
+    // Replace all invalid characters with underscores (no colons allowed in labels)
+    let mut sanitized = LABEL_INVALID_CHARS_PATTERN.replace_all(raw, "_").to_string();
+
+    // Ensure first character is valid (letter or underscore only)
+    if INVALID_FIRST_CHAR_PATTERN.is_match(&sanitized) {
+        sanitized = format!("_{}", sanitized);
+    }
+
+    // Prevent __ prefix (reserved for Prometheus internal use) but allow __ elsewhere
+    if sanitized.starts_with("__") {
+        sanitized = sanitized
+            .strip_prefix("__")
+            .unwrap_or(&sanitized)
+            .to_string();
+        if sanitized.is_empty() || !sanitized.chars().next().unwrap().is_ascii_alphabetic() {
+            sanitized = format!("_{}", sanitized);
+        }
+    }
+
+    // Check if the result is all underscores (invalid input)
+    if sanitized.chars().all(|c| c == '_') {
+        return Err(anyhow::anyhow!(
+            "Input '{}' contains only invalid characters and cannot be sanitized into a valid Prometheus label",
+            raw
+        ));
+    }
+
+    Ok(sanitized)
+}
+
+/// Sanitizes a Prometheus frontend metric prefix by converting invalid characters to underscores
+/// and ensuring the first character is valid. Uses the general prometheus name sanitization
+/// but with frontend-specific fallback behavior.
+pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
+    if raw.is_empty() {
+        return name_prefix::FRONTEND.to_string();
+    }
+
+    // Reuse the general prometheus name sanitization logic, fallback to frontend prefix on error
+    sanitize_prometheus_name(raw).unwrap_or_else(|_| name_prefix::FRONTEND.to_string())
+}
+
+/// Builds a full component metric name by prepending the component prefix
+pub fn build_component_metric_name(metric_name: &str) -> String {
+    format!("{}_{}", name_prefix::COMPONENT, metric_name)
 }
 
 #[cfg(test)]
