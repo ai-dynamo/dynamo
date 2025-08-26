@@ -24,6 +24,7 @@ use tracing;
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
+use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
 use crate::tokenizers::Encoding;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
@@ -151,10 +152,107 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
-        let mut annotations = HashMap::new();
+        let mut builder = self.builder(request)?;
+        let formatted_prompt = self.apply_template(request)?;
+        let annotations = self.gather_tokens(request, &mut builder, formatted_prompt)?;
+
+        Ok((builder.build()?, annotations))
+    }
+
+    pub fn builder<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
 
+        let mut stop_conditions = request.extract_stop_conditions()?;
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            for eos_token in self.model_info.eos_token_ids() {
+                if !stop_tokens.contains(&eos_token) {
+                    stop_tokens.push(eos_token);
+                }
+            }
+        } else {
+            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+        }
+
+        // apply ignore eos if not already set
+        stop_conditions.apply_ignore_eos();
+
+        if !stop_conditions.ignore_eos.unwrap_or(false) {
+            builder.eos_token_ids(self.model_info.eos_token_ids());
+        }
+
+        builder.stop_conditions(stop_conditions);
+        builder.sampling_options(request.extract_sampling_options()?);
+        builder.output_options(request.extract_output_options()?);
+        builder.annotations(request.annotations().unwrap_or_default());
+        builder.mdc_sum(Some(self.mdcsum.clone()));
+        builder.estimated_prefix_hit_num_blocks(None);
+        // Extract backend_instance_id from nvext if present
+        if let Some(nvext) = request.nvext() {
+            builder.backend_instance_id(nvext.backend_instance_id);
+        }
+
+        Ok(builder)
+    }
+
+    pub fn apply_template<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<Option<String>> {
+        if let PromptInput::Text(_) = request.prompt_input_type()
+            && let Some(TextInput::Single(_)) = request.extract_text()
+        {
+            let use_raw_prompt = request
+                .nvext()
+                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
+
+            if use_raw_prompt {
+                match request.raw_prompt() {
+                    Some(prompt) => Ok(Some(prompt)),
+                    None => {
+                        tracing::warn!("Raw prompt requested but not available");
+                        Ok(Some(self.formatter.render(request)?))
+                    }
+                }
+            } else {
+                Ok(Some(self.formatter.render(request)?))
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn gather_tokens<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<String>,
+    ) -> Result<HashMap<String, String>> {
+        let mut annotations = HashMap::new();
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
@@ -178,21 +276,7 @@ impl OpenAIPreprocessor {
                 if let Some(text_input) = request.extract_text() {
                     match text_input {
                         TextInput::Single(_) => {
-                            let use_raw_prompt = request
-                                .nvext()
-                                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
-
-                            let formatted_prompt = if use_raw_prompt {
-                                match request.raw_prompt() {
-                                    Some(prompt) => prompt,
-                                    None => {
-                                        tracing::warn!("Raw prompt requested but not available");
-                                        self.formatter.render(request)?
-                                    }
-                                }
-                            } else {
-                                self.formatter.render(request)?
-                            };
+                            let formatted_prompt = formatted_prompt.expect("Could not find a prompt. The paired match statements earlier should make this unreachable");
 
                             // Check if backend_instance_id is present and token_data is provided
                             let has_backend_instance_id = request
@@ -258,37 +342,7 @@ impl OpenAIPreprocessor {
                 }
             }
         }
-
-        let mut stop_conditions = request.extract_stop_conditions()?;
-        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
-                }
-            }
-        } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
-        }
-
-        // apply ignore eos if not already set
-        stop_conditions.apply_ignore_eos();
-
-        if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
-        }
-
-        builder.stop_conditions(stop_conditions);
-        builder.sampling_options(request.extract_sampling_options()?);
-        builder.output_options(request.extract_output_options()?);
-        builder.annotations(request.annotations().unwrap_or_default());
-        builder.mdc_sum(Some(self.mdcsum.clone()));
-        builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id from nvext if present
-        if let Some(nvext) = request.nvext() {
-            builder.backend_instance_id(nvext.backend_instance_id);
-        }
-
-        Ok((builder.build()?, annotations))
+        Ok(annotations)
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
@@ -581,7 +635,9 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request)?;
+        let mut builder = self.builder(&request)?;
+        let annotations = self.gather_tokens(&request, &mut builder, None)?;
+        let common_request = builder.build()?;
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
