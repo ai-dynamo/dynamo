@@ -231,7 +231,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
-        runtime_config = get_engine_runtime_config(engine, config)
+        runtime_config = await get_engine_runtime_config(engine, config)
 
         if is_first_worker(config):
             # Register the model with runtime config
