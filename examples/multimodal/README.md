@@ -260,7 +260,7 @@ You should see a response similar to this:
 #### Components
 
 - workers: For disaggregated serving, we have two workers, [VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for encoding and prefilling.
-- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
+- processor: Tokenizes the prompt and passes it to the VllmPDWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
 #### Graph
