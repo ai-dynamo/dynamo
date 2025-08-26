@@ -21,7 +21,6 @@ import signal
 import sys
 from typing import AsyncIterator, Tuple
 
-import torch
 import uvloop
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -33,6 +32,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.encode_utils import encode_image_embeddings, get_encoder_components
 from utils.image_loader import ImageLoader
 from utils.model import load_vision_model
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
@@ -74,35 +74,13 @@ class VllmEncodeWorker:
         self.vision_model = load_vision_model(self.model)
         self.min_workers = 1
 
-        # Detect vision encoder and projector for different model
-        if "llava" in self.model.lower():
-            self.vision_encoder = self.vision_model.vision_tower
-            self.projector = getattr(self.vision_model, "multi_modal_projector", None)
-
-        elif "qwen" in self.model.lower():
-            self.vision_encoder = self.vision_model
-            self.projector = None
-        else:
-            raise NotImplementedError(f"Model not supported: {self.model}")
+        # Get encoder components for the model
+        self.vision_encoder, self.projector = get_encoder_components(
+            self.model, self.vision_model
+        )
 
     def cleanup(self):
         pass
-
-    def get_qwen_image_features(self, vision_encoder, image_embeds):
-        pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
-
-        grid_thw = image_embeds.get("image_grid_thw", None)
-        if grid_thw is not None:
-            grid_thw = grid_thw.to(vision_encoder.device)
-            logger.debug(f"Qwen grid_thw shape: {grid_thw.shape}")
-        else:
-            raise ValueError("grid_thw is not provided")
-
-        return (
-            vision_encoder.get_image_features(pixel_values, grid_thw)
-            if grid_thw is not None
-            else vision_encoder.get_image_features(pixel_values)
-        )
 
     async def generate(
         self, request: vLLMMultimodalRequest
@@ -133,31 +111,13 @@ class VllmEncodeWorker:
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
 
-            with torch.no_grad():
-                # Route through the correct encoder
-                if "llava" in self.model.lower():
-                    pixel_values = image_embeds["pixel_values"].to(
-                        self.vision_encoder.device
-                    )
-                    vision_outputs = self.vision_encoder(pixel_values)
-                    if self.projector is None:
-                        raise ValueError(
-                            f"Projector not found for LLaVA model: {self.model}"
-                        )
-                    embeddings = self.projector(vision_outputs.last_hidden_state)
-                elif "qwen" in self.model.lower():
-                    embeddings = self.get_qwen_image_features(
-                        self.vision_encoder, image_embeds
-                    )
-                else:
-                    raise NotImplementedError(f"Model not supported: {self.model}")
-
-                # Normalize output shape
-                if isinstance(embeddings, (tuple, list)):
-                    embeddings = embeddings[0]
-                embeddings = (
-                    embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
-                )
+            # Encode the image embeddings using model-specific encoder
+            embeddings = encode_image_embeddings(
+                model_name=self.model,
+                image_embeds=image_embeds,
+                vision_encoder=self.vision_encoder,
+                projector=self.projector,
+            )
 
             image_grid_thw = (
                 image_embeds["image_grid_thw"].tolist()

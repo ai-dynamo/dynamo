@@ -46,7 +46,7 @@ from utils.args import (
     parse_endpoint,
 )
 from utils.image_loader import ImageLoader
-from utils.model import construct_mm_data, get_vision_embeddings_info
+from utils.model import construct_mm_data
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
@@ -253,23 +253,6 @@ class VllmPDWorker(VllmBaseWorker):
         self._connector = connect.Connector()
         await self._connector.initialize()
 
-        self.embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
-            self.engine_args.model
-        )
-
-        logger.debug(f"Embeddings shape: {self.embeddings_shape}")
-        self._embeddings_descriptor = None
-
-        if self.embeddings_shape[1] != 0:
-            embeddings = torch.empty(
-                self.embeddings_shape,
-                dtype=self.EMBEDDINGS_DTYPE,
-                device=self.EMBEDDINGS_DEVICE,
-            )
-            descriptor = connect.Descriptor(embeddings)
-            # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
-            self._embeddings_descriptor = (embeddings, descriptor)
-
         self.image_loader = ImageLoader()
 
         logger.info("VllmPDWorker has been initialized")
@@ -286,16 +269,13 @@ class VllmPDWorker(VllmBaseWorker):
         embeddings, descriptor = None, None
 
         # Process embeddings using the connector
-        if self._embeddings_descriptor:
-            embeddings, descriptor = self._embeddings_descriptor
-        else:
-            # If no descriptor is provided, create a new one based on the embedding shape.
-            embeddings = torch.empty(
-                request.embeddings_shape,
-                dtype=self.EMBEDDINGS_DTYPE,
-                device=self.EMBEDDINGS_DEVICE,
-            )
-            descriptor = connect.Descriptor(embeddings)
+        # Create a descriptor based on the embedding shape.
+        embeddings = torch.empty(
+            request.embeddings_shape,
+            dtype=self.EMBEDDINGS_DTYPE,
+            device=self.EMBEDDINGS_DEVICE,
+        )
+        descriptor = connect.Descriptor(embeddings)
 
         if request.image_url is None:
             if descriptor is None:

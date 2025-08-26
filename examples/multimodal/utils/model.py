@@ -22,6 +22,14 @@ from transformers import AutoConfig, AutoModel
 logger = logging.getLogger(__name__)
 
 
+class SupportedModels:
+    """Supported multimodal model identifiers"""
+
+    LLAVA_1_5_7B = "llava-hf/llava-1.5-7b-hf"
+    QWEN_2_5_VL_7B = "Qwen/Qwen2.5-VL-7B-Instruct"
+    LLAVA_NEXT_VIDEO_7B = "llava-hf/LLaVA-NeXT-Video-7B-hf"
+
+
 def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
@@ -36,16 +44,16 @@ def get_vision_embeddings_info(
     model_id: str,
 ) -> Tuple[Tuple[int, int, int], torch.dtype]:
     """Calculate vision embeddings size and dtype using model config
-    Returns a tuple of (batch_size, num_patches, hidden_dim), dtype.
+    Returns a tuple of (batch_size, seq_len, hidden_dim), dtype.
     """
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
-    if "llava-hf/llava-1.5-7b-hf" in model_id:
-        num_patches = 577
-    elif "Qwen/Qwen2.5-VL-7B-Instruct" in model_id:
-        num_patches = 345
+    if model_id == SupportedModels.LLAVA_1_5_7B:
+        seq_len = 577
+    elif model_id == SupportedModels.QWEN_2_5_VL_7B:
+        seq_len = 345
     else:
-        num_patches = 0
+        seq_len = 0
 
     if not hasattr(config, "torch_dtype"):
         raise ValueError("Model config missing required 'torch_dtype' attribute")
@@ -56,7 +64,7 @@ def get_vision_embeddings_info(
         hidden_size = 4096
     else:
         hidden_size = config.hidden_size
-    return (1, num_patches, hidden_size), config.torch_dtype
+    return (1, seq_len, hidden_size), config.torch_dtype
 
 
 def construct_mm_data(
@@ -67,7 +75,7 @@ def construct_mm_data(
 ) -> Dict[str, torch.Tensor | Dict[str, Any]]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
     image_embeds = image_embeds.to(embeddings_dtype)
-    if "qwen" in model.lower():
+    if model == SupportedModels.QWEN_2_5_VL_7B:
         if image_grid_thw is not None and len(image_grid_thw) > 0:
             grid_thw_tensor = torch.tensor(image_grid_thw)
         else:

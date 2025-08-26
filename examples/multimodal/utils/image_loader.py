@@ -31,7 +31,9 @@ class ImageLoader:
 
     def __init__(self, cache_size: int = CACHE_SIZE_MAXIMUM):
         self._http_timeout = 30.0
-        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
+        self._http_client = httpx.AsyncClient(
+            timeout=self._http_timeout, follow_redirects=True
+        )
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
