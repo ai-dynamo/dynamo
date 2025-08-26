@@ -398,7 +398,7 @@ impl
 
                         #[allow(deprecated)]
                         let delta = NvCreateChatCompletionStreamResponse {
-                            id: format!("chatcmpl-{}", request_id),
+                            id: format!("chatcmpl-{request_id}"),
                             choices: vec![dynamo_async_openai::types::ChatChoiceStream{
                                 index: 0,
                                 delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta{

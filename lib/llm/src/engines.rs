@@ -185,7 +185,7 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
         let ctx = context.context();
-        let deltas = request.response_generator(ctx.id().to_string());
+        let mut deltas = request.response_generator(ctx.id().to_string());
         let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {

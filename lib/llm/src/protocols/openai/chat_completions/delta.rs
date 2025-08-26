@@ -1,15 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
-
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
-    local_model::runtime_config,
     protocols::common::{self},
     types::TokenIdType,
 };
-use dynamo_runtime::logging;
+use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
@@ -110,7 +107,7 @@ impl DeltaGenerator {
                 .unwrap_or("basic"),
         );
 
-        let chatcmpl_id = format!("chatcmpl-{}", request_id);
+        let chatcmpl_id = format!("chatcmpl-{request_id}");
 
         Self {
             id: chatcmpl_id,
