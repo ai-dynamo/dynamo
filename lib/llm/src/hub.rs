@@ -49,7 +49,9 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
 
     // Only use ModelExpress if the environment variable is explicitly set
     if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
-        tracing::info!("ModelExpress endpoint configured, attempting to use ModelExpress for model: {model_name}");
+        tracing::info!(
+            "ModelExpress endpoint configured, attempting to use ModelExpress for model: {model_name}"
+        );
 
         let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
 
@@ -68,7 +70,9 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
                         get_mx_model_path_from_cache(&model_name)
                     }
                     Err(e) => {
-                        tracing::warn!("Server download failed for model '{model_name}': {e}. Falling back to direct download.");
+                        tracing::warn!(
+                            "Server download failed for model '{model_name}': {e}. Falling back to direct download."
+                        );
                         mx_download_direct(&model_name).await
                     }
                 }
@@ -89,7 +93,9 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
                 return Ok(path);
             }
             Err(e) => {
-                tracing::warn!("ModelExpress download failed for model '{model_name}': {e}. Falling back to hf-hub.");
+                tracing::warn!(
+                    "ModelExpress download failed for model '{model_name}': {e}. Falling back to hf-hub."
+                );
             }
         }
     }
@@ -108,7 +114,9 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let model_name = name.display().to_string();
 
     if env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).is_ok() {
-        tracing::warn!("ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub.");
+        tracing::warn!(
+            "ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub."
+        );
     }
 
     tracing::info!("Using hf-hub for model: {model_name}");
