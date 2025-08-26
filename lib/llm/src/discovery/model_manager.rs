@@ -1,12 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
+
+use parking_lot::Mutex;
+
 use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 use dynamo_runtime::slug::Slug;
 
 use crate::discovery::ModelEntry;
-
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
@@ -14,12 +20,6 @@ use crate::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
     },
-};
-use std::collections::HashSet;
-use std::sync::RwLock;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +61,7 @@ impl ModelManager {
     }
 
     pub fn get_model_entries(&self) -> Vec<ModelEntry> {
-        self.entries.lock().unwrap().values().cloned().collect()
+        self.entries.lock().values().cloned().collect()
     }
 
     pub fn has_model_any(&self, model: &str) -> bool {
@@ -170,12 +170,12 @@ impl ModelManager {
     /// Save a ModelEntry under an instance's etcd `models/` key so we can fetch it later when the key is
     /// deleted from etcd.
     pub fn save_model_entry(&self, key: &str, entry: ModelEntry) {
-        self.entries.lock().unwrap().insert(key.to_string(), entry);
+        self.entries.lock().insert(key.to_string(), entry);
     }
 
     /// Remove and return model entry for this instance's etcd key. We do this when the instance stops.
     pub fn remove_model_entry(&self, key: &str) -> Option<ModelEntry> {
-        self.entries.lock().unwrap().remove(key)
+        self.entries.lock().remove(key)
     }
 
     pub async fn kv_chooser_for(
@@ -203,7 +203,7 @@ impl ModelManager {
     }
 
     fn get_kv_chooser(&self, model_name: &str) -> Option<Arc<KvRouter>> {
-        self.kv_choosers.lock().unwrap().get(model_name).cloned()
+        self.kv_choosers.lock().get(model_name).cloned()
     }
 
     /// Create and return a KV chooser for this component and model
@@ -242,21 +242,18 @@ impl ModelManager {
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers
             .lock()
-            .unwrap()
             .insert(model_name.to_string(), new_kv_chooser.clone());
         Ok(new_kv_chooser)
     }
 
     pub fn get_model_tool_call_parser(&self, model: &str) -> Option<String> {
-        match self.entries.lock() {
-            Ok(entries) => entries
-                .values()
-                .find(|entry| entry.name == model)
-                .and_then(|entry| entry.runtime_config.as_ref())
-                .and_then(|config| config.tool_call_parser.clone())
-                .map(|parser| parser.to_string()),
-            Err(_) => None,
-        }
+        self.entries
+            .lock()
+            .values()
+            .find(|entry| entry.name == model)
+            .and_then(|entry| entry.runtime_config.as_ref())
+            .and_then(|config| config.tool_call_parser.clone())
+            .map(|parser| parser.to_string())
     }
 }
 

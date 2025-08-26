@@ -115,4 +115,20 @@ impl ReasoningParserType {
             },
         }
     }
+
+    pub fn get_reasoning_parser_from_name(name: &str) -> ReasoningParserWrapper {
+        tracing::debug!("Selected reasoning parser: {}", name);
+        match name.to_lowercase().as_str() {
+            "deepseek_r1" => Self::DeepseekR1.get_reasoning_parser(),
+            "basic" => Self::Basic.get_reasoning_parser(),
+            "gpt_oss" => Self::GptOss.get_reasoning_parser(),
+            _ => {
+                tracing::warn!(
+                    "Unknown reasoning parser type '{}', falling back to Basic Reasoning Parser",
+                    name
+                );
+                Self::Basic.get_reasoning_parser()
+            }
+        }
+    }
 }
