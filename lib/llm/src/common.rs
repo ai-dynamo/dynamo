@@ -15,3 +15,18 @@
 
 pub mod dtype;
 pub mod versioned;
+
+/// Test utilities for integration tests
+#[cfg(all(test, feature = "integration"))]
+pub mod test_utils {
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+
+    /// Creates a test DistributedRuntime for integration testing.
+    /// Uses from_current to leverage the existing tokio runtime in tests.
+    pub async fn create_test_drt_async() -> DistributedRuntime {
+        let runtime = Runtime::from_current().expect("Failed to get current runtime");
+        DistributedRuntime::from_settings_without_discovery(runtime)
+            .await
+            .expect("Failed to create test DRT")
+    }
+}

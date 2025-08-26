@@ -20,6 +20,7 @@ use crate::kv_router::{
     scoring::LoadEvent,
 };
 use async_trait::async_trait;
+use dynamo_runtime::metrics::{MetricsRegistry, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
     Error, Result,
@@ -482,12 +483,83 @@ enum RawKvEvent {
 pub struct WorkerMetricsPublisher {
     tx: tokio::sync::watch::Sender<Arc<ForwardPassMetrics>>,
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
+    // Prometheus metrics for KvStats (wrapped in Mutex for thread-safe access)
+    /// Prometheus gauges for KvStats metrics
+    /// We use Option<Arc<KvStatsPrometheusGauges>> for lock-free reads after initialization
+    /// The Arc is set once during register_prometheus_metrics and then only read
+    prometheus_gauges: std::sync::RwLock<Option<Arc<KvStatsPrometheusGauges>>>,
+}
+
+#[derive(Default)]
+struct KvStatsPrometheusGauges {
+    kv_active_blocks_gauge: Option<prometheus::Gauge>,
+    kv_total_blocks_gauge: Option<prometheus::Gauge>,
+    gpu_cache_usage_gauge: Option<prometheus::Gauge>,
+    gpu_prefix_cache_hit_rate_gauge: Option<prometheus::Gauge>,
+}
+
+impl KvStatsPrometheusGauges {
+    /// Create a new KvStatsPrometheusGauges instance with all metrics registered
+    fn new(component: &Component) -> Result<Self> {
+        let kv_active_blocks_gauge = Some(component.create_gauge(
+            kvstats::ACTIVE_BLOCKS,
+            "Number of active KV cache blocks currently in use",
+            &[],
+        )?);
+
+        let kv_total_blocks_gauge = Some(component.create_gauge(
+            kvstats::TOTAL_BLOCKS,
+            "Total number of KV cache blocks available",
+            &[],
+        )?);
+
+        let gpu_cache_usage_gauge = Some(component.create_gauge(
+            kvstats::GPU_CACHE_USAGE_PERCENT,
+            "GPU cache usage as a percentage (0.0-1.0)",
+            &[],
+        )?);
+
+        let gpu_prefix_cache_hit_rate_gauge = Some(component.create_gauge(
+            kvstats::GPU_PREFIX_CACHE_HIT_RATE,
+            "GPU prefix cache hit rate as a percentage (0.0-1.0)",
+            &[],
+        )?);
+
+        tracing::info!("Registered KvStats Prometheus metrics");
+
+        Ok(KvStatsPrometheusGauges {
+            kv_active_blocks_gauge,
+            kv_total_blocks_gauge,
+            gpu_cache_usage_gauge,
+            gpu_prefix_cache_hit_rate_gauge,
+        })
+    }
+
+    /// Update all gauges with values from KvStats
+    fn update_from_kvstats(&self, kv_stats: &KvStats) {
+        if let Some(gauge) = &self.kv_active_blocks_gauge {
+            gauge.set(kv_stats.kv_active_blocks as f64);
+        }
+        if let Some(gauge) = &self.kv_total_blocks_gauge {
+            gauge.set(kv_stats.kv_total_blocks as f64);
+        }
+        if let Some(gauge) = &self.gpu_cache_usage_gauge {
+            gauge.set(kv_stats.gpu_cache_usage_perc as f64);
+        }
+        if let Some(gauge) = &self.gpu_prefix_cache_hit_rate_gauge {
+            gauge.set(kv_stats.gpu_prefix_cache_hit_rate as f64);
+        }
+    }
 }
 
 impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(WorkerMetricsPublisher { tx, rx })
+        Ok(WorkerMetricsPublisher {
+            tx,
+            rx,
+            prometheus_gauges: std::sync::RwLock::new(None),
+        })
     }
 
     pub fn publish(
@@ -495,7 +567,33 @@ impl WorkerMetricsPublisher {
         metrics: Arc<ForwardPassMetrics>,
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
         tracing::trace!("Publish metrics: {metrics:?}");
+
+        // Update Prometheus gauges using read lock for better performance
+        // This is the hot path - we only read the Arc, no writes needed
+        #[allow(clippy::collapsible_if)] // Necessary to keep guard alive
+        if let Ok(guard) = self.prometheus_gauges.read() {
+            if let Some(gauges) = guard.as_ref() {
+                gauges.update_from_kvstats(&metrics.kv_stats);
+            }
+        }
+
         self.tx.send(metrics)
+    }
+
+    /// Register KvStats Prometheus metrics with the component's registry
+    pub fn register_prometheus_metrics(&self, component: &Component) -> Result<()> {
+        // Create new KvStatsPrometheusGauges with registered metrics
+        let new_gauges = Arc::new(KvStatsPrometheusGauges::new(component)?);
+
+        // Use write lock only for initialization (happens once)
+        if let Ok(mut gauges) = self.prometheus_gauges.write() {
+            *gauges = Some(new_gauges);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Failed to acquire write lock on prometheus_gauges"
+            ))
+        }
     }
 
     pub async fn create_endpoint(
@@ -1091,5 +1189,102 @@ mod test_worker_metrics_publisher {
         rt.shutdown();
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use {
+        super::{ForwardPassMetrics, KvStats, WorkerMetricsPublisher, WorkerStats, kvstats},
+        dynamo_runtime::metrics::MetricsRegistry,
+        std::sync::Arc,
+    };
+
+    #[tokio::test]
+    async fn test_kvstats_prometheus_gauge_updates() {
+        use crate::common::test_utils::create_test_drt_async;
+
+        // Test that publish() updates Prometheus gauges correctly using real Component
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+
+        // Create a real DRT and component for integration testing
+        let drt = std::sync::Arc::new(create_test_drt_async().await);
+        let namespace = drt.namespace("test_kvstats").unwrap();
+        let component = namespace.component("test_publisher").unwrap();
+
+        // Register Prometheus metrics using the real constructor
+        publisher.register_prometheus_metrics(&component).unwrap();
+
+        // Get references to the gauges for testing
+        let gauges_guard = publisher.prometheus_gauges.read().unwrap();
+        let gauges = gauges_guard.as_ref().unwrap();
+        let active_blocks_gauge = gauges.kv_active_blocks_gauge.as_ref().unwrap().clone();
+        let total_blocks_gauge = gauges.kv_total_blocks_gauge.as_ref().unwrap().clone();
+        let cache_usage_gauge = gauges.gpu_cache_usage_gauge.as_ref().unwrap().clone();
+        let hit_rate_gauge = gauges
+            .gpu_prefix_cache_hit_rate_gauge
+            .as_ref()
+            .unwrap()
+            .clone();
+        drop(gauges_guard); // Release the read lock
+
+        // Create test metrics with specific values
+        let test_metrics = Arc::new(ForwardPassMetrics {
+            worker_stats: WorkerStats {
+                data_parallel_rank: None,
+                request_active_slots: 5,
+                request_total_slots: 100,
+                num_requests_waiting: 2,
+            },
+            kv_stats: KvStats {
+                kv_active_blocks: 42,
+                kv_total_blocks: 12894,
+                gpu_cache_usage_perc: 0.5,
+                gpu_prefix_cache_hit_rate: 0.75,
+            },
+            spec_decode_stats: None,
+        });
+
+        // Test 1: Initial gauge values should be 0
+        assert_eq!(active_blocks_gauge.get(), 0.0);
+        assert_eq!(total_blocks_gauge.get(), 0.0);
+        assert_eq!(cache_usage_gauge.get(), 0.0);
+        assert_eq!(hit_rate_gauge.get(), 0.0);
+
+        // Test 2: publish() should update all gauges with correct values
+        let result = publisher.publish(test_metrics);
+        assert!(result.is_ok());
+
+        // Test 3: Verify gauges were updated correctly
+        assert_eq!(active_blocks_gauge.get(), 42.0);
+        assert_eq!(total_blocks_gauge.get(), 12894.0);
+        assert_eq!(cache_usage_gauge.get(), 0.5);
+        assert_eq!(hit_rate_gauge.get(), 0.75);
+
+        // Test 4: Verify metrics are properly registered in the component's registry
+        // Component implements MetricsRegistry trait which provides prometheus_metrics_fmt()
+        let prometheus_output = component.prometheus_metrics_fmt().unwrap();
+
+        // Verify metric names are present
+        assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));
+        assert!(prometheus_output.contains(kvstats::TOTAL_BLOCKS));
+        assert!(prometheus_output.contains(kvstats::GPU_CACHE_USAGE_PERCENT));
+        assert!(prometheus_output.contains(kvstats::GPU_PREFIX_CACHE_HIT_RATE));
+
+        // Test 5: Verify the prometheus output contains the actual values
+        // Print the output to debug format issues
+        println!("Prometheus output:\n{}", prometheus_output);
+
+        // Check for metric values - the format includes labels so we need to be more flexible
+        assert!(prometheus_output.contains("kvstats_active_blocks"));
+        assert!(prometheus_output.contains("42")); // The value should be there
+        assert!(prometheus_output.contains("kvstats_total_blocks"));
+        assert!(prometheus_output.contains("12894")); // The value should be there
+        assert!(prometheus_output.contains("kvstats_gpu_cache_usage_percent"));
+        assert!(prometheus_output.contains("kvstats_gpu_prefix_cache_hit_rate"));
+
+        println!(
+            "✅ KvStatsPrometheusGauges constructor and publish() work correctly with real Component"
+        );
     }
 }
