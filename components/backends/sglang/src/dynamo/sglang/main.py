@@ -90,12 +90,29 @@ async def init(runtime: DistributedRuntime, config: Config):
     serve_task = asyncio.create_task(
         generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False)
     )
-    
+
     # Wait for endpoint to be fully established then do model registration
     await asyncio.sleep(2.5)
-    await register_llm_with_runtime_config(
+    registration_success = await register_llm_with_runtime_config(
         engine, generate_endpoint, server_args, dynamo_args.migration_limit
     )
+
+    # If registration failed, shut down serving and fail fast
+    if not registration_success:
+        logging.error("Model registration failed; shutting down server")
+        # Trigger graceful shutdown of the runtime
+        runtime.shutdown()
+        serve_task.cancel()
+        try:
+            import contextlib
+
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(serve_task, timeout=10)
+        except asyncio.TimeoutError:
+            logging.error("Timed out waiting for serve task to cancel")
+        raise RuntimeError("Model registration failed")
+
+    logging.info("Model registration succeeded; service is ready")
 
     try:
         # Wait for serving to complete

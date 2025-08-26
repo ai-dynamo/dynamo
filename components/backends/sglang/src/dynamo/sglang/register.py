@@ -16,8 +16,12 @@ async def register_llm_with_runtime_config(
     endpoint: Endpoint,
     server_args: ServerArgs,
     migration_limit: int,
-):
-    """Register LLM with runtime config"""
+) -> bool:
+    """Register LLM with runtime config
+
+    Returns:
+        bool: True if registration succeeded, False if it failed
+    """
     runtime_config = await _get_runtime_config(engine)
     try:
         await register_llm(
@@ -29,9 +33,11 @@ async def register_llm_with_runtime_config(
             migration_limit=migration_limit,
             runtime_config=runtime_config,
         )
+        logging.info("Successfully registered LLM with runtime config")
+        return True
     except Exception as e:
         logging.error(f"Failed to register with runtime config: {e}")
-        return None
+        return False
 
 
 async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
