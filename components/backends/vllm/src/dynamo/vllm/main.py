@@ -7,10 +7,6 @@ import os
 import signal
 
 import uvloop
-from nvidia_resiliency_ext.shared_utils.health_check import (
-    GPUHealthCheck,
-    NicHealthCheck,
-)
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -58,41 +54,6 @@ def setup_lmcache_environment():
         if key not in os.environ:  # Only set if not already configured
             os.environ[key] = value
             logger.info(f"Set LMCache environment variable: {key}={value}")
-
-
-# Shared health monitor for both worker types
-async def health_monitor(
-    logger, gpu_check_interval=30, nic_check_interval=60, local_rank=None
-):
-    async def on_gpu_failure():
-        logger.error("GPU health check failed - considering graceful shutdown")
-        # TODO: failure handling solutions
-
-    async def on_nic_failure():
-        logger.error("NIC health check failed - network issues detected")
-        # TODO: failure handling solutions
-
-    # TODO: smart logic for interval calculations
-    # e.g: adaptive based on failure rate, load-based intervals,
-    # exponential backoff, or hybrid approach combining multiple factors
-    gpu_checker = GPUHealthCheck(interval=gpu_check_interval, on_failure=on_gpu_failure)
-    nic_checker = NicHealthCheck(interval=nic_check_interval, on_failure=on_nic_failure)
-
-    if local_rank is not None:
-        nic_checker.set_nic_device(local_rank)
-
-    logger.info(
-        f"Starting health monitoring - GPU interval: {gpu_check_interval}s, NIC interval: {nic_check_interval}s"
-    )
-
-    try:
-        await asyncio.gather(
-            gpu_checker.async_check(),
-            nic_checker.async_check(),
-            return_exceptions=True,  # Don't let one health check failure stop the other
-        )
-    except Exception as e:
-        logger.error(f"Health monitor error: {e}")
 
 
 async def graceful_shutdown(runtime):
@@ -320,9 +281,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         logger.info(f"Reading Events from {zmq_endpoint}")
 
         handler.kv_publisher = kv_publisher
-
-    # Get local rank for monitoring
-    local_rank = config.engine_args.data_parallel_rank or 0
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         runtime_config = ModelRuntimeConfig()
