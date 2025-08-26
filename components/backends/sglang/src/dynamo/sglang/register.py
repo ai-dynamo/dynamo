@@ -6,10 +6,10 @@ from typing import Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
-from dynamo.sglang.args import DynamoArgs
 
 from dynamo._core import Endpoint
 from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
+from dynamo.sglang.args import DynamoArgs
 
 
 async def register_llm_with_runtime_config(
@@ -41,7 +41,9 @@ async def register_llm_with_runtime_config(
         return False
 
 
-async def _get_runtime_config(engine: sgl.Engine, dynamo_args: DynamoArgs) -> Optional[ModelRuntimeConfig]:
+async def _get_runtime_config(
+    engine: sgl.Engine, dynamo_args: DynamoArgs
+) -> Optional[ModelRuntimeConfig]:
     """Get runtime config from SGLang engine"""
     runtime_config = ModelRuntimeConfig()
     # set reasoning parser and tool call parser
@@ -50,7 +52,6 @@ async def _get_runtime_config(engine: sgl.Engine, dynamo_args: DynamoArgs) -> Op
     try:
         # Try to check if the engine has a scheduler attribute with the computed values
         if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
-
             # Get max_total_num_tokens from scheduler_info
             if "max_total_num_tokens" in engine.scheduler_info:
                 max_total_tokens = engine.scheduler_info["max_total_num_tokens"]

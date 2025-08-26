@@ -97,8 +97,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     async def register_model():
         """Register the model and signal readiness"""
         registration_success = await register_llm_with_runtime_config(
-            engine, generate_endpoint, server_args, dynamo_args,
-        )
+                                        engine,
+                                        generate_endpoint,
+                                        server_args,
+                                        dynamo_args,
+                                    )
 
         if not registration_success:
             logging.error("Model registration failed; shutting down")
