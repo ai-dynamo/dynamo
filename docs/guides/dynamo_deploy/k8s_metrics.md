@@ -32,7 +32,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 
 ### DCGM Metrics Collection (Optional)
 
-GPU utilization metrics are collected and exported to Prometheus via dcgm-exporter. The Dynamo Grafana dashboard includes a panel for GPU utilization relataed to your Dynamo deployment. For that panel to be populated, you need to ensure that the dcgm-exporter is running in your cluster. To check if the dcgm-exporter is running, please run the following command:
+GPU utilization metrics are collected and exported to Prometheus via dcgm-exporter. The Dynamo Grafana dashboard includes a panel for GPU utilization related to your Dynamo deployment. For that panel to be populated, you need to ensure that the dcgm-exporter is running in your cluster. To check if the dcgm-exporter is running, please run the following command:
 
 ```bash
 kubectl get daemonset -A | grep dcgm-exporter
