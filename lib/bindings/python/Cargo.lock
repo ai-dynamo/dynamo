@@ -1394,6 +1394,7 @@ dependencies = [
  "nixl-sys",
  "offset-allocator",
  "oneshot",
+ "parking_lot",
  "prometheus",
  "rand 0.9.2",
  "rayon",
