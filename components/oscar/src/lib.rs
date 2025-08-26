@@ -20,13 +20,16 @@
 
 pub mod error;
 pub mod hash;
+pub mod keys;
 pub mod object;
 pub mod registry;
 pub mod storage;
+pub mod v2;
 pub mod watcher;
 
 pub use error::{OscarError, OscarResult};
 pub use hash::{ContentHash, ObjectHasher};
+pub use keys::{LeaseMetadata, LeaseReference, ObjectMetadata, OscarKeyType, OscarKeys};
 pub use object::{ObjectInfo, ObjectState, SharedObject};
 pub use registry::ObjectRegistry;
 pub use storage::StorageBackend;

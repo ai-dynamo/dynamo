@@ -37,6 +37,7 @@ pub mod component;
 pub mod discovery;
 pub mod engine;
 pub mod system_status_server;
+pub mod v2;
 pub use system_status_server::SystemStatusServerInfo;
 pub mod instances;
 pub mod logging;
