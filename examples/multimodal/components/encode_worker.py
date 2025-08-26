@@ -122,7 +122,7 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.image_loader.load_image(request.image_url)
+            image = await self.image_loader.load_image(request.multimodal_input.image_url)
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
@@ -151,7 +151,7 @@ class VllmEncodeWorker:
             with self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the image URL as hint that the image is passed as embeddings.
-                request.image_url = None
+                request.multimodal_input.image_url = None
 
                 logger.debug(f"Request: {request.model_dump_json()}")
 

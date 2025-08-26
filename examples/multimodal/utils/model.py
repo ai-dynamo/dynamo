@@ -69,9 +69,10 @@ def get_vision_embeddings_info(
 
 def construct_mm_data(
     model: str,
-    image_embeds: torch.Tensor,
     embeddings_dtype: torch.dtype,
-    image_grid_thw: Optional[List[Any]],
+    image_embeds: Optional[torch.Tensor] = None,
+    video_numpy: Optional[Any] = None,
+    image_grid_thw: Optional[List[Any]] = None,
 ) -> Dict[str, torch.Tensor | Dict[str, Any]]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
     image_embeds = image_embeds.to(embeddings_dtype)
@@ -87,5 +88,12 @@ def construct_mm_data(
                 "image_grid_thw": grid_thw_tensor,
             }
         }
+    elif "llava-hf/LLaVA-NeXT-Video-7B-hf" in model:
+        if video_numpy is None:
+            raise ValueError("No video frames provided.")
+        return {"video": video_numpy}
     else:
+        if image_embeds is None:
+            raise ValueError("No image embeddings provided.")
+        image_embeds = image_embeds.to(embeddings_dtype)
         return {"image": image_embeds}
