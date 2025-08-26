@@ -29,7 +29,7 @@ pub(crate) async fn file_stream_body(source: InputSource) -> Result<Body, OpenAI
         _ => {
             return Err(OpenAIError::FileReadError(
                 "Cannot create stream from non-file source".to_string(),
-            ))
+            ));
         }
     };
     Ok(body)

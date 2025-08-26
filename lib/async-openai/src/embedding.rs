@@ -9,10 +9,10 @@
 // Licensed under Apache 2.0
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{CreateBase64EmbeddingResponse, CreateEmbeddingRequest, CreateEmbeddingResponse},
-    Client,
 };
 
 #[cfg(not(feature = "byot"))]

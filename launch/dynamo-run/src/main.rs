@@ -38,14 +38,14 @@ fn main() -> anyhow::Result<()> {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Invalid verbosity level. Valid values are v (debug) or vv (trace)"
-                ))
+                ));
             }
         },
         Err(_) => "info",
     };
 
     if log_level != "info" {
-        std::env::set_var("DYN_LOG", log_level);
+        unsafe { std::env::set_var("DYN_LOG", log_level) };
     }
 
     logging::init();
@@ -94,7 +94,9 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             }
             "out" => {
                 if val == "sglang" || val == "trtllm" || val == "vllm" {
-                    tracing::error!("To run the {val} engine please use the Python interface, see root README or look in directory `components/backends/`.");
+                    tracing::error!(
+                        "To run the {val} engine please use the Python interface, see root README or look in directory `components/backends/`."
+                    );
                     std::process::exit(1);
                 }
 

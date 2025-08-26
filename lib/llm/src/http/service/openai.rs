@@ -8,31 +8,33 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    disconnect::{create_connection_monitor, monitor_for_disconnects, ConnectionHandle},
+    RouteDoc,
+    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{Endpoint, ResponseMetricCollector},
-    service_v2, RouteDoc,
+    service_v2,
 };
 use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -123,18 +125,17 @@ impl ErrorMessage {
         // First check for PipelineError::ServiceOverloaded
         if let Some(pipeline_err) =
             err.downcast_ref::<dynamo_runtime::pipeline::error::PipelineError>()
-        {
-            if matches!(
+            && matches!(
                 pipeline_err,
                 dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
-            ) {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(ErrorMessage {
-                        error: pipeline_err.to_string(),
-                    }),
-                );
-            }
+            )
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorMessage {
+                    error: pipeline_err.to_string(),
+                }),
+            );
         }
 
         // Then check for HttpError
@@ -165,17 +166,17 @@ impl From<HttpError> for ErrorMessage {
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
-    if let Some(trace_context) = get_distributed_tracing_context() {
-        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-            return x_dynamo_request_id;
-        }
+    if let Some(trace_context) = get_distributed_tracing_context()
+        && let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id
+    {
+        return x_dynamo_request_id;
     }
 
     // Try to get the request ID from the primary source
-    if let Some(primary) = primary {
-        if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
-            return uuid.to_string();
-        }
+    if let Some(primary) = primary
+        && let Ok(uuid) = uuid::Uuid::parse_str(primary)
+    {
+        return uuid.to_string();
     }
 
     // Try to get the request ID header as a string slice
@@ -192,6 +193,13 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     };
 
     uuid.to_string()
+}
+
+fn get_parsing_options(state: &Arc<service_v2::State>, model: &str) -> ParsingOptions {
+    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+    let reasoning_parser = None; // TODO: Implement reasoning parser
+
+    ParsingOptions::new(tool_call_parser, reasoning_parser)
 }
 
 /// OpenAI Completions Request Handler
@@ -245,8 +253,7 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request.id().to_string();
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -266,6 +273,8 @@ async fn completions(
         .manager()
         .get_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
+
+    let parsing_options = get_parsing_options(&state, model);
 
     let mut inflight_guard =
         state
@@ -325,7 +334,7 @@ async fn completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream)
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -344,13 +353,15 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
     let streaming = false;
@@ -370,10 +381,6 @@ async fn embeddings(
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
-
-    // setup context
-    // todo - inherit request_id from distributed trace details
-    let request = Context::with_id(request, request_id.clone());
 
     // issue the generate call on the engine
     let stream = engine
@@ -494,6 +501,8 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let parsing_options = get_parsing_options(&state, model);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -553,19 +562,20 @@ async fn chat_completions(
             process_metrics_only(response, &mut response_collector);
         });
 
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to fold chat completions stream for: {:?}",
-                    e
-                );
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
-            })?;
+        let response =
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        request_id,
+                        "Failed to fold chat completions stream for: {:?}",
+                        e
+                    );
+                    ErrorMessage::internal_server_error(&format!(
+                        "Failed to fold chat completions stream: {}",
+                        e
+                    ))
+                })?;
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
@@ -726,6 +736,8 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
+    let parsing_options = get_parsing_options(&state, model);
+
     let mut inflight_guard =
         state
             .metrics_clone()
@@ -742,19 +754,20 @@ async fn responses(
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // TODO: handle streaming, currently just unary
-    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                request_id,
-                "Failed to fold chat completions stream for: {:?}",
-                e
-            );
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to fold chat completions stream: {}",
-                e
-            ))
-        })?;
+    let response =
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    request_id,
+                    "Failed to fold chat completions stream for: {:?}",
+                    e
+                );
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to fold chat completions stream: {}",
+                    e
+                ))
+            })?;
 
     // Convert NvCreateChatCompletionResponse --> NvResponse
     let response: NvResponse = response.try_into().map_err(|e| {
@@ -776,7 +789,9 @@ pub fn validate_response_input_is_text_only(
 ) -> Option<impl IntoResponse> {
     match &request.inner.input {
         dynamo_async_openai::types::responses::Input::Text(_) => None,
-        _ => Some(ErrorMessage::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
+        _ => Some(ErrorMessage::not_implemented_error(
+            "Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.",
+        )),
     }
 }
 

@@ -228,6 +228,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
+        # should ideally call get_engine_runtime_config
+        # this is because we don't have a good way to
+        # get total_kv_blocks from the engine yet without calling get_stats_async
+        # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
+        # So for now, we just set the parsers from the config
+        # TODO: fix this once we have a better way to get total_kv_blocks
+        runtime_config = ModelRuntimeConfig()
+
+        runtime_config.reasoning_parser = config.reasoning_parser
+        runtime_config.tool_call_parser = config.tool_call_parser
+
         if is_first_worker(config):
             # Register the model with runtime config
             await register_llm(
@@ -237,6 +248,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
+                runtime_config=runtime_config,
             )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
