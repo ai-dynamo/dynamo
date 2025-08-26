@@ -202,17 +202,18 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-func (s *DynamoComponentDeployment) IsReady() bool {
-	return s.Status.IsReady()
+func (s *DynamoComponentDeployment) IsReady() (bool, string) {
+	ready, reason := s.Status.IsReady()
+	return ready, reason
 }
 
-func (s *DynamoComponentDeploymentStatus) IsReady() bool {
+func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {
 	for _, condition := range s.Conditions {
 		if condition.Type == DynamoGraphDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
-			return true
+			return true, ""
 		}
 	}
-	return false
+	return false, "Component deployment not ready - Available condition not true"
 }
 
 func (s *DynamoComponentDeployment) GetSpec() any {

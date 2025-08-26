@@ -4523,7 +4523,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						VolumeSource: corev1.VolumeSource{
 							EmptyDir: &corev1.EmptyDirVolumeSource{
 								Medium:    corev1.StorageMediumMemory,
-								SizeLimit: func() *resource.Quantity { q := resource.MustParse("8Gi"); return &q }(),
+								SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 							},
 						},
 					},
