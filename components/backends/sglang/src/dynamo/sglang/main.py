@@ -64,8 +64,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             .endpoint("generate")
             .client()
         )
-    metrics_labels = [("model", server_args.model_path)]
-    publisher, metrics_task = await setup_sgl_metrics(engine, component, metrics_labels)
+
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(engine, component)
 
     kv_publisher = None
     if server_args.kv_events_config:
