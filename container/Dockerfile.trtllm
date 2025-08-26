@@ -515,5 +515,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
