@@ -14,7 +14,6 @@ use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 use crate::backend::ExecutionContext;
-use crate::local_model::runtime_config;
 use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
@@ -184,8 +183,8 @@ impl
         incoming_request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let mut deltas = request.response_generator(runtime_config::ModelRuntimeConfig::default());
         let ctx = context.context();
+        let mut deltas = request.response_generator(ctx.id().to_string());
         let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {
@@ -231,8 +230,8 @@ impl
         incoming_request: SingleIn<NvCreateCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
         let ctx = context.context();
+        let deltas = request.response_generator(ctx.id().to_string());
         let chars_string = prompt_to_string(&request.inner.prompt);
         let output = stream! {
             let mut id = 1;
