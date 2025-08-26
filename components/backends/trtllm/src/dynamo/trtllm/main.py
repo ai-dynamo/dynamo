@@ -228,6 +228,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
+        # should ideally call get_engine_runtime_config
+        # this is because we don't have a good way to
+        # get total_kv_blocks from the engine yet without calling get_stats_async
+        # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
+        # So for now, we just set the parsers from the config
+        # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
 
         runtime_config.reasoning_parser = config.reasoning_parser
