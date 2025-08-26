@@ -17,7 +17,6 @@ async def register_llm_with_runtime_config(
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoArgs,
-    migration_limit: int,
 ) -> bool:
     """Register LLM with runtime config
 
@@ -32,7 +31,7 @@ async def register_llm_with_runtime_config(
             server_args.model_path,
             server_args.served_model_name,
             kv_cache_block_size=server_args.page_size,
-            migration_limit=migration_limit,
+            migration_limit=dynamo_args.migration_limit,
             runtime_config=runtime_config,
         )
         logging.info("Successfully registered LLM with runtime config")
