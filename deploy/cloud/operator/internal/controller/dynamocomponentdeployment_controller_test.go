@@ -782,7 +782,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
 									"role":                               "leader",
 									"nvidia.com/label1":                  "label1",
-									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -891,7 +892,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									commonconsts.KubeLabelMetricsEnabled: commonconsts.KubeLabelValueTrue,
 									"role":                               "worker",
 									"nvidia.com/label1":                  "label1",
-									commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoGraphDeploymentName: "",
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
