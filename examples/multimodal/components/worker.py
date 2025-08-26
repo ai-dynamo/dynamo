@@ -24,7 +24,6 @@ from typing import Tuple
 
 import torch
 import uvloop
-from transformers import AutoImageProcessor
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
@@ -47,6 +46,7 @@ from utils.args import (
     parse_endpoint,
 )
 from utils.image_loader import ImageLoader
+from utils.model import construct_mm_data
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
@@ -245,37 +245,15 @@ class VllmPDWorker(VllmBaseWorker):
                 .client()
             )
 
-        EMBEDDINGS_DTYPE = torch.float16
-        EMBEDDINGS_DEVICE = "cpu"
+        self.EMBEDDINGS_DTYPE = torch.float16
+        self.EMBEDDINGS_DEVICE = "cpu"
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         parsed_namespace, _, _ = parse_endpoint(self.endpoint)
         self._connector = connect.Connector()
         await self._connector.initialize()
 
-        # embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
-        #     self.engine_args.model, self.engine_args.num_patches
-        # )
-        # [gluo NOTE] Hardcoded for now, will use more generic approach once utils/model.py
-        # is fixed, see utils/models.py for details.
-        embeddings_shape = (1, 577, 4096)
-        logger.debug(f"Embeddings shape: {embeddings_shape}")
-        self.embedding_size = embeddings_shape[1]
-
-        embeddings = torch.empty(
-            embeddings_shape, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE
-        )
-
-        descriptor = connect.Descriptor(embeddings)
-
-        # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
-        # descriptor.register_memory(self._connector)
-        self._embeddings_descriptor = (embeddings, descriptor)
-
         self.image_loader = ImageLoader()
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.engine_args.model, trust_remote_code=True
-        )
 
         logger.info("VllmPDWorker has been initialized")
 
@@ -288,10 +266,18 @@ class VllmPDWorker(VllmBaseWorker):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        if request.image_url is None:
-            # Process embeddings using the connector
-            embeddings, descriptor = self._embeddings_descriptor
+        embeddings, descriptor = None, None
 
+        # Process embeddings using the connector
+        # Create a descriptor based on the embedding shape.
+        embeddings = torch.empty(
+            request.embeddings_shape,
+            dtype=self.EMBEDDINGS_DTYPE,
+            device=self.EMBEDDINGS_DEVICE,
+        )
+        descriptor = connect.Descriptor(embeddings)
+
+        if request.image_url is None:
             if descriptor is None:
                 raise RuntimeError(
                     "Descriptor is None in PD worker - cannot process embeddings"
@@ -301,15 +287,17 @@ class VllmPDWorker(VllmBaseWorker):
                 request.serialized_request, descriptor
             )
             await read_op.wait_for_completion()
-            logger.debug(f"in PD worker, image features: {embeddings}")
-            multi_modal_data = embeddings
+            multi_modal_data = construct_mm_data(
+                self.engine_args.model,
+                embeddings,
+                self.EMBEDDINGS_DTYPE,
+                request.image_grid_thw,
+            )
         else:
             # Use PIL image instead of image embeddings
-            multi_modal_data = await self.image_loader.load_image(request.image_url)
-            # multi_modal_data = self.image_processor(images=image, return_tensors="pt")["pixel_values"].to(dtype=torch.float16)
-            # image input is expected to be (image_num, channel, height, width)
-            # logger.info(f"Image features shape: {multi_modal_data.shape}")
-            # multi_modal_data = multi_modal_data.unsqueeze(0)
+            multi_modal_data = {
+                "image": await self.image_loader.load_image(request.image_url)
+            }
 
         # Remove the image features from the request as they are not required
         request.image_url = None
@@ -331,7 +319,7 @@ class VllmPDWorker(VllmBaseWorker):
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=pd_request.engine_prompt["prompt_token_ids"],
-                multi_modal_data={"image": multi_modal_data},
+                multi_modal_data=multi_modal_data,
             ),
             sampling_params=pd_request.sampling_params,
             request_id=pd_request.request_id,
