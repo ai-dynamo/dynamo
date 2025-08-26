@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-eppAware:
-  enabled: true
-  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
-
-imagePullSecrets:
-  - docker-imagepullsecret
-
-epp:
-  extraEnv:
-    - name: USE_STREAMING
-      value: "true"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-gaie.fullname" . }}-epp-config
+  labels:
+    app.kubernetes.io/name: {{ include "dynamo-gaie.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  epp-config-dynamo.yaml: |
+{{ (.Files.Get "epp-config-dynamo.yaml") | indent 4 }}
