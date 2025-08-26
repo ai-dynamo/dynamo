@@ -24,7 +24,6 @@ class HelloWorldLogitsProcessor(BaseLogitsProcessor):
         self.state = 0
 
     def __call__(self, input_ids: Sequence[int], scores: torch.Tensor) -> torch.Tensor:
-        print("Calling logits processor")
         mask = torch.full_like(scores, float("-inf"))
 
         if self.state < len(self.token_ids):

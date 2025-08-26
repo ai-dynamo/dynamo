@@ -47,18 +47,19 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
         Returns:
             Modified logits tensor (in-place modification expected by TRT-LLM)
         """
-        print(f"Shapes: logits {logits.shape}, ids {ids}")
+        stream = None if stream_ptr is None else torch.cuda.ExternalStream(stream_ptr)
         try:
-            for ids_req, logits_req in zip(ids, logits):
-                if logits_req.shape[0] != 1:
-                    raise ValueError(
-                        "Logits processing with beam width > 1 is not supported"
-                    )
-                # Remove dimension 0 from logits_req
-                modified_logits = self.processor(ids_req, logits_req.reshape(-1))
+            with torch.cuda.stream(stream):
+                for idx, (ids_req, logits_req) in enumerate(zip(ids, logits)):
+                    if logits_req.shape[0] != 1:
+                        raise ValueError(
+                            "Logits processing with beam width > 1 is not supported"
+                        )
+                    # Remove dimension 0 from logits_req
+                    modified_logits = self.processor(ids_req, logits_req.reshape(-1))
 
-                # TRT-LLM expects in-place modification
-                logits.copy_(modified_logits)
+                    # TRT-LLM expects in-place modification
+                    logits[idx, 0, :].copy_(modified_logits)
 
         except Exception as e:
             logger.error(f"Error in logits processor for request {req_ids}: {e}")
