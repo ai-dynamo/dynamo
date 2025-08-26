@@ -136,7 +136,7 @@ async def setup_sgl_metrics(
     """
     Convenience bootstrap: create endpoint, publish an initial update, and start the metrics loop.
     """
-    metrics_labels = [("model", engine.server_args.model_path)]
+    metrics_labels = [("model", engine.server_args.served_model_name)]
     publisher = DynamoSglangStatPublisher(engine, component, metrics_labels)
     publisher.init_publish()
 

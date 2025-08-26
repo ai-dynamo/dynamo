@@ -127,7 +127,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
-            metrics_labels=[("model", server_args.model_path)],
+            metrics_labels=[("model", server_args.served_model_name)],
         )
     ]
 
