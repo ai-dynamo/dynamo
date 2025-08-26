@@ -87,8 +87,16 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # Start serving endpoint first (this does instance registration)
     # TODO: add in native endpoints
+    ready_evt = asyncio.Event()
+
+    async def _gated_generate(request):
+        # Do not process any requests until registration completes.
+        await ready_evt.wait()
+        async for out in handler.generate(request):
+            yield out
+
     serve_task = asyncio.create_task(
-        generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False)
+        generate_endpoint.serve_endpoint(_gated_generate, graceful_shutdown=False)
     )
 
     # Wait for endpoint to be fully established then do model registration
@@ -112,6 +120,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.error("Timed out waiting for serve task to cancel")
         raise RuntimeError("Model registration failed")
 
+    # Registration succeeded; allow traffic to flow
+    ready_evt.set()
     logging.info("Model registration succeeded; service is ready")
 
     try:
