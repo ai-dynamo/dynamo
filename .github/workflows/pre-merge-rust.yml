@@ -100,7 +100,7 @@ jobs:
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run ; echo "Disk space after:" ; df -h
+      run: cargo test --locked --no-run || df -h
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
