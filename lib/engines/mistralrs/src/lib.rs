@@ -240,17 +240,16 @@ impl MistralRsEngine {
         }));
 
         // Send warmup request and consume response
-        if let Ok(sender) = engine.mistralrs.get_sender(None) {
-            if let Ok(()) = sender.send(warmup_request).await {
-                if let Some(response) = rx.recv().await {
-                    match response.as_result() {
-                        Ok(r) => {
-                            tracing::debug!(mistralrs_request_id, "Warmup response: {r:?}");
-                        }
-                        Err(err) => {
-                            tracing::error!(mistralrs_request_id, %err, "Failed converting response to result.");
-                        }
-                    }
+        if let Ok(sender) = engine.mistralrs.get_sender(None)
+            && let Ok(()) = sender.send(warmup_request).await
+            && let Some(response) = rx.recv().await
+        {
+            match response.as_result() {
+                Ok(r) => {
+                    tracing::debug!(mistralrs_request_id, "Warmup response: {r:?}");
+                }
+                Err(err) => {
+                    tracing::error!(mistralrs_request_id, %err, "Failed converting response to result.");
                 }
             }
         }

@@ -26,7 +26,6 @@ use dynamo_llm::{
             service_v2::HttpService,
         },
     },
-    local_model::runtime_config,
 };
 use dynamo_runtime::{
     CancellationToken,
