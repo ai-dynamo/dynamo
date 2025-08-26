@@ -6,6 +6,7 @@ from typing import Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
+from dynamo.sglang.args import DynamoArgs
 
 from dynamo._core import Endpoint
 from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
@@ -15,6 +16,7 @@ async def register_llm_with_runtime_config(
     engine: sgl.Engine,
     endpoint: Endpoint,
     server_args: ServerArgs,
+    dynamo_args: DynamoArgs,
     migration_limit: int,
 ) -> bool:
     """Register LLM with runtime config
@@ -22,7 +24,7 @@ async def register_llm_with_runtime_config(
     Returns:
         bool: True if registration succeeded, False if it failed
     """
-    runtime_config = await _get_runtime_config(engine)
+    runtime_config = await _get_runtime_config(engine, dynamo_args)
     try:
         await register_llm(
             ModelType.Backend,
@@ -40,12 +42,15 @@ async def register_llm_with_runtime_config(
         return False
 
 
-async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
+async def _get_runtime_config(engine: sgl.Engine, dynamo_args: DynamoArgs) -> Optional[ModelRuntimeConfig]:
     """Get runtime config from SGLang engine"""
+    runtime_config = ModelRuntimeConfig()
+    # set reasoning parser and tool call parser
+    runtime_config.reasoning_parser = dynamo_args.reasoning_parser
+    runtime_config.tool_call_parser = dynamo_args.tool_call_parser
     try:
         # Try to check if the engine has a scheduler attribute with the computed values
         if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
-            runtime_config = ModelRuntimeConfig()
 
             # Get max_total_num_tokens from scheduler_info
             if "max_total_num_tokens" in engine.scheduler_info:
@@ -73,8 +78,8 @@ async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig
             "The engine may compute these values internally after initialization. "
             "Proceeding without runtime config - SGLang will use its internal defaults."
         )
-        return None
+        return runtime_config
 
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
-        return None
+        return runtime_config

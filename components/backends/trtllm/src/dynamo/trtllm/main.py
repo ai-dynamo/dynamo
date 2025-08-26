@@ -55,6 +55,9 @@ async def get_engine_runtime_config(
     """Retrieve runtime configuration from TensorRT-LLM engine."""
     runtime_config = ModelRuntimeConfig()
 
+    runtime_config.reasoning_parser = config.reasoning_parser
+    runtime_config.tool_call_parser = config.tool_call_parser
+
     try:
         # Extract total_kv_blocks from engine stats
         stats = engine.llm.get_stats_async(timeout=5)
@@ -228,6 +231,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
+        runtime_config = get_engine_runtime_config(engine, config)
+
         if is_first_worker(config):
             # Register the model with runtime config
             await register_llm(
@@ -237,6 +242,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
+                runtime_config=runtime_config,
             )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
