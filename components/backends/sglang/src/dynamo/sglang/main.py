@@ -81,60 +81,40 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
         kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
 
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
+    async def gated_generate(request):
+        """Queue requests until model registration completes"""
+        await ready_event.wait()  # Block until model is ready
+        async for response in handler.generate(request):
+            yield response
+
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, kv_publisher, prefill_client
     )
 
-    # Start serving endpoint first (this does instance registration)
-    # TODO: add in native endpoints
-    ready_evt = asyncio.Event()
-
-    class GatedHandler:
-        def __init__(self, original_handler, ready_event):
-            self.original_handler = original_handler
-            self.ready_event = ready_event
-
-        async def generate(self, request):
-            # Do not process any requests until registration completes.
-            await self.ready_event.wait()
-            async for out in self.original_handler.generate(request):
-                yield out
-
-    gated_handler = GatedHandler(handler, ready_evt)
-
-    async def registration_task():
-        # Wait for endpoint to be fully established then do model registration
-        try:
-            # Create a client to check if the endpoint is ready
-            client = await generate_endpoint.client()
-            logging.info("Waiting for endpoint instances to be ready...")
-            await client.wait_for_instances()
-            logging.info("Endpoint is ready, proceeding with model registration")
-        except Exception as e:
-            logging.error(f"Failed to wait for endpoint readiness: {e}")
-            raise RuntimeError(f"Endpoint readiness check failed: {e}")
-
+    async def register_model():
+        """Register the model and signal readiness"""
         registration_success = await register_llm_with_runtime_config(
             engine, generate_endpoint, server_args, dynamo_args.migration_limit
         )
 
-        # If registration failed, shut down serving and fail fast
         if not registration_success:
-            logging.error("Model registration failed; shutting down server")
-            # Trigger graceful shutdown of the runtime
+            logging.error("Model registration failed; shutting down")
             runtime.shutdown()
             raise RuntimeError("Model registration failed")
 
-        # Registration succeeded; allow traffic to flow
-        ready_evt.set()
-        logging.info("Model registration succeeded; service is ready")
+        # Model is ready - allow queued requests to proceed
+        ready_event.set()
+        logging.info("Model registration succeeded; processing queued requests")
 
     try:
+        # Start endpoint immediately and register model concurrently
+        # Requests queue until ready_event is set
         await asyncio.gather(
-            registration_task(),
-            generate_endpoint.serve_endpoint(
-                gated_handler.generate, graceful_shutdown=False
-            ),
+            generate_endpoint.serve_endpoint(gated_generate, graceful_shutdown=False),
+            register_model(),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
