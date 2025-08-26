@@ -26,7 +26,7 @@ class TemperatureProcessor(BaseLogitsProcessor):
             raise ValueError("Temperature must be positive")
         self.temperature = temperature
 
-    def __call__(self, input_ids: Sequence[int], logits: torch.Tensor) -> torch.Tensor:
+    def __call__(self, input_ids: Sequence[int], logits: torch.Tensor):
         """
         Apply temperature scaling to logits.
 
@@ -34,9 +34,8 @@ class TemperatureProcessor(BaseLogitsProcessor):
             input_ids: Token IDs generated so far (unused in this simple example)
             logits: Raw logits tensor from model
 
-        Returns:
-            Temperature-scaled logits tensor
+        The processor is expected to modify the logits in-place.
         """
         if self.temperature == 1.0:
-            return logits
-        return logits / self.temperature
+            return
+        logits.div_(self.temperature)

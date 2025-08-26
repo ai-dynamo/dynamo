@@ -23,7 +23,7 @@ class HelloWorldLogitsProcessor(BaseLogitsProcessor):
         self.eos_id = tokenizer.eos_token_id
         self.state = 0
 
-    def __call__(self, input_ids: Sequence[int], scores: torch.Tensor) -> torch.Tensor:
+    def __call__(self, input_ids: Sequence[int], scores: torch.Tensor):
         mask = torch.full_like(scores, float("-inf"))
 
         if self.state < len(self.token_ids):
@@ -36,5 +36,3 @@ class HelloWorldLogitsProcessor(BaseLogitsProcessor):
         # The `scores` tensor *must* also be modified in-place
         scores.add_(mask)
         self.state += 1
-
-        return scores

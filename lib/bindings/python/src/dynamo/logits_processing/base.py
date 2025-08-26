@@ -26,7 +26,7 @@ class BaseLogitsProcessor(Protocol):
         self,
         input_ids: Sequence[int],
         logits: torch.Tensor,
-    ) -> torch.Tensor:
+    ):
         """
         Process the logits for the next token prediction.
 
@@ -34,7 +34,6 @@ class BaseLogitsProcessor(Protocol):
             input_ids: The input token IDs generated so far.
             logits: The raw logits for the next token. Shape: (vocab_size,)
 
-        Returns:
-            A tensor with the same shape, dtype, and device as `logits`.
+        The processor is expected to modify the logits in-place.
         """
         ...
