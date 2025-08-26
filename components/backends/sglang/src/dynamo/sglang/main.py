@@ -81,18 +81,40 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
         kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
 
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
+    async def gated_generate(request):
+        """Queue requests until model registration completes"""
+        await ready_event.wait()  # Block until model is ready
+        async for response in handler.generate(request):
+            yield response
+
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, kv_publisher, prefill_client
     )
 
-    await register_llm_with_runtime_config(
-        engine, generate_endpoint, server_args, dynamo_args.migration_limit
-    )
+    async def register_model():
+        """Register the model and signal readiness"""
+        registration_success = await register_llm_with_runtime_config(
+            engine, generate_endpoint, server_args, dynamo_args.migration_limit
+        )
+
+        if not registration_success:
+            logging.error("Model registration failed; shutting down")
+            runtime.shutdown()
+            raise RuntimeError("Model registration failed")
+
+        # Model is ready - allow queued requests to proceed
+        ready_event.set()
+        logging.info("Model registration succeeded; processing queued requests")
 
     try:
-        # TODO: add in native endpoints
+        # Start endpoint immediately and register model concurrently
+        # Requests queue until ready_event is set
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
+            generate_endpoint.serve_endpoint(gated_generate, graceful_shutdown=False),
+            register_model(),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
