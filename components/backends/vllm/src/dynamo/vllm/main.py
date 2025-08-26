@@ -11,6 +11,7 @@ from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
+from components.backends.vllm.src.dynamo.vllm.engine_monitor import DynamoEngineMonitor
 from dynamo.llm import (
     ModelRuntimeConfig,
     ModelType,
@@ -88,7 +89,7 @@ async def worker(runtime: DistributedRuntime):
         await init(runtime, config)
 
 
-def setup_vllm_engine(config, stat_logger=None):
+def setup_vllm_engine(runtime: DistributedRuntime, config, stat_logger=None):
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -121,10 +122,13 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
+    engine_client.dynamo_monitor = DynamoEngineMonitor(runtime, engine_client)
+
     if ENABLE_LMCACHE:
         logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
     else:
         logger.info(f"VllmWorker for {config.model} has been initialized")
+
     return engine_client, vllm_config, default_sampling_params
 
 
@@ -138,7 +142,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, _, default_sampling_params = setup_vllm_engine(config)
+    engine_client, _, default_sampling_params = setup_vllm_engine(runtime, config)
 
     # TODO register_prefill in similar vein to register_llm
 
@@ -190,7 +194,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         metrics_labels=[("model", config.model)],
     )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
-        config, factory
+        runtime, config, factory
     )
 
     # TODO Hack to get data, move this to registering in ETCD
