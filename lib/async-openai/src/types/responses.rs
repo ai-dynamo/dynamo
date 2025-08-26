@@ -92,7 +92,7 @@ pub enum InputContent {
     InputItemContentList(Vec<ContentType>),
 }
 
-/// Parts of a message: text, image, file, or audio.
+/// Parts of a message: text, image, video, file, or audio.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentType {
@@ -100,6 +100,8 @@ pub enum ContentType {
     InputText(InputText),
     /// An image input to the model.
     InputImage(InputImage),
+    /// A video input to the model.
+    InputVideo(InputVideo),
     /// A file input to the model.
     InputFile(InputFile),
 }
@@ -127,6 +129,26 @@ pub struct InputImage {
     /// in a data URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     image_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
+#[builder(
+    name = "InputVideoArgs",
+    pattern = "mutable",
+    setter(into, strip_option),
+    default
+)]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct InputVideo {
+    /// The detail level of the video to be sent to the model.
+    detail: ImageDetail,
+    /// The ID of the file to be sent to the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<String>,
+    /// The URL of the video to be sent to the model. A fully qualified URL or base64 encoded video
+    /// in a data URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default, Builder)]
