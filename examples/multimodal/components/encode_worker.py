@@ -82,22 +82,6 @@ class VllmEncodeWorker:
     def cleanup(self):
         pass
 
-    def get_qwen_image_features(self, vision_encoder, image_embeds):
-        pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
-
-        grid_thw = image_embeds.get("image_grid_thw", None)
-        if grid_thw is not None:
-            grid_thw = grid_thw.to(vision_encoder.device)
-            logger.debug(f"Qwen grid_thw shape: {grid_thw.shape}")
-        else:
-            raise ValueError("grid_thw is not provided")
-
-        return (
-            vision_encoder.get_image_features(pixel_values, grid_thw)
-            if grid_thw is not None
-            else vision_encoder.get_image_features(pixel_values)
-        )
-
     async def generate(
         self, request: vLLMMultimodalRequest
     ) -> AsyncIterator[MyRequestOutput]:
@@ -122,7 +106,9 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.image_loader.load_image(request.multimodal_input.image_url)
+            image = await self.image_loader.load_image(
+                request.multimodal_input.image_url
+            )
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
