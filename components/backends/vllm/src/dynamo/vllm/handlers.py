@@ -10,7 +10,6 @@ from copy import deepcopy
 from typing import AsyncGenerator
 
 import msgspec
-from vllm.engine.async_vllm_engine import AsyncEngineDeadError
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -84,8 +83,8 @@ class BaseWorkerHandler(ABC):
                     "Decode engine was shut down during token generation"
                 ) from None
 
-        except (AsyncEngineDeadError, EngineDeadError) as e:
-            logger.error(f"AsyncEngineDeadError: {e}")
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
@@ -184,8 +183,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async for tok in self.generate_tokens(prompt, sampling_params, request_id):
                 yield tok
 
-        except (AsyncEngineDeadError, EngineDeadError) as e:
-            logger.error(f"AsyncEngineDeadError: {e}")
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
@@ -227,8 +226,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     "Prefill engine was shut down during token generation"
                 ) from None
 
-        except (AsyncEngineDeadError, EngineDeadError) as e:
-            logger.error(f"AsyncEngineDeadError: {e}")
+        except EngineDeadError as e:
+            logger.error(f"vLLM EngineDeadError: {e}")
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
