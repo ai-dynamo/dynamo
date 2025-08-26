@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 
 SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires 4 nodes of 8xH100 GPUs.
 
-**Prerequisite**: Building the Dynamo container. 
+**Prerequisite**: Building the Dynamo container.
 
 ```bash
 cd $DYNAMO_ROOT
