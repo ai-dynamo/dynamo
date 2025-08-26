@@ -19,13 +19,19 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    kv_router::{KvPushRouter, KvRouterConfig},
-    migration::Migration,
-    model_type::ModelInput,
-    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest, prompt::PromptFormatter},
-    protocols::common::llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
-    protocols::openai::chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    entrypoint,
+    kv_router::KvRouterConfig,
+    model_type::{ModelInput, ModelType},
+    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
+    protocols::{
+        common::llm_backend::EmbeddingsEngineOutput,
+        openai::{
+            chat_completions::{
+                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            },
+            completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+            embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+        },
     },
 };
 
@@ -48,7 +54,7 @@ pub struct ModelWatcher {
 }
 
 const ALL_MODEL_TYPES: &[ModelType] =
-    &[ModelType::Chat, ModelType::Completion, ModelType::Embedding];
+    &[ModelType::Chat, ModelType::Completions, ModelType::Embedding];
 
 impl ModelWatcher {
     pub fn new(
@@ -172,34 +178,32 @@ impl ModelWatcher {
         if !active_instances.is_empty() {
             let mut update_tx = true;
             let mut model_type: ModelType = model_entry.model_type;
-            if model_entry.model_type == ModelType::Chat
+            if model_entry.model_type.contains(ModelType::Chat)
                 && self.manager.list_chat_completions_models().is_empty()
             {
                 self.manager.remove_chat_completions_model(&model_name).ok();
-                model_type = ModelType::Chat;
-            } else if model_entry.model_type == ModelType::Completion
+            } else {
+                tracing::debug!(
+                    "Model {} is still active in other instances, not removing",
+                    model_name
+                );
+                update_tx = false;
+            }
+            if model_entry.model_type.contains(ModelType::Completions)
                 && self.manager.list_completions_models().is_empty()
             {
                 self.manager.remove_completions_model(&model_name).ok();
-                model_type = ModelType::Completion;
-            } else if model_entry.model_type == ModelType::Embedding
+            } else {
+                tracing::debug!(
+                    "Model {} is still active in other instances, not removing",
+                    model_name
+                );
+                update_tx = false;
+            }
+            if model_entry.model_type.contains(ModelType::Embedding)
                 && self.manager.list_embeddings_models().is_empty()
             {
                 self.manager.remove_embeddings_model(&model_name).ok();
-                model_type = ModelType::Embedding;
-            } else if model_entry.model_type == ModelType::Backend {
-                if self.manager.list_chat_completions_models().is_empty() {
-                    self.manager.remove_chat_completions_model(&model_name).ok();
-                    model_type = ModelType::Chat;
-                }
-                if self.manager.list_completions_models().is_empty() {
-                    self.manager.remove_completions_model(&model_name).ok();
-                    if model_type == ModelType::Chat {
-                        model_type = ModelType::Backend;
-                    } else {
-                        model_type = ModelType::Completion;
-                    }
-                }
             } else {
                 tracing::debug!(
                     "Model {} is still active in other instances, not removing",
@@ -244,7 +248,7 @@ impl ModelWatcher {
         } else {
             for model_type in ALL_MODEL_TYPES {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
-                    || (completions_model_removed && *model_type == ModelType::Completion)
+                    || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding))
                     && let Some(tx) = &self.model_update_tx
                 {
@@ -281,9 +285,10 @@ impl ModelWatcher {
             }
         };
 
-         if model_entry.model_type.supports_backend() || ((model_entry.model_type.supports_chat() || model_entry.model_type.supports_completions()) && model_entry.model_input == ModelInput::Tokens) {
-            // A Backend model expects pre-processed requests meaning it's up to us whether we
-            // handle Chat or Completions requests, so handle both.
+        if model_entry.model_input == ModelInput::Tokens && (model_entry.model_type.supports_chat() || model_entry.model_type.supports_completions()) {
+            // Case 1: Tokens + (Chat OR Completions OR Both)
+            // A model that expects pre-processed requests meaning it's up to us whether we
+            // handle Chat or Completions requests, so handle whatever the model supports.
 
             let Some(mut card) = card else {
                 anyhow::bail!("Missing model deployment card");
@@ -309,35 +314,46 @@ impl ModelWatcher {
                     None
                 };
 
-                let chat_engine = entrypoint::build_routed_pipeline::<
-                    NvCreateChatCompletionRequest,
-                    NvCreateChatCompletionStreamResponse,
-                >(
-                    &card,
-                    &client,
-                    self.router_mode,
-                    self.busy_threshold,
-                    kv_chooser.clone(),
-                )
-                .await?;
-                self.manager
-                    .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                // Add chat engine only if the model supports chat
+                if model_entry.model_type.supports_chat() {
+                    let chat_engine = entrypoint::build_routed_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(
+                        &card,
+                        &client,
+                        self.router_mode,
+                        self.busy_threshold,
+                        kv_chooser.clone(),
+                    )
+                    .await?;
+                    self.manager
+                        .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                }
 
-                let completions_engine = entrypoint::build_routed_pipeline::<
-                    NvCreateCompletionRequest,
-                    NvCreateCompletionResponse,
-                >(
-                    &card,
-                    &client,
-                    self.router_mode,
-                    self.busy_threshold,
-                    kv_chooser,
-                )
-                .await?;
-                self.manager
-                    .add_completions_model(&model_entry.name, completions_engine)?;
+                // Add completions engine only if the model supports completions
+                if model_entry.model_type.supports_completions() {
+                    let formatter = PromptFormatter::no_op();
+                    let PromptFormatter::OAI(formatter) = formatter;
+                    let preprocessor = OpenAIPreprocessor::new_with_formatter(card.clone(), formatter).await?;
+                    let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
+                        NvCreateCompletionRequest,
+                        NvCreateCompletionResponse,
+                    >(
+                        &card,
+                        &client,
+                        self.router_mode,
+                        self.busy_threshold,
+                        kv_chooser,
+                        preprocessor,
+                    )
+                    .await?;
+                    self.manager
+                        .add_completions_model(&model_entry.name, completions_engine)?;
+                }
             }
-        else if model_entry.model_type.supports_chat() {
+        else if model_entry.model_input == ModelInput::Text && model_entry.model_type.supports_chat() {
+            // Case 3: Text + Chat
             let push_router = PushRouter::<
                 NvCreateChatCompletionRequest,
                 Annotated<NvCreateChatCompletionStreamResponse>,
@@ -349,7 +365,8 @@ impl ModelWatcher {
             self.manager
                 .add_chat_completions_model(&model_entry.name, engine)?;
         }
-        else if model_entry.model_type.supports_completions() {
+        else if model_entry.model_input == ModelInput::Text && model_entry.model_type.supports_completions() {
+            // Case 2: Text + Completions
             let push_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
@@ -361,7 +378,8 @@ impl ModelWatcher {
                 self.manager
                     .add_completions_model(&model_entry.name, engine)?;
         }
-        else if model_entry.model_type.supports_embedding() {
+        else if model_entry.model_input == ModelInput::Tokens && model_entry.model_type.supports_embedding() {
+            // Case 4: Tokens + Embeddings
             let Some(mut card) = card else {
                 anyhow::bail!("Missing model deployment card for embedding model");
             };
@@ -401,6 +419,15 @@ impl ModelWatcher {
 
             self.manager
                 .add_embeddings_model(&model_entry.name, embedding_engine)?;
+        }
+        else {
+            // Reject unsupported combinations
+            anyhow::bail!(
+                "Unsupported model configuration: {} with {} input. Supported combinations: \
+                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings",
+                model_entry.model_type,
+                model_entry.model_input.as_str()
+            );
         }
 
         Ok(())

@@ -83,8 +83,8 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                // [oandreeva] Converting ModelType::Backend to ModelType::Chat | ModelType::Completion
-                let model_type = ModelType::Chat | ModelType::Completions;
+                            // Default to supporting both Chat and Completions endpoints
+            let model_type = ModelType::Chat | ModelType::Completions;
                 model.attach(&endpoint, model_type, ModelInput::Tokens).await?;
             }
 

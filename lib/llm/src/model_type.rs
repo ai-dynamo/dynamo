@@ -24,7 +24,6 @@ bitflags! {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
-        const Backend = 1 << 3;
     }
 }
 
@@ -42,32 +41,35 @@ impl ModelType {
     pub fn supports_embedding(&self) -> bool {
         self.contains(ModelType::Embedding)
     }
-    pub fn supports_backend(&self) -> bool {
-        self.contains(ModelType::Backend)
-    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
         if self.supports_chat() { result.push("chat"); }
         if self.supports_completions() { result.push("completions"); }
         if self.supports_embedding() { result.push("embedding"); }
-        if self.supports_backend() { result.push("backend"); }
         result
+    }
+
+    /// Returns all endpoint types supported by this model type.
+    /// This properly handles combinations like Chat | Completions.
+    pub fn as_endpoint_types(&self) -> Vec<crate::endpoint_type::EndpointType> {
+        let mut endpoint_types = Vec::new();
+        if self.contains(Self::Chat) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
+        }
+        if self.contains(Self::Completions) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
+        }
+        if self.contains(Self::Embedding) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
+        }
+        endpoint_types
     }
 }
 
 impl fmt::Display for ModelType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
-    }
-
-    pub fn as_endpoint_type(&self) -> crate::endpoint_type::EndpointType {
-        match self {
-            Self::Chat => crate::endpoint_type::EndpointType::Chat,
-            Self::Completion => crate::endpoint_type::EndpointType::Completion,
-            Self::Embedding => crate::endpoint_type::EndpointType::Embedding,
-            Self::Backend => panic!("Backend model type does not map to an endpoint type"),
-        }
     }
 }
 

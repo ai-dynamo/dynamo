@@ -10,7 +10,6 @@ use crate::{
     entrypoint::{self, EngineConfig, input::common},
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
-    model_type::ModelType,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -236,22 +235,16 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
         model_type
     );
     match model_type {
-        ModelUpdate::Added(model_type) => match model_type {
-            ModelType::Backend => {
-                service.enable_model_endpoint(EndpointType::Chat, true);
-                service.enable_model_endpoint(EndpointType::Completion, true);
-            }
-            _ => {
-                service.enable_model_endpoint(model_type.as_endpoint_type(), true);
+        ModelUpdate::Added(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, true);
             }
         },
-        ModelUpdate::Removed(model_type) => match model_type {
-            ModelType::Backend => {
-                service.enable_model_endpoint(EndpointType::Chat, false);
-                service.enable_model_endpoint(EndpointType::Completion, false);
-            }
-            _ => {
-                service.enable_model_endpoint(model_type.as_endpoint_type(), false);
+        ModelUpdate::Removed(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, false);
             }
         },
     }

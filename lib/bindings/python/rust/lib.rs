@@ -269,8 +269,6 @@ impl ModelType {
     #[classattr]
     const Completions: Self = ModelType { inner: llm_rs::model_type::ModelType::Completions };
     #[classattr]
-    const Backend: Self = ModelType { inner: llm_rs::model_type::ModelType::Backend };
-    #[classattr]
     const Embedding: Self = ModelType { inner: llm_rs::model_type::ModelType::Embedding };
 
     fn __or__(&self, other: &Self) -> Self {
