@@ -55,9 +55,6 @@ async def get_engine_runtime_config(
     """Retrieve runtime configuration from TensorRT-LLM engine."""
     runtime_config = ModelRuntimeConfig()
 
-    runtime_config.reasoning_parser = config.reasoning_parser
-    runtime_config.tool_call_parser = config.tool_call_parser
-
     try:
         # Extract total_kv_blocks from engine stats
         stats = engine.llm.get_stats_async(timeout=5)
