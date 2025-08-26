@@ -213,7 +213,7 @@ Visit http://localhost:9090 and try these example queries:
 
 ### In Grafana
 ```bash
-# Get Grafana credss
+# Get Grafana credentials
 export GRAFANA_USER=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-user}" | base64 --decode)
 export GRAFANA_PASSWORD=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode)
 echo "Grafana user: $GRAFANA_USER"
