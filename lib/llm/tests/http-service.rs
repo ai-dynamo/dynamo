@@ -4,6 +4,17 @@
 use anyhow::Error;
 use async_stream::stream;
 use dynamo_async_openai::config::OpenAIConfig;
+use dynamo_llm::http::{
+    client::{
+        GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient, PureOpenAIClient,
+    },
+    service::{
+        Metrics,
+        error::HttpError,
+        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        service_v2::HttpService,
+    },
+};
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -11,20 +22,6 @@ use dynamo_llm::protocols::{
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
-    },
-};
-use dynamo_llm::{
-    http::{
-        client::{
-            GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient,
-            PureOpenAIClient,
-        },
-        service::{
-            Metrics,
-            error::HttpError,
-            metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
-            service_v2::HttpService,
-        },
     },
 };
 use dynamo_runtime::{
