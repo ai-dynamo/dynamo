@@ -9,6 +9,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Union,
 )
 
@@ -216,7 +217,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -224,6 +225,7 @@ class Endpoint:
         Args:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
         """
         ...
 
@@ -438,7 +440,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component) -> None:
+    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
