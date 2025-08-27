@@ -40,7 +40,12 @@ from dynamo.runtime.logging import configure_dynamo_logging
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest, MultiModalInput
+from utils.protocol import (
+    MultiModalInput,
+    MultiModalRequest,
+    MyRequestOutput,
+    vLLMMultimodalRequest,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -245,7 +250,9 @@ class Processor(ProcessMixIn):
         if multimodal_input.image_url is None and multimodal_input.video_url is None:
             raise ValueError("Either image URL or video URL is required")
 
-        async for response in self._generate(chat_request, multimodal_input, RequestType.CHAT):
+        async for response in self._generate(
+            chat_request, multimodal_input, RequestType.CHAT
+        ):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
             )
