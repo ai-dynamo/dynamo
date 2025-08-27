@@ -1191,7 +1191,8 @@ mod test_worker_metrics_publisher {
     }
 }
 
-#[cfg(all(test, feature = "integration"))]
+#[cfg(feature = "integration")]
+#[cfg(test)]
 mod integration_tests {
     use {
         super::{ForwardPassMetrics, KvStats, WorkerMetricsPublisher, WorkerStats, kvstats},
@@ -1199,7 +1200,7 @@ mod integration_tests {
         std::sync::Arc,
     };
 
-    #[cfg(feature = "integration")]
+    #[ignore] // Requires NATS server to be running but keeps getting invoked on CI
     #[tokio::test]
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::common::test_utils::create_test_drt_async;
