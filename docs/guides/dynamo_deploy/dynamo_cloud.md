@@ -151,7 +151,7 @@ kubectl get pods -n ${NAMESPACE}
    - [TensorRT-LLM Deployments](../../../components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
-   - [Set up Prometheus & Grafana](k8s_metrics.md)
+   - [Set up Prometheus & Grafana](metrics.md)
    - [SLA Planner Deployment Guide](sla_planner_deployment.md) (for advanced SLA-aware scheduling and autoscaling)
 
 ## Troubleshooting
