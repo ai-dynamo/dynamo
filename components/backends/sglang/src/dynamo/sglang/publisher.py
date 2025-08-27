@@ -132,7 +132,7 @@ class DynamoSglangStatPublisher:
 async def setup_sgl_metrics(
     engine: sgl.Engine,
     component: Component,
-) -> tuple[DynamoSglangStatPublisher, asyncio.Task]:
+) -> tuple[DynamoSglangStatPublisher, asyncio.Task, list[tuple[str, str]]]:
     """
     Convenience bootstrap: create endpoint, publish an initial update, and start the metrics loop.
     """
