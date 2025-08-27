@@ -385,6 +385,7 @@ RUN apt-get update && \
         libnuma1 librdmacm1 ibverbs-providers \
         openssh-client \
         openssh-server && \
+    ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy all bindings (wheels, lib, include) from dev image
@@ -403,10 +404,6 @@ COPY --from=build /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from build image
 COPY --from=build /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-# Setup the python environment
-# COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-# RUN uv venv $VIRTUAL_ENV --python 3.12 && \
-#     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
 # TODO: Remove extra install and use pyproject.toml to define all dependencies
@@ -440,11 +437,16 @@ ARG SYMPY_VER=1.14.0
 ARG PACKAGING_VER=23.2
 ARG FLASH_ATTN_VER=2.7.4.post1
 ARG MPMATH_VER=1.3.0
-RUN python3 -m pip list # TODO remove this line
+
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
 COPY --from=build /usr/local/cuda-12.9/targets/x86_64-linux/lib/libcupti* /usr/local/cuda/targets/x86_64-linux/lib/
+# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
 COPY --from=build /opt/hpcx /opt/hpcx
+# This is needed to make libucc.so visible so pytorch can use it.
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 # Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
+# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
+# pytorch-triton is copied after trtllm installation.
 COPY --from=build /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info
@@ -460,7 +462,6 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dis
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
-RUN python3 -m pip list # TODO remove this line
 
 
 # Install TensorRT-LLM (same as in build stage)
@@ -488,6 +489,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages "cuda-python>=
         /workspace/wheelhouse/ai_dynamo*any.whl \
         /workspace/wheelhouse/nixl*.whl && \
     python3 -m pip uninstall -y --break-system-packages triton
+    # triton is copied from pytorch container below
 
 COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
 COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
@@ -506,8 +508,6 @@ COPY ATTRIBUTION* LICENSE /workspace/
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
-
-ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
