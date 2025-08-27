@@ -253,6 +253,9 @@ def test_metrics_labels(request, runtime_services):
         output_lines = []
 
         def log_output():
+            if process.stdout is None:
+                logger.warning("Process stdout is None, cannot capture output")
+                return
             for line in process.stdout:
                 line = line.strip()
                 if line:
