@@ -55,6 +55,12 @@ dynamo-operator:
     ingressHostSuffix: ""
     virtualServiceSupportsHTTPS: false
 
+grove:
+  enabled: false
+
+kai-scheduler:
+  enabled: false
+
 etcd:
   enabled: true
   persistence:
