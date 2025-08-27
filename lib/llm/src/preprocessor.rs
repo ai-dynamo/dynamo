@@ -203,27 +203,25 @@ impl OpenAIPreprocessor {
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (encoding, skip_token_annotation) = if has_backend_instance_id
-                                && token_data.is_some()
-                            {
-                                // Use provided tokens, skip tokenization
-                                let tokens = token_data.unwrap().clone();
-                                tracing::trace!("Using provided tokens from EPP: {:?}", tokens);
-                                // Create a passthrough encoding with the provided tokens
-                                let passthrough_encoding = crate::tokenizers::Encoding::Sp(tokens);
-                                (passthrough_encoding, true)
-                            } else if has_backend_instance_id {
-                                // backend_instance_id is set but no token_data provided
-                                tracing::trace!(
-                                    "tokens were not passed by the epp, only backend_instance_id was"
-                                );
-                                // Normal tokenization
-                                let encoding = self.tokenizer.encode(&formatted_prompt)?;
-                                (encoding, false)
+                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
+                                if let Some(tokens) = token_data {
+                                    // need ownership for the builder; one clone is unavoidable here
+                                    tracing::trace!(
+                                        "Using provided tokens from EPP: {} ids",
+                                        tokens.len()
+                                    );
+                                    (tokens.clone(), true)
+                                } else {
+                                    tracing::warn!(
+                                        "backend_instance_id provided but no token_data; tokenizing prompt"
+                                    );
+                                    let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                    (encoding.token_ids().to_vec(), false)
+                                }
                             } else {
-                                // Normal tokenization
+                                // No backend_instance_id provided, continue the normal flow.
                                 let encoding = self.tokenizer.encode(&formatted_prompt)?;
-                                (encoding, false)
+                                (encoding.token_ids().to_vec(), false)
                             };
 
                             if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
@@ -238,11 +236,11 @@ impl OpenAIPreprocessor {
                             {
                                 annotations.insert(
                                     ANNOTATION_TOKEN_IDS.to_string(),
-                                    serde_json::to_string(encoding.token_ids())?,
+                                    serde_json::to_string(&tokens_vec)?,
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids().to_vec());
+                            builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
                             let token_batches: Vec<Vec<u32>> = texts
