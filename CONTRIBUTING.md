@@ -178,7 +178,8 @@ By making a contribution to this project, I certify that:
 ```
 
 We require that every contribution to Dynamo is signed with
-a Developer Certificate of Origin. Additionally, please use your real name.
+a Developer Certificate of Origin, this is verified by a required CI check.
+Additionally, please use your real name.
 We do not accept anonymous contributors nor those utilizing pseudonyms.
 
 Each commit must include a DCO which looks like this
