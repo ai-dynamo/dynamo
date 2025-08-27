@@ -31,7 +31,6 @@ use super::{
     metrics::{Endpoint, ResponseMetricCollector},
     service_v2,
 };
-use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     ParsingOptions,
@@ -42,6 +41,7 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use crate::{discovery::ModelManager, preprocessor::LLMMetricAnnotation};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -195,8 +195,8 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
-fn get_parsing_options(state: &Arc<service_v2::State>, model: &str) -> ParsingOptions {
-    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
+    let tool_call_parser = manager.get_model_tool_call_parser(model);
     let reasoning_parser = None; // TODO: Implement reasoning parser
 
     ParsingOptions::new(tool_call_parser, reasoning_parser)
@@ -274,7 +274,7 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(&state, model);
+    let parsing_options = get_parsing_options(state.manager(), model);
 
     let mut inflight_guard =
         state
@@ -501,7 +501,7 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(&state, model);
+    let parsing_options = get_parsing_options(state.manager(), model);
 
     let mut inflight_guard =
         state
@@ -736,7 +736,7 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(&state, model);
+    let parsing_options = get_parsing_options(state.manager(), model);
 
     let mut inflight_guard =
         state
