@@ -34,7 +34,7 @@ use std::collections::HashMap;
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
     COMPONENT_NATS_METRICS, DRT_NATS_METRICS, build_component_metric_name, labels, name_prefix,
-    nats_client, nats_service, sanitize_prometheus_name, work_handler,
+    nats_client, nats_service, sanitize_prometheus_label, sanitize_prometheus_name, work_handler,
 };
 
 // Pipeline imports for endpoint creation
@@ -228,7 +228,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         if hierarchy.len() > 1 {
             let namespace = &hierarchy[1];
             if !namespace.is_empty() {
-                let valid_namespace = sanitize_prometheus_name(namespace)?;
+                let valid_namespace = sanitize_prometheus_label(namespace)?;
                 if !valid_namespace.is_empty() {
                     updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
                 }
@@ -237,7 +237,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         if hierarchy.len() > 2 {
             let component = &hierarchy[2];
             if !component.is_empty() {
-                let valid_component = sanitize_prometheus_name(component)?;
+                let valid_component = sanitize_prometheus_label(component)?;
                 if !valid_component.is_empty() {
                     updated_labels.push((labels::COMPONENT.to_string(), valid_component));
                 }
@@ -246,7 +246,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         if hierarchy.len() > 3 {
             let endpoint = &hierarchy[3];
             if !endpoint.is_empty() {
-                let valid_endpoint = sanitize_prometheus_name(endpoint)?;
+                let valid_endpoint = sanitize_prometheus_label(endpoint)?;
                 if !valid_endpoint.is_empty() {
                     updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
                 }

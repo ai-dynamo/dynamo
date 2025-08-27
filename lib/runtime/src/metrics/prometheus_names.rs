@@ -251,8 +251,7 @@ static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
 static LABEL_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_]").unwrap());
-static INVALID_FIRST_CHAR_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[^a-zA-Z_]").unwrap());
+static INVALID_FIRST_CHAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[^a-zA-Z_]").unwrap());
 
 /// Sanitizes a Prometheus metric name by converting invalid characters to underscores
 /// and ensuring the first character is valid. Uses regex for clear validation.
@@ -267,7 +266,9 @@ pub fn sanitize_prometheus_name(raw: &str) -> anyhow::Result<String> {
     }
 
     // Replace all invalid characters with underscores
-    let mut sanitized = METRIC_INVALID_CHARS_PATTERN.replace_all(raw, "_").to_string();
+    let mut sanitized = METRIC_INVALID_CHARS_PATTERN
+        .replace_all(raw, "_")
+        .to_string();
 
     // Ensure first character is valid (letter, underscore, or colon)
     if INVALID_FIRST_CHAR_PATTERN.is_match(&sanitized) {
@@ -299,7 +300,9 @@ pub fn sanitize_prometheus_label(raw: &str) -> anyhow::Result<String> {
     }
 
     // Replace all invalid characters with underscores (no colons allowed in labels)
-    let mut sanitized = LABEL_INVALID_CHARS_PATTERN.replace_all(raw, "_").to_string();
+    let mut sanitized = LABEL_INVALID_CHARS_PATTERN
+        .replace_all(raw, "_")
+        .to_string();
 
     // Ensure first character is valid (letter or underscore only)
     if INVALID_FIRST_CHAR_PATTERN.is_match(&sanitized) {
@@ -341,8 +344,11 @@ pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
 }
 
 /// Builds a full component metric name by prepending the component prefix
+/// Sanitizes the metric name to ensure it's valid for Prometheus
 pub fn build_component_metric_name(metric_name: &str) -> String {
-    format!("{}_{}", name_prefix::COMPONENT, metric_name)
+    let sanitized_name =
+        sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
+    format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
 }
 
 #[cfg(test)]
@@ -521,5 +527,52 @@ mod tests {
         // Test that strings with only invalid characters return error
         assert!(sanitize_prometheus_label("@#$%").is_err()); // @#$% -> ____ -> ___ -> all underscores error
         assert!(sanitize_prometheus_label("!!!!").is_err()); // !!!! -> ____ -> ___ -> all underscores error
+    }
+
+    #[test]
+    fn test_build_component_metric_name() {
+        // Test that valid names work correctly
+        assert_eq!(
+            build_component_metric_name("test_metric"),
+            "dynamo_component_test_metric"
+        );
+        assert_eq!(
+            build_component_metric_name("requests_total"),
+            "dynamo_component_requests_total"
+        );
+
+        // Test that invalid characters are sanitized
+        assert_eq!(
+            build_component_metric_name("test metric"),
+            "dynamo_component_test_metric"
+        );
+        assert_eq!(
+            build_component_metric_name("test.metric"),
+            "dynamo_component_test_metric"
+        );
+        assert_eq!(
+            build_component_metric_name("test@metric"),
+            "dynamo_component_test_metric"
+        );
+
+        // Test that invalid first characters are fixed
+        assert_eq!(
+            build_component_metric_name("123metric"),
+            "dynamo_component__123metric"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "metric name should be valid or sanitizable")]
+    fn test_build_component_metric_name_panics_on_invalid_input() {
+        // Test that completely invalid input panics with clear message
+        build_component_metric_name("@#$%");
+    }
+
+    #[test]
+    #[should_panic(expected = "metric name should be valid or sanitizable")]
+    fn test_build_component_metric_name_panics_on_empty_input() {
+        // Test that empty input panics with clear message
+        build_component_metric_name("");
     }
 }
