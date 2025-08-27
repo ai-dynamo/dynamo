@@ -268,16 +268,20 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
+            metrics_labels = [("model", config.served_model_name)]
             async with get_publisher(
                 component,
                 engine,
                 kv_listener,
                 int(endpoint.lease_id()),
                 config.kv_block_size,
+                metrics_labels,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                await endpoint.serve_endpoint(handler.generate)
+                await endpoint.serve_endpoint(
+                    handler.generate, metrics_labels=metrics_labels
+                )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(handler.generate)
