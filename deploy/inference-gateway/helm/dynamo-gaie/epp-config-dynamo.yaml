@@ -13,29 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-backend: pytorch
-tensor_parallel_size: 4
-moe_expert_parallel_size: 4
-max_batch_size: 256
-# When max_num_tokens set to higher values, can cause OOM issues.
-# Will be investigated in the future with TRTLLM team.
-max_num_tokens: 1024
-max_seq_len: 8448
-enable_autotuner: false
-disable_overlap_scheduler: true
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  # Required: tells EPP which profile to use (even if you only have one)
+  - type: single-profile-handler
 
-# Enable Speculative Decoding in the model engine
-speculative_config:
-  decoding_type: Eagle
-  max_draft_len: 1
-  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: false
-
-kv_cache_config:
-  free_gpu_memory_fraction: 0.5
-  enable_block_reuse: false
-
-
-cuda_graph_config:
-  max_batch_size: 8
-
+  # Picker: chooses the final endpoint after scoring
+  - name: picker
+    type: max-score-picker
+  - name: dyn-pre
+    type: dynamo-inject-workerid
+    parameters: {}
+  - name: dyn-kv
+    type: kv-aware-scorer
+    parameters:
+      frontendURL: http://127.0.0.1:8000/v1/chat/completions
+      timeoutMS: 10000
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: dyn-kv
+        weight: 1
+      - pluginRef: picker

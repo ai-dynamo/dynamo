@@ -93,7 +93,7 @@ The GitOps workflow for Dynamo deployments consists of three main steps:
 
 ### Step 1: Build and Push Dynamo Cloud Operator
 
-First, follow to [See Install Dynamo Cloud](quickstart.md#install-dynamo-cloud).
+First, follow to [See Install Dynamo Cloud](README.md).
 
 ### Step 2: Create Initial Deployment
 

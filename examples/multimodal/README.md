@@ -59,14 +59,14 @@ flowchart LR
   pd_worker --> encode_worker
 ```
 
+***Note*** Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct today. Phi3V support will be added in the future. Disaggregated serving is currently only confirmed for LLaVA (see note below).
+
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
 # Serve a LLaVA 1.5 7B model:
 bash launch/agg.sh --model llava-hf/llava-1.5-7b-hf
 # Serve a Qwen2.5-VL model:
-# bash launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct
-# Serve a Phi3V model:
-# bash launch/agg.sh --model microsoft/Phi-3.5-vision-instruct
+bash launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
 ### Client
@@ -100,7 +100,7 @@ curl http://localhost:8080/v1/chat/completions \
     }'
 ```
 
-If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`.
 
 You should see a response similar to this:
 ```json

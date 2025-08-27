@@ -16,15 +16,15 @@
 pub use crate::component::Component;
 use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
+    ErrorContext, RuntimeCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
-    ErrorContext, RuntimeCallback,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
@@ -117,6 +117,13 @@ impl DistributedRuntime {
         });
         distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
 
+        // Initialize the uptime gauge in SystemHealth
+        distributed_runtime
+            .system_health
+            .lock()
+            .unwrap()
+            .initialize_uptime_gauge(&distributed_runtime)?;
+
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
@@ -153,18 +160,10 @@ impl DistributedRuntime {
                 }
             }
         } else {
-            // System server HTTP is disabled, but still create the state for metrics
-            // This ensures uptime_seconds metric is always registered
-            let system_status_state = crate::system_status_server::SystemStatusState::new(
-                Arc::new(distributed_runtime.clone()),
-            )?;
-
-            // Initialize the start time for uptime tracking
-            if let Err(e) = system_status_state.initialize_start_time() {
-                tracing::warn!("Failed to initialize system status start time: {}", e);
-            }
-
-            tracing::debug!("System status server HTTP endpoints disabled, but uptime metrics are being tracked");
+            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
+            tracing::debug!(
+                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
+            );
         }
 
         Ok(distributed_runtime)
@@ -270,26 +269,16 @@ impl DistributedRuntime {
     pub fn add_prometheus_metric(
         &self,
         hierarchy: &str,
-        metric_name: &str,
         prometheus_metric: Box<dyn prometheus::core::Collector>,
     ) -> anyhow::Result<()> {
         let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
         let entry = registries.entry(hierarchy.to_string()).or_default();
 
-        // Try to register the metric and provide better error information
-        match entry.prometheus_registry.register(prometheus_metric) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let error_msg = e.to_string();
-                tracing::error!(
-                    hierarchy = ?hierarchy,
-                    error = ?error_msg,
-                    metric_name = ?metric_name,
-                    "Metric registration failed"
-                );
-                Err(e.into())
-            }
-        }
+        // Try to register the metric
+        entry
+            .prometheus_registry
+            .register(prometheus_metric)
+            .map_err(|e| e.into())
     }
 
     /// Add a callback function to metrics registries for the given hierarchies
@@ -357,7 +346,7 @@ impl DistributedConfig {
 }
 
 #[cfg(test)]
-pub mod test_helpers {
+pub mod distributed_test_utils {
     //! Common test helper functions for DistributedRuntime tests
     // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
@@ -370,5 +359,63 @@ pub mod test_helpers {
         crate::DistributedRuntime::from_settings_without_discovery(rt)
             .await
             .unwrap()
+    }
+}
+
+#[cfg(feature = "integration")]
+#[cfg(test)]
+mod tests {
+    use super::distributed_test_utils::create_test_drt_async;
+
+    #[tokio::test]
+    async fn test_drt_uptime_after_delay_system_disabled() {
+        // Test uptime with system status server disabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            // Start a DRT
+            let drt = create_test_drt_async().await;
+
+            // Wait 50ms
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            // Check that uptime is 50+ ms
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            assert!(
+                uptime >= std::time::Duration::from_millis(50),
+                "Expected uptime to be at least 50ms, but got {:?}",
+                uptime
+            );
+
+            println!(
+                "✓ DRT uptime test passed (system disabled): uptime = {:?}",
+                uptime
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_drt_uptime_after_delay_system_enabled() {
+        // Test uptime with system status server enabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+            // Start a DRT
+            let drt = create_test_drt_async().await;
+
+            // Wait 50ms
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            // Check that uptime is 50+ ms
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            assert!(
+                uptime >= std::time::Duration::from_millis(50),
+                "Expected uptime to be at least 50ms, but got {:?}",
+                uptime
+            );
+
+            println!(
+                "✓ DRT uptime test passed (system enabled): uptime = {:?}",
+                uptime
+            );
+        })
+        .await;
     }
 }

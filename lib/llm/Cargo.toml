@@ -64,6 +64,7 @@ hf-hub = { workspace = true }
 humantime = { workspace = true } # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
+parking_lot = "0.12.4"
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -108,6 +109,13 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = {workspace = true}
 rustls = { version = "0.23" }
 
+
+# grpc-service
+# ping version to 0.13.1 so it depends on prost 0.13.5
+# which is used across other libraries
+tonic = { version = "0.13.1" }
+# Request prost specifically so tonic-build properly compiles protobuf message
+prost = { version = "0.13.5" }
 
 # tokenizers
 tokenizers = { version = "0.21.4", default-features = false, features = [
@@ -156,3 +164,6 @@ insta = { version = "1.41", features = [
 ] }
 aligned-vec = "0.6.4"
 lazy_static = "1.4"
+
+[build-dependencies]
+tonic-build = { version = "0.13.1"}

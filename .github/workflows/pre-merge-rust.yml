@@ -100,11 +100,11 @@ jobs:
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run
+      run: cargo test --locked --no-run --target-dir ${HOME}/tmp || df -h
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      run: cargo test --locked --all-targets --target-dir ${HOME}/tmp

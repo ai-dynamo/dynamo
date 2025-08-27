@@ -92,6 +92,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
+	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
+	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
+
 	// +optional
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
 	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`

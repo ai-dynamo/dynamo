@@ -18,6 +18,7 @@ pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
 pub mod gguf;
+pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
@@ -238,9 +239,10 @@ mod file_json_field_tests {
         let result: anyhow::Result<String> = file_json_field(&file_path, "non_existent_field");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Field 'non_existent_field' not found"));
+        assert!(
+            err.to_string()
+                .contains("Field 'non_existent_field' not found")
+        );
     }
 
     #[test]
@@ -255,9 +257,10 @@ mod file_json_field_tests {
         let result: anyhow::Result<u32> = file_json_field(&file_path, "count");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Failed to deserialize field 'count'"));
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize field 'count'")
+        );
     }
 
     #[test]

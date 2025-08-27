@@ -44,3 +44,8 @@ type Autoscaling struct {
 	Behavior    *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
 	Metrics     []autoscalingv2.MetricSpec                     `json:"metrics,omitempty"`
 }
+
+type SharedMemorySpec struct {
+	Disabled bool              `json:"disabled,omitempty"`
+	Size     resource.Quantity `json:"size,omitempty"`
+}

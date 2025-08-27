@@ -80,6 +80,7 @@ pythonize = "0.23"
 
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
+prometheus = "0.14.0"
 
 
 [dev-dependencies]

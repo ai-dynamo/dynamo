@@ -13,25 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-backend: pytorch
-tensor_parallel_size: 8
-moe_expert_parallel_size: 8
-max_batch_size: 1
-max_num_tokens: 8192
-max_seq_len: 8192
-print_iter_log: true
-disable_overlap_scheduler: true
-
-# Enable Speculative Decoding in the model engine
-speculative_config:
-  decoding_type: Eagle
-  max_draft_len: 3
-  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: True
-
-kv_cache_config:
-  free_gpu_memory_fraction: 0.5
-  enable_block_reuse: false
-
-cache_transceiver_config:
-  backend: default
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-gaie.fullname" . }}-epp-config
+  labels:
+    app.kubernetes.io/name: {{ include "dynamo-gaie.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  epp-config-dynamo.yaml: |
+{{ (.Files.Get "epp-config-dynamo.yaml") | indent 4 }}

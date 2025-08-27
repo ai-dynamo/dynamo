@@ -7,8 +7,8 @@ pub mod distributed_leader_worker;
 pub mod null;
 
 use crate::block_manager::block::{
-    transfer::{TransferContext, TransferError, WriteToStrategy},
     BlockDataProvider, ReadableBlock, WritableBlock,
+    transfer::{TransferContext, TransferError, WriteToStrategy},
 };
 use crate::block_manager::locality::Logical;
 use crate::block_manager::storage::{self, nixl::NixlDescriptor};

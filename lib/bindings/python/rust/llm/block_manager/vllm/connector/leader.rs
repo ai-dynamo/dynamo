@@ -5,6 +5,7 @@ pub mod recorder;
 pub mod slot;
 
 use super::*;
+use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
@@ -14,6 +15,7 @@ use crate::llm::block_manager::{
     vllm::KvbmRequest, VllmBlockManager,
 };
 use crate::DistributedRuntime as PyDistributedRuntime;
+use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use dynamo_llm::block_manager::{
     block::{
@@ -25,10 +27,7 @@ use dynamo_llm::block_manager::{
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashSet, sync::Mutex};
 use tokio;
 use tokio::sync::mpsc;
 
@@ -81,6 +80,7 @@ pub struct KvConnectorLeader {
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorLeader {
@@ -104,12 +104,24 @@ impl KvConnectorLeader {
         // if we need a drt, get it from here
         let drt = drt.inner().clone();
 
+        let ns = drt
+            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
+            .unwrap();
+
+        let kvbm_metrics = KvbmMetrics::new(&ns);
+
         Self {
-            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone()),
+            slot_manager: ConnectorSlotManager::new(
+                block_manager.clone(),
+                leader,
+                drt.clone(),
+                kvbm_metrics.clone(),
+            ),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
+            kvbm_metrics,
         }
     }
 }
@@ -178,6 +190,9 @@ impl Leader for KvConnectorLeader {
                 "scheduling onboarding for {} external tokens",
                 num_external_tokens
             );
+            self.kvbm_metrics
+                .matched_tokens
+                .inc_by(num_external_tokens as u64);
             Ok((num_external_tokens, true))
         } else {
             Ok((0, false))

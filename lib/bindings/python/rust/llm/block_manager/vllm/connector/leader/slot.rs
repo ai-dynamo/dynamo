@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::any::Any;
+use std::{any::Any, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
@@ -179,6 +179,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         block_manager: VllmBlockManager,
         leader: Arc<KvbmLeader>,
         drt: DistributedRuntime,
+        kvbm_metrics: KvbmMetrics,
     ) -> Self {
         tracing::debug!(
             "creating slot manager with block size: {}",
@@ -190,11 +191,14 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
         let mut xfer_engine = LocalTransferEngine::new(block_manager.clone(), leader, xfer_rx);
         let primary_token = drt.primary_token();
         let runtime_primary = drt.runtime().primary();
+
         let drt_for_task = drt;
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
-                xfer_engine.execute(cancellation_token, drt_for_task).await
+                xfer_engine
+                    .execute(cancellation_token, drt_for_task, kvbm_metrics)
+                    .await
             },
             primary_token,
             "LocalTransferEngine",
@@ -1027,6 +1031,7 @@ impl LocalTransferEngine {
         &mut self,
         cancellation_token: CancellationToken,
         drt: DistributedRuntime,
+        kvbm_metrics: KvbmMetrics,
     ) -> anyhow::Result<()> {
         let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel();
         let (offload_tx, mut offload_rx) = mpsc::unbounded_channel();
@@ -1037,6 +1042,9 @@ impl LocalTransferEngine {
         let leader_offload = Arc::clone(&self.leader);
         let leader_onboard = Arc::clone(&self.leader);
 
+        let kvbm_metrics_onboard = kvbm_metrics.clone();
+        let kvbm_metrics_offload = kvbm_metrics.clone();
+
         let onboard_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token_onboard| async move {
                 while let Some(req) = onboard_rx.recv().await {
@@ -1044,7 +1052,10 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOnboardTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) = process_onboard_request(req, &leader_onboard).await {
+                    if let Err(e) =
+                        process_onboard_request(req, &leader_onboard, kvbm_metrics_onboard.clone())
+                            .await
+                    {
                         tracing::error!("LocalOnboardTask: error processing request: {:?}", e);
                     }
                 }
@@ -1062,8 +1073,13 @@ impl LocalTransferEngine {
                         tracing::debug!("LocalOffloadTask: received cancellation signal");
                         break;
                     }
-                    if let Err(e) =
-                        process_offload_request(req, &block_manager_offload, &leader_offload).await
+                    if let Err(e) = process_offload_request(
+                        req,
+                        &block_manager_offload,
+                        &leader_offload,
+                        kvbm_metrics_offload.clone(),
+                    )
+                    .await
                     {
                         tracing::error!("LocalOffloadTask: error processing request: {:?}", e);
                     }
@@ -1132,7 +1148,13 @@ async fn process_offload_request(
     offload_req: LocalOffloadRequest,
     block_manager: &VllmBlockManager,
     leader: &Arc<KvbmLeader>,
+    kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
+    kvbm_metrics.offload_requests.inc();
+    kvbm_metrics
+        .offload_blocks_d2h
+        .inc_by(offload_req.block_ids.len() as u64);
+
     let request_id = &offload_req.request_id;
     let operation_id = &offload_req.operation_id;
 
@@ -1141,7 +1163,6 @@ async fn process_offload_request(
         offload_req.block_ids.len()
     );
 
-    // TODO: Implement actual offload logic
     // 1. Acquire mutable host blocks
     let host_blocks = block_manager
         .host()
@@ -1237,7 +1258,19 @@ async fn process_offload_request(
 async fn process_onboard_request(
     onboard_req: LocalOnboardRequest,
     leader: &Arc<KvbmLeader>,
+    kvbm_metrics: KvbmMetrics,
 ) -> anyhow::Result<()> {
+    kvbm_metrics.onboard_requests.inc();
+    if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Host {
+        kvbm_metrics
+            .onboard_blocks_h2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    } else if onboard_req.src_blocks.storage_pool() == BlockTransferPool::Disk {
+        kvbm_metrics
+            .onboard_blocks_d2d
+            .inc_by(onboard_req.src_blocks.len() as u64);
+    }
+
     let request_id = &onboard_req.request_id;
     let operation_id = &onboard_req.operation_id;
 
