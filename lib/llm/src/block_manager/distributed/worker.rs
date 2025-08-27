@@ -352,12 +352,28 @@ impl KvbmWorker {
         };
 
         // Create the handler for our active message worker.
+        // Determine if host blocks will be contiguous based on layout type
+        let host_blocks_contiguous = match layout_type {
+            LayoutType::FullyContiguous => {
+                tracing::info!("Host layout: FullyContiguous - enabling single-base scatter kernel optimization");
+                true
+            }
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                tracing::info!(
+                    "Host layout: LayerSeparate (outer_contiguous: {}) - enabling multi-base scatter kernel",
+                    outer_contiguous
+                );
+                false  // LayerSeparate is never contiguous across blocks for our purposes
+            }
+        };
+
         let block_transfer_handler = BlockTransferHandler::new(
             device_blocks,
             host_blocks,
             disk_blocks,
             transfer_context,
             scheduler_client,
+            host_blocks_contiguous,
         )?;
 
         tracing::debug!("sending block transfer handler to worker");

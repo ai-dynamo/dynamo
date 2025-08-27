@@ -36,6 +36,8 @@ pub struct BlockTransferHandler {
     disk: Option<LocalBlockDataList<DiskStorage>>,
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
+    /// Whether host blocks are laid out contiguously in memory
+    host_blocks_contiguous: bool,
     // add worker-connector scheduler client here
 }
 
@@ -46,14 +48,27 @@ impl BlockTransferHandler {
         disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
         scheduler_client: Option<TransferSchedulerClient>,
+        host_blocks_contiguous: bool,
         // add worker-connector scheduler client here
     ) -> Result<Self> {
+        tracing::info!(
+            "BlockTransferHandler initialized with host_blocks_contiguous: {}",
+            host_blocks_contiguous
+        );
+
+        if host_blocks_contiguous {
+            tracing::info!("Host blocks use FullyContiguous layout - single-base scatter kernel enabled");
+        } else {
+            tracing::info!("Host blocks use LayerSeparate layout - multi-base scatter kernel required");
+        }
+
         Ok(Self {
             device: Self::get_local_data(device_blocks),
             host: Self::get_local_data(host_blocks),
             disk: Self::get_local_data(disk_blocks),
             context,
             scheduler_client,
+            host_blocks_contiguous,
         })
     }
 
@@ -73,6 +88,11 @@ impl BlockTransferHandler {
                 })
                 .collect()
         })
+    }
+
+    /// Returns whether host blocks are laid out contiguously in memory
+    pub fn host_blocks_contiguous(&self) -> bool {
+        self.host_blocks_contiguous
     }
 
     /// Initiate a transfer between two pools.

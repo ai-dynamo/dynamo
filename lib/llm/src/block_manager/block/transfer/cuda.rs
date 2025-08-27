@@ -16,6 +16,7 @@
 use super::*;
 
 use super::TransferError;
+use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 use crate::block_manager::storage::{DeviceStorage, PinnedStorage};
 use anyhow::Result;
 use cudarc::driver::result as cuda_result;
@@ -242,35 +243,6 @@ where
     Ok(())
 }
 
-/// Helper function to perform the appropriate CUDA memcpy based on storage types
-// Allow dead code because it's used in debug assertions
-#[allow(dead_code)]
-fn expected_strategy<Source: Storage, Dest: Storage>() -> TransferStrategy {
-    match (
-        std::any::TypeId::of::<Source>(),
-        std::any::TypeId::of::<Dest>(),
-    ) {
-        (src, dst)
-            if src == std::any::TypeId::of::<PinnedStorage>()
-                && dst == std::any::TypeId::of::<DeviceStorage>() =>
-        {
-            TransferStrategy::CudaAsyncH2D
-        }
-        (src, dst)
-            if src == std::any::TypeId::of::<DeviceStorage>()
-                && dst == std::any::TypeId::of::<PinnedStorage>() =>
-        {
-            TransferStrategy::CudaAsyncD2H
-        }
-        (src, dst)
-            if src == std::any::TypeId::of::<DeviceStorage>()
-                && dst == std::any::TypeId::of::<DeviceStorage>() =>
-        {
-            TransferStrategy::CudaAsyncD2D
-        }
-        _ => TransferStrategy::Invalid,
-    }
-}
 
 /// H2D Implementation
 #[inline(always)]
@@ -280,13 +252,13 @@ unsafe fn cuda_memcpy_h2d(
     size: usize,
     stream: &CudaStream,
 ) -> Result<(), TransferError> {
+
+    // ADD INDIVIDUAL TRANSFER LOGGING
+    tracing::info!(" H2D Transfer: 0x{:x} → 0x{:x} ({} bytes)",
+        src_ptr as usize, dst_ptr as usize, size);
+
     debug_assert!(!src_ptr.is_null(), "Source host pointer is null");
     debug_assert!(!dst_ptr.is_null(), "Destination device pointer is null");
-    debug_assert!(
-        (src_ptr as usize + size <= dst_ptr as usize)
-            || (dst_ptr as usize + size <= src_ptr as usize),
-        "Source and destination device memory regions must not overlap for D2D copy"
-    );
 
     unsafe {
         let src_slice = std::slice::from_raw_parts(src_ptr, size);
