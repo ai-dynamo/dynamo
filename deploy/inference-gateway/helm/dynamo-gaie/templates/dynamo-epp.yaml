@@ -41,11 +41,7 @@ spec:
 
       containers:
       - name: epp
-        image: {{ if .Values.eppAware.enabled }}
-          {{ default .Values.extension.image .Values.eppAware.eppImage }}
-        {{ else }}
-          {{ .Values.extension.image }}
-        {{ end }}
+        image: {{ if .Values.eppAware.enabled }}{{ default .Values.extension.image .Values.eppAware.eppImage }}{{ else }}{{ .Values.extension.image }}{{ end }}
         imagePullPolicy: {{ .Values.epp.imagePullPolicy | default "IfNotPresent" }}
         args:
         {{- if .Values.epp.argsOverride }}
@@ -63,6 +59,14 @@ spec:
           - "9002"
           - -grpcHealthPort
           - "9003"
+          - -configFile
+          - "/etc/epp/epp-config-dynamo.yaml"
+        {{- end }}
+        {{- if .Values.eppAware.enabled }}
+        volumeMounts:
+            - name: epp-config
+              mountPath: /etc/epp
+              readOnly: true
         {{- end }}
         env:
         {{- range .Values.epp.extraEnv }}
@@ -107,4 +111,13 @@ spec:
         {{- toYaml .Values.eppAware.sidecar.ports | nindent 8 }}
         resources:
         {{- toYaml .Values.eppAware.sidecar.resources | nindent 10 }}
+      {{- end }}
+      {{- if .Values.eppAware.enabled }}
+      volumes:
+        - name: epp-config
+          configMap:
+            name: {{ include "dynamo-gaie.fullname" . }}-epp-config
+            items:
+              - key: epp-config-dynamo.yaml
+                path: epp-config-dynamo.yaml
       {{- end }}

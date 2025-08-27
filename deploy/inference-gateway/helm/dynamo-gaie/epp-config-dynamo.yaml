@@ -13,14 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-eppAware:
-  enabled: true
-  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  # Required: tells EPP which profile to use (even if you only have one)
+  - type: single-profile-handler
 
-imagePullSecrets:
-  - docker-imagepullsecret
-
-epp:
-  extraEnv:
-    - name: USE_STREAMING
-      value: "true"
+  # Picker: chooses the final endpoint after scoring
+  - name: picker
+    type: max-score-picker
+  - name: dyn-pre
+    type: dynamo-inject-workerid
+    parameters: {}
+  - name: dyn-kv
+    type: kv-aware-scorer
+    parameters:
+      frontendURL: http://127.0.0.1:8000/v1/chat/completions
+      timeoutMS: 10000
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: dyn-kv
+        weight: 1
+      - pluginRef: picker

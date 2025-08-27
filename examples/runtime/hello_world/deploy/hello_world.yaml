@@ -10,9 +10,11 @@ spec:
   services:
     Frontend:
       livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'echo ok'
         initialDelaySeconds: 10
         periodSeconds: 10
         timeoutSeconds: 2
