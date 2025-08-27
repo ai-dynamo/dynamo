@@ -174,9 +174,11 @@ where
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
         | TransferStrategy::CudaAsyncD2D => {
-            for (src, dst) in sources.iter().zip(targets.iter_mut()) {
-                cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
-            }
+            tracing::info!("ziqif copy_blocks");
+            cuda::copy_blocks(sources, targets, ctx.stream().as_ref(), RB::write_to_strategy())?;
+            // for (src, dst) in sources.iter().zip(targets.iter_mut()) {
+            //     cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
+            // }
 
             ctx.cuda_event(tx)?;
             Ok(rx)
