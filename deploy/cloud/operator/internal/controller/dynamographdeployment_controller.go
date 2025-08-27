@@ -169,14 +169,27 @@ type Resource interface {
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
-	if r.Config.Grove.Enabled {
-		// check if explicit opt out of grove
-		if dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove] == consts.KubeLabelValueFalse {
-			logger.Info("Grove is explicitly disabled for this deployment, skipping grove resources reconciliation")
-			return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
-		}
+	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
+	// Unset or not "false": Grove if available; else component mode
+	// "false": component mode (multinode -> LWS; single-node -> standard)
+	enableGrove := true
+	if dynamoDeployment.Annotations != nil && strings.ToLower(dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
+		enableGrove = false
+	}
+
+	// Determine if any service is multinode
+	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
+
+	if enableGrove && r.Config.Grove.Enabled {
+		logger.Info("Reconciling Grove resources", "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled, "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
 	}
+	if hasMultinode && !r.Config.LWS.Enabled {
+		err := fmt.Errorf("no multinode orchestrator available")
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled, "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
+		return "", "", "", err
+	}
+	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled, "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
 	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
 
 }
@@ -285,7 +298,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	// Handle Grove scaling operations after structural changes
 	if err := r.reconcileGroveScaling(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return FailedState, "grove_scaling_failed", Message(err.Error()), err
+		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	resources := []Resource{groveGangSetAsResource}
