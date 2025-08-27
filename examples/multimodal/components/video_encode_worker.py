@@ -37,12 +37,13 @@ from dynamo.runtime.logging import configure_dynamo_logging
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
-from utils.video_encode_utils import load_video_content, read_video_pyav
-from utils.video_processor import (
+from utils.video_utils import (
     calculate_frame_sampling_indices,
     get_video_metadata,
+    load_video_content,
     open_video_container,
     prepare_tensor_for_rdma,
+    read_video_pyav,
     resize_video_frames,
 )
 
