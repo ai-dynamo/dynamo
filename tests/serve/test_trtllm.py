@@ -313,8 +313,12 @@ def test_metrics_labels(request, runtime_services):
     - etcd and NATS must be running (docker compose -f deploy/docker-compose.yml up -d)
     - The test runs from the trtllm directory to access engine_configs/agg.yaml
     """
+    import os
     import re
     import subprocess
+    import threading
+
+    import requests
 
     logger = logging.getLogger(request.node.name)
     logger.info("Starting test_metrics_labels")
@@ -327,7 +331,6 @@ def test_metrics_labels(request, runtime_services):
     timeout = 60
 
     # Change to the trtllm directory where engine_configs/agg.yaml exists
-    import os
 
     working_directory = os.path.abspath("components/backends/trtllm")
 
@@ -369,8 +372,6 @@ def test_metrics_labels(request, runtime_services):
 
     try:
         # Start a thread to capture and log output
-        import threading
-
         output_lines = []
 
         def log_output():
@@ -416,6 +417,7 @@ def test_metrics_labels(request, runtime_services):
         assert response.status_code == 200, "Failed to fetch metrics"
 
         metrics_text = response.text
+        logger.info(f"Metrics text: {metrics_text}")
 
         # With the --extra-engine-args flag pointing to agg.yaml,
         # the backend should be able to start properly and register endpoints.
