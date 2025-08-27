@@ -42,11 +42,17 @@ type LWSConfig struct {
 	Enabled bool
 }
 
+type KaiSchedulerConfig struct {
+	// Enabled is automatically determined by checking if Kai-scheduler CRDs are installed in the cluster
+	Enabled bool
+}
+
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
 	Grove               GroveConfig
 	LWS                 LWSConfig
+	KaiScheduler        KaiSchedulerConfig
 	EtcdAddress         string
 	NatsAddress         string
 	IngressConfig       IngressConfig
@@ -73,6 +79,12 @@ func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 // This approach uses the discovery client which is simpler and more reliable
 func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io")
+}
+
+// DetectKaiSchedulerAvailability checks if Kai-scheduler is available by checking if the scheduling.run.ai API group is registered
+// This approach uses the discovery client which is simpler and more reliable
+func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai")
 }
 
 // detectAPIGroupAvailability checks if a specific API group is registered in the cluster
@@ -107,6 +119,7 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	logger.Info("API group not available", "group", groupName)
 	return false
 }
+
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		l := log.FromContext(context.Background())

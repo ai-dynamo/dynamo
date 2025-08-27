@@ -172,6 +172,9 @@ func main() {
 		LWS: commonController.LWSConfig{
 			Enabled: false, // Will be set after LWS discovery
 		},
+		KaiScheduler: commonController.KaiSchedulerConfig{
+			Enabled: false, // Will be set after Kai-scheduler discovery
+		},
 		EtcdAddress: etcdAddr,
 		NatsAddress: natsAddr,
 		IngressConfig: commonController.IngressConfig{
@@ -246,6 +249,11 @@ func main() {
 	setupLog.Info("Detecting LWS availability...")
 	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
 	ctrlConfig.LWS.Enabled = lwsEnabled
+
+	// Detect Kai-scheduler availability using discovery client
+	setupLog.Info("Detecting Kai-scheduler availability...")
+	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
+	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
