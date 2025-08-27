@@ -106,6 +106,9 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
+            if not request.multimodal_input.image_url:
+                raise ValueError("image_url is required for the encode worker.")
+
             image = await self.image_loader.load_image(
                 request.multimodal_input.image_url
             )
