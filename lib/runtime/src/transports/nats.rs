@@ -609,13 +609,14 @@ impl NatsQueue {
         }
     }
 
-    /// Purge messages from the stream up to and including the specified sequence number
+    /// Purge messages from the stream up to (but not including) the specified sequence number
     /// This permanently removes messages and affects all consumers of the stream
     pub async fn purge_up_to_sequence(&self, sequence: u64) -> Result<()> {
         if let Some(client) = &self.client {
             let stream = client.jetstream().get_stream(&self.stream_name).await?;
 
-            // Purge all messages up to and including the specified sequence
+            // NOTE: this purge excludes the sequence itself
+            // https://docs.rs/nats/latest/nats/jetstream/struct.PurgeRequest.html
             stream.purge().sequence(sequence).await.map_err(|e| {
                 anyhow::anyhow!("Failed to purge stream up to sequence {}: {}", sequence, e)
             })?;
@@ -851,7 +852,7 @@ mod tests {
         // Create unique stream name for this test
         let stream_name = format!("test-broadcast-{}", Uuid::new_v4());
         let nats_server = "nats://localhost:4222".to_string();
-        let timeout = time::Duration::from_secs(5);
+        let timeout = time::Duration::from_secs(0);
 
         // Create two consumers with different names for the same stream
         let consumer1_name = format!("consumer-{}", Uuid::new_v4());
@@ -906,9 +907,9 @@ mod tests {
             .expect("Failed to connect to NATS");
 
         // Purge the first two messages (sequence 1 and 2)
-        // Note: JetStream sequences start at 1
+        // Note: JetStream sequences start at 1, and purge is exclusive of the sequence number
         queue1
-            .purge_up_to_sequence(2)
+            .purge_up_to_sequence(3)
             .await
             .expect("Failed to purge messages");
 
@@ -921,7 +922,7 @@ mod tests {
 
         // Collect messages from consumer 1
         while let Some(msg) = queue1
-            .dequeue_task(Some(time::Duration::from_millis(500)))
+            .dequeue_task(None)
             .await
             .expect("Failed to dequeue from queue1")
         {
@@ -930,7 +931,7 @@ mod tests {
 
         // Collect messages from consumer 2
         while let Some(msg) = queue2
-            .dequeue_task(Some(time::Duration::from_millis(500)))
+            .dequeue_task(None)
             .await
             .expect("Failed to dequeue from queue2")
         {
