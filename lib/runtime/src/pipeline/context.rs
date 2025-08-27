@@ -393,24 +393,50 @@ impl AsyncEngineContext for Controller {
     }
 
     fn stop_generating(&self) {
-        self.stop();
-    }
-
-    fn stop(&self) {
-        self.child_context
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
             .lock()
             .expect("Failed to lock child context")
             .iter()
-            .for_each(|child| child.stop());
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop_generating();
+        }
+
+        let _ = self.tx.send(State::Stopped);
+    }
+
+    fn stop(&self) {
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop();
+        }
+
         let _ = self.tx.send(State::Stopped);
     }
 
     fn kill(&self) {
-        self.child_context
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
             .lock()
             .expect("Failed to lock child context")
             .iter()
-            .for_each(|child| child.kill());
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.kill();
+        }
+
         let _ = self.tx.send(State::Killed);
     }
 

@@ -150,11 +150,17 @@ impl AsyncEngineContext for HttpRequestContext {
     }
 
     fn stop(&self) {
-        self.child_context
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
             .lock()
             .expect("Failed to lock child context")
             .iter()
-            .for_each(|child| child.stop());
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop();
+        }
 
         self.stopped
             .store(true, std::sync::atomic::Ordering::Release);
@@ -162,22 +168,36 @@ impl AsyncEngineContext for HttpRequestContext {
     }
 
     fn stop_generating(&self) {
-        self.child_context
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
             .lock()
             .expect("Failed to lock child context")
             .iter()
-            .for_each(|child| child.stop_generating());
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop_generating();
+        }
 
         // For HTTP clients, stop_generating is the same as stop
-        self.stop();
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.cancel_token.cancel();
     }
 
     fn kill(&self) {
-        self.child_context
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
             .lock()
             .expect("Failed to lock child context")
             .iter()
-            .for_each(|child| child.kill());
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.kill();
+        }
 
         self.stopped
             .store(true, std::sync::atomic::Ordering::Release);
