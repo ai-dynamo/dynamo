@@ -6,7 +6,7 @@ toolchain go1.24.3
 
 require (
 	emperror.dev/errors v0.8.1
-	github.com/NVIDIA/grove/operator/api v0.0.0-20250801123021-8b42bac59ef2
+	github.com/NVIDIA/grove/operator/api v0.0.0-20250825164137-da01400261a6
 	github.com/bsm/gomega v1.27.10
 	github.com/google/go-cmp v0.7.0
 	github.com/imdario/mergo v0.3.6
