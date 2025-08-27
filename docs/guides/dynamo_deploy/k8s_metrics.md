@@ -2,15 +2,15 @@
 
 ## Overview
 
-This guide provides a walkthrough for collecting and visualizing metrics from Dynamo components using the Prometheus Operator stack. The Prometheus Operator provides a powerful and flexible way to configure monitoring for Kubernetes applications through custom resources like PodMonitors, making it easy to automatically discover and scrape metrics from Dynamo components.
+This guide provides a walkthrough for collecting and visualizing metrics from Dynamo components using the kube-prometheus-stack. The kube-prometheus-stack provides a powerful and flexible way to configure monitoring for Kubernetes applications through custom resources like PodMonitors, making it easy to automatically discover and scrape metrics from Dynamo components.
 
 ## Prerequisites
 
 ### Install Dynamo Operator
 Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/dynamo_cloud.md) for detailed instructions on deploying the Dynamo operator.
 
-### Install Prometheus Operator
-If you don't have an existing Prometheus setup, you'll need to install the Prometheus Operator. The Prometheus Operator introduces custom resources that make it easy to deploy and manage Prometheus monitoring in Kubernetes:
+### Install kube-prometheus-stack
+If you don't have an existing Prometheus setup, you'll likely want to install the kube-prometheus-stack. This is a collection of Kubernetes manifests that includes the Prometheus Operator, Prometheus, Grafana, and other monitoring components in a pre-configured setup. The stack introduces custom resources that make it easy to deploy and manage monitoring in Kubernetes:
 
 - `PodMonitor`: Automatically discovers and scrapes metrics from pods based on label selectors
 - `ServiceMonitor`: Similar to PodMonitor but works with Services
@@ -20,8 +20,26 @@ For a basic installation:
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
-helm install prometheus prometheus-community/kube-prometheus-stack
+# Values allow podmnonitors to be picked up that are outside of the kube-prometheus-stack helm release
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}" \
+  --set prometheus.prometheusSpec.probeNamespaceSelector="{}"
 ```
+
+> [!Note]
+> The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
+
+### DCGM Metrics Collection (Optional)
+
+GPU utilization metrics are collected and exported to Prometheus via dcgm-exporter. The Dynamo Grafana dashboard includes a panel for GPU utilization related to your Dynamo deployment. For that panel to be populated, you need to ensure that the dcgm-exporter is running in your cluster. To check if the dcgm-exporter is running, please run the following command:
+
+```bash
+kubectl get daemonset -A | grep dcgm-exporter
+```
+
+If the output is empty, you need to install the dcgm-exporter. For more information, please consult the official [dcgm-exporter documentation](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html).
+
 
 ## Deploy a DynamoGraphDeployment
 
@@ -178,13 +196,13 @@ The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_da
 - Inter-token latency
 - Request duration
 - Input/Output sequence lengths
-- GPU utilization
+- GPU utilization via DCGM
 
 ## Viewing the Metrics
 
 ### In Prometheus
 ```bash
-kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring
+kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n monitoring
 ```
 
 Visit http://localhost:9090 and try these example queries:
@@ -195,9 +213,18 @@ Visit http://localhost:9090 and try these example queries:
 
 ### In Grafana
 ```bash
-kubectl port-forward svc/grafana 3000:80 -n monitoring
+# Get Grafana credentials
+export GRAFANA_USER=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-user}" | base64 --decode)
+export GRAFANA_PASSWORD=$(kubectl get secret -n monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode)
+echo "Grafana user: $GRAFANA_USER"
+echo "Grafana password: $GRAFANA_PASSWORD"
+
+# Port forward Grafana service
+kubectl port-forward svc/prometheus-grafana 3000:80 -n monitoring
 ```
 
-Visit http://localhost:3000 and find the Dynamo dashboard under General.
+Visit http://localhost:3000 and log in with the credentials captured above.
+
+Once logged in, find the Dynamo dashboard under General.
 
 ![Grafana dashboard showing Dynamo metrics](../../images/grafana-k8s.png)

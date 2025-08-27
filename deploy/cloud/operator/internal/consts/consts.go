@@ -23,6 +23,7 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	KubeLabelDynamoGraphDeploymentName  = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
@@ -48,9 +49,11 @@ const (
 	DefaultGroveTerminationDelay = 15 * time.Minute
 
 	// Metrics related constants
-	KubeAnnotationEnableMetrics = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
-	KubeLabelMetricsEnabled     = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection
-	KubeValueNameSharedMemory   = "shared-memory"
+	KubeAnnotationEnableMetrics  = "nvidia.com/enable-metrics"  // User-provided annotation to control metrics
+	KubeLabelMetricsEnabled      = "nvidia.com/metrics-enabled" // Controller-managed label for pod selection
+	KubeValueNameSharedMemory    = "shared-memory"
+	DefaultSharedMemoryMountPath = "/dev/shm"
+	DefaultSharedMemorySize      = "8Gi"
 
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"

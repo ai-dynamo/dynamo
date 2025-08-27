@@ -33,7 +33,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo.llm import ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 # To import example local module
@@ -96,9 +96,14 @@ class Processor(ProcessMixIn):
 
         return args, config
 
-    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        engine_args: AsyncEngineArgs,
+        encode_worker_client: Client,
+    ):
+        self.encode_worker_client = encode_worker_client
         self.prompt_template = args.prompt_template
-        self.downstream_endpoint = args.downstream_endpoint
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -124,17 +129,6 @@ class Processor(ProcessMixIn):
             use_fast=True,  # VLLM might use the fast tokenizer for efficiency
         )
         return base_tokenizer
-
-    async def async_init(self, runtime: DistributedRuntime):
-        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-            self.downstream_endpoint
-        )
-        self.encode_worker_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
 
     # Main method to parse the request and send the request to the vllm worker.
     async def _generate(
@@ -300,8 +294,20 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     generate_endpoint = component.endpoint(config.endpoint)
 
-    handler = Processor(args, config.engine_args)
-    await handler.async_init(runtime)
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        args.downstream_endpoint
+    )
+    encode_worker_client = (
+        await runtime.namespace(parsed_namespace)
+        .component(parsed_component_name)
+        .endpoint(parsed_endpoint_name)
+        .client()
+    )
+
+    handler = Processor(args, config.engine_args, encode_worker_client)
+
+    logger.info("Waiting for Encoder Worker Instances ...")
+    await encode_worker_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model
     await register_llm(

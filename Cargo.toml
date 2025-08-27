@@ -4,7 +4,6 @@
 [workspace]
 members = [
     "components/metrics",
-    "components/router",
     "launch/*",
     "lib/llm",
     "lib/runtime",

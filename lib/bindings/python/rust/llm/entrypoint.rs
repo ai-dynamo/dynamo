@@ -33,6 +33,12 @@ pub struct KvRouterConfig {
     inner: RsKvRouterConfig,
 }
 
+impl KvRouterConfig {
+    pub fn inner(&self) -> RsKvRouterConfig {
+        self.inner
+    }
+}
+
 #[pymethods]
 impl KvRouterConfig {
     #[new]

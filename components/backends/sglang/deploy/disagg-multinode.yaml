@@ -18,7 +18,7 @@ spec:
   services:
     Frontend:
       dynamoNamespace: sglang-disagg-multinode
-      componentType: main
+      componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
@@ -54,7 +54,7 @@ spec:
       multinode:
         nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
       replicas: 1
       resources:

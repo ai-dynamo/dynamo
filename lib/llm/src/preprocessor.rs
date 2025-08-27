@@ -494,7 +494,7 @@ impl
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
         // convert the chat completion request to a common completion request
@@ -548,7 +548,7 @@ impl
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
