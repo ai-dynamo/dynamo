@@ -1087,12 +1087,11 @@ mod test_worker_metrics_publisher {
     use futures::StreamExt;
 
     #[tokio::test]
-    #[ignore] // Mark as ignored as requested
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::from_settings(rt.clone()).await?;
-        let namespace = drt.namespace("test".to_string())?;
+        let namespace = drt.namespace("ns2001".to_string())?;
 
         // Create a subscriber for the metrics events using subscribe_with_type
         let mut subscriber = namespace
@@ -1193,14 +1192,15 @@ mod test_worker_metrics_publisher {
 
 #[cfg(feature = "integration")]
 #[cfg(test)]
-mod integration_tests {
+mod test_kvstats_prometheus_gauge_updates {
     use {
-        super::{ForwardPassMetrics, KvStats, WorkerMetricsPublisher, WorkerStats, kvstats},
+        crate::kv_router::publisher::{
+            ForwardPassMetrics, KvStats, WorkerMetricsPublisher, WorkerStats, kvstats,
+        },
         dynamo_runtime::metrics::MetricsRegistry,
         std::sync::Arc,
     };
 
-    #[ignore] // Requires NATS server to be running but keeps getting invoked on CI
     #[tokio::test]
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::common::test_utils::create_test_drt_async;
@@ -1210,8 +1210,8 @@ mod integration_tests {
 
         // Create a real DRT and component for integration testing
         let drt = std::sync::Arc::new(create_test_drt_async().await);
-        let namespace = drt.namespace("test_kvstats").unwrap();
-        let component = namespace.component("test_publisher").unwrap();
+        let namespace = drt.namespace("ns2002").unwrap();
+        let component = namespace.component("comp2002").unwrap();
 
         // Register Prometheus metrics using the real constructor
         publisher.register_prometheus_metrics(&component).unwrap();
