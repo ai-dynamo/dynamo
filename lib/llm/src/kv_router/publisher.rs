@@ -1199,6 +1199,7 @@ mod integration_tests {
         std::sync::Arc,
     };
 
+    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::common::test_utils::create_test_drt_async;
