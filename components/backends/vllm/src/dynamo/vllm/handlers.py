@@ -150,7 +150,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 try:
                     prefill_response = await anext(
                         await self.prefill_worker_client.round_robin(
-                            prefill_request, context
+                            prefill_request, context=context
                         )
                     )
                 except Exception as e:
