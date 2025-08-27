@@ -62,7 +62,7 @@ async def load_video_content(
 
     if parsed_url.scheme in ("http", "https"):
         if video_url_lower in video_content_cache:
-            logger.info(f"Video content found in cache for URL: {video_url}")
+            logger.debug(f"Video content found in cache for URL: {video_url}")
             cached_content = video_content_cache[video_url_lower]
             cached_content.seek(0)
             return cached_content
@@ -90,7 +90,7 @@ async def load_video_content(
         elif parsed_url.scheme in ("http", "https"):
             http_client = get_http_client(http_timeout)
 
-            logger.info(f"Downloading video from URL: {video_url}")
+            logger.debug(f"Downloading video from URL: {video_url}")
             response = await http_client.get(video_url, timeout=http_timeout)
             response.raise_for_status()
 
@@ -98,7 +98,7 @@ async def load_video_content(
                 raise ValueError(f"Empty response content from video URL: {video_url}")
             video_data = BytesIO(response.content)
             video_data.seek(0)
-            logger.info(
+            logger.debug(
                 f"Video downloaded from {video_url}, size: {len(response.content)} bytes."
             )
 
@@ -351,7 +351,7 @@ def calculate_frame_sampling_indices(
         # If indices is empty and total_frames is 0, let downstream handle this case
         pass
 
-    logger.info(f"Selected frame indices for {video_url}: {indices.tolist()}")
+    logger.debug(f"Selected frame indices for {video_url}: {indices.tolist()}")
     return indices
 
 
@@ -405,7 +405,7 @@ def prepare_tensor_for_rdma(
         device="cpu", dtype=torch.uint8
     ).contiguous()
 
-    logger.info(
+    logger.debug(
         f"Req {request_id}: Preparing raw frames tensor (shape: {tensor_for_descriptor.shape}, "
         f"dtype: {tensor_for_descriptor.dtype}, device: {tensor_for_descriptor.device}, "
         f"contiguous: {tensor_for_descriptor.is_contiguous()}) for RDMA."

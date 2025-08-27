@@ -79,7 +79,7 @@ class VllmEncodeWorker:
         self.min_workers = 1
 
         # Video processing parameters
-        self.num_frames_to_sample = 8
+        self.num_frames_to_sample = args.num_frames_to_sample
         self.frame_height = 336
         self.frame_width = 336
         self.frame_channels = 3
@@ -144,7 +144,7 @@ class VllmEncodeWorker:
                     f"Failed to extract any video frames from {video_url} for indices {indices.tolist()}. Clip is empty."
                 )
 
-            logger.info(
+            logger.debug(
                 f"Successfully extracted {len(clip_np) if clip_np.ndim > 1 and clip_np.shape[0] > 0 else 0} frames for {video_url} with original shape {clip_np.shape}."
             )
 
@@ -234,6 +234,12 @@ class VllmEncodeWorker:
             type=str,
             default=DEFAULT_DOWNSTREAM_ENDPOINT,
             help=f"The endpoint string of the downstream LLM in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_DOWNSTREAM_ENDPOINT}'",
+        )
+        parser.add_argument(
+            "--num-frames-to-sample",
+            type=int,
+            default=8,
+            help="Number of frames to sample from the video. Default: 8",
         )
 
         args, config = base_parse_args(parser)
