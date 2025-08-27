@@ -28,10 +28,12 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
+use crate::traits::events::EventPublisher;
 use crate::{Result, metrics::MetricsRegistry};
 
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
+use async_trait::async_trait;
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
@@ -745,6 +747,39 @@ impl NatsQueue {
     }
 }
 
+#[async_trait]
+impl EventPublisher for NatsQueue {
+    fn subject(&self) -> String {
+        self.stream_name.clone()
+    }
+
+    async fn publish(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+        event: &(impl Serialize + Send + Sync),
+    ) -> Result<()> {
+        let bytes = serde_json::to_vec(event)?;
+        self.publish_bytes(event_name, bytes).await
+    }
+
+    async fn publish_bytes(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        let subject = format!("{}.{}", self.subject(), event_name.as_ref());
+
+        // Note: enqueue_task requires &mut self, but EventPublisher requires &self
+        // We need to ensure the client is connected and use it directly
+        if let Some(client) = &self.client {
+            client.jetstream().publish(subject, bytes.into()).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+}
+
 /// Prometheus metrics that mirror the NATS client statistics (in primitive types)
 /// to be used for the System Status Server.
 ///
@@ -988,20 +1023,27 @@ mod tests {
         queue1.connect().await.expect("Failed to connect queue1");
         queue2.connect().await.expect("Failed to connect queue2");
 
-        // Send 4 messages
-        let messages = vec![
-            Bytes::from("message1"),
-            Bytes::from("message2"),
-            Bytes::from("message3"),
-            Bytes::from("message4"),
+        // Send 4 messages using the EventPublisher trait
+        let message_strings = vec![
+            "message1".to_string(),
+            "message2".to_string(),
+            "message3".to_string(),
+            "message4".to_string(),
         ];
 
-        for msg in &messages {
+        // Using the EventPublisher trait to publish messages
+        for (idx, msg) in message_strings.iter().enumerate() {
             queue1
-                .enqueue_task(msg.clone())
+                .publish("queue", msg)
                 .await
-                .expect("Failed to enqueue message");
+                .expect(&format!("Failed to publish message {}", idx + 1));
         }
+
+        // Convert messages to JSON-serialized Bytes for comparison
+        let messages: Vec<Bytes> = message_strings
+            .iter()
+            .map(|s| Bytes::from(serde_json::to_vec(s).unwrap()))
+            .collect();
 
         // Give JetStream a moment to persist the messages
         tokio::time::sleep(time::Duration::from_millis(100)).await;
