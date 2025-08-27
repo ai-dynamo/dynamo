@@ -1203,7 +1203,7 @@ mod test_kvstats_prometheus_gauge_updates {
 
     #[tokio::test]
     async fn test_kvstats_prometheus_gauge_updates() {
-        use crate::common::test_utils::create_test_drt_async;
+        use dynamo_runtime::distributed_test_utils::create_test_drt_async;
 
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();

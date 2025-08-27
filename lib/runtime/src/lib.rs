@@ -56,6 +56,9 @@ pub mod utils;
 pub mod worker;
 
 pub mod distributed;
+// Re-export test utilities at crate root so external crates can use them with the integration feature
+#[cfg(any(test, feature = "integration"))]
+pub use distributed::distributed_test_utils;
 pub use futures::stream;
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
