@@ -1,34 +1,48 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Oscar-specific descriptors built on dynamo-runtime v2 descriptor system
+//! Oscar object descriptors with caller context mirroring
 //!
-//! This module provides Oscar-specific entity descriptors that integrate with the
-//! dynamo-runtime v2 descriptor system while adding Oscar-specific validation and
-//! functionality for object sharing and management.
+//! This module provides Oscar-specific object management that mirrors the caller's
+//! descriptor context within the _internal.oscar namespace. Objects are associated
+//! with the caller's namespace/component/endpoint but not instance-specific.
+//!
+//! Key concepts:
+//! - Caller context mirroring: ns1.foo.generate → _internal.oscar.ns1.foo.generate
+//! - Path-based object keys: tokenizer.json-a1b2c3d4/metadata
+//! - Lease attachment tracking: tokenizer.json-a1b2c3d4/attaches/lease_123
+//! - Content-addressable storage with BLAKE3 hashing
 
-use crate::{ContentHash, OscarError, OscarResult};
-use dynamo_runtime::v2::{DescriptorError, NamespaceDescriptor, ComponentDescriptor, EndpointDescriptor};
+use crate::ContentHash;
+use dynamo_runtime::v2::{
+    DescriptorError, NamespaceDescriptor, ComponentDescriptor, EndpointDescriptor, 
+    InstanceDescriptor, PathDescriptor
+};
+use dynamo_runtime::v2::entity::ToPath;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use thiserror::Error;
 
-/// Errors specific to Oscar descriptors
-#[derive(thiserror::Error, Debug, Clone, PartialEq)]
+/// Errors specific to Oscar object operations
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum OscarDescriptorError {
     #[error("Runtime descriptor error: {0}")]
     Runtime(#[from] DescriptorError),
     
-    #[error("Invalid object name: {name}. Object names must be 1-255 characters and contain only lowercase letters, numbers, hyphens, and underscores")]
+    #[error("Invalid object name: '{name}'. Object names must be 1-255 characters and contain only lowercase letters, numbers, hyphens, underscores, and dots")]
     InvalidObjectName { name: String },
-    
-    #[error("Invalid object hash: {hash}")]
-    InvalidObjectHash { hash: String },
     
     #[error("Object name too long: {length} characters (max 255)")]
     ObjectNameTooLong { length: usize },
+    
+    #[error("Invalid caller context: {message}")]
+    InvalidCallerContext { message: String },
+    
+    #[error("Missing required context: {field}")]
+    MissingRequiredContext { field: String },
 }
 
-/// Object name with Oscar-specific validation
+/// Object name with Oscar-specific validation (allows dots for file-like names)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectName {
     name: String,
@@ -47,6 +61,11 @@ impl ObjectName {
         &self.name
     }
     
+    /// Get slugified version for use in etcd keys (dots → underscores)
+    pub fn slugified(&self) -> String {
+        self.name.replace('.', "_")
+    }
+    
     /// Validate object name according to Oscar rules
     fn validate(name: &str) -> Result<(), OscarDescriptorError> {
         if name.is_empty() {
@@ -61,13 +80,13 @@ impl ObjectName {
             });
         }
         
-        // Object names follow same rules as component names but are more permissive
+        // Object names are more permissive than component names - allow dots
         let is_valid = name.chars().all(|c| 
             c.is_ascii_lowercase() || 
             c.is_ascii_digit() || 
             c == '-' || 
             c == '_' || 
-            c == '.'  // Allow dots in object names for file-like naming
+            c == '.'  // Allow dots for file-like naming
         );
         
         if !is_valid {
@@ -86,150 +105,224 @@ impl fmt::Display for ObjectName {
     }
 }
 
-/// Oscar service descriptor - represents the internal Oscar service in the `_internal` namespace
+/// Context information about the caller registering an object
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OscarDescriptor {
-    endpoint: EndpointDescriptor,
+pub struct CallerContext {
+    /// The caller's descriptor (can be namespace, component, or endpoint - not instance)
+    descriptor: CallerDescriptor,
 }
 
-impl OscarDescriptor {
-    /// Create Oscar descriptor for the internal Oscar service
-    pub fn new() -> Result<Self, OscarDescriptorError> {
-        let namespace = NamespaceDescriptor::new_internal("_internal")?;
-        let component = namespace.component("oscar")?;
-        let endpoint = component.endpoint("objects")?;
-        
-        Ok(Self { endpoint })
+/// The type of descriptor the caller is using
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallerDescriptor {
+    /// Caller is at namespace level
+    Namespace(NamespaceDescriptor),
+    /// Caller is at component level  
+    Component(ComponentDescriptor),
+    /// Caller is at endpoint level
+    Endpoint(EndpointDescriptor),
+}
+
+impl CallerContext {
+    /// Create caller context from a namespace descriptor
+    pub fn from_namespace(namespace: NamespaceDescriptor) -> Self {
+        Self {
+            descriptor: CallerDescriptor::Namespace(namespace),
+        }
     }
     
-    /// Get the underlying endpoint descriptor
-    pub fn endpoint(&self) -> &EndpointDescriptor {
-        &self.endpoint
+    /// Create caller context from a component descriptor
+    pub fn from_component(component: ComponentDescriptor) -> Self {
+        Self {
+            descriptor: CallerDescriptor::Component(component),
+        }
     }
     
-    /// Get the namespace (should be "_internal")
-    pub fn namespace(&self) -> &NamespaceDescriptor {
-        self.endpoint.namespace()
+    /// Create caller context from an endpoint descriptor
+    pub fn from_endpoint(endpoint: EndpointDescriptor) -> Self {
+        Self {
+            descriptor: CallerDescriptor::Endpoint(endpoint),
+        }
     }
     
-    /// Get the component (should be "oscar") 
-    pub fn component(&self) -> &ComponentDescriptor {
-        self.endpoint.component()
+    /// Create caller context from an instance descriptor (extracts endpoint)
+    pub fn from_instance(instance: InstanceDescriptor) -> Self {
+        Self {
+            descriptor: CallerDescriptor::Endpoint(instance.endpoint()),
+        }
     }
     
-    /// Get the full path for this Oscar descriptor
-    pub fn path(&self) -> String {
-        self.endpoint.path()
+    /// Get the caller's namespace segments  
+    pub fn namespace_segments(&self) -> Vec<String> {
+        match &self.descriptor {
+            CallerDescriptor::Namespace(ns) => ns.segments().to_vec(),
+            CallerDescriptor::Component(comp) => comp.namespace().segments().to_vec(), 
+            CallerDescriptor::Endpoint(ep) => ep.namespace().segments().to_vec(),
+        }
     }
     
-    /// Create object descriptor for a specific object
-    pub fn object(&self, name: ObjectName, hash: ContentHash) -> ObjectDescriptor {
-        ObjectDescriptor::new(self.clone(), name, hash)
+    /// Get the caller's component name if present
+    pub fn component_name(&self) -> Option<String> {
+        match &self.descriptor {
+            CallerDescriptor::Namespace(_) => None,
+            CallerDescriptor::Component(comp) => comp.name().map(|s| s.to_string()),
+            CallerDescriptor::Endpoint(ep) => ep.component().name().map(|s| s.to_string()),
+        }
+    }
+    
+    /// Get the caller's endpoint name if present  
+    pub fn endpoint_name(&self) -> Option<String> {
+        match &self.descriptor {
+            CallerDescriptor::Namespace(_) => None,
+            CallerDescriptor::Component(_) => None,
+            CallerDescriptor::Endpoint(ep) => ep.name().map(|s| s.to_string()),
+        }
     }
 }
 
-impl Default for OscarDescriptor {
-    fn default() -> Self {
-        Self::new().expect("Oscar descriptor should always be valid")
-    }
-}
-
-impl fmt::Display for OscarDescriptor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.endpoint)
-    }
-}
-
-/// Object descriptor representing a specific object in Oscar
+/// Oscar object descriptor with caller context mirroring
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectDescriptor {
-    oscar: OscarDescriptor,
-    name: ObjectName,
-    hash: ContentHash,
+    /// The object name
+    object_name: ObjectName,
+    /// Content hash for content-addressable storage
+    content_hash: ContentHash,
+    /// Caller context for namespace mirroring
+    caller_context: CallerContext,
 }
 
 impl ObjectDescriptor {
-    /// Create a new object descriptor
-    pub fn new(oscar: OscarDescriptor, name: ObjectName, hash: ContentHash) -> Self {
-        Self { oscar, name, hash }
-    }
-    
-    /// Create object descriptor with validation
+    /// Create a new object descriptor with caller context
     pub fn create(
-        object_name: impl Into<String>, 
-        hash: ContentHash
+        object_name: impl Into<String>,
+        content_hash: ContentHash,
+        caller_context: CallerContext,
     ) -> Result<Self, OscarDescriptorError> {
-        let oscar = OscarDescriptor::new()?;
-        let name = ObjectName::new(object_name)?;
-        Ok(Self::new(oscar, name, hash))
-    }
-    
-    /// Get the Oscar service descriptor
-    pub fn oscar(&self) -> &OscarDescriptor {
-        &self.oscar
+        let object_name = ObjectName::new(object_name)?;
+        
+        Ok(Self {
+            object_name,
+            content_hash,
+            caller_context,
+        })
     }
     
     /// Get the object name
     pub fn object_name(&self) -> &ObjectName {
-        &self.name
+        &self.object_name
     }
     
     /// Get the content hash
+    pub fn content_hash(&self) -> &ContentHash {
+        &self.content_hash
+    }
+    
+    /// Get the caller context
+    pub fn caller_context(&self) -> &CallerContext {
+        &self.caller_context
+    }
+    
+    /// Get the content hash (alias for backward compatibility)
     pub fn hash(&self) -> &ContentHash {
-        &self.hash
+        &self.content_hash
     }
     
-    /// Get the full path for this object
-    pub fn path(&self) -> String {
-        format!("{}.{}", self.oscar.path(), self.name)
+    /// Generate the Oscar namespace mirroring the caller's context
+    /// Example: caller ns1.foo.generate → _internal.oscar.ns1
+    fn oscar_namespace(&self) -> Result<NamespaceDescriptor, OscarDescriptorError> {
+        let caller_ns_segments = self.caller_context.namespace_segments();
+        
+        // Build Oscar namespace: [_internal, oscar, ...caller_namespace_segments]
+        let mut oscar_segments = vec!["_internal", "oscar"];
+        oscar_segments.extend(caller_ns_segments.iter().map(|s| s.as_str()));
+        
+        Ok(NamespaceDescriptor::new_internal(&oscar_segments)?)
     }
     
-    /// Generate etcd key for object metadata
-    pub fn metadata_key(&self) -> String {
-        format!(
-            "dynamo://_internal/oscar/objects/{}/{}",
-            dynamo_runtime::slug::Slug::slugify(self.name.name()),
-            self.hash.to_hex()
-        )
+    /// Generate Oscar descriptor mirroring caller's context
+    /// Examples:
+    /// - Caller ns1 → _internal.oscar.ns1
+    /// - Caller ns1.foo → _internal.oscar.ns1.foo
+    /// - Caller ns1.foo.generate → _internal.oscar.ns1.foo.generate
+    fn oscar_descriptor(&self) -> Result<PathDescriptor, OscarDescriptorError> {
+        let oscar_ns = self.oscar_namespace()?;
+        
+        let mut oscar_desc = oscar_ns.to_path();
+        
+        // Add component if caller has one
+        if let Some(component_name) = self.caller_context.component_name() {
+            oscar_desc = oscar_desc.with_segment(&component_name)?;
+        }
+        
+        // Add endpoint if caller has one  
+        if let Some(endpoint_name) = self.caller_context.endpoint_name() {
+            oscar_desc = oscar_desc.with_segment(&endpoint_name)?;
+        }
+        
+        Ok(oscar_desc)
     }
     
-    /// Generate etcd key for lease reference
-    pub fn lease_reference_key(&self, lease_id: i64) -> String {
-        format!(
-            "dynamo://_internal/oscar/leases/{:x}/objects/{}/{}",
-            lease_id,
-            dynamo_runtime::slug::Slug::slugify(self.name.name()),
-            self.hash.to_hex()
-        )
+    /// Generate object key with hash suffix
+    /// Example: tokenizer.json + hash_a1b2c3d4... → tokenizer_json-a1b2c3d4
+    fn object_key(&self) -> String {
+        let hash_suffix = &self.content_hash.to_string()[..8]; // First 8 chars of hash
+        format!("{}-{}", self.object_name.slugified(), hash_suffix)
+    }
+    
+    /// Generate metadata key path
+    /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4.metadata
+    pub fn metadata_key(&self) -> Result<String, OscarDescriptorError> {
+        let oscar_desc = self.oscar_descriptor()?;
+        let object_key = self.object_key();
+        let metadata_path = oscar_desc
+            .with_segment(&object_key)?
+            .with_segment("metadata")?;
+        Ok(metadata_path.etcd_key())
+    }
+    
+    /// Generate lease attachment key path  
+    /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4.attaches.lease_123456789
+    pub fn lease_attachment_key(&self, lease_id: i64) -> Result<String, OscarDescriptorError> {
+        let oscar_desc = self.oscar_descriptor()?;
+        let object_key = self.object_key();
+        let lease_key = format!("lease_{}", lease_id);
+        let attachment_path = oscar_desc
+            .with_segment(&object_key)?
+            .with_segment("attaches")?
+            .with_segment(&lease_key)?;
+        Ok(attachment_path.etcd_key())
+    }
+    
+    /// Generate the base object path for prefix operations
+    /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4
+    pub fn object_path(&self) -> Result<String, OscarDescriptorError> {
+        let oscar_desc = self.oscar_descriptor()?;
+        let object_key = self.object_key();
+        let object_path = oscar_desc.with_segment(&object_key)?;
+        Ok(object_path.etcd_key())
     }
 }
 
 impl fmt::Display for ObjectDescriptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.oscar, self.name)
+        write!(f, "{}", self.object_name)
     }
 }
 
-/// Conversion utilities
-impl From<&ObjectDescriptor> for String {
-    fn from(desc: &ObjectDescriptor) -> Self {
-        desc.path()
-    }
-}
-
+// Conversion helpers for ObjectName
 impl TryFrom<&str> for ObjectName {
     type Error = OscarDescriptorError;
     
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        Self::new(name)
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        ObjectName::new(value)
     }
 }
 
 impl TryFrom<String> for ObjectName {
     type Error = OscarDescriptorError;
     
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        Self::new(name)
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        ObjectName::new(value)
     }
 }
 
@@ -237,11 +330,11 @@ impl TryFrom<String> for ObjectName {
 mod tests {
     use super::*;
     use crate::ObjectHasher;
-
+    
     fn test_hash() -> ContentHash {
         ObjectHasher::hash(b"test data")
     }
-
+    
     #[test]
     fn test_object_name_validation() {
         // Valid names
@@ -249,111 +342,178 @@ mod tests {
         assert!(ObjectName::new("with-hyphens").is_ok());
         assert!(ObjectName::new("with_underscores").is_ok());
         assert!(ObjectName::new("with.dots").is_ok());
-        assert!(ObjectName::new("model-v1.2.3").is_ok());
-        assert!(ObjectName::new("dataset_2024-01-01.csv").is_ok());
+        assert!(ObjectName::new("tokenizer.json").is_ok());
+        assert!(ObjectName::new("model-v1_final.bin").is_ok());
         
         // Invalid names
         assert!(ObjectName::new("").is_err());
         assert!(ObjectName::new("With-Capital").is_err());
         assert!(ObjectName::new("with spaces").is_err());
-        assert!(ObjectName::new("with/slashes").is_err());
-        assert!(ObjectName::new("with@symbols").is_err());
-        
-        // Too long name
-        let long_name = "x".repeat(256);
-        assert!(matches!(
-            ObjectName::new(long_name),
-            Err(OscarDescriptorError::ObjectNameTooLong { length: 256 })
-        ));
+        assert!(ObjectName::new("with/slash").is_err());
+        assert!(ObjectName::new("a".repeat(256)).is_err()); // Too long
     }
-
+    
     #[test]
-    fn test_oscar_descriptor() {
-        let oscar = OscarDescriptor::new().unwrap();
-        
-        assert_eq!(oscar.namespace().name(), "_internal");
-        assert_eq!(oscar.component().name(), "oscar");
-        assert_eq!(oscar.endpoint().name(), "objects");
-        assert_eq!(oscar.path(), "_internal.oscar.objects");
-        assert!(oscar.namespace().is_internal());
+    fn test_object_name_slugification() {
+        let name = ObjectName::new("tokenizer.json").unwrap();
+        assert_eq!(name.name(), "tokenizer.json");
+        assert_eq!(name.slugified(), "tokenizer_json");
     }
-
+    
     #[test]
-    fn test_object_descriptor() {
+    fn test_caller_context_creation() {
+        // From namespace
+        let ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let context = CallerContext::from_namespace(ns.clone());
+        assert_eq!(context.namespace_segments(), &["ns1"]);
+        assert!(context.component_name().is_none());
+        assert!(context.endpoint_name().is_none());
+        
+        // From component  
+        let comp = ns.component("foo").unwrap();
+        let context = CallerContext::from_component(comp.clone());
+        assert_eq!(context.namespace_segments(), &["ns1"]);
+        assert_eq!(context.component_name(), Some("foo".to_string()));
+        assert!(context.endpoint_name().is_none());
+        
+        // From endpoint
+        let endpoint = comp.endpoint("generate").unwrap();
+        let context = CallerContext::from_endpoint(endpoint.clone());
+        assert_eq!(context.namespace_segments(), &["ns1"]);
+        assert_eq!(context.component_name(), Some("foo".to_string()));
+        assert_eq!(context.endpoint_name(), Some("generate".to_string()));
+        
+        // From instance (should extract endpoint)
+        let instance = endpoint.instance(123);
+        let context = CallerContext::from_instance(instance);
+        assert_eq!(context.namespace_segments(), &["ns1"]);
+        assert_eq!(context.component_name(), Some("foo".to_string()));
+        assert_eq!(context.endpoint_name(), Some("generate".to_string()));
+    }
+    
+    #[test]
+    fn test_oscar_namespace_mirroring() {
         let hash = test_hash();
-        let object = ObjectDescriptor::create("my-model.bin", hash.clone()).unwrap();
         
-        assert_eq!(object.object_name().name(), "my-model.bin");
-        assert_eq!(object.hash(), &hash);
-        assert_eq!(object.path(), "_internal.oscar.objects.my-model.bin");
+        // Test namespace-level caller
+        let caller_ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let context = CallerContext::from_namespace(caller_ns);
+        let object = ObjectDescriptor::create("tokenizer.json", hash.clone(), context).unwrap();
+        
+        let oscar_ns = object.oscar_namespace().unwrap();
+        assert_eq!(oscar_ns.segments(), &["_internal", "oscar", "ns1"]);
+        assert!(oscar_ns.is_internal());
     }
-
+    
     #[test]
-    fn test_object_descriptor_key_generation() {
+    fn test_metadata_key_generation() {
         let hash = test_hash();
-        let object = ObjectDescriptor::create("test-object", hash.clone()).unwrap();
+        let hash_prefix = &hash.to_string()[..8];
         
-        let metadata_key = object.metadata_key();
-        assert!(metadata_key.starts_with("dynamo://_internal/oscar/objects/"));
-        assert!(metadata_key.contains("test-object"));
-        assert!(metadata_key.ends_with(&hash.to_hex()));
+        // Test with namespace-level caller
+        let caller_ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let context = CallerContext::from_namespace(caller_ns);
+        let object = ObjectDescriptor::create("tokenizer.json", hash.clone(), context).unwrap();
         
-        let lease_key = object.lease_reference_key(0xabc123);
-        assert!(lease_key.starts_with("dynamo://_internal/oscar/leases/abc123/objects/"));
-        assert!(lease_key.contains("test-object"));
-        assert!(lease_key.ends_with(&hash.to_hex()));
+        let metadata_key = object.metadata_key().unwrap();
+        let expected = format!("dynamo://_internal.oscar.ns1.tokenizer_json-{}.metadata", hash_prefix);
+        assert_eq!(metadata_key, expected);
     }
-
+    
     #[test]
-    fn test_object_name_slugification_in_keys() {
+    fn test_metadata_key_with_component() {
         let hash = test_hash();
-        // Use a valid object name but test that it gets slugified in the key
-        let object = ObjectDescriptor::create("test.model-v1_final", hash.clone()).unwrap();
+        let hash_prefix = &hash.to_string()[..8];
         
-        let metadata_key = object.metadata_key();
+        // Test with component-level caller
+        let caller_ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let caller_comp = caller_ns.component("foo").unwrap();
+        let context = CallerContext::from_component(caller_comp);
+        let object = ObjectDescriptor::create("tokenizer.json", hash.clone(), context).unwrap();
         
-        // The name should be valid and preserved
-        assert_eq!(object.object_name().name(), "test.model-v1_final");
-        // The slugified version (dots become underscores) should appear in the key
-        assert!(metadata_key.contains("test_model-v1_final"));
+        let metadata_key = object.metadata_key().unwrap();
+        let expected = format!("dynamo://_internal.oscar.ns1.foo.tokenizer_json-{}.metadata", hash_prefix);
+        assert_eq!(metadata_key, expected);
     }
-
+    
     #[test]
-    fn test_serialization() {
+    fn test_metadata_key_with_endpoint() {
         let hash = test_hash();
-        let original = ObjectDescriptor::create("test-object", hash).unwrap();
+        let hash_prefix = &hash.to_string()[..8];
         
-        let serialized = serde_json::to_string(&original).unwrap();
-        let deserialized: ObjectDescriptor = serde_json::from_str(&serialized).unwrap();
+        // Test with endpoint-level caller
+        let caller_ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let caller_comp = caller_ns.component("foo").unwrap();
+        let caller_endpoint = caller_comp.endpoint("generate").unwrap();
+        let context = CallerContext::from_endpoint(caller_endpoint);
+        let object = ObjectDescriptor::create("tokenizer.json", hash.clone(), context).unwrap();
         
-        assert_eq!(original, deserialized);
-        assert_eq!(original.path(), deserialized.path());
+        let metadata_key = object.metadata_key().unwrap();
+        let expected = format!("dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-{}.metadata", hash_prefix);
+        assert_eq!(metadata_key, expected);
     }
-
+    
+    #[test]
+    fn test_lease_attachment_key() {
+        let hash = test_hash();
+        let hash_prefix = &hash.to_string()[..8];
+        
+        let caller_ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let caller_comp = caller_ns.component("foo").unwrap();
+        let caller_endpoint = caller_comp.endpoint("generate").unwrap();
+        let context = CallerContext::from_endpoint(caller_endpoint);
+        let object = ObjectDescriptor::create("tokenizer.json", hash.clone(), context).unwrap();
+        
+        let lease_key = object.lease_attachment_key(123456789).unwrap();
+        let expected = format!("dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-{}.attaches.lease_123456789", hash_prefix);
+        assert_eq!(lease_key, expected);
+    }
+    
+    #[test]
+    fn test_hierarchical_namespace_mirroring() {
+        let hash = test_hash();
+        
+        // Test multi-level namespace
+        let caller_ns = NamespaceDescriptor::new_internal(&["_system", "cache", "v1"]).unwrap();
+        let context = CallerContext::from_namespace(caller_ns);
+        let object = ObjectDescriptor::create("data.bin", hash.clone(), context).unwrap();
+        
+        let oscar_ns = object.oscar_namespace().unwrap();
+        assert_eq!(oscar_ns.segments(), &["_internal", "oscar", "_system", "cache", "v1"]);
+    }
+    
+    #[test]
+    fn test_object_path_prefix() {
+        let hash = test_hash();
+        let hash_prefix = &hash.to_string()[..8];
+        
+        let caller_ns = NamespaceDescriptor::new(&["ns1"]).unwrap();
+        let context = CallerContext::from_namespace(caller_ns);
+        let object = ObjectDescriptor::create("model.bin", hash.clone(), context).unwrap();
+        
+        let object_path = object.object_path().unwrap();
+        let expected = format!("dynamo://_internal.oscar.ns1.model_bin-{}", hash_prefix);
+        assert_eq!(object_path, expected);
+    }
+    
     #[test]
     fn test_display_implementations() {
         let hash = test_hash();
-        let name = ObjectName::new("test-object").unwrap();
-        let oscar = OscarDescriptor::new().unwrap();
-        let object = ObjectDescriptor::new(oscar.clone(), name.clone(), hash);
+        let name = ObjectName::new("test.model").unwrap();
+        let caller_ns = NamespaceDescriptor::new(&["test"]).unwrap();
+        let context = CallerContext::from_namespace(caller_ns);
+        let object = ObjectDescriptor::create("test.model", hash, context).unwrap();
         
-        assert_eq!(name.to_string(), "test-object");
-        assert_eq!(oscar.to_string(), "_internal.oscar.objects");
-        assert_eq!(object.to_string(), "_internal.oscar.objects.test-object");
+        assert_eq!(name.to_string(), "test.model");
+        assert_eq!(object.to_string(), "test.model");
     }
-
-    #[test] 
+    
+    #[test]
     fn test_conversion_traits() {
-        let hash = test_hash();
-        let object = ObjectDescriptor::create("test", hash).unwrap();
+        let name_from_str = ObjectName::try_from("valid.name").unwrap();
+        assert_eq!(name_from_str.name(), "valid.name");
         
-        let path_string: String = (&object).into();
-        assert_eq!(path_string, object.path());
-        
-        let name_from_str = ObjectName::try_from("valid-name").unwrap();
-        assert_eq!(name_from_str.name(), "valid-name");
-        
-        let name_from_string = ObjectName::try_from("valid-name".to_string()).unwrap();
-        assert_eq!(name_from_string.name(), "valid-name");
+        let name_from_string = ObjectName::try_from("valid.name".to_string()).unwrap();
+        assert_eq!(name_from_string.name(), "valid.name");
     }
 }

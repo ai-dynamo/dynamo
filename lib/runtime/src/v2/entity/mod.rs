@@ -11,11 +11,12 @@ pub mod descriptor;
 
 pub use descriptor::{
     ComponentDescriptor,
-    DescriptorError, 
-    DescriptorValidation,
+    DescriptorError,
+    EntityDescriptor,
     EndpointDescriptor,
     InstanceDescriptor, 
     InstanceType,
     NamespaceDescriptor,
     PathDescriptor,
+    ToPath,
 };
