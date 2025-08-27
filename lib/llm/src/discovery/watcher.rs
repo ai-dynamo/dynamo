@@ -5,16 +5,16 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
-use tokio::sync::{mpsc::Receiver, Notify};
+use tokio::sync::{Notify, mpsc::Receiver};
 
 use dynamo_runtime::{
+    DistributedRuntime,
     pipeline::{
-        network::egress::push_router::PushRouter, ManyOut, Operator, RouterMode, SegmentSource,
-        ServiceBackend, SingleIn, Source,
+        ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
+        network::egress::push_router::PushRouter,
     },
     protocols::annotated::Annotated,
     transports::etcd::{KeyValue, WatchEvent},
-    DistributedRuntime,
 };
 
 use crate::{
@@ -35,7 +35,7 @@ use crate::{
     },
 };
 
-use super::{ModelEntry, ModelManager, MODEL_ROOT_PATH};
+use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModelUpdate {
@@ -213,10 +213,8 @@ impl ModelWatcher {
                 );
                 update_tx = false;
             }
-            if update_tx {
-                if let Some(tx) = &self.model_update_tx {
-                    tx.send(ModelUpdate::Removed(model_type)).await.ok();
-                }
+            if update_tx && let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Removed(model_type)).await.ok();
             }
             return Ok(None);
         }
@@ -251,13 +249,12 @@ impl ModelWatcher {
             );
         } else {
             for model_type in ALL_MODEL_TYPES {
-                if (chat_model_removed && *model_type == ModelType::Chat)
+                if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completion)
-                    || (embeddings_model_removed && *model_type == ModelType::Embedding)
+                    || (embeddings_model_removed && *model_type == ModelType::Embedding))
+                    && let Some(tx) = &self.model_update_tx
                 {
-                    if let Some(tx) = &self.model_update_tx {
-                        tx.send(ModelUpdate::Removed(*model_type)).await.ok();
-                    }
+                    tx.send(ModelUpdate::Removed(*model_type)).await.ok();
                 }
             }
         }

@@ -30,18 +30,18 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        logging,
+        DistributedRuntime, ErrorContext, Result, Runtime, Worker, logging,
         pipeline::{
-            async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-            PushRouter, ResponseStream, SingleIn,
+            AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
+            SingleIn, async_trait, network::Ingress,
         },
         protocols::annotated::Annotated,
-        stream, DistributedRuntime, ErrorContext, Result, Runtime, Worker,
+        stream,
     };
     use futures::StreamExt;
     use std::{
-        sync::atomic::{AtomicU64, Ordering},
         sync::Arc,
+        sync::atomic::{AtomicU64, Ordering},
         time::Duration,
     };
     use tokio::time::Instant;

@@ -88,7 +88,7 @@ pub use disk::*;
 use torch::*;
 
 use std::{
-    alloc::{alloc_zeroed, dealloc, Layout},
+    alloc::{Layout, alloc_zeroed, dealloc},
     collections::HashMap,
     fmt::Debug,
     ptr::NonNull,
@@ -322,7 +322,10 @@ impl std::fmt::Debug for RegistrationHandles {
 impl Drop for RegistrationHandles {
     fn drop(&mut self) {
         if !self.handles.is_empty() {
-            panic!("RegistrationHandles dropped with {} handles remaining; RegistrationHandles::release() needs to be explicitly called", self.handles.len());
+            panic!(
+                "RegistrationHandles dropped with {} handles remaining; RegistrationHandles::release() needs to be explicitly called",
+                self.handles.len()
+            );
         }
     }
 }

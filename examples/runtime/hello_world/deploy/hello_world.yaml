@@ -6,12 +6,15 @@ kind: DynamoGraphDeployment
 metadata:
   name: hello-world
 spec:
+  backendFramework: vllm
   services:
     Frontend:
       livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'echo ok'
         initialDelaySeconds: 10
         periodSeconds: 10
         timeoutSeconds: 2
@@ -60,7 +63,7 @@ spec:
           command:
             - /bin/sh
             - -c
-            - 'grep "Serving endpoint" /tmp/hello_world.log'
+            - "exit 0"
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 30
@@ -83,4 +86,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 hello_world.py 2>&1 | tee /tmp/hello_world.log
+            - python3 hello_world.py

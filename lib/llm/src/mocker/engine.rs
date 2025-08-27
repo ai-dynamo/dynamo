@@ -22,18 +22,18 @@ use crate::kv_router::publisher::WorkerMetricsPublisher;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
-use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::TokenIdType;
-use dynamo_runtime::protocols::annotated::Annotated;
+use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::protocols::annotated::Annotated;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
+    Result,
     component::Component,
     engine::AsyncEngineContextProvider,
-    pipeline::{async_trait, AsyncEngine, Error, ManyOut, ResponseStream, SingleIn},
+    pipeline::{AsyncEngine, Error, ManyOut, ResponseStream, SingleIn, async_trait},
     traits::DistributedRuntimeProvider,
-    Result,
 };
 
 use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
@@ -43,8 +43,8 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex, OnceCell};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{Mutex, OnceCell, mpsc};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
@@ -366,7 +366,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         self.direct(direct_request, dp_rank as usize);
 
         // Create a simple channel for the stream
-        let (stream_tx, stream_rx) = mpsc::channel::<LLMEngineOutput>(64);
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
@@ -380,19 +380,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 tokio::select! {
                     maybe_signal = request_rx.recv() => {
                         let Some(signal) = maybe_signal else {
-                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string())).await;
+                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
                             break;
                         };
-
-                        if signal.completed && token_count < max_tokens - 1 {
-                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string())).await;
-                            break;
-                        }
-
-                        if signal.completed {
-                            let _ = stream_tx.send(LLMEngineOutput::length()).await;
-                            break;
-                        }
 
                         // Generate a new token
                         let token_id = generate_random_token();
@@ -409,13 +399,25 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             index: None,
                         };
 
-                        if stream_tx.send(output).await.is_err() {
+                        if signal.completed && token_count < max_tokens {
+                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
+                            break;
+                        }
+
+                        if signal.completed {
+                            let _ = stream_tx.send(output);
+                            let _ = stream_tx.send(LLMEngineOutput::length());
+                            break;
+                        }
+
+                        if stream_tx.send(output).is_err() {
+                            tracing::error!("Output stream receiver closed.");
                             break;
                         }
                     }
 
                     _ = async_context.stopped() => {
-                        let _ = stream_tx.send(LLMEngineOutput::cancelled()).await;
+                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
                         break;
                     }
                 }
@@ -426,8 +428,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             active.remove(&request_uuid);
         });
 
-        // Create a simple ReceiverStream which is naturally Send + Sync
-        let stream = ReceiverStream::new(stream_rx);
+        // Create a simple UnboundedReceiverStream which is naturally Send + Sync
+        let stream = UnboundedReceiverStream::new(stream_rx);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
@@ -523,14 +525,14 @@ pub async fn make_mocker_engine(
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::kv_router::indexer::RouterEvent;
     use crate::kv_router::KV_EVENT_SUBJECT;
+    use crate::kv_router::indexer::RouterEvent;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::{
-        pipeline::Context,
-        pipeline::{network::Ingress, PushRouter},
-        traits::events::EventSubscriber,
         DistributedRuntime, Worker,
+        pipeline::Context,
+        pipeline::{PushRouter, network::Ingress},
+        traits::events::EventSubscriber,
     };
     use futures::StreamExt;
     use tokio::time::timeout;
@@ -632,21 +634,20 @@ mod integration_tests {
         tracing::info!("✓ Router created");
 
         // Create test requests for both DP workers
-        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
-            model: "mock".to_string(),
-            token_ids: tokens,
-            batch_token_ids: None,
-            stop_conditions: StopConditions {
-                max_tokens: Some(TOKENS_PER_REQUEST as u32),
-                ..Default::default()
-            },
-            sampling_options: SamplingOptions::default(),
-            output_options: OutputOptions::default(),
-            eos_token_ids: vec![],
-            mdc_sum: None,
-            annotations: vec![format!("dp_rank:{dp_rank}")],
-            estimated_prefix_hit_num_blocks: None,
-            backend_instance_id: None,
+        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(TOKENS_PER_REQUEST as u32),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .eos_token_ids(vec![])
+                .annotations(vec![format!("dp_rank:{dp_rank}")])
+                .build()
+                .unwrap()
         };
 
         let requests = vec![

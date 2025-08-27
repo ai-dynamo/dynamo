@@ -234,6 +234,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
         runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
         runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+        runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.reasoning_parser = config.reasoning_parser
 
         await register_llm(
             ModelType.Backend,

@@ -27,11 +27,11 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::network::{
+    ConnectionInfo, ResponseStreamPrologue, StreamSender,
     codec::{TwoPartCodec, TwoPartMessage},
     tcp::StreamType,
-    ConnectionInfo, ResponseStreamPrologue, StreamSender,
 };
-use crate::{error, ErrorContext, Result}; // Import SinkExt to use the `send` method
+use crate::{ErrorContext, Result, error}; // Import SinkExt to use the `send` method
 
 #[allow(dead_code)]
 pub struct TcpClient {

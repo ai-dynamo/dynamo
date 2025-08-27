@@ -8,10 +8,10 @@ pub mod tools;
 
 // Re-export main types and functions for convenience
 pub use json_parser::{
-    try_tool_call_parse_json, CalledFunctionArguments, CalledFunctionParameters,
+    CalledFunctionArguments, CalledFunctionParameters, try_tool_call_parse_json,
 };
 pub use parsers::{
-    detect_and_parse_tool_call, JsonParserConfig, ToolCallConfig, ToolCallParserType,
+    JsonParserConfig, ToolCallConfig, ToolCallParserType, detect_and_parse_tool_call,
 };
 pub use response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub use tools::{try_tool_call_parse_aggregate, try_tool_call_parse_stream};

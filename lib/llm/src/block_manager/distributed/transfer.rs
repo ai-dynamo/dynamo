@@ -10,15 +10,15 @@ use zmq::*;
 use BlockTransferPool::*;
 
 use crate::block_manager::{
+    BasicMetadata, Storage,
     block::{
+        Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
         data::local::LocalBlockData,
         locality,
         transfer::{TransferContext, WriteTo, WriteToStrategy},
-        Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
-    BasicMetadata, Storage,
 };
 
 use anyhow::Result;
@@ -113,15 +113,13 @@ impl BlockTransferHandler {
             .collect();
 
         // Perform the transfer, and return the notifying channel.
-        let channel = match sources.write_to(&mut targets, self.context.clone()) {
+        match sources.write_to(&mut targets, self.context.clone()) {
             Ok(channel) => Ok(channel),
             Err(e) => {
                 tracing::error!("Failed to write to blocks: {:?}", e);
                 Err(e.into())
             }
-        };
-
-        channel
+        }
     }
 
     pub async fn execute_transfer(&self, request: BlockTransferRequest) -> Result<()> {
