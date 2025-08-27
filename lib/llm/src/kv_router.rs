@@ -380,13 +380,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         .await?
                 };
 
+                // Extract context information before moving the request
+                let stream_context = request.context().clone();
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // if request has the annotation "query_instance_id", for example
                 // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
                 // request will not be routed to worker immediately.
                 // The gateway EPP will receive the worker_instance_id and the tokens.
                 if query_instance_id {
-                    let tokens: Vec<u32> = request.token_ids;
                     let instance_id_str = instance_id.to_string();
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
@@ -401,9 +402,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
-                // Extract context information before moving the request
-                let stream_context = request.context().clone();
-                let tokens: Vec<u32> = request.token_ids.clone();
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
