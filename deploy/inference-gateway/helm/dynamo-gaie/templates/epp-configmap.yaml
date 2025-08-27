@@ -13,25 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[package]
-name = "router"
-version.workspace = true
-edition.workspace = true
-description.workspace = true
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
-repository.workspace = true
-keywords.workspace = true
-
-[dependencies]
-dynamo-runtime = { workspace = true}
-dynamo-llm = { workspace = true}
-
-rand = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-
-clap = { version = "4.5", features = ["derive"] }
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-gaie.fullname" . }}-epp-config
+  labels:
+    app.kubernetes.io/name: {{ include "dynamo-gaie.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  epp-config-dynamo.yaml: |
+{{ (.Files.Get "epp-config-dynamo.yaml") | indent 4 }}
