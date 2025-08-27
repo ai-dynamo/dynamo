@@ -26,7 +26,7 @@ class BaseLogitsProcessor(Protocol):
         self,
         input_ids: Sequence[int],
         logits: torch.Tensor,
-    ):
+    ) -> None:
         """
         Process the logits for the next token prediction.
 
