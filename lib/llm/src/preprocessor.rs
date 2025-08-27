@@ -205,11 +205,11 @@ impl OpenAIPreprocessor {
 
                             let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
                                 if let Some(tokens) = token_data {
-                                    // need ownership for the builder; one clone is unavoidable here
                                     tracing::trace!(
                                         "Using provided tokens from EPP: {} ids",
                                         tokens.len()
                                     );
+                                    // need ownership for the builder, so clone.
                                     (tokens.clone(), true)
                                 } else {
                                     tracing::warn!(
