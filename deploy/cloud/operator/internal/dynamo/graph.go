@@ -138,6 +138,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
 		labels[commonconsts.KubeLabelDynamoNamespace] = graphDynamoNamespace
+		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
@@ -960,6 +961,7 @@ func GenerateGrovePodGangSet(
 func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}
