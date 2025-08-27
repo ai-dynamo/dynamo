@@ -24,7 +24,9 @@ use super::{
     ContentProvider, OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{
+        CommonExt, CommonExtProvider, choose_with_deprecation, emit_nvext_deprecation_warning,
+    },
     nvext::{NvExt, NvExtProvider},
     validate,
 };
@@ -143,6 +145,12 @@ impl CommonExtProvider for NvCreateCompletionRequest {
 
     /// Guided Decoding Options
     fn get_guided_json(&self) -> Option<&serde_json::Value> {
+        // Note: This one needs special handling since it returns a reference
+        if let Some(nvext) = &self.nvext
+            && nvext.guided_json.is_some()
+        {
+            emit_nvext_deprecation_warning("guided_json", true, self.common.guided_json.is_some());
+        }
         self.common
             .guided_json
             .as_ref()
@@ -150,32 +158,39 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     }
 
     fn get_guided_regex(&self) -> Option<String> {
-        self.common
-            .guided_regex
-            .clone()
-            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_regex.clone()))
+        choose_with_deprecation(
+            "guided_regex",
+            self.common.guided_regex.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.guided_regex.as_ref()),
+        )
     }
 
     fn get_guided_grammar(&self) -> Option<String> {
-        self.common
-            .guided_grammar
-            .clone()
-            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_grammar.clone()))
+        choose_with_deprecation(
+            "guided_grammar",
+            self.common.guided_grammar.as_ref(),
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.guided_grammar.as_ref()),
+        )
     }
 
     fn get_guided_choice(&self) -> Option<Vec<String>> {
-        self.common
-            .guided_choice
-            .clone()
-            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_choice.clone()))
+        choose_with_deprecation(
+            "guided_choice",
+            self.common.guided_choice.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.guided_choice.as_ref()),
+        )
     }
 
     fn get_guided_decoding_backend(&self) -> Option<String> {
-        self.common.guided_decoding_backend.clone().or_else(|| {
+        choose_with_deprecation(
+            "guided_decoding_backend",
+            self.common.guided_decoding_backend.as_ref(),
             self.nvext
                 .as_ref()
-                .and_then(|nv| nv.guided_decoding_backend.clone())
-        })
+                .and_then(|nv| nv.guided_decoding_backend.as_ref()),
+        )
     }
 }
 
@@ -198,6 +213,16 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
 
     fn get_common_ignore_eos(&self) -> Option<bool> {
         self.common.ignore_eos
+    }
+
+    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
+    /// CommonExt (root-level) takes precedence over NvExt.
+    fn get_ignore_eos(&self) -> Option<bool> {
+        choose_with_deprecation(
+            "ignore_eos",
+            self.get_common_ignore_eos().as_ref(),
+            NvExtProvider::nvext(self).and_then(|nv| nv.ignore_eos.as_ref()),
+        )
     }
 }
 
