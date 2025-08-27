@@ -349,8 +349,6 @@ WORKDIR /workspace
 ARG ARCH_ALT
 
 ENV DYNAMO_HOME=/workspace
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
@@ -370,6 +368,7 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         python3-dev \
+        python3-pip \
         # jq and curl for polling various endpoints and health checks
         jq \
         curl \
@@ -377,11 +376,14 @@ RUN apt-get update && \
         vim \
         # support UCX to establish connections with zmq
         libzmq3-dev \
+        # install cudnn libs
+        libcudnn9-cuda-12 \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
         libnuma1 librdmacm1 ibverbs-providers \
         openssh-client \
         openssh-server && \
+    ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy all bindings (wheels, lib, include) from dev image
@@ -400,20 +402,18 @@ COPY --from=build /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from build image
 COPY --from=build /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-# Setup the python environment
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv venv $VIRTUAL_ENV --python 3.12 && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
 # TODO: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+    python3 -m pip install --no-cache-dir --break-system-packages --requirement /tmp/requirements.txt && \
+    echo "uninstall (networkx packaging torch triton) as we will use NVIDIA's versions later" && \
+    python3 -m pip uninstall --yes --break-system-packages networkx packaging torch triton
 
 # Install test dependencies
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+    python3 -m pip install --no-cache-dir --break-system-packages --requirement /tmp/requirements.txt
 
 # Copy CUDA toolkit components needed for nvcc, cudafe, cicc etc.
 COPY --from=build /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
@@ -435,26 +435,28 @@ ARG SYMPY_VER=1.14.0
 ARG PACKAGING_VER=23.2
 ARG FLASH_ATTN_VER=2.7.4.post1
 ARG MPMATH_VER=1.3.0
+
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
+COPY --from=build /usr/local/cuda-12.9/targets/x86_64-linux/lib/libcupti* /usr/local/cuda/targets/x86_64-linux/lib/
+# Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
+COPY --from=build /opt/hpcx /opt/hpcx
+# This is needed to make libucc.so visible so pytorch can use it.
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+# Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
+# networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
+# pytorch-triton is copied after trtllm installation.
+COPY --from=build /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchgen /usr/local/lib/python3.12/dist-packages/torchgen
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision /usr/local/lib/python3.12/dist-packages/torchvision
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision-${TORCHVISION_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torchvision-${TORCHVISION_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision.libs /usr/local/lib/python3.12/dist-packages/torchvision.libs
-COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools /usr/local/lib/python3.12/dist-packages/setuptools
-COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools-${SETUPTOOLS_VER}.dist-info /usr/local/lib/python3.12/dist-packages/setuptools-${SETUPTOOLS_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/functorch /usr/local/lib/python3.12/dist-packages/functorch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
-COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2 /usr/local/lib/python3.12/dist-packages/jinja2
 COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx /usr/local/lib/python3.12/dist-packages/networkx
-COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx-${NETWORKX_VER}.dist-info /usr/local/lib/python3.12/dist-packages/networkx-${NETWORKX_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy /usr/local/lib/python3.12/dist-packages/sympy
 COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dist-info /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging /usr/local/lib/python3.12/dist-packages/packaging
-COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_VER}.dist-info /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
@@ -478,19 +480,24 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 # NOTE: locking cuda-python version to <13 to avoid breaks with tensorrt-llm 1.0.0rc6. This
 #       can be removed after https://github.com/NVIDIA/TensorRT-LLM/pull/6703 is merged
 #       we upgrade to a published pip wheel containing this change.
-RUN uv pip install "cuda-python>=12,<13" && \
-    uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
-    if [ "$ARCH" = "amd64" ]; then \
-        pip install "triton==3.3.1"; \
-    fi; \
-    uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl /workspace/wheelhouse/ai_dynamo*any.whl /workspace/wheelhouse/nixl*.whl
+RUN python3 -m pip install --no-cache-dir --break-system-packages "cuda-python>=12,<13" && \
+    python3 -m pip install --no-cache-dir --break-system-packages --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
+    python3 -m pip install --no-cache-dir --break-system-packages \
+        /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+        /workspace/wheelhouse/ai_dynamo*any.whl \
+        /workspace/wheelhouse/nixl*.whl && \
+    python3 -m pip uninstall -y --break-system-packages triton
+    # triton is copied from pytorch container below
+
+COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
+COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 
 # Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
 COPY components/backends/trtllm /workspace/components/backends/trtllm
-RUN uv pip install /workspace/benchmarks
+RUN python3 -m pip install --no-cache-dir --break-system-packages /workspace/benchmarks
 
 # Copy files for legal compliance
 COPY ATTRIBUTION* LICENSE /workspace/
