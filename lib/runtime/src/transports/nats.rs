@@ -577,7 +577,7 @@ impl NatsQueue {
         if let Some(client) = &self.client {
             let mut stream = client.jetstream().get_stream(&self.stream_name).await?;
             let info = stream.info().await?;
-            Ok(info.state.consumer_count as usize)
+            Ok(info.state.consumer_count)
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }
