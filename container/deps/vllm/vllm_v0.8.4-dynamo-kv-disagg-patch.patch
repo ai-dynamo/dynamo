@@ -1,3 +1,384 @@
+diff --git a/.buildkite/scripts/hardware_ci/run-amd-test.sh b/.buildkite/scripts/hardware_ci/run-amd-test.sh
+old mode 100755
+new mode 100644
+diff --git a/.buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh b/.buildkite/scripts/hardware_ci/run-cpu-test-ppc64le.sh
+old mode 100755
+new mode 100644
+diff --git a/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh b/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh
+old mode 100755
+new mode 100644
+diff --git a/.buildkite/scripts/run-multi-node-test.sh b/.buildkite/scripts/run-multi-node-test.sh
+old mode 100755
+new mode 100644
+diff --git a/.github/scripts/cleanup_pr_body.sh b/.github/scripts/cleanup_pr_body.sh
+old mode 100755
+new mode 100644
+diff --git a/benchmarks/run_structured_output_benchmark.sh b/benchmarks/run_structured_output_benchmark.sh
+old mode 100755
+new mode 100644
+diff --git a/benchmarks/structured_schemas/structured_schema_1.json b/benchmarks/structured_schemas/structured_schema_1.json
+deleted file mode 100644
+index 13bd6b6d1..000000000
+--- a/benchmarks/structured_schemas/structured_schema_1.json
++++ /dev/null
+@@ -1,19 +0,0 @@
+-{
+-    "type": "object",
+-    "properties": {
+-      "name": { "type": "string" },
+-      "email": { "type": "string" },
+-      "street": { "type": "string" },
+-      "city": { "type": "string" },
+-      "state": { "type": "string" },
+-      "zip": { "type": "string" },
+-      "phone": { "type": "string" },
+-      "website": { "type": "string" },
+-      "company": { "type": "string" },
+-      "age": { "type": "integer" }
+-    },
+-    "required": [
+-      "name",
+-      "email"
+-    ]
+-}
+diff --git a/cmake/hipify.py b/cmake/hipify.py
+old mode 100755
+new mode 100644
+diff --git a/docs/make.bat b/docs/make.bat
+index 747ffb7b3..dc1312ab0 100644
+--- a/docs/make.bat
++++ b/docs/make.bat
+@@ -1,35 +1,35 @@
+-@ECHO OFF
+-
+-pushd %~dp0
+-
+-REM Command file for Sphinx documentation
+-
+-if "%SPHINXBUILD%" == "" (
+-	set SPHINXBUILD=sphinx-build
+-)
+-set SOURCEDIR=source
+-set BUILDDIR=build
+-
+-%SPHINXBUILD% >NUL 2>NUL
+-if errorlevel 9009 (
+-	echo.
+-	echo.The 'sphinx-build' command was not found. Make sure you have Sphinx
+-	echo.installed, then set the SPHINXBUILD environment variable to point
+-	echo.to the full path of the 'sphinx-build' executable. Alternatively you
+-	echo.may add the Sphinx directory to PATH.
+-	echo.
+-	echo.If you don't have Sphinx installed, grab it from
+-	echo.https://www.sphinx-doc.org/
+-	exit /b 1
+-)
+-
+-if "%1" == "" goto help
+-
+-%SPHINXBUILD% -M %1 %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
+-goto end
+-
+-:help
+-%SPHINXBUILD% -M help %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
+-
+-:end
+-popd
++@ECHO OFF
++
++pushd %~dp0
++
++REM Command file for Sphinx documentation
++
++if "%SPHINXBUILD%" == "" (
++	set SPHINXBUILD=sphinx-build
++)
++set SOURCEDIR=source
++set BUILDDIR=build
++
++%SPHINXBUILD% >NUL 2>NUL
++if errorlevel 9009 (
++	echo.
++	echo.The 'sphinx-build' command was not found. Make sure you have Sphinx
++	echo.installed, then set the SPHINXBUILD environment variable to point
++	echo.to the full path of the 'sphinx-build' executable. Alternatively you
++	echo.may add the Sphinx directory to PATH.
++	echo.
++	echo.If you don't have Sphinx installed, grab it from
++	echo.https://www.sphinx-doc.org/
++	exit /b 1
++)
++
++if "%1" == "" goto help
++
++%SPHINXBUILD% -M %1 %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
++goto end
++
++:help
++%SPHINXBUILD% -M help %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
++
++:end
++popd
+diff --git a/format.sh b/format.sh
+old mode 100755
+new mode 100644
+diff --git a/setup.py b/setup.py
+old mode 100755
+new mode 100644
+diff --git a/tests/kernels/test_cascade_flash_attn.py b/tests/kernels/test_cascade_flash_attn.py
+old mode 100755
+new mode 100644
+diff --git a/tests/quantization/test_cpu_offload.py b/tests/quantization/test_cpu_offload.py
+index a05eb494c..e2df28209 100644
+--- a/tests/quantization/test_cpu_offload.py
++++ b/tests/quantization/test_cpu_offload.py
+@@ -1,76 +1,76 @@
+-# SPDX-License-Identifier: Apache-2.0
+-
+-# Expanded quantized model tests for CPU offloading
+-# Base tests: tests/basic_correctness/test_cpu_offload.py
+-
+-import pytest
+-
+-from tests.quantization.utils import is_quant_method_supported
+-
+-from ..utils import compare_two_settings
+-
+-
+-@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+-                    reason="fp8 is not supported on this GPU type.")
+-def test_cpu_offload_fp8():
+-    # Test quantization of an unquantized checkpoint
+-    compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
+-                         ["--quantization", "fp8"],
+-                         ["--quantization", "fp8", "--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-    # Test loading a quantized checkpoint
+-    compare_two_settings("neuralmagic/Qwen2-1.5B-Instruct-FP8", [],
+-                         ["--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-
+-
+-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
+-                    reason="gptq_marlin is not supported on this GPU type.")
+-def test_cpu_offload_gptq(monkeypatch):
+-    # This quant method is sensitive to dummy weights, so we force real weights
+-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
+-    # Test GPTQ Marlin
+-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
+-                         ["--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-    # Test GPTQ
+-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
+-                         ["--quantization", "gptq"],
+-                         ["--quantization", "gptq", "--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-
+-
+-@pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
+-                    reason="awq_marlin is not supported on this GPU type.")
+-def test_cpu_offload_awq(monkeypatch):
+-    # This quant method is sensitive to dummy weights, so we force real weights
+-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
+-    # Test AWQ Marlin
+-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
+-                         ["--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-    # Test AWQ
+-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ",
+-                         ["--quantization", "awq"],
+-                         ["--quantization", "awq", "--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-
+-
+-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
+-                    reason="gptq_marlin is not supported on this GPU type.")
+-def test_cpu_offload_compressed_tensors(monkeypatch):
+-    # This quant method is sensitive to dummy weights, so we force real weights
+-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
+-    # Test wNa16
+-    compare_two_settings("nm-testing/tinyllama-oneshot-w4a16-channel-v2", [],
+-                         ["--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-    # Test w4a16_marlin24
+-    compare_two_settings("nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t",
+-                         [], ["--cpu-offload-gb", "1"],
+-                         max_wait_seconds=480)
+-    # Test w8a8
+-    compare_two_settings(
+-        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", [],
+-        ["--cpu-offload-gb", "1"],
+-        max_wait_seconds=480)
++# SPDX-License-Identifier: Apache-2.0
++
++# Expanded quantized model tests for CPU offloading
++# Base tests: tests/basic_correctness/test_cpu_offload.py
++
++import pytest
++
++from tests.quantization.utils import is_quant_method_supported
++
++from ..utils import compare_two_settings
++
++
++@pytest.mark.skipif(not is_quant_method_supported("fp8"),
++                    reason="fp8 is not supported on this GPU type.")
++def test_cpu_offload_fp8():
++    # Test quantization of an unquantized checkpoint
++    compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
++                         ["--quantization", "fp8"],
++                         ["--quantization", "fp8", "--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++    # Test loading a quantized checkpoint
++    compare_two_settings("neuralmagic/Qwen2-1.5B-Instruct-FP8", [],
++                         ["--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++
++
++@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
++                    reason="gptq_marlin is not supported on this GPU type.")
++def test_cpu_offload_gptq(monkeypatch):
++    # This quant method is sensitive to dummy weights, so we force real weights
++    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
++    # Test GPTQ Marlin
++    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
++                         ["--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++    # Test GPTQ
++    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
++                         ["--quantization", "gptq"],
++                         ["--quantization", "gptq", "--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++
++
++@pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
++                    reason="awq_marlin is not supported on this GPU type.")
++def test_cpu_offload_awq(monkeypatch):
++    # This quant method is sensitive to dummy weights, so we force real weights
++    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
++    # Test AWQ Marlin
++    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
++                         ["--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++    # Test AWQ
++    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ",
++                         ["--quantization", "awq"],
++                         ["--quantization", "awq", "--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++
++
++@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
++                    reason="gptq_marlin is not supported on this GPU type.")
++def test_cpu_offload_compressed_tensors(monkeypatch):
++    # This quant method is sensitive to dummy weights, so we force real weights
++    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
++    # Test wNa16
++    compare_two_settings("nm-testing/tinyllama-oneshot-w4a16-channel-v2", [],
++                         ["--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++    # Test w4a16_marlin24
++    compare_two_settings("nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t",
++                         [], ["--cpu-offload-gb", "1"],
++                         max_wait_seconds=480)
++    # Test w8a8
++    compare_two_settings(
++        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", [],
++        ["--cpu-offload-gb", "1"],
++        max_wait_seconds=480)
+diff --git a/tests/test_embedded_commit.py b/tests/test_embedded_commit.py
+index a9b4f5cbf..21345f354 100644
+--- a/tests/test_embedded_commit.py
++++ b/tests/test_embedded_commit.py
+@@ -1,10 +1,10 @@
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-import vllm
+-
+-
+-def test_embedded_commit_defined():
+-    assert hasattr(vllm, "__version__")
+-    assert hasattr(vllm, "__version_tuple__")
+-    assert vllm.__version__ != "dev"
+-    assert vllm.__version_tuple__ != (0, 0, "dev")
++import vllm
++
++
++def test_embedded_commit_defined():
++    assert hasattr(vllm, "__version__")
++    assert hasattr(vllm, "__version_tuple__")
++    assert vllm.__version__ != "dev"
++    assert vllm.__version_tuple__ != (0, 0, "dev")
+diff --git a/tests/test_seed_behavior.py b/tests/test_seed_behavior.py
+index c45ed6926..5a6638a9a 100644
+--- a/tests/test_seed_behavior.py
++++ b/tests/test_seed_behavior.py
+@@ -1,24 +1,24 @@
+-# SPDX-License-Identifier: Apache-2.0
+-import random
+-
+-import numpy as np
+-import torch
+-
+-from vllm.platforms.interface import Platform
+-
+-
+-def test_seed_behavior():
+-    # Test with a specific seed
+-    Platform.seed_everything(42)
+-    random_value_1 = random.randint(0, 100)
+-    np_random_value_1 = np.random.randint(0, 100)
+-    torch_random_value_1 = torch.randint(0, 100, (1, )).item()
+-
+-    Platform.seed_everything(42)
+-    random_value_2 = random.randint(0, 100)
+-    np_random_value_2 = np.random.randint(0, 100)
+-    torch_random_value_2 = torch.randint(0, 100, (1, )).item()
+-
+-    assert random_value_1 == random_value_2
+-    assert np_random_value_1 == np_random_value_2
+-    assert torch_random_value_1 == torch_random_value_2
++# SPDX-License-Identifier: Apache-2.0
++import random
++
++import numpy as np
++import torch
++
++from vllm.platforms.interface import Platform
++
++
++def test_seed_behavior():
++    # Test with a specific seed
++    Platform.seed_everything(42)
++    random_value_1 = random.randint(0, 100)
++    np_random_value_1 = np.random.randint(0, 100)
++    torch_random_value_1 = torch.randint(0, 100, (1, )).item()
++
++    Platform.seed_everything(42)
++    random_value_2 = random.randint(0, 100)
++    np_random_value_2 = np.random.randint(0, 100)
++    torch_random_value_2 = torch.randint(0, 100, (1, )).item()
++
++    assert random_value_1 == random_value_2
++    assert np_random_value_1 == np_random_value_2
++    assert torch_random_value_1 == torch_random_value_2
+diff --git a/tests/weight_loading/run_model_weight_loading_test.sh b/tests/weight_loading/run_model_weight_loading_test.sh
+old mode 100755
+new mode 100644
+diff --git a/tools/mypy.sh b/tools/mypy.sh
+old mode 100755
+new mode 100644
+diff --git a/tools/png-lint.sh b/tools/png-lint.sh
+old mode 100755
+new mode 100644
+diff --git a/tools/shellcheck.sh b/tools/shellcheck.sh
+old mode 100755
+new mode 100644
+diff --git a/tools/update-dockerfile-graph.sh b/tools/update-dockerfile-graph.sh
+old mode 100755
+new mode 100644
+diff --git a/vllm/attention/backends/flash_attn.py b/vllm/attention/backends/flash_attn.py
+old mode 100755
+new mode 100644
 diff --git a/vllm/attention/backends/mla/common.py b/vllm/attention/backends/mla/common.py
 index 54278f5f6..7eaf92feb 100644
 --- a/vllm/attention/backends/mla/common.py
@@ -1045,10 +1426,10 @@ index 000000000..a2f9ce99e
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 000000000..bd4ac984e
+index 000000000..484a8194d
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,512 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -1120,6 +1501,7 @@ index 000000000..bd4ac984e
 +        self.rank = rank
 +        self._tp_size = {}
 +        self.src_xfer_side_handles = {}
++        self.prefill_dst_xfer_side_handles = defaultdict(dict)
 +        self.dst_xfer_side_handles = defaultdict(dict)
 +        self.dst_num_blocks = {}
 +
@@ -1128,7 +1510,11 @@ index 000000000..bd4ac984e
 +
 +        self._tp_size[engine_id] = vllm_config.parallel_config.tensor_parallel_size
 +        self._is_mla = "deepseek" in vllm_config.model_config.architectures[0].lower()
-+        
++
++        self.block_size = None
++        self.head_dim = None
++
++        self._downscale_info = {}
 +
 +    @property
 +    def agent_name(self):
@@ -1168,6 +1554,8 @@ index 000000000..bd4ac984e
 +        else:
 +            _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
 +            self.block_len = block_size * num_heads * head_dim * kv_caches[0].element_size()
++            self.block_size = block_size
++            self.head_dim = head_dim
 +            logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
 +            self.num_layers = len(kv_caches)
 +            self.num_blocks = num_blocks
@@ -1203,6 +1591,9 @@ index 000000000..bd4ac984e
 +        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
 +            for dst_xfer_side_handle in dst_xfer_side_handles.values():
 +                self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
++        for prefill_dst_xfer_side_handles in self.prefill_dst_xfer_side_handles.values():
++            for prefill_dst_xfer_side_handle in prefill_dst_xfer_side_handles.values():
++                self.nixl_wrapper.release_dlist_handle(prefill_dst_xfer_side_handle)
 +
 +    def _get_ranges(self, block_ids):
 +        # This function should return a list of ranges of block ids that are contiguous
@@ -1301,129 +1692,159 @@ index 000000000..bd4ac984e
 +
 +    def read_blocks(self, local_block_ids, staging_block_ids, remote_block_ids, dst_engine_id):
 +        logger.debug("Reading %d blocks from %s to %s", len(local_block_ids), self.agent_name, dst_engine_id)
-+
 +        assert len(local_block_ids) == len(staging_block_ids) == len(remote_block_ids)
-+
 +        if len(local_block_ids) == 0:
 +            logger.debug("No blocks to read")
 +            return
 +
 +        start_time = time.perf_counter()
-+
 +        if self._is_mla:
-+            # TODO ptarasiewicz: we skip staging when is_mla is true, we shouldn't assign staging blocks at all
 +            staging_rearranging_ranges = None
 +            staging_block_ids = local_block_ids
 +        else:
 +            local_ranges = self._get_ranges(local_block_ids)
 +            staging_ranges = self._get_ranges(staging_block_ids)
++            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges,
++                                                                                                staging_ranges)
 +
-+            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
-+
++        downscale_info = self._downscale_info.get(dst_engine_id)
 +        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
++        if downscale_info is not None:
++            eff_tp = 1
++            targets = [0]
++        else:
++            eff_tp = max(1, tp_multiplier)
++            targets = list(range(eff_tp))
++
 +        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
-+        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
++        local_xfer_side_handle = self.src_xfer_side_handles[eff_tp]
 +        handles = []
 +
 +        logger.debug("Time to get block descs ids: %s ms", (time.perf_counter() - start_time) * 1000)
 +        create_xfer_start_time = time.perf_counter()
 +
-+        for i in range(tp_multiplier):
-+            staging_block_descs_ids = self._get_block_descs_ids(self.engine_id, "all", staging_block_ids, i=i, tp_multiplier=tp_multiplier, staging_ranges=staging_rearranging_ranges)
++        for i in targets:
++            staging_block_descs_ids = self._get_block_descs_ids(
++                self.engine_id, "all", staging_block_ids, i=i, tp_multiplier=eff_tp,
++                staging_ranges=staging_rearranging_ranges
++            )
 +            assert len(staging_block_descs_ids) == len(remote_block_descs_ids)
 +            remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id][i]
-+            handle = self.nixl_wrapper.make_prepped_xfer("READ", local_xfer_side_handle, staging_block_descs_ids, 
-+                                                        remote_xfer_side_handle, remote_block_descs_ids, 
-+                                                        "")
++            handle = self.nixl_wrapper.make_prepped_xfer(
++                "READ", local_xfer_side_handle, staging_block_descs_ids,
++                remote_xfer_side_handle, remote_block_descs_ids, ""
++            )
++            self.nixl_wrapper.transfer(handle)
 +            handles.append(handle)
-+            status = self.nixl_wrapper.transfer(handle)
 +
 +        logger.debug("Time to create xfer: %s ms", (time.perf_counter() - create_xfer_start_time) * 1000)
-+
 +        transfer_start_time = time.perf_counter()
 +
-+        for handle in handles:
-+            while (status := self.nixl_wrapper.check_xfer_state(handle)) != "DONE":
-+                if status == "PROC":
-+                    time.sleep(0.001)
++        pending = list(handles)
++        while pending:
++            nxt = []
++            for h in pending:
++                status = self.nixl_wrapper.check_xfer_state(h)
++                if status == "DONE":
++                    continue
++                elif status == "PROC":
++                    nxt.append(h)
 +                else:
-+                    raise RuntimeError("Read transfer failed with state %s", status)
-+            # self.nixl_wrapper.abort_xfer(handle) # TODO ptarasiewicz: why abort is throwing errors?
++                    raise RuntimeError(f"Read transfer failed with state {status}")
++            pending = nxt
++            if pending:
++                time.sleep(0.001)
 +
 +        logger.debug("Time to transfer: %s ms", (time.perf_counter() - transfer_start_time) * 1000)
-+
 +        rearrange_start_time = time.perf_counter()
 +
 +        if not self._is_mla:
 +            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
-+                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
++                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s",
++                             self.kv_caches[0].shape, local_range, staging_range)
 +                for kv_cache in self.kv_caches:
 +                    for cache in kv_cache:
-+                        rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "read")
++                        rearrange_tensors(
++                            cache[local_range[0]:local_range[1] + 1],
++                            cache[staging_range[0]:staging_range[1] + 1],
++                            eff_tp, "read"
++                        )
 +
 +        logger.debug("Time to rearrange tensors: %s ms", (time.perf_counter() - rearrange_start_time) * 1000)
 +        logger.debug("Total time for read: %s ms", (time.perf_counter() - start_time) * 1000)
 +
 +    def write_blocks(self, local_block_ids, staging_block_ids, remote_block_ids, dst_engine_id, notify_msg):
-+        logger.debug("Writing %d blocks to %s from %s with notify message %s", len(local_block_ids), dst_engine_id, self.agent_name, notify_msg)
++        logger.debug("Writing %d blocks to %s from %s with notify message %s",
++                     len(local_block_ids), dst_engine_id, self.agent_name, notify_msg)
 +
-+        # hongkuanz: we send isl[:-1] tokens to the prefill where the kv for the last
-+        # isl[-1] token is calculated in the first iteration in decode.
-+        # If isl equals to a multiple of tokens_per_block + 1, prefill engine will have \
-+        # one less block due to the missing last token.
 +        remote_block_ids = remote_block_ids[:len(local_block_ids)]
-+
 +        assert len(staging_block_ids) == len(local_block_ids)
++
++        downscale_info = self._downscale_info.get(dst_engine_id)
 +        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
++        if downscale_info is not None:
++            eff_tp = 1
++            targets = [0]
++        else:
++            eff_tp = max(1, tp_multiplier)
++            targets = list(range(eff_tp))
 +
 +        if len(local_block_ids) == 0:
 +            logger.debug("No blocks to write")
-+            for i in range(tp_multiplier):
-+                self.nixl_wrapper.send_notif(self._remote_agents[dst_engine_id][self.rank * tp_multiplier + i], notify_msg)
++            if downscale_info is not None:
++                rr = downscale_info["remote_rank"]
++                self.nixl_wrapper.send_notif(self._remote_agents[dst_engine_id][rr], notify_msg)
++            else:
++                for i in range(tp_multiplier):
++                    self.nixl_wrapper.send_notif(self._remote_agents[dst_engine_id][self.rank * tp_multiplier + i],
++                                                 notify_msg)
 +            return
-+        
-+        start_time = time.perf_counter()
 +
++        start_time = time.perf_counter()
 +        if self._is_mla:
-+            # TODO ptarasiewicz: we skip staging when is_mla is true, we shouldn't assign staging blocks at all
 +            staging_rearranging_ranges = None
 +            staging_block_ids = local_block_ids
 +        else:
 +            local_ranges = self._get_ranges(local_block_ids)
 +            staging_ranges = self._get_ranges(staging_block_ids)
-+
-+            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
-+            
++            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges,
++                                                                                                staging_ranges)
 +            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
-+                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
++                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s",
++                             self.kv_caches[0].shape, local_range, staging_range)
 +                for kv_cache in self.kv_caches:
 +                    for cache in kv_cache:
-+                        rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "write")
++                        rearrange_tensors(
++                            cache[local_range[0]: local_range[1] + 1],
++                            cache[staging_range[0]: staging_range[1] + 1],
++                            eff_tp, "write"
++                        )
 +
 +        logger.debug("Time to rearrange tensors: %s ms", (time.perf_counter() - start_time) * 1000)
-+
 +        create_xfer_start_time = time.perf_counter()
 +
-+        # getting block descs ids
 +        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
-+        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
-+        
-+        logger.debug("Creating xfer handles")
-+        for i in range(tp_multiplier):
-+            staging_block_descs_ids = self._get_block_descs_ids(self.engine_id, "all", staging_block_ids, i=i, tp_multiplier=tp_multiplier, staging_ranges=staging_rearranging_ranges)
++        local_xfer_side_handle = self.src_xfer_side_handles[eff_tp]
++
++        for i in targets:
++            staging_block_descs_ids = self._get_block_descs_ids(
++                self.engine_id, "all", staging_block_ids,
++                i=i, tp_multiplier=eff_tp, staging_ranges=staging_rearranging_ranges
++            )
 +            assert len(staging_block_descs_ids) == len(remote_block_descs_ids)
 +            remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id][i]
-+            handle = self.nixl_wrapper.make_prepped_xfer("WRITE", local_xfer_side_handle, staging_block_descs_ids,
-+                                                        remote_xfer_side_handle, remote_block_descs_ids, 
-+                                                        notify_msg)
++            handle = self.nixl_wrapper.make_prepped_xfer(
++                "WRITE",
++                local_xfer_side_handle, staging_block_descs_ids,
++                remote_xfer_side_handle, remote_block_descs_ids,
++                notify_msg
++            )
 +            self._transfers[notify_msg].append(handle)
-+            status = self.nixl_wrapper.transfer(handle)
++            self.nixl_wrapper.transfer(handle)
 +
 +        logger.debug("Time to create xfer: %s ms", (time.perf_counter() - create_xfer_start_time) * 1000)
-+
-+        transfer_start_time = time.perf_counter()
 +        logger.debug("Total time for write: %s ms", (time.perf_counter() - start_time) * 1000)
-+                
++
 +    def get_notifs(self):
 +        return self.nixl_wrapper.update_notifs()
 +    
@@ -1432,14 +1853,41 @@ index 000000000..bd4ac984e
 +
 +    def add_remote_agent(self, engine_id, agent_metadata, agent_tp, kv_caches_base_addr, num_blocks):
 +        self._tp_size[engine_id] = agent_tp
++
 +        agent_names = []
 +        for agent_meta in agent_metadata:
 +            agent_name = self.nixl_wrapper.add_remote_agent(agent_meta)
 +            agent_names.append(agent_name)
 +        self._remote_agents[engine_id] = agent_names
 +        self.kv_caches_base_addr[engine_id] = kv_caches_base_addr
-+
 +        tp_multiplier = self._tp_size[engine_id] // self._tp_size[self.engine_id]
++        if tp_multiplier == 0 and not self._is_mla:
++            group_size = self._tp_size[self.engine_id] // self._tp_size[engine_id]
++            remote_rank = self.rank // group_size
++            seg_len = self.block_len
++            full_len = seg_len * group_size
++            peer_offset = (self.rank % group_size) * seg_len
++            self._downscale_info[engine_id] = {"group_size": group_size, "remote_rank": remote_rank}
++            src_blocks = []
++            for layer in range(self.num_layers):
++                for base in self.kv_caches_base_addr[self.engine_id][layer]:
++                    for bid in range(self.num_blocks):
++                        src_blocks.append((base + bid * seg_len, seg_len, self.rank))
++            src_desc = self.nixl_wrapper.get_xfer_descs(src_blocks, "VRAM")
++            self.src_xfer_side_handles[1] = self.nixl_wrapper.prep_xfer_dlist("", src_desc)
++
++            dst_blocks = []
++            for layer in range(self.num_layers):
++                for rbase in self.kv_caches_base_addr[engine_id][remote_rank][layer]:
++                    for bid in range(num_blocks):
++                        dst_blocks.append((rbase + bid * full_len + peer_offset, seg_len, remote_rank))
++            dst_desc = self.nixl_wrapper.get_xfer_descs(dst_blocks, "VRAM")
++            self.dst_xfer_side_handles[engine_id][0] = self.nixl_wrapper.prep_xfer_dlist(
++                agent_names[remote_rank], dst_desc
++            )
++            self.dst_num_blocks[engine_id] = num_blocks
++            self._tp_size[engine_id] = self._tp_size[self.engine_id]
++            return agent_names
 +        assert tp_multiplier > 0, f"Decode TP cannot be smaller than prefill TP, got {self._tp_size[engine_id]} and {self._tp_size[self.engine_id]}"
 +
 +        logger.debug("Creating src xfer side handles for engine %s, tp_multiplier: %s", engine_id, tp_multiplier)
@@ -4101,6 +4549,19 @@ index f80bf878f..f64c49fe8 100644
  }
  
  # end-env-vars-definition
+diff --git a/vllm/model_executor/layers/quantization/utils/__init__.py b/vllm/model_executor/layers/quantization/utils/__init__.py
+index f7ee47288..2c08bb064 100644
+--- a/vllm/model_executor/layers/quantization/utils/__init__.py
++++ b/vllm/model_executor/layers/quantization/utils/__init__.py
+@@ -1,5 +1,5 @@
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-from .layer_utils import replace_parameter, update_tensor_inplace
+-
+-__all__ = ['update_tensor_inplace', 'replace_parameter']
++from .layer_utils import replace_parameter, update_tensor_inplace
++
++__all__ = ['update_tensor_inplace', 'replace_parameter']
 diff --git a/vllm/model_executor/models/deepseek_v2.py b/vllm/model_executor/models/deepseek_v2.py
 index 23b450aed..23fe6d7b8 100644
 --- a/vllm/model_executor/models/deepseek_v2.py
@@ -4425,6 +4886,12 @@ index 61867b025..8a07cf39e 100644
  
      @property
      def is_first_multi_step(self) -> bool:
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+old mode 100755
+new mode 100644
+diff --git a/vllm/vllm_flash_attn/.gitkeep b/vllm/vllm_flash_attn/.gitkeep
+deleted file mode 100644
+index e69de29bb..000000000
 diff --git a/vllm/worker/model_runner.py b/vllm/worker/model_runner.py
 index 9524a69f6..c314fbe8f 100644
 --- a/vllm/worker/model_runner.py
