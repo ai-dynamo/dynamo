@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for dynamo-gaie.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# This is the Dynamo namespace where the dynamo model is deployed
+dynamoNamespace: "vllm-agg"
+
+# This is the port on which the model is exposed
+model:
+  # This is the model name that will be used to route traffic to the dynamo model
+  # for example, if the model name is Qwen/Qwen3-0.6B, then the modelShortName should be qwen
+  identifier: "Qwen/Qwen3-0.6B"
+  # This is the short name of the model that will be used to generate the resource names
+  shortName: "qwen"
+  # Criticality level for the inference model
+  criticality: "Critical"
+
+# InferencePool configuration
+inferencePool:
+  # Target port number for the inference pool
+  port: 8000
+
+# HTTPRoute configuration
+httpRoute:
+  # Enable the HTTPRoute
+  enabled: true
+  # Gateway parent reference configuration
+  gatewayName: "inference-gateway"
+  # Path matching configuration
+  path:
+    prefix: "/"
+  # Timeout configuration
+  timeout:
+    request: "300s"
+
+extension:
+  # default (non-epp-aware) EPP image for the GAIE extension
+  image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0
+
+# generic knobs you may want in both modes
+imagePullSecrets: []     # e.g. ["docker-imagepullsecret"]
+epp:
+  imagePullPolicy: IfNotPresent
+  # Add env in name/value pairs
+  extraEnv: []           # e.g. [{name: USE_STREAMING, value: "true"}]
+  # If you ever want to completely override args, supply a list here.
+  # When empty, chart will render sane defaults
+  argsOverride: []
+
+# epp-aware mode toggle + specific settings
+eppAware:
+  enabled: false
+  # Optional: override EPP image when epp-aware=true
+  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
+
+  # Sidecar (frontend-router)
+  sidecar:
+    # Container name for the sidecar
+    name: frontend-router
+    # Sidecar image
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+    # Image pull policy for the sidecar
+    imagePullPolicy: IfNotPresent
+    # Command and args for running the frontend in router mode.
+    command: ["/bin/sh", "-c"]
+    args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
+    # Environment variables for the sidecar.
+    env:
+      - name: DYNAMO_NAMESPACE
+        valueFromDynamoNamespace: true
+      - name: ETCD_ENDPOINTS
+        value: "http://dynamo-platform-etcd:2379"
+      - name: NATS_SERVER
+        value: "nats://dynamo-platform-nats:4222"
+    # Resource requests/limits for the sidecar container.
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+    # Ports exposed by the sidecar container.
+    ports:
+      - containerPort: 8000

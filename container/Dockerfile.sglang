@@ -27,7 +27,7 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.4.9.post1"
+ARG SGLANG_VERSION="0.5.0rc2"
 
 ##################################
 ########## Base Image ############
@@ -39,8 +39,8 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 ARG ARCH
 ARG ARCH_ALT
 
-ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_UCX_REF=v1.19.0
+ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -58,6 +58,10 @@ RUN apt-get update -y && \
     meson \
     ninja-build \
     pybind11-dev \
+    # These headers are missing with the hpcx installer, required
+    # by UCX to find RDMA devices
+    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers \
     # Rust build dependencies
 	clang \
     libclang-dev \
@@ -208,7 +212,7 @@ RUN apt update -y && \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.87.0
+    RUST_VERSION=1.89.0
 
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
@@ -226,6 +230,20 @@ ARG CARGO_BUILD_JOBS
 # This is to prevent cargo from building $(nproc) jobs in parallel,
 # which might exceed the number of opened files limit.
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
 
 #######################################
 ########## Local Development ##########
@@ -258,7 +276,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
@@ -319,12 +337,12 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
+COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
-COPY deploy/sdk /workspace/deploy/sdk
 
 RUN cargo build \
 	--release \
@@ -375,7 +393,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
 
 ########################################
 ########## Development Image ###########
@@ -401,7 +419,11 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-ENV PATH=/usr/local/bin/etcd/:$PATH
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+
+# Copy prometheus from base image
+COPY --from=base /usr/local/bin/prometheus /usr/local/bin/prometheus
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
@@ -412,6 +434,15 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
+COPY --from=base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=base /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
 
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
@@ -424,7 +455,16 @@ $LD_LIBRARY_PATH
 # libnuma-dev is a required dependency for sglang integration with NIXL
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev libnuma-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential python3-dev libnuma-dev \
+        # jq and curl for polling various endpoints and health checks
+        curl \
+        jq \
+        # For debugging
+        vim \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
@@ -435,7 +475,22 @@ RUN apt-get update && \
 COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[sglang] --find-links wheelhouse
+ARG SGLANG_VERSION
+RUN uv pip install \
+    /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /workspace/wheelhouse/ai_dynamo*any.whl \
+    /workspace/wheelhouse/nixl*.whl \
+    "sglang[all]==${SGLANG_VERSION}"
+
+# Common dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

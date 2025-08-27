@@ -9,74 +9,21 @@ spec:
   services:
     Frontend:
       dynamoNamespace: vllm-v1-disagg-router
-      componentType: main
+      componentType: frontend
       replicas: 1
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      resources:
-        requests:
-          cpu: "1"
-          memory: "2Gi"
-        limits:
-          cpu: "1"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -86,39 +33,14 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -128,4 +50,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  --is-prefill-worker 2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker

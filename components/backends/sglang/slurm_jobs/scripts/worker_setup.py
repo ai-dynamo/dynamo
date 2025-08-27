@@ -8,8 +8,8 @@ benchmark_dynamo.sh script.
 
 The script will:
 - Setup the environment
-- Update the YAML config file
-- Start Dynamo graphs.disagg service
+- Generate the python3 command to run the prefill or decode worker
+- Start dynamo (or sglang)
 - Monitor the GPU utilization
 """
 
@@ -124,28 +124,34 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--prefill_host_ip",
+        "--leader_ip",
         type=str,
         required=True,
-        help="IP address of the prefill host node",
+        help="IP address of the leader node for this worker group",
     )
     parser.add_argument(
-        "--decode_host_ip",
+        "--master_ip",
         type=str,
         required=True,
-        help="IP address of the decode host node",
+        help="IP address of the master node (first prefill node) for NATS/ETCD",
     )
     parser.add_argument(
-        "--rank",
+        "--worker_idx",
         type=int,
         required=True,
-        help="Rank of the current node (0 for host node)",
+        help="Index of the worker group (0-based)",
     )
     parser.add_argument(
-        "--total_nodes",
+        "--local_rank",
         type=int,
         required=True,
-        help="Total number of nodes in the cluster",
+        help="Local rank within the worker group (0 for leader)",
+    )
+    parser.add_argument(
+        "--nodes_per_worker",
+        type=int,
+        required=True,
+        help="Number of nodes per worker",
     )
     parser.add_argument(
         "--worker_type",
@@ -166,140 +172,167 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="File to log GPU utilization (default: None)",
     )
 
+    parser.add_argument(
+        "--gpu_type",
+        type=str,
+        choices=["h100", "gb200-fp8"],
+        default="h100",
+        help="Type of GPU to use",
+    )
+
     return parser.parse_args(args)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
     """Validate command line arguments"""
-    if args.rank < 0:
-        raise ValueError("Rank must be non-negative")
+    if args.worker_idx < 0:
+        raise ValueError("Worker index must be non-negative")
 
-    if args.total_nodes < 1:
-        raise ValueError("Total nodes must be at least 1")
+    if args.local_rank < 0:
+        raise ValueError("Local rank must be non-negative")
+
+    if args.nodes_per_worker < 1:
+        raise ValueError("Nodes per worker must be at least 1")
 
     if args.gpus_per_node < 1:
         raise ValueError("GPUs per node must be at least 1")
 
-
-def setup_prefill_node(
-    rank: int, prefill_host_ip: str, total_nodes: int, total_gpus: int
-) -> int:
-    """
-    Setup the prefill node.
-    """
-    if rank == 0:
-        logging.info(f"Setting up host prefill node: {rank}")
-        logging.info(f"Starting nats server on node {rank} with IP {prefill_host_ip}")
-
-        nats_process = run_command("nats-server -js", background=True)
-        if not nats_process:
-            raise RuntimeError("Failed to start nats-server")
-
-        etcd_cmd = (
-            f"etcd --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
-            f"--advertise-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
-            f"--listen-peer-urls {ETCD_LISTEN_ADDR}:{ETCD_PEER_PORT} "
-            f"--initial-cluster default=http://{prefill_host_ip}:{ETCD_PEER_PORT}"
+    if args.local_rank >= args.nodes_per_worker:
+        raise ValueError(
+            f"Local rank ({args.local_rank}) must be less than nodes per worker ({args.nodes_per_worker})"
         )
 
-        etcd_process = run_command(etcd_cmd, background=True)
-        if not etcd_process:
-            raise RuntimeError("Failed to start etcd")
 
-        ingress_process = run_command("dynamo run in=http out=dyn", background=True)
-        if not ingress_process:
-            raise RuntimeError("Failed to start ingress")
-
-    else:
-        logging.info(f"Setting up child prefill node: {rank}")
-        if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
-            raise RuntimeError("Failed to connect to etcd")
-
-    # NOTE: This implements the example in examples/sglang/dsr1-wideep.md
-    # For other examples, the command might have to be modified.
-    dynamo_cmd = (
-        f"python3 -m dynamo.sglang.worker "
-        "--model-path /model/ "
-        "--served-model-name deepseek-ai/DeepSeek-R1 "
-        "--skip-tokenizer-init "
-        "--disaggregation-mode prefill "
-        "--disaggregation-transfer-backend nixl "
-        "--disaggregation-bootstrap-port 30001 "
-        f"--dist-init-addr {prefill_host_ip}:{DIST_INIT_PORT} "
-        f"--nnodes {total_nodes} "
-        f"--node-rank {rank} "
-        f"--tp-size {total_gpus} "
-        f"--dp-size {total_gpus} "
-        "--enable-dp-attention "
-        "--decode-log-interval 1 "
-        "--enable-deepep-moe "
-        "--page-size 1 "
-        "--trust-remote-code "
-        "--moe-dense-tp-size 1 "
-        "--enable-dp-lm-head "
-        "--disable-radix-cache "
-        "--watchdog-timeout 1000000 "
-        "--enable-two-batch-overlap "
-        "--deepep-mode normal "
-        "--mem-fraction-static 0.85 "
-        "--deepep-config /configs/deepep.json "
-        "--ep-num-redundant-experts 32 "
-        "--ep-dispatch-algorithm dynamic "
-        "--eplb-algorithm deepseek "
-    )
-    return run_command(dynamo_cmd)
-
-
-def setup_decode_node(
-    rank: int,
-    decode_host_ip: str,
-    prefill_host_ip: str,
-    total_nodes: int,
+def setup_env_vars_for_gpu_script(
+    host_ip: str,
+    local_rank: int,
     total_gpus: int,
+    total_nodes: int,
+    port: int = DIST_INIT_PORT,
+):
+    """Setup environment variables required by GPU scripts (h100.sh, gb200-fp8.sh, gb200-fp4.sh)"""
+    os.environ["HOST_IP"] = host_ip
+    os.environ["PORT"] = str(port)
+    os.environ["TOTAL_GPUS"] = str(total_gpus)
+    os.environ["RANK"] = str(local_rank)
+    os.environ["TOTAL_NODES"] = str(total_nodes)
+
+    logging.info(f"Set HOST_IP: {host_ip}")
+    logging.info(f"Set PORT: {port}")
+    logging.info(f"Set TOTAL_GPUS: {total_gpus}")
+    logging.info(f"Set RANK: {local_rank}")
+    logging.info(f"Set TOTAL_NODES: {total_nodes}")
+
+
+def get_gpu_command(worker_type: str, gpu_type: str) -> str:
+    """Generate command to run the appropriate GPU script"""
+    script_name = f"{gpu_type}.sh"
+    script_path = Path(__file__).parent / script_name
+    mode = worker_type  # "prefill" or "decode"
+
+    return f"bash {script_path} {mode}"
+
+
+def setup_head_prefill_node(prefill_host_ip: str) -> None:
+    """
+    Setup NATS, etcd, ingress, and http servers on the prefill host node.
+    """
+    logging.info(f"Starting nats server on node {prefill_host_ip}")
+
+    nats_process = run_command("nats-server -js", background=True)
+    if not nats_process:
+        raise RuntimeError("Failed to start nats-server")
+
+    logging.info(f"Starting etcd server on node {prefill_host_ip}")
+    etcd_cmd = (
+        f"etcd --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
+        f"--advertise-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
+        f"--listen-peer-urls {ETCD_LISTEN_ADDR}:{ETCD_PEER_PORT} "
+        f"--initial-cluster default=http://{prefill_host_ip}:{ETCD_PEER_PORT}"
+    )
+
+    etcd_process = run_command(etcd_cmd, background=True)
+    if not etcd_process:
+        raise RuntimeError("Failed to start etcd")
+
+    logging.info(f"Starting ingress server on node {prefill_host_ip}")
+    ingress_process = run_command(
+        "python3 -m dynamo.frontend --http-port=8000", background=True
+    )
+    if not ingress_process:
+        raise RuntimeError("Failed to start ingress")
+
+    logging.info(
+        f"Starting http server on port 9001 for flush_cache endpoint on node {prefill_host_ip}"
+    )
+    cache_flush_server_cmd = "python3 utils/sgl_http_server.py --ns dynamo"
+    cache_flush_server_process = run_command(cache_flush_server_cmd, background=True)
+    if not cache_flush_server_process:
+        raise RuntimeError("Failed to start cache flush server")
+
+
+def setup_prefill_worker(
+    worker_idx: int,
+    local_rank: int,
+    leader_ip: str,
+    master_ip: str,
+    nodes_per_worker: int,
+    gpus_per_node: int,
+    gpu_type: str,
 ) -> int:
     """
-    Setup the decode node.
+    Setup the prefill worker.
     """
-    logging.info(f"Setting up child decode node: {rank}")
+    total_gpus = nodes_per_worker * gpus_per_node
 
-    if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
+    # Only the first prefill worker's leader node sets up NATS/ETCD/Frontend
+    if worker_idx == 0 and local_rank == 0:
+        setup_head_prefill_node(master_ip)
+    else:
+        logging.info(
+            f"Setting up child prefill worker {worker_idx}, local rank {local_rank}"
+        )
+        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+            raise RuntimeError("Failed to connect to etcd")
+
+    # Setup environment variables for GPU script - use leader_ip as dist-init-addr
+    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker)
+
+    # Use appropriate GPU script instead of generating command directly
+    cmd_to_run = get_gpu_command("prefill", gpu_type)
+    return run_command(cmd_to_run)
+
+
+def setup_decode_worker(
+    worker_idx: int,
+    local_rank: int,
+    leader_ip: str,
+    master_ip: str,
+    nodes_per_worker: int,
+    gpus_per_node: int,
+    gpu_type: str,
+) -> int:
+    """
+    Setup the decode worker.
+    """
+    total_gpus = nodes_per_worker * gpus_per_node
+
+    logging.info(f"Setting up decode worker {worker_idx}, local rank {local_rank}")
+
+    if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
         raise RuntimeError("Failed to connect to etcd")
 
-    dynamo_cmd = (
-        "python3 -m dynamo.sglang.decode_worker "
-        "--model-path /model/ "
-        "--served-model-name deepseek-ai/DeepSeek-R1 "
-        "--skip-tokenizer-init "
-        "--disaggregation-mode decode "
-        "--disaggregation-transfer-backend nixl "
-        "--disaggregation-bootstrap-port 30001 "
-        f"--dist-init-addr {decode_host_ip}:{DIST_INIT_PORT} "
-        f"--nnodes {total_nodes} "
-        f"--node-rank {rank} "
-        f"--tp-size {total_gpus} "
-        f"--dp-size {total_gpus} "
-        "--enable-dp-attention "
-        "--decode-log-interval 1 "
-        "--enable-deepep-moe "
-        "--page-size 1 "
-        "--trust-remote-code "
-        "--moe-dense-tp-size 1 "
-        "--enable-dp-lm-head "
-        "--disable-radix-cache "
-        "--watchdog-timeout 1000000 "
-        "--enable-two-batch-overlap "
-        "--deepep-mode low_latency "
-        "--mem-fraction-static 0.835 "
-        "--ep-num-redundant-experts 32 "
-        "--cuda-graph-bs 256 "
-    )
+    # Setup environment variables for GPU script - use leader_ip as dist-init-addr
+    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker)
 
-    return run_command(dynamo_cmd)
+    # Use appropriate GPU script instead of generating command directly
+    cmd_to_run = get_gpu_command("decode", gpu_type)
+    return run_command(cmd_to_run)
 
 
-def setup_env(prefill_host_ip: str):
-    nats_server = f"nats://{prefill_host_ip}:{NATS_PORT}"
-    etcd_endpoints = f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"
+def setup_env(master_ip: str):
+    nats_server = f"nats://{master_ip}:{NATS_PORT}"
+    etcd_endpoints = f"http://{master_ip}:{ETCD_CLIENT_PORT}"
 
     os.environ["NATS_SERVER"] = nats_server
     os.environ["ETCD_ENDPOINTS"] = etcd_endpoints
@@ -316,30 +349,38 @@ def main(input_args: list[str] | None = None):
     if args.gpu_utilization_log:
         log_gpu_utilization(args.gpu_utilization_log)
 
-    logging.info(f"{args.worker_type.capitalize()} node setup started")
+    logging.info(f"{args.worker_type.capitalize()} worker setup started")
     logging.info(f"Hostname: {socket.gethostname()}")
-    logging.info(f"Prefill host IP: {args.prefill_host_ip}")
-    logging.info(f"Decode host IP: {args.decode_host_ip}")
-    logging.info(f"Rank: {args.rank}")
+    logging.info(f"Worker type: {args.worker_type}")
+    logging.info(f"Worker index: {args.worker_idx}")
+    logging.info(f"Local rank: {args.local_rank}")
+    logging.info(f"Leader IP: {args.leader_ip}")
+    logging.info(f"Master IP: {args.master_ip}")
+    logging.info(f"Nodes per worker: {args.nodes_per_worker}")
 
-    setup_env(args.prefill_host_ip)
+    setup_env(args.master_ip)
     if args.worker_type == "prefill":
-        setup_prefill_node(
-            args.rank,
-            args.prefill_host_ip,
-            args.total_nodes,
-            args.total_nodes * args.gpus_per_node,
+        setup_prefill_worker(
+            args.worker_idx,
+            args.local_rank,
+            args.leader_ip,
+            args.master_ip,
+            args.nodes_per_worker,
+            args.gpus_per_node,
+            args.gpu_type,
         )
     else:
-        setup_decode_node(
-            args.rank,
-            args.decode_host_ip,
-            args.prefill_host_ip,
-            args.total_nodes,
-            args.total_nodes * args.gpus_per_node,
+        setup_decode_worker(
+            args.worker_idx,
+            args.local_rank,
+            args.leader_ip,
+            args.master_ip,
+            args.nodes_per_worker,
+            args.gpus_per_node,
+            args.gpu_type,
         )
 
-    logging.info(f"{args.worker_type.capitalize()} node setup complete")
+    logging.info(f"{args.worker_type.capitalize()} worker setup complete")
 
 
 if __name__ == "__main__":

@@ -9,9 +9,18 @@ SPDX-License-Identifier: Apache-2.0
 
 SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires 4 nodes of 8xH100 GPUs.
 
+**Prerequisite**: Building the Dynamo container.
+
+```bash
+cd $DYNAMO_ROOT
+docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
+```
+
+You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+
 **Step 1**: Use the provided helper script to generate commands to start NATS/ETCD on your head prefill node. This script will also give you environment variables to export on each other node. You will need the IP addresses of your head prefill and head decode node to run this script.
 ```bash
-./components/backends/sglang/src/dynamo/sglang/utils/gen_env_vars.sh
+./utils/gen_env_vars.sh
 ```
 
 **Step 2**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
@@ -19,9 +28,9 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
 ```bash
 # run ingress
-dynamo run in=http out=dyn &
+python3 -m dynamo.frontend --http-port=8000 &
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -40,7 +49,7 @@ python3 -m dynamo.sglang.worker \
 
 Node 2: Run the remaining 8 shards of the prefill worker
 ```bash
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -59,7 +68,7 @@ python3 -m dynamo.sglang.worker \
 
 Node 3: Run the first 8 shards of the decode worker
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -78,7 +87,7 @@ python3 -m dynamo.sglang.decode_worker \
 
 Node 4: Run the remaining 8 shards of the decode worker
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -102,7 +111,7 @@ SGLang typically requires a warmup period to ensure the DeepGEMM kernels are loa
 curl ${HEAD_PREFILL_NODE_IP}:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "deepseek-ai/DeepSeek-R1",
     "messages": [
     {
         "role": "user",

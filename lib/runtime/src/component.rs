@@ -30,21 +30,24 @@
 //! TODO: Top-level Overview of Endpoints/Functions
 
 use crate::{
-    config::HealthStatus, discovery::Lease, metrics::MetricsRegistry, service::ServiceSet,
+    config::HealthStatus,
+    discovery::Lease,
+    metrics::{MetricsRegistry, prometheus_names},
+    service::ServiceSet,
     transports::etcd::EtcdPath,
 };
 
 use super::{
-    error,
+    DistributedRuntime, Result, Runtime, error,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
     utils::Duration,
-    DistributedRuntime, Result, Runtime,
 };
 
-use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
-use crate::protocols::Endpoint as EndpointId;
+use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
+use crate::protocols::EndpointId;
+use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -124,6 +127,10 @@ pub struct Component {
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
@@ -215,11 +222,16 @@ impl Component {
         self.name.clone()
     }
 
+    pub fn labels(&self) -> &[(String, String)] {
+        &self.labels
+    }
+
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
         Endpoint {
             component: self.clone(),
             name: endpoint.into(),
             is_static: self.is_static,
+            labels: Vec::new(),
         }
     }
 
@@ -247,12 +259,78 @@ impl Component {
         Ok(out)
     }
 
+    /// Scrape ServiceSet, which contains NATS stats as well as user defined stats
+    /// embedded in data field of ServiceInfo.
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
+        // Debug: scraping stats for component
         let service_name = self.service_name();
         let service_client = self.drt().service_client();
         service_client
             .collect_services(&service_name, timeout)
             .await
+    }
+
+    /// Add Prometheus metrics for this component's NATS service stats.
+    ///
+    /// Starts a background task that periodically requests service statistics from NATS
+    /// and updates the corresponding Prometheus metrics. The scraping interval is set to
+    /// approximately 873ms (MAX_DELAY_MS), which is arbitrary but any value less than a second
+    /// is fair game. This frequent scraping provides real-time service statistics updates.
+    pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
+        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
+            std::time::Duration::from_millis(300);
+        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(873);
+
+        // If there is another component with the same service name, this will fail.
+        let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
+
+        let component_clone = self.clone();
+        let mut hierarchies = self.parent_hierarchy();
+        hierarchies.push(self.hierarchy());
+        debug_assert!(
+            hierarchies
+                .last()
+                .map(|x| x.as_str())
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(&self.service_name())
+        ); // it happens that in component, hierarchy and service name are the same
+
+        // Start a background task that scrapes stats every 5 seconds
+        let m = component_metrics.clone();
+        let c = component_clone.clone();
+
+        // Use the DRT's runtime handle to spawn the background task.
+        // We cannot use regular `tokio::spawn` here because:
+        // 1. This method may be called from contexts without an active Tokio runtime
+        //    (e.g., tests that create a DRT in a blocking context)
+        // 2. Tests often create a temporary runtime just to build the DRT, then drop it
+        // 3. `tokio::spawn` requires being called from within a runtime context
+        // By using the DRT's own runtime handle, we ensure the task runs in the
+        // correct runtime that will persist for the lifetime of the component.
+        c.drt().runtime().secondary().spawn(async move {
+            let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
+            let mut interval = tokio::time::interval(MAX_DELAY_MS);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                match c.scrape_stats(timeout).await {
+                    Ok(service_set) => {
+                        m.update_from_service_set(&service_set);
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "Background scrape failed for {}: {}",
+                            c.service_name(),
+                            err
+                        );
+                        m.reset_to_zeros();
+                    }
+                }
+                interval.tick().await;
+            }
+        });
+
+        Ok(())
     }
 
     /// TODO
@@ -285,6 +363,9 @@ pub struct Endpoint {
     name: String,
 
     is_static: bool,
+
+    /// Additional labels for metrics
+    labels: Vec<(String, String)>,
 }
 
 impl Hash for Endpoint {
@@ -447,6 +528,10 @@ pub struct Namespace {
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
+
+    /// Additional labels for metrics
+    #[builder(default = "Vec::new()")]
+    labels: Vec<(String, String)>,
 }
 
 impl DistributedRuntimeProvider for Namespace {

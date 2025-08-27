@@ -41,11 +41,12 @@ TEST_MODELS = [
 ]
 
 
-def download_models(model_list=None):
+def download_models(model_list=None, ignore_weights=False):
     """Download models - can be called directly or via fixture
 
     Args:
         model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+        ignore_weights: If True, skips downloading model weight files. Default is False.
     """
     if model_list is None:
         model_list = TEST_MODELS
@@ -65,15 +66,33 @@ def download_models(model_list=None):
         from huggingface_hub import snapshot_download
 
         for model_id in model_list:
-            logging.info(f"Pre-downloading model: {model_id}")
+            logging.info(
+                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+            )
 
             try:
-                # Download the full model snapshot (includes all files)
-                # HuggingFace will handle caching automatically
-                snapshot_download(
-                    repo_id=model_id,
-                    token=hf_token,
-                )
+                if ignore_weights:
+                    # Weight file patterns to exclude (based on hub.rs implementation)
+                    weight_patterns = [
+                        "*.bin",
+                        "*.safetensors",
+                        "*.h5",
+                        "*.msgpack",
+                        "*.ckpt.index",
+                    ]
+
+                    # Download everything except weight files
+                    snapshot_download(
+                        repo_id=model_id,
+                        token=hf_token,
+                        ignore_patterns=weight_patterns,
+                    )
+                else:
+                    # Download the full model snapshot (includes all files)
+                    snapshot_download(
+                        repo_id=model_id,
+                        token=hf_token,
+                    )
                 logging.info(f"Successfully pre-downloaded: {model_id}")
 
             except Exception as e:
@@ -91,6 +110,13 @@ def download_models(model_list=None):
 def predownload_models():
     """Fixture wrapper around download_models for all TEST_MODELS"""
     download_models()
+    yield
+
+
+@pytest.fixture(scope="session")
+def predownload_tokenizers():
+    """Fixture wrapper around download_models for all TEST_MODELS"""
+    download_models(ignore_weights=True)
     yield
 
 
@@ -115,26 +141,36 @@ def pytest_collection_modifyitems(config, items):
     It is used to skip tests that are not supported on all environments.
     """
 
-    # Tests marked with tensorrtllm requires specific environment with tensorrtllm
+    # Tests marked with trtllm requires specific environment with tensorrtllm
     # installed. Hence, we skip them if the user did not explicitly ask for them.
-    if config.getoption("-m") and "tensorrtllm" in config.getoption("-m"):
+    if config.getoption("-m") and "trtllm_marker" in config.getoption("-m"):
         return
-    skip_tensorrtllm = pytest.mark.skip(reason="need -m tensorrtllm to run")
+    skip_trtllm = pytest.mark.skip(reason="need -m trtllm_marker to run")
     for item in items:
-        if "tensorrtllm" in item.keywords:
-            item.add_marker(skip_tensorrtllm)
+        if "trtllm_marker" in item.keywords:
+            item.add_marker(skip_trtllm)
 
         # Auto-inject predownload_models fixture for serve tests only (not router tests)
         # Skip items that don't have fixturenames (like MypyFileItem)
         if hasattr(item, "fixturenames"):
-            # Only apply to tests in the serve directory
+            # Guard clause: skip if already has the fixtures
             if (
-                ("serve" in str(item.path))
-                and ("predownload_models" not in item.fixturenames)
-                and (not item.get_closest_marker("skip_model_download"))
+                "predownload_models" in item.fixturenames
+                or "predownload_tokenizers" in item.fixturenames
             ):
+                continue
+
+            # Guard clause: skip if marked with skip_model_download
+            if item.get_closest_marker("skip_model_download"):
+                continue
+
+            # Add appropriate fixture based on test path
+            if "serve" in str(item.path):
                 item.fixturenames = list(item.fixturenames)
                 item.fixturenames.append("predownload_models")
+            elif "router" in str(item.path):
+                item.fixturenames = list(item.fixturenames)
+                item.fixturenames.append("predownload_tokenizers")
 
 
 class EtcdServer(ManagedProcess):

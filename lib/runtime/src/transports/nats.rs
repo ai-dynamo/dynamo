@@ -28,21 +28,29 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
-use crate::Result;
+use crate::{Result, metrics::MetricsRegistry};
 
-use async_nats::{client, jetstream, Subscriber};
+use async_nats::connection::State;
+use async_nats::{Subscriber, client, jetstream};
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
+use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
 use url::Url;
 use validator::{Validate, ValidationError};
 
+use crate::metrics::prometheus_names::nats_client as nats_metrics;
 pub use crate::slug::Slug;
 use tracing as log;
+
+use super::utils::build_in_runtime;
 
 pub const URL_PREFIX: &str = "nats://";
 
@@ -119,33 +127,55 @@ impl Client {
         Ok(subscription)
     }
 
-    /// Upload file to NATS at this URL
-    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
-        let mut disk_file = TokioFile::open(filepath).await?;
-
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+    /// Helper method to get or optionally create an object store bucket
+    ///
+    /// # Arguments
+    /// * `bucket_name` - The name of the bucket to retrieve
+    /// * `create_if_not_found` - If true, creates the bucket when it doesn't exist
+    ///
+    /// # Returns
+    /// The object store bucket or an error
+    async fn get_or_create_bucket(
+        &self,
+        bucket_name: &str,
+        create_if_not_found: bool,
+    ) -> anyhow::Result<jetstream::object_store::ObjectStore> {
         let context = self.jetstream();
 
-        let bucket = match context.get_object_store(&bucket_name).await {
-            Ok(bucket) => bucket,
+        match context.get_object_store(bucket_name).await {
+            Ok(bucket) => Ok(bucket),
             Err(err) if err.to_string().contains("stream not found") => {
                 // err.source() is GetStreamError, which has a kind() which
                 // is GetStreamErrorKind::JetStream which wraps a jetstream::Error
                 // which has code 404. Phew. So yeah check the string for now.
 
-                tracing::debug!("Creating NATS bucket {bucket_name}");
-                context
-                    .create_object_store(jetstream::object_store::Config {
-                        bucket: bucket_name.to_string(),
-                        ..Default::default()
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed creating bucket / object store: {e}"))?
+                if create_if_not_found {
+                    tracing::debug!("Creating NATS bucket {bucket_name}");
+                    context
+                        .create_object_store(jetstream::object_store::Config {
+                            bucket: bucket_name.to_string(),
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed creating bucket / object store: {e}"))
+                } else {
+                    anyhow::bail!(
+                        "NATS get_object_store bucket does not exist: {bucket_name}. {err}."
+                    );
+                }
             }
             Err(err) => {
                 anyhow::bail!("NATS get_object_store error: {err}");
             }
-        };
+        }
+    }
+
+    /// Upload file to NATS at this URL
+    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
+        let mut disk_file = TokioFile::open(filepath).await?;
+
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
             name: key.to_string(),
@@ -167,20 +197,7 @@ impl Client {
         let mut disk_file = TokioFile::create(filepath).await?;
 
         let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
-        let context = self.jetstream();
-
-        let bucket = match context.get_object_store(&bucket_name).await {
-            Ok(bucket) => bucket,
-            Err(err) if err.to_string().contains("stream not found") => {
-                // err.source() is GetStreamError, which has a kind() which
-                // is GetStreamErrorKind::JetStream which wraps a jetstream::Error
-                // which has code 404. Phew. So yeah check the string for now.
-                anyhow::bail!("NATS get_object_store bucket does not exist: {bucket_name}. {err}.");
-            }
-            Err(err) => {
-                anyhow::bail!("NATS get_object_store error: {err}");
-            }
-        };
+        let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
             anyhow::anyhow!(
@@ -203,6 +220,59 @@ impl Client {
             }
             Err(err) => Err(anyhow::anyhow!("NATS get_object_store error: {err}")),
         }
+    }
+
+    /// Upload a serializable struct to NATS object store using bincode
+    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: Url) -> anyhow::Result<()>
+    where
+        T: Serialize,
+    {
+        // Serialize the data using bincode (more efficient binary format)
+        let binary_data = bincode::serialize(data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize data with bincode: {e}"))?;
+
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
+
+        let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
+            name: key.to_string(),
+            ..Default::default()
+        };
+
+        // Upload the serialized bytes
+        let mut cursor = std::io::Cursor::new(binary_data);
+        bucket.put(key_meta, &mut cursor).await.map_err(|e| {
+            anyhow::anyhow!("Failed uploading to bucket / object store {bucket_name}/{key}: {e}")
+        })?;
+
+        Ok(())
+    }
+
+    /// Download and deserialize a struct from NATS object store using bincode
+    pub async fn object_store_download_data<T>(&self, nats_url: Url) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
+
+        let mut obj_reader = bucket.get(&key).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed downloading from bucket / object store {bucket_name}/{key}: {e}"
+            )
+        })?;
+
+        // Read all bytes into memory
+        let mut buffer = Vec::new();
+        tokio::io::copy(&mut obj_reader, &mut buffer)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed reading object data: {e}"))?;
+
+        // Deserialize from bincode
+        let data = bincode::deserialize(&buffer)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize data with bincode: {e}"))?;
+
+        Ok(data)
     }
 }
 
@@ -236,7 +306,9 @@ fn validate_nats_server(server: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
+// TODO(jthomson04): We really shouldn't be hardcoding this.
+const NATS_WORKER_THREADS: usize = 4;
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
@@ -258,8 +330,24 @@ impl ClientOptions {
             }
         };
 
-        let client = client.connect(self.server).await?;
+        let (client, _) = build_in_runtime(
+            async move {
+                client
+                    .connect(self.server)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}"))
+            },
+            NATS_WORKER_THREADS,
+        )
+        .await?;
+
         let js_ctx = jetstream::new(client.clone());
+
+        // Validate JetStream is available
+        js_ctx
+            .query_account()
+            .await
+            .map_err(|e| anyhow::anyhow!("JetStream not available: {e}"))?;
 
         Ok(Client { client, js_ctx })
     }
@@ -355,6 +443,8 @@ pub struct NatsQueue {
     subject: String,
     /// The subscriber for pull-based consumption
     subscriber: Option<jetstream::consumer::PullConsumer>,
+    /// Optional consumer name for broadcast pattern (if None, uses "worker-group")
+    consumer_name: Option<String>,
 }
 
 impl NatsQueue {
@@ -372,6 +462,29 @@ impl NatsQueue {
             client: None,
             subject,
             subscriber: None,
+            consumer_name: None,
+        }
+    }
+
+    /// Create a new NatsQueue with a specific consumer name for broadcast pattern
+    /// Each consumer with a unique name will receive all messages independently
+    pub fn new_with_consumer(
+        stream_name: String,
+        nats_server: String,
+        dequeue_timeout: time::Duration,
+        consumer_name: String,
+    ) -> Self {
+        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        let subject = format!("{}.*", sanitized_stream_name);
+
+        Self {
+            stream_name: sanitized_stream_name,
+            nats_server,
+            dequeue_timeout,
+            client: None,
+            subject,
+            subscriber: None,
+            consumer_name: Some(consumer_name),
         }
     }
 
@@ -398,7 +511,11 @@ impl NatsQueue {
 
             // Create persistent subscriber
             let consumer_config = jetstream::consumer::pull::Config {
-                durable_name: Some("worker-group".to_string()),
+                durable_name: Some(
+                    self.consumer_name
+                        .clone()
+                        .unwrap_or_else(|| "worker-group".to_string()),
+                ),
                 ..Default::default()
             };
 
@@ -425,6 +542,45 @@ impl NatsQueue {
         self.subscriber = None;
         self.client = None;
         Ok(())
+    }
+
+    /// Shutdown the consumer by deleting it from the stream and closing the connection
+    /// This permanently removes the consumer from the server
+    pub async fn shutdown(&mut self) -> Result<()> {
+        if let (Some(client), Some(consumer_name)) = (&self.client, &self.consumer_name) {
+            // Get the stream and delete the consumer
+            let stream = client.jetstream().get_stream(&self.stream_name).await?;
+            stream.delete_consumer(consumer_name).await.map_err(|e| {
+                anyhow::anyhow!("Failed to delete consumer {}: {}", consumer_name, e)
+            })?;
+            log::debug!(
+                "Deleted consumer {} from stream {}",
+                consumer_name,
+                self.stream_name
+            );
+        } else {
+            log::warn!(
+                "Cannot shutdown consumer: client or consumer_name is None (client: {:?}, consumer_name: {:?})",
+                self.client.is_some(),
+                self.consumer_name.is_some()
+            );
+        }
+
+        // Then close the connection
+        self.close().await
+    }
+
+    /// Count the number of consumers for the stream
+    pub async fn count_consumers(&mut self) -> Result<usize> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            let mut stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let info = stream.info().await?;
+            Ok(info.state.consumer_count)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
     }
 
     /// Enqueue a task using the provided data
@@ -476,8 +632,12 @@ impl NatsQueue {
         if let Some(client) = &self.client {
             // Get consumer info to get pending messages count
             let stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let consumer_name = self
+                .consumer_name
+                .clone()
+                .unwrap_or_else(|| "worker-group".to_string());
             let mut consumer: jetstream::consumer::PullConsumer = stream
-                .get_consumer("worker-group")
+                .get_consumer(&consumer_name)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to get consumer: {}", e))?;
             let info = consumer.info().await?;
@@ -487,6 +647,205 @@ impl NatsQueue {
             Err(anyhow::anyhow!("Client not connected"))
         }
     }
+
+    /// Purge messages from the stream up to (but not including) the specified sequence number
+    /// This permanently removes messages and affects all consumers of the stream
+    pub async fn purge_up_to_sequence(&self, sequence: u64) -> Result<()> {
+        if let Some(client) = &self.client {
+            let stream = client.jetstream().get_stream(&self.stream_name).await?;
+
+            // NOTE: this purge excludes the sequence itself
+            // https://docs.rs/nats/latest/nats/jetstream/struct.PurgeRequest.html
+            stream.purge().sequence(sequence).await.map_err(|e| {
+                anyhow::anyhow!("Failed to purge stream up to sequence {}: {}", sequence, e)
+            })?;
+
+            log::debug!(
+                "Purged stream {} up to sequence {}",
+                self.stream_name,
+                sequence
+            );
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
+    /// Purge messages from the stream up to the minimum acknowledged sequence across all consumers
+    /// This finds the lowest acknowledged sequence number across all consumers and purges up to that point
+    pub async fn purge_acknowledged(&mut self) -> Result<()> {
+        self.ensure_connection().await?;
+
+        let Some(client) = &self.client else {
+            return Err(anyhow::anyhow!("Client not connected"));
+        };
+
+        let stream = client.jetstream().get_stream(&self.stream_name).await?;
+
+        // Get all consumer names for the stream
+        let consumer_names: Vec<String> = stream
+            .consumer_names()
+            .try_collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list consumers: {}", e))?;
+
+        if consumer_names.is_empty() {
+            log::debug!("No consumers found for stream {}", self.stream_name);
+            return Ok(());
+        }
+
+        // Find the minimum acknowledged sequence across all consumers
+        let mut min_ack_sequence = u64::MAX;
+
+        for consumer_name in &consumer_names {
+            let mut consumer: jetstream::consumer::PullConsumer = stream
+                .get_consumer(consumer_name)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get consumer {}: {}", consumer_name, e))?;
+
+            let info = consumer.info().await.map_err(|e| {
+                anyhow::anyhow!("Failed to get consumer info for {}: {}", consumer_name, e)
+            })?;
+
+            // The ack_floor contains the stream sequence of the highest contiguously acknowledged message
+            // If stream_sequence is 0, it means no messages have been acknowledged yet
+            if info.ack_floor.stream_sequence > 0 {
+                min_ack_sequence = min_ack_sequence.min(info.ack_floor.stream_sequence);
+                log::debug!(
+                    "Consumer {} has ack_floor at sequence {}",
+                    consumer_name,
+                    info.ack_floor.stream_sequence
+                );
+            }
+        }
+
+        // Only purge if we found a valid minimum acknowledged sequence
+        if min_ack_sequence < u64::MAX && min_ack_sequence > 0 {
+            // Purge up to (but not including) the minimum acknowledged sequence + 1
+            // We add 1 because we want to include the minimum acknowledged message in the purge
+            let purge_sequence = min_ack_sequence + 1;
+
+            self.purge_up_to_sequence(purge_sequence).await?;
+
+            log::info!(
+                "Purged stream {} up to acknowledged sequence {} (purged up to sequence {})",
+                self.stream_name,
+                min_ack_sequence,
+                purge_sequence
+            );
+        } else {
+            log::debug!(
+                "No messages to purge for stream {} (min_ack_sequence: {})",
+                self.stream_name,
+                min_ack_sequence
+            );
+        }
+
+        Ok(())
+    }
+}
+
+/// Prometheus metrics that mirror the NATS client statistics (in primitive types)
+/// to be used for the System Status Server.
+///
+/// ⚠️  IMPORTANT: These Prometheus Gauges are COPIES of NATS client data, not live references!
+///
+/// How it works:
+/// 1. NATS client provides source data via client.statistics() and connection_state()
+/// 2. set_from_client_stats() reads current NATS values and updates these Prometheus Gauges
+/// 3. Prometheus scrapes these Gauge values (snapshots, not live data)
+///
+/// Flow: NATS Client → Client Statistics → set_from_client_stats() → Prometheus Gauge
+/// Note: These are snapshots updated when set_from_client_stats() is called.
+#[derive(Debug, Clone)]
+pub struct DRTNatsClientPrometheusMetrics {
+    nats_client: client::Client,
+    /// Number of bytes received (excluding protocol overhead)
+    pub in_bytes: IntGauge,
+    /// Number of bytes sent (excluding protocol overhead)
+    pub out_bytes: IntGauge,
+    /// Number of messages received
+    pub in_messages: IntGauge,
+    /// Number of messages sent
+    pub out_messages: IntGauge,
+    /// Number of times connection was established
+    pub connects: IntGauge,
+    /// Current connection state (0 = disconnected, 1 = connected, 2 = reconnecting)
+    pub connection_state: IntGauge,
+}
+
+impl DRTNatsClientPrometheusMetrics {
+    /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
+    pub fn new(drt: &crate::DistributedRuntime, nats_client: client::Client) -> Result<Self> {
+        let in_bytes = drt.create_intgauge(
+            nats_metrics::IN_TOTAL_BYTES,
+            "Total number of bytes received by NATS client",
+            &[],
+        )?;
+        let out_bytes = drt.create_intgauge(
+            nats_metrics::OUT_OVERHEAD_BYTES,
+            "Total number of bytes sent by NATS client",
+            &[],
+        )?;
+        let in_messages = drt.create_intgauge(
+            nats_metrics::IN_MESSAGES,
+            "Total number of messages received by NATS client",
+            &[],
+        )?;
+        let out_messages = drt.create_intgauge(
+            nats_metrics::OUT_MESSAGES,
+            "Total number of messages sent by NATS client",
+            &[],
+        )?;
+        let connects = drt.create_intgauge(
+            nats_metrics::CONNECTS,
+            "Total number of connections established by NATS client",
+            &[],
+        )?;
+        let connection_state = drt.create_intgauge(
+            nats_metrics::CONNECTION_STATE,
+            "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
+            &[],
+        )?;
+
+        Ok(Self {
+            nats_client,
+            in_bytes,
+            out_bytes,
+            in_messages,
+            out_messages,
+            connects,
+            connection_state,
+        })
+    }
+
+    /// Copy statistics from the stored NATS client to these Prometheus metrics
+    pub fn set_from_client_stats(&self) {
+        let stats = self.nats_client.statistics();
+
+        // Get current values from the client statistics
+        let in_bytes = stats.in_bytes.load(Ordering::Relaxed);
+        let out_bytes = stats.out_bytes.load(Ordering::Relaxed);
+        let in_messages = stats.in_messages.load(Ordering::Relaxed);
+        let out_messages = stats.out_messages.load(Ordering::Relaxed);
+        let connects = stats.connects.load(Ordering::Relaxed);
+
+        // Get connection state
+        let connection_state = match self.nats_client.connection_state() {
+            State::Connected => 1,
+            // treat Disconnected and Pending as "down"
+            State::Disconnected | State::Pending => 0,
+        };
+
+        // Update Prometheus metrics
+        // Using gauges allows us to set absolute values directly
+        self.in_bytes.set(in_bytes as i64);
+        self.out_bytes.set(out_bytes as i64);
+        self.in_messages.set(in_messages as i64);
+        self.out_messages.set(out_messages as i64);
+        self.connects.set(connects as i64);
+        self.connection_state.set(connection_state);
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +853,14 @@ mod tests {
 
     use super::*;
     use figment::Jail;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct TestData {
+        id: u32,
+        name: String,
+        values: Vec<f64>,
+    }
 
     #[test]
     fn test_client_options_builder() {
@@ -538,5 +905,244 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    // Integration test for object store data operations using bincode
+    #[tokio::test]
+    #[ignore] // Requires NATS server to be running
+    async fn test_object_store_data_operations() {
+        // Create test data
+        let test_data = TestData {
+            id: 42,
+            name: "test_item".to_string(),
+            values: vec![1.0, 2.5, 3.7, 4.2],
+        };
+
+        // Set up client
+        let client_options = ClientOptions::builder()
+            .server("nats://localhost:4222")
+            .build()
+            .expect("Failed to build client options");
+
+        let client = client_options
+            .connect()
+            .await
+            .expect("Failed to connect to NATS");
+
+        // Test URL (using .bin extension to indicate binary format)
+        let url =
+            Url::parse("nats://localhost/test-bucket/test-data.bin").expect("Failed to parse URL");
+
+        // Upload the data
+        client
+            .object_store_upload_data(&test_data, url.clone())
+            .await
+            .expect("Failed to upload data");
+
+        // Download the data
+        let downloaded_data: TestData = client
+            .object_store_download_data(url.clone())
+            .await
+            .expect("Failed to download data");
+
+        // Verify the data matches
+        assert_eq!(test_data, downloaded_data);
+
+        // Clean up
+        client
+            .object_store_delete_bucket("test-bucket")
+            .await
+            .expect("Failed to delete bucket");
+    }
+
+    // Integration test for broadcast pattern with purging
+    #[tokio::test]
+    #[ignore]
+    async fn test_nats_queue_broadcast_with_purge() {
+        use uuid::Uuid;
+
+        // Create unique stream name for this test
+        let stream_name = format!("test-broadcast-{}", Uuid::new_v4());
+        let nats_server = "nats://localhost:4222".to_string();
+        let timeout = time::Duration::from_secs(0);
+
+        // Create two consumers with different names for the same stream
+        let consumer1_name = format!("consumer-{}", Uuid::new_v4());
+        let consumer2_name = format!("consumer-{}", Uuid::new_v4());
+
+        let mut queue1 = NatsQueue::new_with_consumer(
+            stream_name.clone(),
+            nats_server.clone(),
+            timeout,
+            consumer1_name,
+        );
+
+        let mut queue2 = NatsQueue::new_with_consumer(
+            stream_name.clone(),
+            nats_server.clone(),
+            timeout,
+            consumer2_name,
+        );
+
+        // Connect both queues (first one creates the stream, second one reuses it)
+        queue1.connect().await.expect("Failed to connect queue1");
+        queue2.connect().await.expect("Failed to connect queue2");
+
+        // Send 4 messages
+        let messages = vec![
+            Bytes::from("message1"),
+            Bytes::from("message2"),
+            Bytes::from("message3"),
+            Bytes::from("message4"),
+        ];
+
+        for msg in &messages {
+            queue1
+                .enqueue_task(msg.clone())
+                .await
+                .expect("Failed to enqueue message");
+        }
+
+        // Give JetStream a moment to persist the messages
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Get stream info to find the sequence numbers
+        // We need to know the sequence of message 2 to purge up to it
+        let client_options = Client::builder()
+            .server(nats_server.clone())
+            .build()
+            .expect("Failed to build client options");
+
+        let client = client_options
+            .connect()
+            .await
+            .expect("Failed to connect to NATS");
+
+        // Purge the first two messages (sequence 1 and 2)
+        // Note: JetStream sequences start at 1, and purge is exclusive of the sequence number
+        queue1
+            .purge_up_to_sequence(3)
+            .await
+            .expect("Failed to purge messages");
+
+        // Give JetStream a moment to process the purge
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Consumer 1 dequeues one message (message3)
+        let msg3_consumer1 = queue1
+            .dequeue_task(Some(time::Duration::from_millis(500)))
+            .await
+            .expect("Failed to dequeue from queue1");
+        assert_eq!(
+            msg3_consumer1,
+            Some(messages[2].clone()),
+            "Consumer 1 should get message3"
+        );
+
+        // Give JetStream a moment to process acknowledgments
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Now run purge_acknowledged
+        // At this point:
+        // - Consumer 1 has ack'd message 3 (ack_floor = 3)
+        // - Consumer 2 hasn't consumed anything yet (ack_floor = 0)
+        // - Min ack_floor = 0, so nothing will be purged
+        queue1
+            .purge_acknowledged()
+            .await
+            .expect("Failed to purge acknowledged messages");
+
+        // Give JetStream a moment to process the purge
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Now collect remaining messages from both consumers
+        let mut consumer1_remaining = Vec::new();
+        let mut consumer2_remaining = Vec::new();
+
+        // Collect remaining messages from consumer 1
+        while let Some(msg) = queue1
+            .dequeue_task(None)
+            .await
+            .expect("Failed to dequeue from queue1")
+        {
+            consumer1_remaining.push(msg);
+        }
+
+        // Collect remaining messages from consumer 2
+        while let Some(msg) = queue2
+            .dequeue_task(None)
+            .await
+            .expect("Failed to dequeue from queue2")
+        {
+            consumer2_remaining.push(msg);
+        }
+
+        // Verify consumer 1 gets 1 remaining message (message4)
+        assert_eq!(
+            consumer1_remaining.len(),
+            1,
+            "Consumer 1 should have 1 remaining message"
+        );
+        assert_eq!(
+            consumer1_remaining[0], messages[3],
+            "Consumer 1 should get message4"
+        );
+
+        // Verify consumer 2 gets 2 messages (message3 and message4)
+        assert_eq!(
+            consumer2_remaining.len(),
+            2,
+            "Consumer 2 should have 2 messages"
+        );
+        assert_eq!(
+            consumer2_remaining[0], messages[2],
+            "Consumer 2 should get message3"
+        );
+        assert_eq!(
+            consumer2_remaining[1], messages[3],
+            "Consumer 2 should get message4"
+        );
+
+        // Test consumer count and shutdown behavior
+        // First verify via consumer 1 that there are two consumers
+        let consumer_count = queue1
+            .count_consumers()
+            .await
+            .expect("Failed to count consumers");
+        assert_eq!(consumer_count, 2, "Should have 2 consumers initially");
+
+        // Close consumer 1 and verify via consumer 2 that there are still two consumers
+        queue1.close().await.expect("Failed to close queue1");
+
+        let consumer_count = queue2
+            .count_consumers()
+            .await
+            .expect("Failed to count consumers");
+        assert_eq!(
+            consumer_count, 2,
+            "Should still have 2 consumers after closing queue1"
+        );
+
+        // Reconnect queue1 to be able to shutdown
+        queue1.connect().await.expect("Failed to reconnect queue1");
+
+        // Shutdown consumer 1 and verify via consumer 2 that there is only one consumer left
+        queue1.shutdown().await.expect("Failed to shutdown queue1");
+
+        let consumer_count = queue2
+            .count_consumers()
+            .await
+            .expect("Failed to count consumers");
+        assert_eq!(
+            consumer_count, 1,
+            "Should have only 1 consumer after shutting down queue1"
+        );
+
+        // Clean up by deleting the stream
+        client
+            .jetstream()
+            .delete_stream(&stream_name)
+            .await
+            .expect("Failed to delete test stream");
     }
 }

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 {{- range $serviceName, $serviceSpec := .Values.spec.services }}
-{{- if eq $serviceSpec.componentType "main" }}
+{{- if eq $serviceSpec.componentType "frontend" }}
 ---
 apiVersion: v1
 kind: Service

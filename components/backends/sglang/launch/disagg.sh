@@ -15,13 +15,13 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 
 # run ingress
-dynamo run in=http out=dyn --http-port=8000 &
+python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 -m dynamo.sglang.worker \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
@@ -31,9 +31,9 @@ python3 -m dynamo.sglang.worker \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \

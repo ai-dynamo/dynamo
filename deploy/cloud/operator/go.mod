@@ -6,13 +6,14 @@ toolchain go1.24.3
 
 require (
 	emperror.dev/errors v0.8.1
-	github.com/NVIDIA/grove/operator/api v0.0.0-20250717114148-daac6e53774f
+	github.com/NVIDIA/grove/operator/api v0.0.0-20250801123021-8b42bac59ef2
 	github.com/bsm/gomega v1.27.10
 	github.com/google/go-cmp v0.7.0
 	github.com/imdario/mergo v0.3.6
 	github.com/onsi/ginkgo/v2 v2.23.4
 	github.com/onsi/gomega v1.37.0
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.71.2
+	github.com/stretchr/testify v1.10.0
 	go.etcd.io/etcd/client/v3 v3.5.21
 	istio.io/api v1.23.1
 	istio.io/client-go v1.23.1
@@ -23,7 +24,7 @@ require (
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
 	sigs.k8s.io/controller-runtime v0.21.0
 	sigs.k8s.io/lws v0.6.1
-	volcano.sh/apis v1.11.0
+	volcano.sh/apis v1.12.2
 )
 
 require (
@@ -57,6 +58,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect

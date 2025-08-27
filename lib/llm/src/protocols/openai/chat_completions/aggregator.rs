@@ -1,27 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
+    Annotated,
     codec::{Message, SseCodecError},
-    convert_sse_stream, Annotated,
+    convert_sse_stream,
+    openai::ParsingOptions,
 };
 
+use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -35,7 +26,7 @@ pub struct DeltaAggregator {
     /// Timestamp (Unix epoch) indicating when the response was created.
     created: u32,
     /// Optional usage statistics for the completion request.
-    usage: Option<async_openai::types::CompletionUsage>,
+    usage: Option<dynamo_async_openai::types::CompletionUsage>,
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
     /// Map of incremental response choices, keyed by index.
@@ -43,7 +34,7 @@ pub struct DeltaAggregator {
     /// Optional error message if an error occurs during aggregation.
     error: Option<String>,
     /// Optional service tier information for the response.
-    service_tier: Option<async_openai::types::ServiceTierResponse>,
+    service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -53,13 +44,16 @@ struct DeltaChoice {
     /// The accumulated text content for the choice.
     text: String,
     /// The role associated with this message (e.g., `system`, `user`, `assistant`).
-    role: Option<async_openai::types::Role>,
+    role: Option<dynamo_async_openai::types::Role>,
     /// The reason the completion was finished (if applicable).
-    finish_reason: Option<async_openai::types::FinishReason>,
+    finish_reason: Option<dynamo_async_openai::types::FinishReason>,
     /// Optional log probabilities for the chat choice.
-    logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
+    logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
     // Optional tool calls for the chat choice.
-    tool_calls: Option<Vec<async_openai::types::ChatCompletionMessageToolCall>>,
+    tool_calls: Option<Vec<dynamo_async_openai::types::ChatCompletionMessageToolCall>>,
+
+    /// Optional reasoning content for the chat choice.
+    reasoning_content: Option<String>,
 }
 
 impl Default for DeltaAggregator {
@@ -95,6 +89,7 @@ impl DeltaAggregator {
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -110,21 +105,21 @@ impl DeltaAggregator {
                 if aggregator.error.is_none() && delta.data.is_some() {
                     // Extract the data payload from the delta.
                     let delta = delta.data.unwrap();
-                    aggregator.id = delta.inner.id;
-                    aggregator.model = delta.inner.model;
-                    aggregator.created = delta.inner.created;
-                    aggregator.service_tier = delta.inner.service_tier;
+                    aggregator.id = delta.id;
+                    aggregator.model = delta.model;
+                    aggregator.created = delta.created;
+                    aggregator.service_tier = delta.service_tier;
 
                     // Aggregate usage statistics if available.
-                    if let Some(usage) = delta.inner.usage {
+                    if let Some(usage) = delta.usage {
                         aggregator.usage = Some(usage);
                     }
-                    if let Some(system_fingerprint) = delta.inner.system_fingerprint {
+                    if let Some(system_fingerprint) = delta.system_fingerprint {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
 
                     // Aggregate choices incrementally.
-                    for choice in delta.inner.choices {
+                    for choice in delta.choices {
                         let state_choice =
                             aggregator
                                 .choices
@@ -136,11 +131,19 @@ impl DeltaAggregator {
                                     finish_reason: None,
                                     logprobs: choice.logprobs,
                                     tool_calls: None,
+                                    reasoning_content: None,
                                 });
 
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
                             state_choice.text.push_str(content);
+                        }
+
+                        if let Some(reasoning_content) = &choice.delta.reasoning_content {
+                            state_choice
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(reasoning_content);
                         }
 
                         // Update finish reason if provided.
@@ -162,21 +165,30 @@ impl DeltaAggregator {
 
         // After aggregation, inspect each choice's text for tool call syntax
         for choice in aggregator.choices.values_mut() {
-            if choice.tool_calls.is_none() {
-                if let Ok(Some(tool_call)) =
-                    crate::preprocessor::tools::try_parse_tool_call_aggregate(&choice.text)
-                {
+            if choice.tool_calls.is_none()
+                && let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
+                    &choice.text,
+                    parsing_options.tool_call_parser.as_deref(),
+                )
+            {
+                if tool_calls.is_empty() {
+                    continue;
+                }
+                for tool_call in &tool_calls {
                     tracing::debug!(
                         tool_call_id = %tool_call.id,
                         function_name = %tool_call.function.name,
                         arguments = %tool_call.function.arguments,
                         "Parsed structured tool call from aggregated content"
                     );
-
-                    choice.tool_calls = Some(vec![tool_call]);
-                    choice.text.clear();
-                    choice.finish_reason = Some(async_openai::types::FinishReason::ToolCalls);
                 }
+                choice.tool_calls = Some(tool_calls);
+                choice.text.clear();
+                // If normal text is not empty, update the choice text
+                if let Some(normal_text) = normal_text.filter(|text| !text.is_empty()) {
+                    choice.text = normal_text;
+                }
+                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
             }
         }
 
@@ -184,13 +196,13 @@ impl DeltaAggregator {
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
-            .map(async_openai::types::ChatChoice::from)
+            .map(dynamo_async_openai::types::ChatChoice::from)
             .collect();
 
         choices.sort_by(|a, b| a.index.cmp(&b.index));
 
         // Construct the final response object.
-        let inner = async_openai::types::CreateChatCompletionResponse {
+        let response = NvCreateChatCompletionResponse {
             id: aggregator.id,
             created: aggregator.created,
             usage: aggregator.usage,
@@ -201,23 +213,21 @@ impl DeltaAggregator {
             service_tier: aggregator.service_tier,
         };
 
-        let response = NvCreateChatCompletionResponse { inner };
-
         Ok(response)
     }
 }
 
 #[allow(deprecated)]
-impl From<DeltaChoice> for async_openai::types::ChatChoice {
-    /// Converts a [`DeltaChoice`] into an [`async_openai::types::ChatChoice`].
+impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
+    /// Converts a [`DeltaChoice`] into an [`dynamo_async_openai::types::ChatChoice`].
     ///
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        async_openai::types::ChatChoice {
-            message: async_openai::types::ChatCompletionResponseMessage {
+        dynamo_async_openai::types::ChatChoice {
+            message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
-                content: if delta.tool_calls.is_some() {
+                content: if delta.text.is_empty() {
                     None
                 } else {
                     Some(delta.text)
@@ -226,6 +236,7 @@ impl From<DeltaChoice> for async_openai::types::ChatChoice {
                 refusal: None,
                 function_call: None,
                 audio: None,
+                reasoning_content: delta.reasoning_content,
             },
             index: delta.index,
             finish_reason: delta.finish_reason,
@@ -234,22 +245,10 @@ impl From<DeltaChoice> for async_openai::types::ChatChoice {
     }
 }
 
-impl NvCreateChatCompletionResponse {
-    /// Converts an SSE stream into a [`NvCreateChatCompletionResponse`].
-    ///
-    /// # Arguments
-    /// * `stream` - A stream of SSE messages containing chat completion responses.
-    ///
-    /// # Returns
-    /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
-    /// * `Err(String)` if an error occurs.
-    pub async fn from_sse_stream(
-        stream: DataStream<Result<Message, SseCodecError>>,
-    ) -> Result<NvCreateChatCompletionResponse, String> {
-        let stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(stream);
-        NvCreateChatCompletionResponse::from_annotated_stream(stream).await
-    }
-
+/// Trait for aggregating chat completion responses from streams.
+/// Setting this macro because our async functions are not used outside of the library
+#[allow(async_fn_in_trait)]
+pub trait ChatCompletionAggregator {
     /// Aggregates an annotated stream of chat completion responses into a final response.
     ///
     /// # Arguments
@@ -258,10 +257,39 @@ impl NvCreateChatCompletionResponse {
     /// # Returns
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
     /// * `Err(String)` if an error occurs.
-    pub async fn from_annotated_stream(
+    async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
+    ) -> Result<NvCreateChatCompletionResponse, String>;
+
+    /// Converts an SSE stream into a [`NvCreateChatCompletionResponse`].
+    ///
+    /// # Arguments
+    /// * `stream` - A stream of SSE messages containing chat completion responses.
+    ///
+    /// # Returns
+    /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
+    /// * `Err(String)` if an error occurs.
+    async fn from_sse_stream(
+        stream: DataStream<Result<Message, SseCodecError>>,
+        parsing_options: ParsingOptions,
+    ) -> Result<NvCreateChatCompletionResponse, String>;
+}
+
+impl ChatCompletionAggregator for dynamo_async_openai::types::CreateChatCompletionResponse {
+    async fn from_annotated_stream(
+        stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
-        DeltaAggregator::apply(stream).await
+        DeltaAggregator::apply(stream, parsing_options).await
+    }
+
+    async fn from_sse_stream(
+        stream: DataStream<Result<Message, SseCodecError>>,
+        parsing_options: ParsingOptions,
+    ) -> Result<NvCreateChatCompletionResponse, String> {
+        let stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(stream);
+        NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options).await
     }
 }
 
@@ -275,25 +303,26 @@ mod tests {
     fn create_test_delta(
         index: u32,
         text: &str,
-        role: Option<async_openai::types::Role>,
-        finish_reason: Option<async_openai::types::FinishReason>,
+        role: Option<dynamo_async_openai::types::Role>,
+        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
-        let delta = async_openai::types::ChatCompletionStreamResponseDelta {
+        let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: Some(text.to_string()),
             function_call: None,
             tool_calls: None,
             role,
             refusal: None,
+            reasoning_content: None,
         };
-        let choice = async_openai::types::ChatChoiceStream {
+        let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
             logprobs: None,
         };
 
-        let inner = async_openai::types::CreateChatCompletionStreamResponse {
+        let data = NvCreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             model: "meta/llama-3.1-8b-instruct".to_string(),
             created: 1234567890,
@@ -303,8 +332,6 @@ mod tests {
             choices: vec![choice],
             object: "chat.completion".to_string(),
         };
-
-        let data = NvCreateChatCompletionStreamResponse { inner };
 
         Annotated {
             data: Some(data),
@@ -321,51 +348,55 @@ mod tests {
             Box::pin(stream::empty());
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
         let response = result.unwrap();
 
         // Verify that the response is empty and has default values
-        assert_eq!(response.inner.id, "");
-        assert_eq!(response.inner.model, "");
-        assert_eq!(response.inner.created, 0);
-        assert!(response.inner.usage.is_none());
-        assert!(response.inner.system_fingerprint.is_none());
-        assert_eq!(response.inner.choices.len(), 0);
-        assert!(response.inner.service_tier.is_none());
+        assert_eq!(response.id, "");
+        assert_eq!(response.model, "");
+        assert_eq!(response.created, 0);
+        assert!(response.usage.is_none());
+        assert!(response.system_fingerprint.is_none());
+        assert_eq!(response.choices.len(), 0);
+        assert!(response.service_tier.is_none());
     }
 
     #[tokio::test]
     async fn test_single_delta() {
         // Create a sample delta
-        let annotated_delta =
-            create_test_delta(0, "Hello,", Some(async_openai::types::Role::User), None);
+        let annotated_delta = create_test_delta(
+            0,
+            "Hello,",
+            Some(dynamo_async_openai::types::Role::User),
+            None,
+        );
 
         // Create a stream
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
         let response = result.unwrap();
 
         // Verify the response fields
-        assert_eq!(response.inner.id, "test_id");
-        assert_eq!(response.inner.model, "meta/llama-3.1-8b-instruct");
-        assert_eq!(response.inner.created, 1234567890);
-        assert!(response.inner.usage.is_none());
-        assert!(response.inner.system_fingerprint.is_none());
-        assert_eq!(response.inner.choices.len(), 1);
-        let choice = &response.inner.choices[0];
+        assert_eq!(response.id, "test_id");
+        assert_eq!(response.model, "meta/llama-3.1-8b-instruct");
+        assert_eq!(response.created, 1234567890);
+        assert!(response.usage.is_none());
+        assert!(response.system_fingerprint.is_none());
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(choice.message.content.as_ref().unwrap(), "Hello,");
         assert!(choice.finish_reason.is_none());
-        assert_eq!(choice.message.role, async_openai::types::Role::User);
-        assert!(response.inner.service_tier.is_none());
+        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+        assert!(response.service_tier.is_none());
     }
 
     #[tokio::test]
@@ -373,13 +404,17 @@ mod tests {
         // Create multiple deltas with the same choice index
         // One will have a MessageRole and no FinishReason,
         // the other will have a FinishReason and no MessageRole
-        let annotated_delta1 =
-            create_test_delta(0, "Hello,", Some(async_openai::types::Role::User), None);
+        let annotated_delta1 = create_test_delta(
+            0,
+            "Hello,",
+            Some(dynamo_async_openai::types::Role::User),
+            None,
+        );
         let annotated_delta2 = create_test_delta(
             0,
             " world!",
             None,
-            Some(async_openai::types::FinishReason::Stop),
+            Some(dynamo_async_openai::types::FinishReason::Stop),
         );
 
         // Create a stream
@@ -387,22 +422,22 @@ mod tests {
         let stream = Box::pin(stream::iter(annotated_deltas));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
         let response = result.unwrap();
 
         // Verify the response fields
-        assert_eq!(response.inner.choices.len(), 1);
-        let choice = &response.inner.choices[0];
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(choice.message.content.as_ref().unwrap(), "Hello, world!");
         assert_eq!(
             choice.finish_reason,
-            Some(async_openai::types::FinishReason::Stop)
+            Some(dynamo_async_openai::types::FinishReason::Stop)
         );
-        assert_eq!(choice.message.role, async_openai::types::Role::User);
+        assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
     }
 
     #[allow(deprecated)]
@@ -410,7 +445,7 @@ mod tests {
     async fn test_multiple_choices() {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
-        let delta = async_openai::types::CreateChatCompletionStreamResponse {
+        let data = NvCreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             model: "test_model".to_string(),
             created: 1234567890,
@@ -418,35 +453,35 @@ mod tests {
             usage: None,
             system_fingerprint: None,
             choices: vec![
-                async_openai::types::ChatChoiceStream {
+                dynamo_async_openai::types::ChatChoiceStream {
                     index: 0,
-                    delta: async_openai::types::ChatCompletionStreamResponseDelta {
-                        role: Some(async_openai::types::Role::Assistant),
+                    delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
+                        role: Some(dynamo_async_openai::types::Role::Assistant),
                         content: Some("Choice 0".to_string()),
                         function_call: None,
                         tool_calls: None,
                         refusal: None,
+                        reasoning_content: None,
                     },
-                    finish_reason: Some(async_openai::types::FinishReason::Stop),
+                    finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
                     logprobs: None,
                 },
-                async_openai::types::ChatChoiceStream {
+                dynamo_async_openai::types::ChatChoiceStream {
                     index: 1,
-                    delta: async_openai::types::ChatCompletionStreamResponseDelta {
-                        role: Some(async_openai::types::Role::Assistant),
+                    delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
+                        role: Some(dynamo_async_openai::types::Role::Assistant),
                         content: Some("Choice 1".to_string()),
                         function_call: None,
                         tool_calls: None,
                         refusal: None,
+                        reasoning_content: None,
                     },
-                    finish_reason: Some(async_openai::types::FinishReason::Stop),
+                    finish_reason: Some(dynamo_async_openai::types::FinishReason::Stop),
                     logprobs: None,
                 },
             ],
             object: "chat.completion".to_string(),
         };
-
-        let data = NvCreateChatCompletionStreamResponse { inner: delta };
 
         // Wrap it in Annotated and create a stream
         let annotated_delta = Annotated {
@@ -458,31 +493,161 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
 
         // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream).await;
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
 
         // Check the result
         assert!(result.is_ok());
         let mut response = result.unwrap();
 
         // Verify the response fields
-        assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
-        let choice0 = &response.inner.choices[0];
+        assert_eq!(response.choices.len(), 2);
+        response.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        let choice0 = &response.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(choice0.message.content.as_ref().unwrap(), "Choice 0");
         assert_eq!(
             choice0.finish_reason,
-            Some(async_openai::types::FinishReason::Stop)
+            Some(dynamo_async_openai::types::FinishReason::Stop)
         );
-        assert_eq!(choice0.message.role, async_openai::types::Role::Assistant);
+        assert_eq!(
+            choice0.message.role,
+            dynamo_async_openai::types::Role::Assistant
+        );
 
-        let choice1 = &response.inner.choices[1];
+        let choice1 = &response.choices[1];
         assert_eq!(choice1.index, 1);
         assert_eq!(choice1.message.content.as_ref().unwrap(), "Choice 1");
         assert_eq!(
             choice1.finish_reason,
-            Some(async_openai::types::FinishReason::Stop)
+            Some(dynamo_async_openai::types::FinishReason::Stop)
         );
-        assert_eq!(choice1.message.role, async_openai::types::Role::Assistant);
+        assert_eq!(
+            choice1.message.role,
+            dynamo_async_openai::types::Role::Assistant
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_output() {
+        // Simulate a delta with a tool call in the content
+        let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+
+        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
+        let annotated_delta = create_test_delta(
+            0,
+            tool_call_json,
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+        );
+        let data = annotated_delta.data.unwrap();
+
+        // Wrap it in Annotated and create a stream
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        // Call DeltaAggregator::apply
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        // Check the result
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // There should be one choice
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // The tool_calls field should be present and parsed
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        let tool_call = &tool_calls[0];
+        assert_eq!(tool_call.function.name, "get_weather");
+        // The arguments should be a JSON string containing the expected keys
+        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+
+        // The content should be cleared (None) after tool call parsing
+        assert!(choice.message.content.is_none());
+
+        // The finish_reason should be ToolCalls
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            choice.message.role,
+            dynamo_async_openai::types::Role::Assistant
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_output_with_normal_text() {
+        // Simulate a delta with a tool call in the content
+        let tool_call_json = r#"Hey, I'm a normal text! {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+
+        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
+        let annotated_delta = create_test_delta(
+            0,
+            tool_call_json,
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+        );
+        let data = annotated_delta.data.unwrap();
+
+        // Wrap it in Annotated and create a stream
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        // Call DeltaAggregator::apply
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        // Check the result
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // There should be one choice
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // The tool_calls field should be present and parsed
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        let tool_call = &tool_calls[0];
+        assert_eq!(tool_call.function.name, "get_weather");
+        // The arguments should be a JSON string containing the expected keys
+        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+
+        // The content should be the normal text
+        assert!(choice.message.content.is_some());
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            "Hey, I'm a normal text!"
+        );
+
+        // The finish_reason should be ToolCalls
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            choice.message.role,
+            dynamo_async_openai::types::Role::Assistant
+        );
     }
 }

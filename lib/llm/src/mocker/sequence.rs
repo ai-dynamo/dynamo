@@ -90,7 +90,7 @@ impl ActiveSequence {
         assert!(block_size > 1, "block_size must be greater than 1");
         let num_input_tokens = tokens.len();
 
-        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, None);
+        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
         let unique_blocks =
             create_unique_blocks_from_sequence(&tokens, None, block_size, enable_prefix_caching);
         let creation_signal = Some(MoveBlock::Use(unique_blocks.clone()));
@@ -122,6 +122,14 @@ impl ActiveSequence {
 
     pub fn take_creation_signal(&mut self) -> Option<MoveBlock> {
         self.creation_signal.take()
+    }
+
+    pub fn block_hashes(&self) -> Vec<u64> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.block_hash())
+            .collect()
     }
 
     /// Create a new ActiveSequence instance and return the creation signal

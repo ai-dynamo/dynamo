@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -20,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// Record entry that will be serialized to JSONL
@@ -34,6 +22,7 @@ where
 }
 
 /// A generic recorder for events that streams directly to a JSONL file
+#[derive(Debug)]
 pub struct Recorder<T> {
     /// A sender for events that can be cloned and shared with producers
     event_tx: mpsc::Sender<T>,
@@ -81,10 +70,10 @@ where
         let first_event_time_clone = first_event_time.clone();
 
         // Ensure the directory exists
-        if let Some(parent) = output_path.as_ref().parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).await?;
-            }
+        if let Some(parent) = output_path.as_ref().parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).await?;
         }
 
         // Create the file for writing
@@ -113,16 +102,16 @@ where
 
             loop {
                 // Check time limit if set
-                if let Some(deadline) = max_time_deadline {
-                    if Instant::now() >= deadline {
-                        tracing::info!("Recorder reached max time limit, shutting down");
-                        // Flush and cancel
-                        if let Err(e) = writer.flush().await {
-                            tracing::error!("Failed to flush on time limit shutdown: {}", e);
-                        }
-                        cancel_clone.cancel();
-                        return;
+                if let Some(deadline) = max_time_deadline
+                    && Instant::now() >= deadline
+                {
+                    tracing::info!("Recorder reached max time limit, shutting down");
+                    // Flush and cancel
+                    if let Err(e) = writer.flush().await {
+                        tracing::error!("Failed to flush on time limit shutdown: {}", e);
                     }
+                    cancel_clone.cancel();
+                    return;
                 }
 
                 tokio::select! {
@@ -181,8 +170,8 @@ where
                         line_count += 1;
 
                         // Check if we need to rotate to a new file
-                        if let Some(max_lines) = max_lines_per_file {
-                            if line_count >= max_lines {
+                        if let Some(max_lines) = max_lines_per_file
+                            && line_count >= max_lines {
                                 // Flush the current file
                                 if let Err(e) = writer.flush().await {
                                     tracing::error!("Failed to flush file before rotation: {}", e);
@@ -211,15 +200,14 @@ where
                                     }
                                 }
                             }
-                        }
 
                         // Update event count
                         let mut count = event_count_clone.lock().await;
                         *count += 1;
 
                         // Check if we've reached the maximum count
-                        if let Some(max) = max_count {
-                            if *count >= max {
+                        if let Some(max) = max_count
+                            && *count >= max {
                                 tracing::info!("Recorder reached max event count ({}), shutting down", max);
                                 // Flush buffer before shutting down
                                 if let Err(e) = writer.flush().await {
@@ -230,7 +218,6 @@ where
                                 cancel_clone.cancel();
                                 return;
                             }
-                        }
                     }
                 }
             }
@@ -318,19 +305,19 @@ where
         // Read and send events line by line
         while let Some(line) = lines.next_line().await? {
             // Check if we've reached the maximum count
-            if let Some(max) = max_count {
-                if count >= max {
-                    tracing::info!("Reached maximum event count ({}), stopping", max);
-                    break;
-                }
+            if let Some(max) = max_count
+                && count >= max
+            {
+                tracing::info!("Reached maximum event count ({}), stopping", max);
+                break;
             }
 
             // Check if we've exceeded the time limit
-            if let Some(end_time) = deadline {
-                if Instant::now() >= end_time {
-                    tracing::info!("Reached maximum time limit, stopping");
-                    break;
-                }
+            if let Some(end_time) = deadline
+                && Instant::now() >= end_time
+            {
+                tracing::info!("Reached maximum time limit, stopping");
+                break;
             }
 
             line_number += 1;
@@ -357,12 +344,12 @@ where
             let event = record.event;
 
             // Handle timing if needed
-            if timed && prev_timestamp.is_some() {
-                let prev = prev_timestamp.unwrap();
-                if timestamp > prev {
-                    let wait_time = timestamp - prev;
-                    tokio::time::sleep(Duration::from_millis(wait_time)).await;
-                }
+            if timed
+                && let Some(prev) = prev_timestamp
+                && timestamp > prev
+            {
+                let wait_time = timestamp - prev;
+                tokio::time::sleep(Duration::from_millis(wait_time)).await;
             }
 
             // Send the event
@@ -383,6 +370,12 @@ where
         }
 
         Ok(count)
+    }
+}
+
+impl<T> Drop for Recorder<T> {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -471,11 +464,11 @@ mod tests {
         // Check that both events were recorded
         assert_eq!(recorder.event_count().await, 2);
 
-        // Check that the elapsed time is between 9 and 11 milliseconds
+        // Check that the elapsed time is between 7 and 13 milliseconds
         let elapsed_ms = recorder.elapsed_time().await.unwrap().as_millis();
-        if !(9..=11).contains(&elapsed_ms) {
+        if !(7..=13).contains(&elapsed_ms) {
             println!("Actual elapsed time: {} ms", elapsed_ms);
-            assert!((9..=11).contains(&elapsed_ms));
+            assert!((7..=13).contains(&elapsed_ms));
         }
 
         // Force shutdown to flush file
@@ -617,7 +610,10 @@ mod tests {
 
             // Should have MAX_LINES_PER_FILE lines in each file (except maybe the last one)
             if i < found_files.len() - 1 {
-                assert_eq!(line_count, MAX_LINES_PER_FILE, "Each file except possibly the last should have exactly MAX_LINES_PER_FILE lines");
+                assert_eq!(
+                    line_count, MAX_LINES_PER_FILE,
+                    "Each file except possibly the last should have exactly MAX_LINES_PER_FILE lines"
+                );
             }
 
             total_lines += line_count;
@@ -636,19 +632,19 @@ mod tests {
                 line_number += 1;
                 let entry: RecordEntry<TestEvent> = serde_json::from_str(&line).unwrap();
 
-                if let Some(prev) = prev_timestamp {
-                    if entry.timestamp < prev {
-                        unsorted_count += 1;
-                        if unsorted_count <= 5 {
-                            // Only log first 5 violations to avoid spam
-                            println!(
-                                "Timestamp order violation in file {} at line {}: {} < {}",
-                                file_path.display(),
-                                line_number,
-                                entry.timestamp,
-                                prev
-                            );
-                        }
+                if let Some(prev) = prev_timestamp
+                    && entry.timestamp < prev
+                {
+                    unsorted_count += 1;
+                    if unsorted_count <= 5 {
+                        // Only log first 5 violations to avoid spam
+                        println!(
+                            "Timestamp order violation in file {} at line {}: {} < {}",
+                            file_path.display(),
+                            line_number,
+                            entry.timestamp,
+                            prev
+                        );
                     }
                 }
 

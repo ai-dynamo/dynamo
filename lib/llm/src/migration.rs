@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
@@ -23,14 +11,14 @@ use async_nats::client::{
 };
 
 use crate::{
-    model_card::model::ModelDeploymentCard,
+    model_card::ModelDeploymentCard,
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
 };
 
 use dynamo_runtime::{
     pipeline::{
-        async_trait, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
-        ServerStreamingEngine, SingleIn,
+        AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
+        SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -112,10 +100,13 @@ impl RetryManager {
             if let Some(response) = response_stream.next().await {
                 if let Some(err) = response.err() {
                     const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                    if format!("{:?}", err) == STREAM_ERR_MSG {
-                        tracing::info!("Stream disconnected... recreating stream...");
+                    if err
+                        .chain()
+                        .any(|e| e.to_string().starts_with(STREAM_ERR_MSG))
+                    {
+                        tracing::warn!("Stream disconnected... recreating stream...");
                         if let Err(err) = self.new_stream().await {
-                            tracing::info!("Cannot recreate stream: {:?}", err);
+                            tracing::warn!("Cannot recreate stream: {:#}", err);
                         } else {
                             continue;
                         }
@@ -135,13 +126,12 @@ impl RetryManager {
             // TODO: Is there anything needed to pass between context?
             let request = SingleIn::new(self.request.clone());
             response_stream = Some(self.next_generate.generate(request).await);
-            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err() {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                    if matches!(req_err.kind(), NatsNoResponders) {
-                        tracing::info!("Creating new stream... retrying...");
-                        continue;
-                    }
-                }
+            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
+                && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
+                && matches!(req_err.kind(), NatsNoResponders)
+            {
+                tracing::warn!("Creating new stream... retrying...");
+                continue;
             }
             break;
         }
@@ -150,9 +140,9 @@ impl RetryManager {
                 self.next_stream = Some(next_stream);
                 Ok(())
             }
-            Some(Err(err)) => Err(err), // should propagate streaming error if stream started
+            Some(Err(err)) => Err(err), // should propagate original error if any
             None => Err(Error::msg(
-                "Retries exhausted - should propagate streaming error",
+                "Migration limit exhausted", // should propagate original error if any
             )),
         }
     }
@@ -165,6 +155,10 @@ impl RetryManager {
             Some(output) => output,
             None => return,
         };
+        if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
+            self.request.stop_conditions.max_tokens =
+                Some(max_tokens.saturating_sub(llm_engine_output.token_ids.len() as u32));
+        }
         for token_id in llm_engine_output.token_ids.iter() {
             self.request.token_ids.push(*token_id);
         }
@@ -174,24 +168,27 @@ impl RetryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::{SamplingOptions, StopConditions};
-    use dynamo_runtime::pipeline::context::Controller;
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::pipeline::AsyncEngine;
+    use dynamo_runtime::pipeline::context::Controller;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::sync::mpsc;
 
     // Helper to create a mock preprocessed request
-    fn create_mock_request() -> PreprocessedRequest {
-        PreprocessedRequest {
-            token_ids: vec![1, 2, 3],
-            batch_token_ids: None,
-            stop_conditions: StopConditions::default(),
-            sampling_options: SamplingOptions::default(),
-            eos_token_ids: vec![],
-            mdc_sum: None,
-            annotations: vec![],
-            estimated_prefix_hit_num_blocks: None,
-        }
+    fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("mock".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions {
+                max_tokens: Some(max_tokens),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .eos_token_ids(vec![])
+            .annotations(vec![])
+            .build()
+            .unwrap()
     }
 
     // Helper to create mock LLM engine output
@@ -202,6 +199,7 @@ mod tests {
             text: Some(format!("token_{}", token_id)),
             cum_log_probs: None,
             log_probs: None,
+            top_logprobs: None,
             finish_reason: None,
             index: None,
         })
@@ -264,9 +262,18 @@ mod tests {
                 .token_ids
                 .len()
                 .saturating_sub(initial_tokens);
-            let _responses_remaining = self
-                .num_responses
-                .saturating_sub(responses_already_generated);
+
+            // Assert that max_tokens reflects the expected remaining tokens
+            let expected_max_tokens =
+                self.num_responses
+                    .saturating_sub(responses_already_generated) as u32;
+            assert_eq!(
+                preprocessed_request.stop_conditions.max_tokens,
+                Some(expected_max_tokens),
+                "max_tokens should be {} but got {:?}",
+                expected_max_tokens,
+                preprocessed_request.stop_conditions.max_tokens
+            );
 
             match &self.behavior {
                 MockBehavior::Success => {
@@ -454,7 +461,8 @@ mod tests {
     /// Expected behavior: All 10 responses should be received successfully.
     #[tokio::test]
     async fn test_retry_manager_no_migration() {
-        let request = create_mock_request();
+        dynamo_runtime::logging::init();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::Success, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
@@ -485,7 +493,8 @@ mod tests {
     /// Expected behavior: All 10 responses should be received successfully after retry.
     #[tokio::test]
     async fn test_retry_manager_new_request_migration() {
-        let request = create_mock_request();
+        dynamo_runtime::logging::init();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::FailThenSuccess, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
@@ -516,7 +525,9 @@ mod tests {
     /// Expected behavior: 5 responses from first stream + 5 responses from retry stream = 10 total.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration() {
-        let request = create_mock_request();
+        dynamo_runtime::logging::init();
+
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFail { fail_after: 5 },
             10,
@@ -552,7 +563,8 @@ mod tests {
     /// Expected behavior: Should receive an error after all retries are exhausted, with the original error.
     #[tokio::test]
     async fn test_retry_manager_new_request_migration_indefinite_failure() {
-        let request = create_mock_request();
+        dynamo_runtime::logging::init();
+        let request = create_mock_request(0);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::AlwaysFail, 0, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
@@ -572,7 +584,8 @@ mod tests {
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
-        let request = create_mock_request();
+        dynamo_runtime::logging::init();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlways { fail_after: 3 },
             10,
@@ -607,9 +620,11 @@ mod tests {
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
-            assert!(error
-                .to_string()
-                .contains("Stream ended before generation completed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Stream ended before generation completed")
+            );
         }
     }
 
@@ -619,7 +634,8 @@ mod tests {
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
-        let request = create_mock_request();
+        dynamo_runtime::logging::init();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlwaysStreamError { fail_after: 3 },
             10,
@@ -654,9 +670,11 @@ mod tests {
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
-            assert!(error
-                .to_string()
-                .contains("Stream ended before generation completed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Stream ended before generation completed")
+            );
         }
     }
 }

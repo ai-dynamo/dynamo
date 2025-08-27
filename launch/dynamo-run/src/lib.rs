@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context as _;
-use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig;
+use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_runtime::CancellationToken;
+use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 mod flags;
@@ -19,7 +20,7 @@ pub async fn run(
     runtime: Runtime,
     in_opt: Input,
     out_opt: Option<Output>,
-    flags: Flags,
+    mut flags: Flags,
 ) -> anyhow::Result<()> {
     //
     // Configure
@@ -34,13 +35,17 @@ pub async fn run(
                 .or(flags.model_path_flag.clone()),
         )
         .model_name(flags.model_name.clone())
+        .model_config(flags.model_config.clone())
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
-        .http_port(Some(flags.http_port))
+        .http_port(flags.http_port)
+        .tls_cert_path(flags.tls_cert_path.take())
+        .tls_key_path(flags.tls_key_path.take())
         .router_config(Some(flags.router_config()))
         .request_template(flags.request_template.clone())
-        .migration_limit(flags.migration_limit);
+        .migration_limit(flags.migration_limit)
+        .is_mocker(matches!(out_opt, Some(Output::Mocker)));
 
     // TODO: old, address this later:
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
@@ -49,9 +54,13 @@ pub async fn run(
     if let Input::Endpoint(path) = &in_opt {
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
 
-        let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+        let dst_config = DistributedConfig::from_settings(flags.static_worker);
+        let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
         rt = Either::Right(distributed_runtime);
     };
+    if let Some(Output::Static(path)) = &out_opt {
+        builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
+    }
 
     let local_model = builder.build().await?;
 
@@ -63,7 +72,7 @@ pub async fn run(
     print_cuda(&out_opt);
 
     // Now that we know the output we're targeting, check if we expect it to work
-    flags.validate(&local_model, &out_opt)?;
+    flags.validate(&local_model, &in_opt, &out_opt)?;
 
     // Make an engine from the local_model, flags and output.
     let engine_config = engine_for(
@@ -74,7 +83,6 @@ pub async fn run(
         rt.clone(),
     )
     .await?;
-
     //
     // Run in from an input
     //
@@ -93,24 +101,35 @@ async fn engine_for(
     rt: Either<Runtime, DistributedRuntime>,
 ) -> anyhow::Result<EngineConfig> {
     match out_opt {
-        Output::Dynamic => Ok(EngineConfig::Dynamic(Box::new(local_model))),
+        Output::Auto => {
+            // Auto-discover backends
+            Ok(EngineConfig::Dynamic(Box::new(local_model)))
+        }
+        Output::Static(_) => {
+            // A single static backend, no etcd
+            Ok(EngineConfig::StaticRemote(Box::new(local_model)))
+        }
         Output::EchoFull => Ok(EngineConfig::StaticFull {
             model: Box::new(local_model),
             engine: dynamo_llm::engines::make_engine_full(),
+            is_static: flags.static_worker,
         }),
         Output::EchoCore => Ok(EngineConfig::StaticCore {
             engine: dynamo_llm::engines::make_engine_core(),
             model: Box::new(local_model),
+            is_static: flags.static_worker,
         }),
         #[cfg(feature = "mistralrs")]
         Output::MistralRs => Ok(EngineConfig::StaticFull {
             engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
             model: Box::new(local_model),
+            is_static: flags.static_worker,
         }),
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => Ok(EngineConfig::StaticCore {
             engine: dynamo_engine_llamacpp::make_engine(cancel_token, &local_model).await?,
             model: Box::new(local_model),
+            is_static: flags.static_worker,
         }),
         Output::Mocker => {
             let Either::Right(drt) = rt else {
@@ -126,6 +145,7 @@ async fn engine_for(
             Ok(EngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
+                is_static: flags.static_worker,
             })
         }
     }

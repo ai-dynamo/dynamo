@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 use std::{num::NonZero, sync::Arc};
 
-use async_openai::types::FinishReason;
 use async_stream::stream;
 use async_trait::async_trait;
+use dynamo_async_openai::types::FinishReason;
 use either::Either;
 use indexmap::IndexMap;
 use mistralrs::{
@@ -25,7 +25,7 @@ use dynamo_runtime::protocols::annotated::Annotated;
 
 use dynamo_llm::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -92,10 +92,7 @@ impl MistralRsEngine {
                 None,
                 model_dir.display().to_string(),
                 vec![model_filename.to_string_lossy().into_owned()],
-                GGUFSpecificConfig {
-                    prompt_chunksize: None,
-                    topology: None,
-                },
+                GGUFSpecificConfig::default(),
                 no_kv_cache,
                 jinja_explicit,
             )
@@ -215,9 +212,9 @@ impl MistralRsEngine {
 
         // Perform warmup request
         let (tx, mut rx) = channel(1);
-        let request_id = engine.mistralrs.next_request_id();
+        let mistralrs_request_id = engine.mistralrs.next_request_id();
         let warmup_request = Request::Normal(Box::new(NormalRequest {
-            id: request_id,
+            id: mistralrs_request_id,
             model_id: Some(display_name.to_string()),
             messages: RequestMessage::Chat {
                 messages: vec![IndexMap::from([
@@ -243,17 +240,16 @@ impl MistralRsEngine {
         }));
 
         // Send warmup request and consume response
-        if let Ok(sender) = engine.mistralrs.get_sender(None) {
-            if let Ok(()) = sender.send(warmup_request).await {
-                if let Some(response) = rx.recv().await {
-                    match response.as_result() {
-                        Ok(r) => {
-                            tracing::debug!(request_id, "Warmup response: {r:?}");
-                        }
-                        Err(err) => {
-                            tracing::error!(request_id, %err, "Failed converting response to result.");
-                        }
-                    }
+        if let Ok(sender) = engine.mistralrs.get_sender(None)
+            && let Ok(()) = sender.send(warmup_request).await
+            && let Some(response) = rx.recv().await
+        {
+            match response.as_result() {
+                Ok(r) => {
+                    tracing::debug!(mistralrs_request_id, "Warmup response: {r:?}");
+                }
+                Err(err) => {
+                    tracing::error!(mistralrs_request_id, %err, "Failed converting response to result.");
                 }
             }
         }
@@ -276,14 +272,15 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = request.transfer(());
         let ctx = context.context();
+        let request_id = ctx.id().to_string();
         let (tx, mut rx) = channel(10_000);
 
         let mut messages = vec![];
         for m in request.inner.messages {
-            let async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
+            let dynamo_async_openai::types::ChatCompletionRequestMessage::User(inner_m) = m else {
                 continue;
             };
-            let async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
+            let dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(content) =
                 inner_m.content
             else {
                 anyhow::bail!("Only Text type chat completion supported");
@@ -342,9 +339,9 @@ impl
             n_choices: 1,
             dry_params: det.dry_params,
         };
-        let request_id = self.mistralrs.next_request_id();
+        let mistralrs_request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
-            id: request_id,
+            id: mistralrs_request_id,
             model_id: Some(self.display_name.clone()),
             messages: RequestMessage::Chat {
                 messages,
@@ -373,14 +370,14 @@ impl
                 let response = match response.as_result() {
                     Ok(r) => r,
                     Err(err) => {
-                        tracing::error!(request_id, %err, "Failed converting mistralrs channel response to result.");
+                        tracing::error!(mistralrs_request_id, %err, "Failed converting mistralrs channel response to result.");
                         break;
                     }
                 };
                 match response {
                     ResponseOk::Chunk(c) => {
                         let Some(from_assistant) = c.choices[0].delta.content.clone() else {
-                            tracing::warn!(request_id, "No content from mistralrs. Abandoning request.");
+                            tracing::warn!(mistralrs_request_id, "No content from mistralrs. Abandoning request.");
                             break;
                         };
                         let finish_reason = match &c.choices[0].finish_reason.as_deref() {
@@ -391,7 +388,7 @@ impl
                                 Some(FinishReason::Length)
                             }
                             Some(s) => {
-                                tracing::warn!(request_id, stop_reason = s, "Unknow stop reason");
+                                tracing::warn!(mistralrs_request_id, stop_reason = s, "Unknow stop reason");
                                 Some(FinishReason::Stop)
                             }
                             None => None,
@@ -399,17 +396,18 @@ impl
                         //tracing::trace!("from_assistant: {from_assistant}");
 
                         #[allow(deprecated)]
-                        let inner = async_openai::types::CreateChatCompletionStreamResponse{
-                            id: c.id,
-                            choices: vec![async_openai::types::ChatChoiceStream{
+                        let delta = NvCreateChatCompletionStreamResponse {
+                            id: format!("chatcmpl-{request_id}"),
+                            choices: vec![dynamo_async_openai::types::ChatChoiceStream{
                                 index: 0,
-                                delta: async_openai::types::ChatCompletionStreamResponseDelta{
+                                delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta{
                                     //role: c.choices[0].delta.role,
-                                    role: Some(async_openai::types::Role::Assistant),
+                                    role: Some(dynamo_async_openai::types::Role::Assistant),
                                     content: Some(from_assistant),
                                     tool_calls: None,
                                     refusal: None,
                                     function_call: None,
+                                    reasoning_content: None,
                                 },
                                 logprobs: None,
                                 finish_reason,
@@ -421,7 +419,6 @@ impl
                             system_fingerprint: Some(c.system_fingerprint),
                             service_tier: None,
                         };
-                        let delta = NvCreateChatCompletionStreamResponse{inner};
                         let ann = Annotated{
                             id: None,
                             data: Some(delta),
@@ -431,11 +428,11 @@ impl
                         yield ann;
 
                         if finish_reason.is_some() {
-                            //tracing::trace!(request_id, "Finish reason: {finish_reason:?}");
+                            //tracing::trace!(mistralrs_request_id, "Finish reason: {finish_reason:?}");
                             break;
                         }
                     },
-                    x => tracing::error!(request_id, "Unhandled. {x:?}"),
+                    x => tracing::error!(mistralrs_request_id, "Unhandled. {x:?}"),
                 }
             }
         };
@@ -444,10 +441,10 @@ impl
 }
 
 /// openai stop tokens to mistralrs stop tokens
-fn to_stop_tokens(t: async_openai::types::Stop) -> StopTokens {
+fn to_stop_tokens(t: dynamo_async_openai::types::Stop) -> StopTokens {
     match t {
-        async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
-        async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
+        dynamo_async_openai::types::Stop::String(s) => StopTokens::Seqs(vec![s]),
+        dynamo_async_openai::types::Stop::StringArray(v) => StopTokens::Seqs(v),
     }
 }
 
@@ -489,7 +486,7 @@ impl
         let (request, context) = request.transfer(());
         let ctx = context.context();
         let (tx, mut rx) = channel(10_000);
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(ctx.id().to_string());
 
         let messages = RequestMessage::Completion {
             text: prompt_to_string(&request.inner.prompt),
@@ -543,9 +540,9 @@ impl
             dry_params: det.dry_params,
         };
 
-        let request_id = self.mistralrs.next_request_id();
+        let mistralrs_request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
-            id: request_id,
+            id: mistralrs_request_id,
             model_id: Some(self.display_name.clone()),
             messages,
             sampling_params,
@@ -571,7 +568,7 @@ impl
                 let response = match response.as_result() {
                     Ok(r) => r,
                     Err(err) => {
-                        tracing::error!(request_id, %err, "Failed converting mistralrs channel response to result.");
+                        tracing::error!(mistralrs_request_id, %err, "Failed converting mistralrs channel response to result.");
                         break;
                     }
                 };
@@ -587,13 +584,13 @@ impl
                                 Some(FinishReason::Length)
                             }
                             Some(s) => {
-                                tracing::warn!(request_id, stop_reason = s, "Unknow stop reason");
+                                tracing::warn!(mistralrs_request_id, stop_reason = s, "Unknow stop reason");
                                 Some(FinishReason::Stop)
                             }
                             None => None,
                         };
                         #[allow(deprecated)]
-                        let inner = response_generator.create_choice(0, Some(from_assistant), None);
+                        let inner = response_generator.create_choice(0, Some(from_assistant), None, None);
                         let ann = Annotated{
                             id: None,
                             data: Some(inner),
@@ -606,7 +603,7 @@ impl
                             break;
                         }
                     },
-                    x => tracing::error!(request_id, "Unhandled. {x:?}"),
+                    x => tracing::error!(mistralrs_request_id, "Unhandled. {x:?}"),
                 }
             }
         };

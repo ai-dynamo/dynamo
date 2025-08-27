@@ -33,9 +33,14 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    context, AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO,
-    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source,
+    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
+    ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
+use ingress::push_handler::WorkHandlerMetrics;
+
+// Add Prometheus metrics types
+use crate::metrics::MetricsRegistry;
+use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
@@ -278,12 +283,14 @@ struct RequestControlMessage {
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
+    metrics: OnceLock<Arc<WorkHandlerMetrics>>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             segment: OnceLock::new(),
+            metrics: OnceLock::new(),
         })
     }
 
@@ -291,6 +298,19 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         self.segment
             .set(segment)
             .map_err(|_| anyhow::anyhow!("Segment already set"))
+    }
+
+    pub fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
+            .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
+
+        self.metrics
+            .set(Arc::new(metrics))
+            .map_err(|_| anyhow::anyhow!("Metrics already set"))
     }
 
     pub fn link(segment: Arc<SegmentSource<Req, Resp>>) -> Result<Arc<Self>> {
@@ -317,11 +337,23 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
 
         Ok(ingress)
     }
+
+    /// Helper method to access metrics if available
+    fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
+        self.metrics.get()
+    }
 }
 
 #[async_trait]
 pub trait PushWorkHandler: Send + Sync {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
+
+    /// Add metrics to the handler
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()>;
 }
 
 /*

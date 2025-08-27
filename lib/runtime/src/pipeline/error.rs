@@ -17,7 +17,7 @@
 //
 use async_nats::error::Error as NatsError;
 
-pub use anyhow::{anyhow, anyhow as error, bail, ensure, Context, Error, Result};
+pub use anyhow::{Context, Error, Result, anyhow, anyhow as error, bail, ensure};
 
 pub trait PipelineErrorExt {
     /// Downcast the [`Error`] to a [`PipelineError`]
@@ -64,13 +64,13 @@ pub enum PipelineError {
     /// terminating sink either cannot find the `oneshot` channel sender or the corresponding
     /// receiver was dropped
     #[error("Unlinked request; initiating request task was dropped or cancelled")]
-    DetatchedStreamReceiver,
+    DetachedStreamReceiver,
 
     // In the interim between when a response was made and when the stream was received, the
     // Sender for the stream was dropped. This maybe a logic error in the pipeline; and become a
     // panic/fatal error in the future.
     #[error("Unlinked response; response task was dropped or cancelled")]
-    DetatchedStreamSender,
+    DetachedStreamSender,
 
     #[error("Serialzation Error: {0}")]
     SerializationError(String),
@@ -131,6 +131,10 @@ pub enum PipelineError {
 
     #[error("NATS KV Err: {0} for bucket '{1}")]
     KeyValueError(String, String),
+
+    /// All instances are busy and cannot handle new requests
+    #[error("Service temporarily unavailable: {0}")]
+    ServiceOverloaded(String),
 }
 
 #[derive(Debug, thiserror::Error)]

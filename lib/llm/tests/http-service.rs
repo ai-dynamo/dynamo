@@ -1,55 +1,46 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use anyhow::Error;
-use async_openai::config::OpenAIConfig;
 use async_stream::stream;
+use dynamo_async_openai::config::OpenAIConfig;
 use dynamo_llm::http::{
     client::{
         GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient, PureOpenAIClient,
     },
     service::{
-        error::HttpError,
-        metrics::{Endpoint, RequestType, Status},
-        service_v2::HttpService,
         Metrics,
+        error::HttpError,
+        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        service_v2::HttpService,
     },
 };
 use dynamo_llm::protocols::{
+    Annotated,
     codec::SseLineCodec,
     convert_sse_stream,
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
-    Annotated,
 };
 use dynamo_runtime::{
+    CancellationToken,
     engine::AsyncEngineContext,
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
     },
-    CancellationToken,
 };
 use futures::StreamExt;
-use prometheus::{proto::MetricType, Registry};
+use prometheus::{Registry, proto::MetricType};
 use reqwest::StatusCode;
-use rstest::*;
 use std::{io::Cursor, sync::Arc};
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
+
+#[path = "common/ports.rs"]
+mod ports;
+use ports::get_random_port;
 
 struct CounterEngine {}
 
@@ -92,16 +83,12 @@ impl
         let max_tokens = request.inner.max_tokens.unwrap_or(0) as u64;
 
         // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
-        let generator = request.response_generator();
+        let mut generator = request.response_generator(ctx.id().to_string());
 
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let inner = generator.create_choice(i,Some(format!("choice {i}")), None, None);
-
-                let output = NvCreateChatCompletionStreamResponse {
-                    inner,
-                };
+                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None, None);
 
                 yield Annotated::from_data(output);
             }
@@ -270,7 +257,13 @@ fn inc_counter(
 #[allow(deprecated)]
 #[tokio::test]
 async fn test_http_service() {
-    let service = HttpService::builder().port(8989).build().unwrap();
+    let port = get_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -302,16 +295,16 @@ async fn test_http_service() {
 
     let client = reqwest::Client::new();
 
-    let message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 "hi".to_string(),
             ),
             name: None,
         },
     );
 
-    let mut request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let mut request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![message])
         .build()
@@ -330,7 +323,7 @@ async fn test_http_service() {
     request.max_tokens = Some(3000);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -357,7 +350,7 @@ async fn test_http_service() {
     let families = registry.gather();
     let histogram_metric_family = families
         .into_iter()
-        .find(|m| m.get_name() == "nv_llm_http_service_request_duration_seconds")
+        .find(|m| m.get_name() == format!("{}_request_duration_seconds", FRONTEND_METRIC_PREFIX))
         .expect("Histogram metric not found");
 
     assert_eq!(
@@ -410,7 +403,7 @@ async fn test_http_service() {
     request.max_tokens = Some(0);
 
     let future = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send();
 
@@ -435,7 +428,7 @@ async fn test_http_service() {
     request.stream = Some(true);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -456,7 +449,7 @@ async fn test_http_service() {
     request.stream = Some(false);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -474,14 +467,14 @@ async fn test_http_service() {
     // ==== ChatCompletions / Unary / Error ====
 
     // ==== Completions / Unary / Error ====
-    let mut request = async_openai::types::CreateCompletionRequestArgs::default()
+    let mut request = dynamo_async_openai::types::CreateCompletionRequestArgs::default()
         .model("bar")
         .prompt("hi")
         .build()
         .unwrap();
 
     let response = client
-        .post("http://localhost:8989/v1/completions")
+        .post(format!("http://localhost:{}/v1/completions", port))
         .json(&request)
         .send()
         .await
@@ -502,7 +495,7 @@ async fn test_http_service() {
     request.stream = Some(true);
 
     let response = client
-        .post("http://localhost:8989/v1/completions")
+        .post(format!("http://localhost:{}/v1/completions", port))
         .json(&request)
         .send()
         .await
@@ -524,7 +517,7 @@ async fn test_http_service() {
     request.stream = Some(false);
 
     let response = client
-        .post("http://localhost:8989/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .json(&request)
         .send()
         .await
@@ -539,7 +532,7 @@ async fn test_http_service() {
 
     // =========== Query /metrics endpoint ===========
     let response = client
-        .get("http://localhost:8989/metrics")
+        .get(format!("http://localhost:{}/metrics", port))
         .send()
         .await
         .unwrap();
@@ -568,11 +561,14 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
-#[fixture]
-fn service_with_engines(
-    #[default(8990)] port: u16,
-) -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>) {
-    let service = HttpService::builder().port(port).build().unwrap();
+async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, u16) {
+    let port = get_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(port)
+        .build()
+        .unwrap();
     let manager = service.model_manager();
 
     let counter = Arc::new(CounterEngine {});
@@ -588,11 +584,10 @@ fn service_with_engines(
         .add_completions_model("bar", failure.clone())
         .unwrap();
 
-    (service, counter, failure)
+    (service, counter, failure, port)
 }
 
-#[fixture]
-fn pure_openai_client(#[default(8990)] port: u16) -> PureOpenAIClient {
+fn pure_openai_client(port: u16) -> PureOpenAIClient {
     let config = HttpClientConfig {
         openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
         verbose: false,
@@ -600,8 +595,7 @@ fn pure_openai_client(#[default(8990)] port: u16) -> PureOpenAIClient {
     PureOpenAIClient::new(config)
 }
 
-#[fixture]
-fn nv_custom_client(#[default(8991)] port: u16) -> NvCustomClient {
+fn nv_custom_client(port: u16) -> NvCustomClient {
     let config = HttpClientConfig {
         openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
         verbose: false,
@@ -609,8 +603,7 @@ fn nv_custom_client(#[default(8991)] port: u16) -> NvCustomClient {
     NvCustomClient::new(config)
 }
 
-#[fixture]
-fn generic_byot_client(#[default(8992)] port: u16) -> GenericBYOTClient {
+fn generic_byot_client(port: u16) -> GenericBYOTClient {
     let config = HttpClientConfig {
         openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
         verbose: false,
@@ -618,13 +611,11 @@ fn generic_byot_client(#[default(8992)] port: u16) -> GenericBYOTClient {
     GenericBYOTClient::new(config)
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_pure_openai_client(
-    #[with(8990)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
-    #[with(8990)] pure_openai_client: PureOpenAIClient,
-) {
-    let (service, _counter, _failure) = service_with_engines;
+async fn test_pure_openai_client() {
+    let (service, _counter, _failure, port) = service_with_engines().await;
+    let pure_openai_client = pure_openai_client(port);
+
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
@@ -632,17 +623,18 @@ async fn test_pure_openai_client(
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8990).await;
+    wait_for_service_ready(port).await;
 
     // Test successful streaming request
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -667,14 +659,15 @@ async fn test_pure_openai_client(
     assert!(count > 0, "Should receive at least one response");
 
     // Test error case with invalid model
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("bar") // This model will fail
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -700,14 +693,15 @@ async fn test_pure_openai_client(
 
     // Test context management
     let ctx = HttpRequestContext::new();
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -729,13 +723,11 @@ async fn test_pure_openai_client(
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_nv_custom_client(
-    #[with(8991)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
-    #[with(8991)] nv_custom_client: NvCustomClient,
-) {
-    let (service, _counter, _failure) = service_with_engines;
+async fn test_nv_custom_client() {
+    let (service, _counter, _failure, port) = service_with_engines().await;
+    let nv_custom_client = nv_custom_client(port);
+
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
@@ -743,17 +735,18 @@ async fn test_nv_custom_client(
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8991).await;
+    wait_for_service_ready(port).await;
 
     // Test successful streaming request
-    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -765,6 +758,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -783,14 +777,15 @@ async fn test_nv_custom_client(
     assert!(count > 0, "Should receive at least one response");
 
     // Test error case with invalid model
-    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("bar") // This model will fail
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -802,6 +797,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -821,14 +817,15 @@ async fn test_nv_custom_client(
 
     // Test context management
     let ctx = HttpRequestContext::new();
-    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let inner_request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("foo")
         .messages(vec![
-            async_openai::types::ChatCompletionRequestMessage::User(
-                async_openai::types::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hi".to_string(),
-                    ),
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+                dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+                    content:
+                        dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                            "Hi".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -840,6 +837,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -855,13 +853,11 @@ async fn test_nv_custom_client(
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_generic_byot_client(
-    #[with(8992)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
-    #[with(8992)] generic_byot_client: GenericBYOTClient,
-) {
-    let (service, _counter, _failure) = service_with_engines;
+async fn test_generic_byot_client() {
+    let (service, _counter, _failure, port) = service_with_engines().await;
+    let generic_byot_client = generic_byot_client(port);
+
     let token = CancellationToken::new();
     let cancel_token = token.clone();
 
@@ -869,7 +865,7 @@ async fn test_generic_byot_client(
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8992).await;
+    wait_for_service_ready(port).await;
 
     // Test successful streaming request
     let request = serde_json::json!({
@@ -952,10 +948,15 @@ async fn test_generic_byot_client(
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
-    let service = HttpService::builder().port(8993).build().unwrap();
+    let port = get_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(port)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -966,7 +967,7 @@ async fn test_client_disconnect_cancellation_unary() {
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8993).await;
+    wait_for_service_ready(port).await;
 
     // Create a long-running engine (10 seconds)
     let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
@@ -976,16 +977,16 @@ async fn test_client_disconnect_cancellation_unary() {
 
     let client = reqwest::Client::new();
 
-    let message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will take a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("slow-model")
         .messages(vec![message])
         .stream(false) // Test unary response
@@ -997,7 +998,7 @@ async fn test_client_disconnect_cancellation_unary() {
 
     let request_future = async {
         client
-            .post("http://localhost:8993/v1/chat/completions")
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
@@ -1036,12 +1037,17 @@ async fn test_client_disconnect_cancellation_unary() {
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
-    let service = HttpService::builder().port(8994).build().unwrap();
+    let port = get_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(port)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -1052,7 +1058,7 @@ async fn test_client_disconnect_cancellation_streaming() {
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8994).await;
+    wait_for_service_ready(port).await;
 
     // Create a long-running engine (10 seconds)
     let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
@@ -1062,16 +1068,16 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let client = reqwest::Client::new();
 
-    let message = async_openai::types::ChatCompletionRequestMessage::User(
-        async_openai::types::ChatCompletionRequestUserMessage {
-            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+    let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
+        dynamo_async_openai::types::ChatCompletionRequestUserMessage {
+            content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
                 "This will stream for a long time".to_string(),
             ),
             name: None,
         },
     );
 
-    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+    let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
         .model("slow-stream-model")
         .messages(vec![message])
         .stream(true) // Test streaming response
@@ -1083,7 +1089,7 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let request_future = async {
         let response = client
-            .post("http://localhost:8994/v1/chat/completions")
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
@@ -1128,13 +1134,18 @@ async fn test_client_disconnect_cancellation_streaming() {
     task.await.unwrap().unwrap();
 }
 
-#[rstest]
 #[tokio::test]
 async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();
 
-    let service = HttpService::builder().port(8995).build().unwrap();
+    let port = get_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .port(port)
+        .build()
+        .unwrap();
     let state = service.state_clone();
     let manager = state.manager();
 
@@ -1145,7 +1156,7 @@ async fn test_request_id_annotation() {
     let task = tokio::spawn(async move { service.run(token).await });
 
     // Wait for service to be ready
-    wait_for_service_ready(8995).await;
+    wait_for_service_ready(port).await;
 
     // Add a counter engine for this test
     let counter_engine = Arc::new(CounterEngine {});
@@ -1177,7 +1188,7 @@ async fn test_request_id_annotation() {
 
     // Make the streaming request with custom header
     let response = client
-        .post("http://localhost:8995/v1/chat/completions")
+        .post(format!("http://localhost:{}/v1/chat/completions", port))
         .header("x-dynamo-request-id", request_uuid.to_string())
         .json(&request_json)
         .send()
@@ -1209,23 +1220,23 @@ async fn test_request_id_annotation() {
     let mut annotated_stream = std::pin::pin!(annotated_stream);
     while let Some(annotated_response) = annotated_stream.next().await {
         // Check if this is a request_id annotation
-        if let Some(event) = &annotated_response.event {
-            if event == "request_id" {
-                found_request_id_annotation = true;
-                // Extract the request ID from the annotation
-                if let Some(comments) = &annotated_response.comment {
-                    if let Some(comment) = comments.first() {
-                        // The comment contains a JSON-encoded string, so we need to parse it
-                        if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
-                            received_request_id = Some(parsed_value);
-                        } else {
-                            // Fallback: remove quotes manually if JSON parsing fails
-                            received_request_id = Some(comment.trim_matches('"').to_string());
-                        }
-                    }
+        if let Some(event) = &annotated_response.event
+            && event == "request_id"
+        {
+            found_request_id_annotation = true;
+            // Extract the request ID from the annotation
+            if let Some(comments) = &annotated_response.comment
+                && let Some(comment) = comments.first()
+            {
+                // The comment contains a JSON-encoded string, so we need to parse it
+                if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
+                    received_request_id = Some(parsed_value);
+                } else {
+                    // Fallback: remove quotes manually if JSON parsing fails
+                    received_request_id = Some(comment.trim_matches('"').to_string());
                 }
-                break;
             }
+            break;
         }
     }
 

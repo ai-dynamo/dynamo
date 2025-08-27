@@ -15,34 +15,34 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
-use async_openai::types::EncodingFormat;
+use dynamo_async_openai::types::EncodingFormat;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
+use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::tokenizers::Encoding;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    async_trait, AsyncEngineContext, Error, ManyOut, Operator, SingleIn,
+    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
-    common::{SamplingOptionsProvider, StopConditionsProvider},
+    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
+        DeltaGeneratorExt,
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         nvext::NvExtProvider,
-        DeltaGeneratorExt,
     },
 };
-use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
+use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -101,7 +101,6 @@ impl OpenAIPreprocessor {
         let mdcsum = mdc.mdcsum();
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
         let PromptFormatter::OAI(formatter) = formatter;
-
         let tokenizer = match &mdc.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
             Some(TokenizerKind::GGUF(tokenizer)) => {
@@ -146,6 +145,7 @@ impl OpenAIPreprocessor {
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
+            + OutputOptionsProvider
             + NvExtProvider,
     >(
         &self,
@@ -153,6 +153,7 @@ impl OpenAIPreprocessor {
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
+        builder.model(request.model());
 
         // match request type before any conversion/processing
         match request.prompt_input_type() {
@@ -248,9 +249,14 @@ impl OpenAIPreprocessor {
 
         builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
+        builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
+        // Extract backend_instance_id from nvext if present
+        if let Some(nvext) = request.nvext() {
+            builder.backend_instance_id(nvext.backend_instance_id);
+        }
 
         Ok((builder.build()?, annotations))
     }
@@ -269,11 +275,11 @@ impl OpenAIPreprocessor {
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
         let all_token_ids = match &request.inner.input {
-            async_openai::types::EmbeddingInput::String(s) => {
+            dynamo_async_openai::types::EmbeddingInput::String(s) => {
                 let encoding = self.tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
-            async_openai::types::EmbeddingInput::StringArray(arr) => {
+            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = self.tokenizer.clone();
@@ -289,8 +295,10 @@ impl OpenAIPreprocessor {
                     .collect();
                 token_arrays
             }
-            async_openai::types::EmbeddingInput::IntegerArray(token_ids) => vec![token_ids.clone()],
-            async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+            dynamo_async_openai::types::EmbeddingInput::IntegerArray(token_ids) => {
+                vec![token_ids.clone()]
+            }
+            dynamo_async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
                 token_arrays.clone()
             }
         };
@@ -430,11 +438,11 @@ impl OpenAIPreprocessor {
         let transformed_stream = stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
-                let embeddings: Vec<async_openai::types::Embedding> = engine_output
+                let embeddings: Vec<dynamo_async_openai::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| async_openai::types::Embedding {
+                    .map(|(index, embedding)| dynamo_async_openai::types::Embedding {
                         index: index as u32,
                         object: "embedding".to_string(),
                         embedding: embedding.into_iter().map(|f| f as f32).collect(),
@@ -442,11 +450,11 @@ impl OpenAIPreprocessor {
                     .collect();
 
                 let response = NvCreateEmbeddingResponse {
-                    inner: async_openai::types::CreateEmbeddingResponse {
+                    inner: dynamo_async_openai::types::CreateEmbeddingResponse {
                         object: "list".to_string(),
                         model: original_request.inner.model.clone(),
                         data: embeddings,
-                        usage: async_openai::types::EmbeddingUsage {
+                        usage: dynamo_async_openai::types::EmbeddingUsage {
                             prompt_tokens: engine_output.prompt_tokens,
                             total_tokens: engine_output.total_tokens,
                         },
@@ -479,18 +487,14 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
         // convert the chat completion request to a common completion request
@@ -537,18 +541,14 @@ impl
         &self,
         request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
@@ -595,10 +595,10 @@ impl
         request: SingleIn<NvCreateEmbeddingRequest>,
         next: Arc<
             dyn AsyncEngine<
-                SingleIn<PreprocessedEmbeddingRequest>,
-                ManyOut<Annotated<EmbeddingsEngineOutput>>,
-                Error,
-            >,
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
         // Unpack request

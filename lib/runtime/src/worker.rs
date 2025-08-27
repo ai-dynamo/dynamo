@@ -32,7 +32,7 @@
 //! and release builds. In development, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG] and
 //! in release, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE].
 
-use super::{error, CancellationToken, Result, Runtime, RuntimeConfig};
+use super::{CancellationToken, Result, Runtime, RuntimeConfig, error};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
@@ -86,6 +86,16 @@ impl Worker {
 
         let runtime = Runtime::from_handle(rt.handle().clone())?;
         Ok(Worker { runtime, config })
+    }
+
+    pub fn runtime_from_existing() -> Result<Runtime> {
+        if let Some(rt) = RT.get() {
+            Ok(Runtime::from_handle(rt.handle().clone())?)
+        } else if let Some(rt) = RTHANDLE.get() {
+            Ok(Runtime::from_handle(rt.clone())?)
+        } else {
+            Runtime::from_settings()
+        }
     }
 
     pub fn tokio_runtime(&self) -> Result<&'static tokio::runtime::Runtime> {
@@ -188,14 +198,13 @@ impl Worker {
         }))))
         .expect("Failed to spawn application task");
 
-        let task = INIT
+        INIT
             .get()
             .expect("Application task not initialized")
             .lock()
             .unwrap()
             .take()
-            .expect("Application initialized; but another thread is awaiting it; Worker.execute() can only be called once");
-        task
+            .expect("Application initialized; but another thread is awaiting it; Worker.execute() can only be called once")
     }
 
     pub fn from_current() -> Result<Worker> {

@@ -27,21 +27,20 @@
 //!   - ISL Blocks: Cumulative count of total blocks in all KV hit rate events
 //!   - Overlap Blocks: Cumulative count of blocks that were already in the KV cache
 use clap::Parser;
-use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_llm::kv_router::KV_HIT_RATE_SUBJECT;
+use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_runtime::{
-    error, logging,
+    DistributedRuntime, ErrorContext, Result, Runtime, Worker, error, logging,
     traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
-    DistributedRuntime, ErrorContext, Result, Runtime, Worker,
 };
 use futures::stream::StreamExt;
 use std::sync::Arc;
 
 // Import from our library
 use metrics::{
-    collect_endpoints, extract_metrics, postprocess_metrics, LLMWorkerLoadCapacityConfig,
-    MetricsMode, PrometheusMetricsCollector,
+    LLMWorkerLoadCapacityConfig, MetricsMode, PrometheusMetricsCollector, collect_endpoints,
+    extract_metrics, postprocess_metrics,
 };
 
 /// CLI arguments for the metrics application
@@ -59,6 +58,10 @@ struct Args {
     /// Endpoint to scrape metrics from
     #[arg(long)]
     endpoint: String,
+
+    /// Model name for the target component (optional)
+    #[arg(long)]
+    model_name: Option<String>,
 
     /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
     #[arg(long, default_value = "1")]
@@ -109,6 +112,7 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
     Ok(LLMWorkerLoadCapacityConfig {
         component_name: args.component.clone(),
         endpoint_name: args.endpoint.clone(),
+        model_name: args.model_name.clone(),
     })
 }
 
@@ -127,7 +131,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
         .expect("Unreachable because of DistributedRuntime::from_settings above")
-        .kv_create(key, serde_json::to_vec_pretty(&config)?, None)
+        .kv_create(&key, serde_json::to_vec_pretty(&config)?, None)
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 
@@ -269,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_namespace_from_env() {
-        env::set_var("DYN_NAMESPACE", "test-namespace");
+        unsafe { env::set_var("DYN_NAMESPACE", "test-namespace") };
         let args = Args::parse_from(["count", "--component", "comp", "--endpoint", "end"]);
         assert_eq!(args.namespace, "test-namespace");
     }

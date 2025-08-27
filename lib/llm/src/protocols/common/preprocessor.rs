@@ -1,28 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use super::{SamplingOptions, StopConditions};
+use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RouterConfigOverride;
 use crate::protocols::TokenIdType;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
 pub struct PreprocessedRequest {
+    /// ID of the model to use
+    pub model: String,
+
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
@@ -37,6 +29,10 @@ pub struct PreprocessedRequest {
     /// More documentation on how and on the order in which sampling options are applied
     /// are needed.
     pub sampling_options: SamplingOptions,
+
+    /// OutputOptions are options that control the output of the inference engine such as whether
+    /// to return log probabilities, or whether to skip special tokens in output.
+    pub output_options: OutputOptions,
 
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
@@ -55,6 +51,14 @@ pub struct PreprocessedRequest {
     /// Estimated number of prefix hit tokens (only used in kv aware routing)
     #[builder(default)]
     pub estimated_prefix_hit_num_blocks: Option<u32>,
+
+    /// Targeted backend instance ID for the request
+    #[builder(default)]
+    pub backend_instance_id: Option<i64>,
+
+    /// Router configuration overrides for this specific request
+    #[builder(default)]
+    pub router_config_override: Option<RouterConfigOverride>,
 }
 
 impl PreprocessedRequest {

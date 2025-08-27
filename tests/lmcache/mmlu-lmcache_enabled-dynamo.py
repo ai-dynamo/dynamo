@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This is a MMLU test script for dynamo LMCache testing (with LMCache enabled)
+# Reference: https://github.com/LMCache/LMCache/blob/dev/.buildkite/correctness/2-mmlu.py
+
+# ASSUMPTIONS:
+# 1. dynamo is running (default: localhost:8080) with LMCache enabled
+# 2. the mmlu dataset is in a "data" directory
+# 3. all invocations of this script should be run in the same directory
+#    (for later consolidation)
+
+# Standard
+import argparse
+import json
+import os
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import requests
+
+# Third Party
+from tqdm import tqdm
+from transformers import AutoTokenizer, set_seed
+
+tokenizer: Optional[AutoTokenizer] = None
+choices = ["A", "B", "C", "D"]
+
+
+# for complete determinism between runs of MMLU, we should:
+# 1. set the seed of LLM requests to a fixed number (42)
+# 2. set temperature to 0 on requests
+def get_llm_response(args, prompt):
+    # Use dynamo's completions API format
+    data = {
+        "model": args.model,
+        "prompt": prompt,
+        "temperature": 0,
+        "max_tokens": 3,
+        "stream": False,
+        "seed": 42,  # Add explicit seed for determinism
+    }
+    url = f"http://{args.host}:{args.port}/v1/completions"
+    res = requests.post(url, json=data, timeout=30)
+    if res.status_code != 200:
+        raise Exception(f"Error: {res.status_code} {res.text}")
+    response_json = res.json()
+    return response_json["choices"][0]["text"]
+
+
+# grab the idx'th row of the df and generate a prompt string
+# format of the MMLU csvs:
+# question,option_A,option_B,option_C,option_D,answer
+def prompt_string(df, idx, include_answer=True):
+    prompt = df.iloc[idx, 0]
+    k = df.shape[1] - 2  # number of columns - 2 (question and answer)
+    for i in range(k):
+        prompt += f"\n{choices[i]}. {df.iloc[idx, i + 1]}"
+    prompt += "\nRespond with **only the letter** (A, B, C, D).  Do **not** output any explanation, analysis, or extra words. Answer:"
+    if include_answer:
+        prompt += f" {df.iloc[idx, k]}\n\n"
+    return prompt
+
+
+def evaluate(args, subject, dev_df, test_df):
+    prompts, labels = [], []
+
+    shared_multi_shot_prefix = [
+        f"The following are multiple choice questions (with answers) \
+                                about {subject}. \n\n"
+    ]
+    shared_multi_shot_prefix_length = 0
+    for i in range(dev_df.shape[0]):
+        # the multi-shot examples should contain answers
+        shared_multi_shot_prefix.append(prompt_string(dev_df, i))
+
+        # Use plain list of token IDs, no torch tensors
+        assert tokenizer is not None, "Tokenizer must be initialized"
+        token_ids = tokenizer(shared_multi_shot_prefix[-1], add_special_tokens=True)[  # type: ignore
+            "input_ids"
+        ]
+        shared_multi_shot_prefix_length += len(token_ids)
+
+        if shared_multi_shot_prefix_length > 4000:
+            break
+
+    # all already have double newlines at the end
+    shared_multi_shot_prefix_str = "".join(shared_multi_shot_prefix)
+
+    for i in range(test_df.shape[0]):
+        # do NOT include the answer for the actual question we want the LLM to answer
+        query_prompt = prompt_string(test_df, i, include_answer=False)
+        prompt = f"{shared_multi_shot_prefix_str}\n\n{query_prompt}"
+        prompts.append(prompt)
+        label = test_df.iloc[i, test_df.shape[1] - 1]
+        labels.append(label)
+
+    predictions = []
+    for i, prompt in enumerate(prompts):
+        prediction = get_llm_response(args, prompt)
+        prediction_stripped = prediction.strip()
+        if prediction_stripped and prediction_stripped[0] in ["A", "B", "C", "D"]:
+            predictions.append(prediction_stripped[0])
+        else:
+            # Fallback: look for any A, B, C, D in the response
+            for char in prediction_stripped:
+                if char in ["A", "B", "C", "D"]:
+                    predictions.append(char)
+                    break
+            else:
+                predictions.append("A")  # Default fallback
+
+    accuracy = np.mean(np.array(predictions) == np.array(labels))
+    return accuracy
+
+
+def main(args):
+    global tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    mmlu_files = os.listdir("data/test")
+    test_files = [f for f in mmlu_files if f.endswith("_test.csv")]
+    subjects = sorted([f.split("_test.csv")[0] for f in test_files])
+
+    accuracies = []
+    num_questions = []
+    output_dict = {}
+
+    for subject_raw in tqdm(
+        subjects[: args.number_of_subjects], desc="Processing subjects"
+    ):
+        subject = " ".join(subject_raw.split("_"))  # replace underscores with spaces
+        dev_df = pd.read_csv(
+            os.path.join("data/dev", subject_raw + "_dev.csv"), header=None
+        )
+        test_df = pd.read_csv(
+            os.path.join("data/test", subject_raw + "_test.csv"), header=None
+        )
+        accuracy = evaluate(args, subject, dev_df, test_df)
+        accuracies.append(accuracy)
+        num_questions.append(len(test_df))
+        output_dict[subject_raw] = {"accuracy": accuracy, "num_questions": len(test_df)}
+
+    total_accuracy = np.mean(accuracies)
+    total_num_questions = sum(num_questions)
+    output_dict["total"] = {
+        "accuracy": total_accuracy,
+        "num_questions": total_num_questions,
+    }
+
+    with open(args.result_file, "w") as f:
+        # output will be a jsonl file
+        for subject, value in output_dict.items():
+            f.write(json.dumps({subject: value}) + "\n")
+
+
+if __name__ == "__main__":
+    set_seed(42)  # some tokenizers may have randomness
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--result-file", type=str, required=False)
+    parser.add_argument("--number-of-subjects", type=int, required=True)
+    parser.add_argument("--host", type=str, default="localhost", help="Dynamo host")
+    parser.add_argument("--port", type=int, default=8080, help="Dynamo port")
+
+    args = parser.parse_args()
+    if args.result_file is None:
+        # Clean model name if it's a path or has slashes
+        model_name = args.model.split("/")[-1]
+        args.result_file = f"dynamo-lmcache-{model_name}.jsonl"
+
+    main(args)

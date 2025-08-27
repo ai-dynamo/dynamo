@@ -40,6 +40,14 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, private)]
     _stats_handler: Option<EndpointStatsHandler>,
+
+    /// Additional labels for metrics
+    #[builder(default, setter(into))]
+    metrics_labels: Option<Vec<(String, String)>>,
+
+    /// Whether to wait for inflight requests to complete during shutdown
+    #[builder(default = "true")]
+    graceful_shutdown: bool,
 }
 
 impl EndpointConfigBuilder {
@@ -55,7 +63,8 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler) = self.build_internal()?.dissolve();
+        let (endpoint, lease, handler, stats_handler, metrics_labels, graceful_shutdown) =
+            self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
@@ -68,6 +77,12 @@ impl EndpointConfigBuilder {
 
         // acquire the registry lock
         let registry = endpoint.drt().component_registry.inner.lock().await;
+
+        let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
+            .as_ref()
+            .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
+        // Add metrics to the handler. The endpoint provides additional information to the handler.
+        handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
         // get the group
         let group = registry
@@ -106,13 +121,17 @@ impl EndpointConfigBuilder {
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
             .cancellation_token(cancel_token.clone())
+            .graceful_shutdown(graceful_shutdown)
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 
         // launch in primary runtime
         let task = tokio::spawn(push_endpoint.start(
             service_endpoint,
+            endpoint.component.namespace.name.clone(),
+            endpoint.component.name.clone(),
             endpoint.name.clone(),
+            lease_id,
             endpoint.drt().system_health.clone(),
         ));
 
@@ -129,19 +148,18 @@ impl EndpointConfigBuilder {
 
         let info = serde_json::to_vec_pretty(&info)?;
 
-        if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
-            if let Err(e) = etcd_client
+        if let Some(etcd_client) = &endpoint.component.drt.etcd_client
+            && let Err(e) = etcd_client
                 .kv_create(
-                    endpoint.etcd_path_with_lease_id(lease_id),
+                    &endpoint.etcd_path_with_lease_id(lease_id),
                     info,
                     Some(lease_id),
                 )
                 .await
-            {
-                tracing::error!("Failed to register discoverable service: {:?}", e);
-                cancel_token.cancel();
-                return Err(error!("Failed to register discoverable service"));
-            }
+        {
+            tracing::error!("Failed to register discoverable service: {:?}", e);
+            cancel_token.cancel();
+            return Err(error!("Failed to register discoverable service"));
         }
         task.await??;
 

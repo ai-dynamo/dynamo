@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_openai::types::CreateCompletionRequestArgs;
+use dynamo_async_openai::types::CreateCompletionRequestArgs;
 use dynamo_llm::protocols::openai::{completions::NvCreateCompletionRequest, validate};
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +36,11 @@ impl CompletionSample {
 
         let inner = builder.build().unwrap();
 
-        let request = NvCreateCompletionRequest { inner, nvext: None };
+        let request = NvCreateCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+        };
 
         Ok(Self {
             request,

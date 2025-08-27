@@ -24,9 +24,8 @@ use crate::kv_router::protocols::{
     KvCacheStoredBlockData, LocalBlockHash,
 };
 use crate::tokens::blocks::UniqueBlock;
+use crate::tokens::{BlockHash, SequenceHash, Token};
 
-pub type Token = u32;
-pub type GlobalHash = u64;
 pub type NumBlocks = usize;
 
 /// Represents different block movement operations in the cache
@@ -36,13 +35,13 @@ pub enum MoveBlock {
     Use(Vec<UniqueBlock>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, GlobalHash, Option<u64>),
+    Promote(Uuid, SequenceHash, Option<u64>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlockResponse {
-    Store(Vec<GlobalHash>, Option<u64>),
-    Remove(Vec<GlobalHash>),
+    Store(Vec<SequenceHash>, Option<u64>),
+    Remove(Vec<SequenceHash>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,58 +160,58 @@ impl MockEngineArgs {
         }
 
         // Apply each extra argument to the builder
-        if let Some(value) = extra_args.get("num_gpu_blocks") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.num_gpu_blocks(num as usize);
-            }
+        if let Some(value) = extra_args.get("num_gpu_blocks")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.num_gpu_blocks(num as usize);
         }
 
-        if let Some(value) = extra_args.get("block_size") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.block_size(num as usize);
-            }
+        if let Some(value) = extra_args.get("block_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.block_size(num as usize);
         }
 
-        if let Some(value) = extra_args.get("max_num_seqs") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.max_num_seqs(Some(num as usize));
-            }
+        if let Some(value) = extra_args.get("max_num_seqs")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.max_num_seqs(Some(num as usize));
         }
 
-        if let Some(value) = extra_args.get("max_num_batched_tokens") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.max_num_batched_tokens(Some(num as usize));
-            }
+        if let Some(value) = extra_args.get("max_num_batched_tokens")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.max_num_batched_tokens(Some(num as usize));
         }
 
-        if let Some(value) = extra_args.get("enable_prefix_caching") {
-            if let Some(enabled) = value.as_bool() {
-                builder = builder.enable_prefix_caching(enabled);
-            }
+        if let Some(value) = extra_args.get("enable_prefix_caching")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.enable_prefix_caching(enabled);
         }
 
-        if let Some(value) = extra_args.get("enable_chunked_prefill") {
-            if let Some(enabled) = value.as_bool() {
-                builder = builder.enable_chunked_prefill(enabled);
-            }
+        if let Some(value) = extra_args.get("enable_chunked_prefill")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.enable_chunked_prefill(enabled);
         }
 
-        if let Some(value) = extra_args.get("watermark") {
-            if let Some(num) = value.as_f64() {
-                builder = builder.watermark(num);
-            }
+        if let Some(value) = extra_args.get("watermark")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.watermark(num);
         }
 
-        if let Some(value) = extra_args.get("speedup_ratio") {
-            if let Some(num) = value.as_f64() {
-                builder = builder.speedup_ratio(num);
-            }
+        if let Some(value) = extra_args.get("speedup_ratio")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.speedup_ratio(num);
         }
 
-        if let Some(value) = extra_args.get("dp_size") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.dp_size(num as u32);
-            }
+        if let Some(value) = extra_args.get("dp_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.dp_size(num as u32);
         }
 
         // Build the MockEngineArgs with either defaults or overridden values
@@ -222,18 +221,36 @@ impl MockEngineArgs {
     }
 }
 
-/// Note: This assumes block_hash and tokens_hash are the same, which is not correct in rare cases
-/// where the sequence-aware hash differs from the token content hash.
-pub fn block_response_to_kv_event(response: MoveBlockResponse) -> KvCacheEventData {
+/// Converts a MoveBlockResponse from the mocker backend into a KvCacheEventData.
+///
+/// This function assumes that the stored sequence hashes in the response always
+/// correspond to the tail part of the local hashes array. This is the expected
+/// behavior of KV block storage, where blocks are stored sequentially and the
+/// response contains the most recent blocks that were stored.
+///
+/// # Panics
+/// Panics if the number of blocks in the Store response exceeds the length
+/// of local_hashes.
+pub fn block_response_to_kv_event(
+    response: MoveBlockResponse,
+    local_hashes: &[BlockHash],
+) -> KvCacheEventData {
     match response {
         MoveBlockResponse::Store(full_blocks, parent_hash) => {
+            let num_blocks = full_blocks.len();
+            let local_hashes_slice = &local_hashes[local_hashes
+                .len()
+                .checked_sub(num_blocks)
+                .expect("local hashes fewer than block response signal")..];
+
             KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash),
                 blocks: full_blocks
                     .into_iter()
-                    .map(|block| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(block),
-                        tokens_hash: LocalBlockHash(block),
+                    .zip(local_hashes_slice.iter())
+                    .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(global_hash),
+                        tokens_hash: LocalBlockHash(*local_hash),
                     })
                     .collect(),
             })

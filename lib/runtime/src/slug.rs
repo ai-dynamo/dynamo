@@ -21,7 +21,7 @@ const REPLACEMENT_CHAR: char = '_';
 
 /// URL and NATS friendly string.
 /// Only a-z, 0-9, - and _.
-#[derive(Serialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct Slug(String);
 
 impl Slug {
@@ -43,11 +43,7 @@ impl Slug {
             .chars()
             .map(|c| {
                 let is_valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
-                if is_valid {
-                    c
-                } else {
-                    REPLACEMENT_CHAR
-                }
+                if is_valid { c } else { REPLACEMENT_CHAR }
             })
             .collect::<String>();
         Slug::new(out)
@@ -61,11 +57,7 @@ impl Slug {
             .chars()
             .map(|c| {
                 let is_valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
-                if is_valid {
-                    c
-                } else {
-                    REPLACEMENT_CHAR
-                }
+                if is_valid { c } else { REPLACEMENT_CHAR }
             })
             .collect::<String>();
         let hash = blake3::hash(s.as_bytes()).to_string();

@@ -18,8 +18,6 @@ cuda = ["llama-cpp-2/cuda"]
 metal = ["llama-cpp-2/metal"]
 vulkan = ["llama-cpp-2/vulkan"]
 openmp = ["llama-cpp-2/openmp"]
-# We cannot link libllama into a `.so`, so the bindings need this
-dynamic-link = ["llama-cpp-2/dynamic-link"]
 
 [dependencies]
 dynamo-runtime = { workspace = true }
@@ -30,4 +28,4 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 # default-features = false to disable openmp because that needs libgomp1 installed
-llama-cpp-2 = { version = "0.1.107", default-features = false }
+llama-cpp-2 = { version = "0.1.108", default-features = false }

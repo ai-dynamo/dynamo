@@ -9,6 +9,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Union,
 )
 
@@ -216,10 +217,15 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
+
+        Args:
+            handler: The request handler function
+            graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
         """
         ...
 
@@ -241,6 +247,24 @@ class Client:
     """
 
     ...
+
+    def instance_ids(self) -> List[int]:
+        """
+        Get list of current instance IDs.
+
+        Returns:
+            A list of currently available instance IDs
+        """
+        ...
+
+    async def wait_for_instances(self) -> List[int]:
+        """
+        Wait for instances to be available for work and return their IDs.
+
+        Returns:
+            A list of instance IDs that are available for work
+        """
+        ...
 
     async def random(self, request: JsonLike) -> AsyncIterator[JsonLike]:
         """
@@ -416,7 +440,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component) -> None:
+    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
@@ -436,6 +460,12 @@ class ModelDeploymentCard:
     A model deployment card is a collection of model information
     """
 
+    ...
+
+class ModelRuntimeConfig:
+    """
+    A model runtime configuration is a collection of runtime information
+    """
     ...
 
 class OAIChatPreprocessor:
@@ -1118,6 +1148,23 @@ class BlockManager:
         BlockList
             List of allocated blocks
         """
+        ...
+
+class KvbmCacheManager:
+    """
+    A KV cache manager for VLLM
+    """
+
+    def __init__(self, block_manager: BlockManager) -> None:
+        ...
+
+
+class KvbmRequest:
+    """
+    A request for KV cache
+    """
+
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
 class ZmqKvEventListener:

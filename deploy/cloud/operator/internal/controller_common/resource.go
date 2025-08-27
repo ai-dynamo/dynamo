@@ -27,6 +27,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -156,6 +157,14 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
 		}
 		if newHash != nil {
+			// Generate and log diff before updating
+			diff, diffErr := generateSpecDiff(oldResource, resource)
+			if diffErr != nil {
+				logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
+			} else if diff != "" {
+				logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
+			}
+
 			// update the spec of the current object with the desired spec
 			err = CopySpec(resource, oldResource)
 			if err != nil {
@@ -250,6 +259,27 @@ func IsSpecChanged(current client.Object, desired client.Object) (*string, error
 		}
 	}
 	return &hashStr, nil
+}
+
+// generateSpecDiff creates a unified diff showing changes between old and new resource specs
+func generateSpecDiff(oldResource, newResource client.Object) (string, error) {
+	oldSpec, err := getSpec(oldResource)
+	if err != nil {
+		return "", fmt.Errorf("failed to get old spec: %w", err)
+	}
+
+	newSpec, err := getSpec(newResource)
+	if err != nil {
+		return "", fmt.Errorf("failed to get new spec: %w", err)
+	}
+
+	// Generate diff using cmp
+	diff := cmp.Diff(oldSpec, newSpec)
+	if diff == "" {
+		return "", nil
+	}
+
+	return diff, nil
 }
 
 func GetSpecHash(obj client.Object) (string, error) {

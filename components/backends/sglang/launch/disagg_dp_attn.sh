@@ -15,11 +15,15 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 
 # run ingress
-dynamo run in=http out=dyn --http-port=8000 &
+python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
+# Set the expert distribution recording directory
+mkdir -p /tmp/sglang_expert_distribution_record
+export SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR=/tmp/sglang_expert_distribution_record
+
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
@@ -29,11 +33,12 @@ python3 -m dynamo.sglang.worker \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
+  --expert-distribution-recorder-mode stat \
   --port 30000 &
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2,3 python3 dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
@@ -43,4 +48,5 @@ CUDA_VISIBLE_DEVICES=2,3 python3 dynamo.sglang.decode_worker \
   --skip-tokenizer-init \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
+  --expert-distribution-recorder-mode stat \
   --port 31000

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::env;
 use std::sync::Arc;
@@ -30,7 +18,7 @@ use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
 };
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
@@ -114,6 +102,7 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
         text: None,
         cum_log_probs: None,
         log_probs: None,
+        top_logprobs: None,
         finish_reason: None,
         index: None,
     };
@@ -194,16 +183,16 @@ impl
         incoming_request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
         let ctx = context.context();
+        let mut deltas = request.response_generator(ctx.id().to_string());
         let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {
-            async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
+            dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
                 match user_msg.content {
-                    async_openai::types::ChatCompletionRequestUserMessageContent::Text(prompt) => {
-                        prompt
-                    }
+                    dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        prompt,
+                    ) => prompt,
                     _ => anyhow::bail!("Invalid request content field, expected Content::Text"),
                 }
             }
@@ -215,18 +204,12 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let inner = deltas.create_choice(0, Some(c.to_string()), None, None);
-                let response = NvCreateChatCompletionStreamResponse {
-                    inner,
-                };
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
 
-            let inner = deltas.create_choice(0, None, Some(async_openai::types::FinishReason::Stop), None);
-            let response = NvCreateChatCompletionStreamResponse {
-                inner,
-            };
+            let response = deltas.create_choice(0, None, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
         };
 
@@ -247,18 +230,18 @@ impl
         incoming_request: SingleIn<NvCreateCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
         let ctx = context.context();
+        let deltas = request.response_generator(ctx.id().to_string());
         let chars_string = prompt_to_string(&request.inner.prompt);
         let output = stream! {
             let mut id = 1;
             for c in chars_string.chars() {
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop));
+            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::CompletionFinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
 
         };
