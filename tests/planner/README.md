@@ -21,7 +21,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/architecture/pre_deployment_profiling.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
 
 ## Interpolator Testing
 

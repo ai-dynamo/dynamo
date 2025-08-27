@@ -3,13 +3,13 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: profile-sla-binding
+  name: dynamo-binding
   namespace: ${NAMESPACE}
 subjects:
 - kind: ServiceAccount
-  name: profile-sla-sa
+  name: dynamo-sa
   namespace: ${NAMESPACE}
 roleRef:
   kind: Role
-  name: profile-sla-role
+  name: dynamo-role
   apiGroup: rbac.authorization.k8s.io

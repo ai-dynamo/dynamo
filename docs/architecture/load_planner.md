@@ -24,7 +24,7 @@ There are two additional rules set by planner to prevent over-compensation:
 
 ## SLA-based Scaling Up/Down Prefill/Decode Workers
 
-See [Pre-Deployment Profiling](pre_deployment_profiling.md) for more details.
+See [Pre-Deployment Profiling](../benchmarks/pre_deployment_profiling.md) for more details.
 
 ## Usage
 

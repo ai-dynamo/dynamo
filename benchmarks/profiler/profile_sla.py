@@ -23,10 +23,6 @@ import numpy as np
 import yaml
 from utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
-from utils.dynamo_deployment import (
-    DynamoDeploymentClient,
-    cleanup_remaining_deployments,
-)
 from utils.genai_perf import benchmark_decode, benchmark_prefill
 from utils.plot import plot_decode_performance, plot_prefill_performance
 from utils.profile_cache import (
@@ -37,6 +33,11 @@ from utils.profile_cache import (
 )
 from utils.profile_decode import profile_decode
 from utils.profile_prefill import profile_prefill
+
+from deploy.utils.dynamo_deployment import (
+    DynamoDeploymentClient,
+    cleanup_remaining_deployments,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -170,10 +171,10 @@ async def run_profile(args):
                 prefill_ttft.append(ttft)
                 prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
 
-            print("Cleaning up deployment...")
+            logger.info("Cleaning up deployment...")
             await client.delete_deployment()
             deployment_clients.remove(client)
-            print("Deployment deleted")
+            logger.info("Deployment deleted")
 
         # Plot the results as a 2D scatter plot
         if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
@@ -270,7 +271,7 @@ async def run_profile(args):
             )
             max_concurrency = max_kv_tokens // (args.isl + args.osl)
             sweep_num_request = [
-                num for num in DECODE_NUM_REQUESTS_RANGE if num < max_concurrency
+                num for num in DECODE_NUM_REQUESTS_RANGE if num <= max_concurrency
             ]
             logger.info(
                 f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
@@ -303,10 +304,10 @@ async def run_profile(args):
                     decode_concurrency.append(num_request)
                     decode_kv_cache_size.append(max_kv_tokens)
 
-            print("Cleaning up deployment...")
+            logger.info("Cleaning up deployment...")
             await client.delete_deployment()
             deployment_clients.remove(client)
-            print("Deployment deleted")
+            logger.info("Deployment deleted")
 
             # Store partial results for plotting later
             decode_results.append(
@@ -318,6 +319,11 @@ async def run_profile(args):
             plot_decode_performance(decode_results, args.itl, args.output_dir)
 
         logger.info("Analyzing results and generate recommendations...")
+        # Safety guards: no results → exit early with a clear message
+        if not (prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu):
+            logger.error("No prefill results produced; skipping recommendations.")
+            return
+
         # select best tp size for prefill
         if min(prefill_ttft) > args.ttft:
             logger.info(
@@ -349,6 +355,15 @@ async def run_profile(args):
         )
 
         # select best tp size for decode
+        if not (
+            decode_tp_size
+            and decode_itl
+            and decode_thpt_per_gpu
+            and decode_concurrency
+            and decode_kv_cache_size
+        ):
+            logger.error("No decode results produced; skipping recommendations.")
+            return
         if min(decode_itl) > args.itl:
             logger.info(
                 "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
@@ -367,7 +382,7 @@ async def run_profile(args):
         # calculate kv cache utlization for the selected TP and concurrency
         selected_decode_kv_cache_utilization = (
             decode_concurrency[selected_decode_idx]
-            * (args.isl + args.osl / 2)
+            * (args.isl + (args.osl / 2))
             / decode_kv_cache_size[selected_decode_idx]
         )
         # set a +- 20% range for the kv cache utilization
@@ -433,10 +448,10 @@ async def run_profile(args):
             args.prefill_interpolation_granularity,
         )
 
-        print("Cleaning up deployment...")
+        logger.info("Cleaning up deployment...")
         await client.delete_deployment()
         deployment_clients.remove(client)
-        print("Deployment deleted")
+        logger.info("Deployment deleted")
 
         # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode TP
         best_decode_tp = decode_tp_size[selected_decode_idx]
@@ -490,10 +505,10 @@ async def run_profile(args):
             args.decode_interpolation_granularity,
         )
 
-        print("Cleaning up deployment...")
+        logger.info("Cleaning up deployment...")
         await client.delete_deployment()
         deployment_clients.remove(client)
-        print("Deployment deleted")
+        logger.info("Deployment deleted")
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")

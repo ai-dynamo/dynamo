@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vanilla-vllm
+  labels:
+    app: vanilla-vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vanilla-vllm
+  template:
+    metadata:
+      labels:
+        app: vanilla-vllm
+    spec:
+      volumes:
+        # vLLM needs to access the host's shared memory for tensor parallel inference
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "8Gi"
+        # Cache volume for model storage
+        - name: cache-volume
+          emptyDir:
+            sizeLimit: "50Gi"
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-c"]
+          args:
+            [
+              "vllm serve Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000 --trust-remote-code --enable-chunked-prefill --max-num-batched-tokens 3500 --gpu-memory-utilization 0.95 --disable-log-requests",
+            ]
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "16"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "4"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache-volume
+              mountPath: /root/.cache/huggingface
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vanilla-vllm
+spec:
+  selector:
+    app: vanilla-vllm
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

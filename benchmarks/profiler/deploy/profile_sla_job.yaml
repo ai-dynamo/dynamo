@@ -8,7 +8,7 @@ metadata:
 spec:
   template:
     spec:
-      serviceAccountName: profile-sla-sa
+      serviceAccountName: dynamo-sa
       containers:
       - name: profile-sla
         image: ${DOCKER_IMAGE}
@@ -26,10 +26,10 @@ spec:
             value: nats://${NAMESPACE}-nats:4222
           - name: ETCD_ENDPOINTS
             value: ${NAMESPACE}-etcd:2379
-        command: ["python", "/workspace/benchmarks/profiler/profile_sla.py"]
+        command: ["python", "-m", "benchmarks.profiler.profile_sla"]
         args:
           - --config
-          - ${DGD_CONFIG_FILE}
+          - /workspace/configs/disagg.yaml
           - --output-dir
           - /workspace/profiling_results
           - --namespace
@@ -51,9 +51,14 @@ spec:
         volumeMounts:
           - name: output-volume
             mountPath: /workspace/profiling_results
+          - name: configs
+            mountPath: /workspace/configs
       restartPolicy: Never
       volumes:
         - name: output-volume
           persistentVolumeClaim:
-            claimName: profiling-pvc
+            claimName: dynamo-pvc
+        - name: configs
+          persistentVolumeClaim:
+            claimName: dynamo-pvc
   backoffLimit: 0
