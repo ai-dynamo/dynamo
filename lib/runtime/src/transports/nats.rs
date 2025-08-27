@@ -443,6 +443,8 @@ pub struct NatsQueue {
     subject: String,
     /// The subscriber for pull-based consumption
     subscriber: Option<jetstream::consumer::PullConsumer>,
+    /// Optional consumer name for broadcast pattern (if None, uses "worker-group")
+    consumer_name: Option<String>,
 }
 
 impl NatsQueue {
@@ -460,6 +462,29 @@ impl NatsQueue {
             client: None,
             subject,
             subscriber: None,
+            consumer_name: None,
+        }
+    }
+
+    /// Create a new NatsQueue with a specific consumer name for broadcast pattern
+    /// Each consumer with a unique name will receive all messages independently
+    pub fn new_with_consumer(
+        stream_name: String,
+        nats_server: String,
+        dequeue_timeout: time::Duration,
+        consumer_name: String,
+    ) -> Self {
+        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        let subject = format!("{}.*", sanitized_stream_name);
+
+        Self {
+            stream_name: sanitized_stream_name,
+            nats_server,
+            dequeue_timeout,
+            client: None,
+            subject,
+            subscriber: None,
+            consumer_name: Some(consumer_name),
         }
     }
 
@@ -486,7 +511,11 @@ impl NatsQueue {
 
             // Create persistent subscriber
             let consumer_config = jetstream::consumer::pull::Config {
-                durable_name: Some("worker-group".to_string()),
+                durable_name: Some(
+                    self.consumer_name
+                        .clone()
+                        .unwrap_or_else(|| "worker-group".to_string()),
+                ),
                 ..Default::default()
             };
 
@@ -564,13 +593,39 @@ impl NatsQueue {
         if let Some(client) = &self.client {
             // Get consumer info to get pending messages count
             let stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let consumer_name = self
+                .consumer_name
+                .clone()
+                .unwrap_or_else(|| "worker-group".to_string());
             let mut consumer: jetstream::consumer::PullConsumer = stream
-                .get_consumer("worker-group")
+                .get_consumer(&consumer_name)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to get consumer: {}", e))?;
             let info = consumer.info().await?;
 
             Ok(info.num_pending)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
+    /// Purge messages from the stream up to and including the specified sequence number
+    /// This permanently removes messages and affects all consumers of the stream
+    pub async fn purge_up_to_sequence(&self, sequence: u64) -> Result<()> {
+        if let Some(client) = &self.client {
+            let stream = client.jetstream().get_stream(&self.stream_name).await?;
+
+            // Purge all messages up to and including the specified sequence
+            stream.purge().sequence(sequence).await.map_err(|e| {
+                anyhow::anyhow!("Failed to purge stream up to sequence {}: {}", sequence, e)
+            })?;
+
+            log::debug!(
+                "Purged stream {} up to sequence {}",
+                self.stream_name,
+                sequence
+            );
+            Ok(())
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }
@@ -785,5 +840,126 @@ mod tests {
             .object_store_delete_bucket("test-bucket")
             .await
             .expect("Failed to delete bucket");
+    }
+
+    // Integration test for broadcast pattern with purging
+    #[tokio::test]
+    #[ignore]
+    async fn test_nats_queue_broadcast_with_purge() {
+        use uuid::Uuid;
+
+        // Create unique stream name for this test
+        let stream_name = format!("test-broadcast-{}", Uuid::new_v4());
+        let nats_server = "nats://localhost:4222".to_string();
+        let timeout = time::Duration::from_secs(5);
+
+        // Create two consumers with different names for the same stream
+        let consumer1_name = format!("consumer-{}", Uuid::new_v4());
+        let consumer2_name = format!("consumer-{}", Uuid::new_v4());
+
+        let mut queue1 = NatsQueue::new_with_consumer(
+            stream_name.clone(),
+            nats_server.clone(),
+            timeout,
+            consumer1_name,
+        );
+
+        let mut queue2 = NatsQueue::new_with_consumer(
+            stream_name.clone(),
+            nats_server.clone(),
+            timeout,
+            consumer2_name,
+        );
+
+        // Connect both queues (first one creates the stream, second one reuses it)
+        queue1.connect().await.expect("Failed to connect queue1");
+        queue2.connect().await.expect("Failed to connect queue2");
+
+        // Send 4 messages
+        let messages = vec![
+            Bytes::from("message1"),
+            Bytes::from("message2"),
+            Bytes::from("message3"),
+            Bytes::from("message4"),
+        ];
+
+        for msg in &messages {
+            queue1
+                .enqueue_task(msg.clone())
+                .await
+                .expect("Failed to enqueue message");
+        }
+
+        // Give JetStream a moment to persist the messages
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Get stream info to find the sequence numbers
+        // We need to know the sequence of message 2 to purge up to it
+        let client_options = Client::builder()
+            .server(nats_server.clone())
+            .build()
+            .expect("Failed to build client options");
+
+        let client = client_options
+            .connect()
+            .await
+            .expect("Failed to connect to NATS");
+
+        // Purge the first two messages (sequence 1 and 2)
+        // Note: JetStream sequences start at 1
+        queue1
+            .purge_up_to_sequence(2)
+            .await
+            .expect("Failed to purge messages");
+
+        // Give JetStream a moment to process the purge
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Now both consumers should only receive messages 3 and 4
+        let mut consumer1_messages = Vec::new();
+        let mut consumer2_messages = Vec::new();
+
+        // Collect messages from consumer 1
+        while let Some(msg) = queue1
+            .dequeue_task(Some(time::Duration::from_millis(500)))
+            .await
+            .expect("Failed to dequeue from queue1")
+        {
+            consumer1_messages.push(msg);
+        }
+
+        // Collect messages from consumer 2
+        while let Some(msg) = queue2
+            .dequeue_task(Some(time::Duration::from_millis(500)))
+            .await
+            .expect("Failed to dequeue from queue2")
+        {
+            consumer2_messages.push(msg);
+        }
+
+        // Verify both consumers received exactly 2 messages (message3 and message4)
+        assert_eq!(
+            consumer1_messages.len(),
+            2,
+            "Wrong message count for consumer 1"
+        );
+        assert_eq!(
+            consumer2_messages.len(),
+            2,
+            "Wrong message count for consumer 2"
+        );
+
+        // Verify the messages are the last two (message3 and message4)
+        assert_eq!(consumer1_messages[0], messages[2]);
+        assert_eq!(consumer1_messages[1], messages[3]);
+        assert_eq!(consumer2_messages[0], messages[2]);
+        assert_eq!(consumer2_messages[1], messages[3]);
+
+        // Clean up by deleting the stream
+        client
+            .jetstream()
+            .delete_stream(&stream_name)
+            .await
+            .expect("Failed to delete test stream");
     }
 }
