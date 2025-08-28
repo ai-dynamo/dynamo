@@ -258,14 +258,10 @@ impl ModelWatcher {
 
 
 
-                // CRITICAL: Download tokenizer.json etc to local disk BEFORE creating pipelines
-                // The PromptFormatter needs these files to be on local disk, not NATS URLs
                 // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
                 // OpenAIPreprocessor::new loads the files, so we can delete them after this
                 // function. Needs checking carefully, possibly we need to store it in state.
                 let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
-
-
 
                 let kv_chooser = if self.router_mode == RouterMode::KV {
                     Some(
