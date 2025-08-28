@@ -55,20 +55,6 @@ const (
 	PendingState State = "pending"
 )
 
-var (
-	// Grove GroupVersionResources for scaling operations
-	podCliqueGVR = schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliques",
-	}
-	podCliqueScalingGroupGVR = schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliquescalinggroups",
-	}
-)
-
 type etcdStorage interface {
 	DeleteKeys(ctx context.Context, prefix string) error
 }
@@ -88,6 +74,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podgangsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -201,9 +188,9 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	var gvr schema.GroupVersionResource
 	switch resourceType {
 	case "PodClique":
-		gvr = podCliqueGVR
+		gvr = consts.PodCliqueGVR
 	case "PodCliqueScalingGroup":
-		gvr = podCliqueScalingGroupGVR
+		gvr = consts.PodCliqueScalingGroupGVR
 	default:
 		return fmt.Errorf("unsupported Grove resource type: %s", resourceType)
 	}
