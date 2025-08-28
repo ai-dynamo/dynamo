@@ -3,6 +3,7 @@
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, List
 
@@ -32,6 +33,11 @@ def create_payload_for_config(config: EngineConfig) -> Payload:
 
     This provides the default implementation for text-only models.
     """
+    expected_response = (
+        ["Hello world"]
+        if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1"
+        else ["AI"]
+    )
     return Payload(
         payload_chat={
             "model": config.model,
@@ -54,5 +60,5 @@ def create_payload_for_config(config: EngineConfig) -> Payload:
         },
         repeat_count=3,
         expected_log=[],
-        expected_response=["AI"],
+        expected_response=expected_response,
     )
