@@ -284,6 +284,7 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	@$(CRD_REF_DOCS) \
 		--source-path=api \
 		--config=docs/crd-ref-docs-config.yaml \
+		--renderer=markdown \
 		--output-path=docs/api-reference.md
 	@echo "✅ Generated API reference at docs/api-reference.md"
 

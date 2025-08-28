@@ -1,55 +1,20 @@
-// Generated documentation. Please do not edit.
-:anchor_prefix: k8s-api
+# API Reference
 
-[id="{p}-api-reference"]
-== API Reference
-
-.Packages
-- xref:{anchor_prefix}-nvidia-com-v1alpha1[$$nvidia.com/v1alpha1$$]
+## Packages
+- [nvidia.com/v1alpha1](#nvidiacomv1alpha1)
 
 
-[id="{anchor_prefix}-nvidia-com-v1alpha1"]
-=== nvidia.com/v1alpha1
+## nvidia.com/v1alpha1
 
 Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group
 
-.Resource Types
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeployment[$$DynamoComponentDeployment$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeployment[$$DynamoGraphDeployment$$]
+### Resource Types
+- [DynamoComponentDeployment](#dynamocomponentdeployment)
+- [DynamoGraphDeployment](#dynamographdeployment)
 
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-autoscaling"]
-==== Autoscaling
-
-
-
-
-
-
-
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentsharedspec[$$DynamoComponentDeploymentSharedSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]
-****
-
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`enabled`* __boolean__ |  |  | 
-| *`minReplicas`* __integer__ |  |  | 
-| *`maxReplicas`* __integer__ |  |  | 
-| *`behavior`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling[$$HorizontalPodAutoscalerBehavior$$]__ |  |  | 
-| *`metrics`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling[$$MetricSpec$$] array__ |  |  | 
-|===
-
-
-
-
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-basestatus"]
-==== BaseStatus
+#### Autoscaling
 
 
 
@@ -57,22 +22,41 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-basecrd[$$BaseCRD$$]
-****
+_Appears in:_
+- [DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec)
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`version`* __string__ |  |  | 
-| *`state`* __string__ |  |  | 
-| *`conditions`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta[$$Condition$$] array__ |  |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ |  |  |  |
+| `minReplicas` _integer_ |  |  |  |
+| `maxReplicas` _integer_ |  |  |  |
+| `behavior` _[HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling)_ |  |  |  |
+| `metrics` _[MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling) array_ |  |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeployment"]
-==== DynamoComponentDeployment
+
+
+#### BaseStatus
+
+
+
+
+
+
+
+_Appears in:_
+- [BaseCRD](#basecrd)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `version` _string_ |  |  |  |
+| `state` _string_ |  |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ |  |  |  |
+
+
+#### DynamoComponentDeployment
 
 
 
@@ -82,20 +66,16 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 
 
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`apiVersion`* __string__ | `nvidia.com/v1alpha1` | |
-| *`kind`* __string__ | `DynamoComponentDeployment` | |
-| *`metadata`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta[$$ObjectMeta$$]__ | Refer to Kubernetes API documentation for fields of `metadata`.
- |  | 
-| *`spec`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]__ | Spec defines the desired state for this Dynamo component deployment. + |  | 
-| *`status`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentstatus[$$DynamoComponentDeploymentStatus$$]__ | Status reflects the current observed state of the component deployment. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoComponentDeployment` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | Spec defines the desired state for this Dynamo component deployment. |  |  |
+| `status` _[DynamoComponentDeploymentStatus](#dynamocomponentdeploymentstatus)_ | Status reflects the current observed state of the component deployment. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec"]
-==== DynamoComponentDeploymentOverridesSpec
+#### DynamoComponentDeploymentOverridesSpec
 
 
 
@@ -103,42 +83,32 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeploymentspec[$$DynamoGraphDeploymentSpec$$]
-****
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`annotations`* __object (keys:string, values:string)__ | Annotations to add to generated Kubernetes resources for this component +
-(such as Pod, Service, and Ingress when applicable). + |  | 
-| *`labels`* __object (keys:string, values:string)__ | Labels to add to generated Kubernetes resources for this component. + |  | 
-| *`serviceName`* __string__ | contains the name of the component + |  | 
-| *`componentType`* __string__ | ComponentType indicates the role of this component (for example, "main"). + |  | 
-| *`dynamoNamespace`* __string__ | dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive) + |  | 
-| *`resources`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-resources[$$Resources$$]__ | Resources requested and limits for this component, including CPU, memory, +
-GPUs/devices, and any runtime-specific resources. + |  | 
-| *`autoscaling`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-autoscaling[$$Autoscaling$$]__ | Autoscaling config for this component (replica range, target utilization, etc.). + |  | 
-| *`envs`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core[$$EnvVar$$] array__ | Envs defines additional environment variables to inject into the component containers. + |  | 
-| *`envFromSecret`* __string__ | EnvFromSecret references a Secret whose key/value pairs will be exposed as +
-environment variables in the component containers. + |  | 
-| *`pvc`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-pvc[$$PVC$$]__ | PVC config describing volumes to be mounted by the component. + |  | 
-| *`ingress`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingressspec[$$IngressSpec$$]__ | Ingress config to expose the component outside the cluster (or through a service mesh). + |  | 
-| *`sharedMemory`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-sharedmemoryspec[$$SharedMemorySpec$$]__ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). + |  | 
-| *`extraPodMetadata`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-extrapodmetadata[$$ExtraPodMetadata$$]__ | ExtraPodMetadata adds labels/annotations to the created Pods. + |  | 
-| *`extraPodSpec`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-extrapodspec[$$ExtraPodSpec$$]__ | ExtraPodSpec allows to override the main pod spec configuration. +
-It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field +
-that allows overriding the main container configuration. + |  | 
-| *`livenessProbe`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core[$$Probe$$]__ | LivenessProbe to detect and restart unhealthy containers. + |  | 
-| *`readinessProbe`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core[$$Probe$$]__ | ReadinessProbe to signal when the container is ready to receive traffic. + |  | 
-| *`replicas`* __integer__ | Replicas is the desired number of Pods for this component when autoscaling is not used. + |  | 
-| *`multinode`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-multinodespec[$$MultinodeSpec$$]__ | Multinode is the configuration for multinode components. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
+| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
+| `serviceName` _string_ | contains the name of the component |  |  |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `dynamoNamespace` _string_ | dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive) |  |  |
+| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
+| `pvc` _[PVC](#pvc)_ | PVC config describing volumes to be mounted by the component. |  |  |
+| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentsharedspec"]
-==== DynamoComponentDeploymentSharedSpec
+#### DynamoComponentDeploymentSharedSpec
 
 
 
@@ -146,43 +116,33 @@ that allows overriding the main container configuration. + |  |
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]
-****
+_Appears in:_
+- [DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`annotations`* __object (keys:string, values:string)__ | Annotations to add to generated Kubernetes resources for this component +
-(such as Pod, Service, and Ingress when applicable). + |  | 
-| *`labels`* __object (keys:string, values:string)__ | Labels to add to generated Kubernetes resources for this component. + |  | 
-| *`serviceName`* __string__ | contains the name of the component + |  | 
-| *`componentType`* __string__ | ComponentType indicates the role of this component (for example, "main"). + |  | 
-| *`dynamoNamespace`* __string__ | dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive) + |  | 
-| *`resources`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-resources[$$Resources$$]__ | Resources requested and limits for this component, including CPU, memory, +
-GPUs/devices, and any runtime-specific resources. + |  | 
-| *`autoscaling`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-autoscaling[$$Autoscaling$$]__ | Autoscaling config for this component (replica range, target utilization, etc.). + |  | 
-| *`envs`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core[$$EnvVar$$] array__ | Envs defines additional environment variables to inject into the component containers. + |  | 
-| *`envFromSecret`* __string__ | EnvFromSecret references a Secret whose key/value pairs will be exposed as +
-environment variables in the component containers. + |  | 
-| *`pvc`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-pvc[$$PVC$$]__ | PVC config describing volumes to be mounted by the component. + |  | 
-| *`ingress`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingressspec[$$IngressSpec$$]__ | Ingress config to expose the component outside the cluster (or through a service mesh). + |  | 
-| *`sharedMemory`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-sharedmemoryspec[$$SharedMemorySpec$$]__ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). + |  | 
-| *`extraPodMetadata`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-extrapodmetadata[$$ExtraPodMetadata$$]__ | ExtraPodMetadata adds labels/annotations to the created Pods. + |  | 
-| *`extraPodSpec`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-extrapodspec[$$ExtraPodSpec$$]__ | ExtraPodSpec allows to override the main pod spec configuration. +
-It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field +
-that allows overriding the main container configuration. + |  | 
-| *`livenessProbe`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core[$$Probe$$]__ | LivenessProbe to detect and restart unhealthy containers. + |  | 
-| *`readinessProbe`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core[$$Probe$$]__ | ReadinessProbe to signal when the container is ready to receive traffic. + |  | 
-| *`replicas`* __integer__ | Replicas is the desired number of Pods for this component when autoscaling is not used. + |  | 
-| *`multinode`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-multinodespec[$$MultinodeSpec$$]__ | Multinode is the configuration for multinode components. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
+| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
+| `serviceName` _string_ | contains the name of the component |  |  |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `dynamoNamespace` _string_ | dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive) |  |  |
+| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
+| `pvc` _[PVC](#pvc)_ | PVC config describing volumes to be mounted by the component. |  |  |
+| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec"]
-==== DynamoComponentDeploymentSpec
+#### DynamoComponentDeploymentSpec
 
 
 
@@ -190,47 +150,35 @@ DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeploy
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeployment[$$DynamoComponentDeployment$$]
-****
+_Appears in:_
+- [DynamoComponentDeployment](#dynamocomponentdeployment)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`dynamoComponent`* __string__ | DynamoComponent selects the Dynamo component from the archive to deploy. +
-Typically corresponds to a component defined in the packaged Dynamo artifacts. + |  | 
-| *`dynamoTag`* __string__ | contains the tag of the DynamoComponent: for example, "my_package:MyService" + |  | 
-| *`backendFramework`* __string__ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm") + |  | Enum: [sglang vllm trtllm] +
-
-| *`annotations`* __object (keys:string, values:string)__ | Annotations to add to generated Kubernetes resources for this component +
-(such as Pod, Service, and Ingress when applicable). + |  | 
-| *`labels`* __object (keys:string, values:string)__ | Labels to add to generated Kubernetes resources for this component. + |  | 
-| *`serviceName`* __string__ | contains the name of the component + |  | 
-| *`componentType`* __string__ | ComponentType indicates the role of this component (for example, "main"). + |  | 
-| *`dynamoNamespace`* __string__ | dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive) + |  | 
-| *`resources`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-resources[$$Resources$$]__ | Resources requested and limits for this component, including CPU, memory, +
-GPUs/devices, and any runtime-specific resources. + |  | 
-| *`autoscaling`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-autoscaling[$$Autoscaling$$]__ | Autoscaling config for this component (replica range, target utilization, etc.). + |  | 
-| *`envs`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core[$$EnvVar$$] array__ | Envs defines additional environment variables to inject into the component containers. + |  | 
-| *`envFromSecret`* __string__ | EnvFromSecret references a Secret whose key/value pairs will be exposed as +
-environment variables in the component containers. + |  | 
-| *`pvc`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-pvc[$$PVC$$]__ | PVC config describing volumes to be mounted by the component. + |  | 
-| *`ingress`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingressspec[$$IngressSpec$$]__ | Ingress config to expose the component outside the cluster (or through a service mesh). + |  | 
-| *`sharedMemory`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-sharedmemoryspec[$$SharedMemorySpec$$]__ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). + |  | 
-| *`extraPodMetadata`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-extrapodmetadata[$$ExtraPodMetadata$$]__ | ExtraPodMetadata adds labels/annotations to the created Pods. + |  | 
-| *`extraPodSpec`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-dynamo-common-extrapodspec[$$ExtraPodSpec$$]__ | ExtraPodSpec allows to override the main pod spec configuration. +
-It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field +
-that allows overriding the main container configuration. + |  | 
-| *`livenessProbe`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core[$$Probe$$]__ | LivenessProbe to detect and restart unhealthy containers. + |  | 
-| *`readinessProbe`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core[$$Probe$$]__ | ReadinessProbe to signal when the container is ready to receive traffic. + |  | 
-| *`replicas`* __integer__ | Replicas is the desired number of Pods for this component when autoscaling is not used. + |  | 
-| *`multinode`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-multinodespec[$$MultinodeSpec$$]__ | Multinode is the configuration for multinode components. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `dynamoComponent` _string_ | DynamoComponent selects the Dynamo component from the archive to deploy.<br />Typically corresponds to a component defined in the packaged Dynamo artifacts. |  |  |
+| `dynamoTag` _string_ | contains the tag of the DynamoComponent: for example, "my_package:MyService" |  |  |
+| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm") |  | Enum: [sglang vllm trtllm] <br /> |
+| `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
+| `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
+| `serviceName` _string_ | contains the name of the component |  |  |
+| `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
+| `dynamoNamespace` _string_ | dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive) |  |  |
+| `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
+| `autoscaling` _[Autoscaling](#autoscaling)_ | Autoscaling config for this component (replica range, target utilization, etc.). |  |  |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
+| `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the component containers. |  |  |
+| `pvc` _[PVC](#pvc)_ | PVC config describing volumes to be mounted by the component. |  |  |
+| `ingress` _[IngressSpec](#ingressspec)_ | Ingress config to expose the component outside the cluster (or through a service mesh). |  |  |
+| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size). |  |  |
+| `extraPodMetadata` _[ExtraPodMetadata](#extrapodmetadata)_ | ExtraPodMetadata adds labels/annotations to the created Pods. |  |  |
+| `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
+| `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
+| `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component when autoscaling is not used. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentstatus"]
-==== DynamoComponentDeploymentStatus
+#### DynamoComponentDeploymentStatus
 
 
 
@@ -238,25 +186,16 @@ DynamoComponentDeploymentStatus defines the observed state of DynamoComponentDep
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeployment[$$DynamoComponentDeployment$$]
-****
+_Appears in:_
+- [DynamoComponentDeployment](#dynamocomponentdeployment)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`conditions`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta[$$Condition$$] array__ | INSERT ADDITIONAL STATUS FIELD - define observed state of cluster +
-Important: Run "make" to regenerate code after modifying this file +
-Conditions captures the latest observed state of the component (including +
-availability and readiness) using standard Kubernetes condition types. + |  | 
-| *`podSelector`* __object (keys:string, values:string)__ | PodSelector contains the labels that can be used to select Pods belonging to +
-this component deployment. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | INSERT ADDITIONAL STATUS FIELD - define observed state of cluster<br />Important: Run "make" to regenerate code after modifying this file<br />Conditions captures the latest observed state of the component (including<br />availability and readiness) using standard Kubernetes condition types. |  |  |
+| `podSelector` _object (keys:string, values:string)_ | PodSelector contains the labels that can be used to select Pods belonging to<br />this component deployment. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeployment"]
-==== DynamoGraphDeployment
+#### DynamoGraphDeployment
 
 
 
@@ -266,20 +205,16 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
 
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`apiVersion`* __string__ | `nvidia.com/v1alpha1` | |
-| *`kind`* __string__ | `DynamoGraphDeployment` | |
-| *`metadata`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta[$$ObjectMeta$$]__ | Refer to Kubernetes API documentation for fields of `metadata`.
- |  | 
-| *`spec`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeploymentspec[$$DynamoGraphDeploymentSpec$$]__ | Spec defines the desired state for this graph deployment. + |  | 
-| *`status`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeploymentstatus[$$DynamoGraphDeploymentStatus$$]__ | Status reflects the current observed state of this graph deployment. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
+| `kind` _string_ | `DynamoGraphDeployment` | | |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | Spec defines the desired state for this graph deployment. |  |  |
+| `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | Status reflects the current observed state of this graph deployment. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeploymentspec"]
-==== DynamoGraphDeploymentSpec
+#### DynamoGraphDeploymentSpec
 
 
 
@@ -287,31 +222,18 @@ DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeployment[$$DynamoGraphDeployment$$]
-****
+_Appears in:_
+- [DynamoGraphDeployment](#dynamographdeployment)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`dynamoGraph`* __string__ | DynamoGraph selects the graph (workflow/topology) to deploy. This must match +
-a graph name packaged with the Dynamo archive. + |  | 
-| *`services`* __object (keys:string, values:xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$])__ | Services allows per-service overrides of the component deployment settings. +
-- key: name of the service defined by the DynamoComponent +
-- value: overrides for that service +
-If not set for a service, the default DynamoComponentDeployment values are used. + |  | Optional: {} +
-
-| *`envs`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core[$$EnvVar$$] array__ | Envs are environment variables applied to all services in the graph unless +
-overridden by service-specific configuration. + |  | Optional: {} +
-
-| *`backendFramework`* __string__ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). + |  | Enum: [sglang vllm trtllm] +
-
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `dynamoGraph` _string_ | DynamoGraph selects the graph (workflow/topology) to deploy. This must match<br />a graph name packaged with the Dynamo archive. |  |  |
+| `services` _object (keys:string, values:[DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec))_ | Services allows per-service overrides of the component deployment settings.<br />- key: name of the service defined by the DynamoComponent<br />- value: overrides for that service<br />If not set for a service, the default DynamoComponentDeployment values are used. |  | Optional: {} <br /> |
+| `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the graph unless<br />overridden by service-specific configuration. |  | Optional: {} <br /> |
+| `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeploymentstatus"]
-==== DynamoGraphDeploymentStatus
+#### DynamoGraphDeploymentStatus
 
 
 
@@ -319,22 +241,16 @@ DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamographdeployment[$$DynamoGraphDeployment$$]
-****
+_Appears in:_
+- [DynamoGraphDeployment](#dynamographdeployment)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`state`* __string__ | State is a high-level textual status of the graph deployment lifecycle. + |  | 
-| *`conditions`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta[$$Condition$$] array__ | Conditions contains the latest observed conditions of the graph deployment. +
-The slice is merged by type on patch updates. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingressspec"]
-==== IngressSpec
+#### IngressSpec
 
 
 
@@ -342,31 +258,26 @@ The slice is merged by type on patch updates. + |  |
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentsharedspec[$$DynamoComponentDeploymentSharedSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]
-****
+_Appears in:_
+- [DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec)
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`enabled`* __boolean__ | Enabled exposes the component through an ingress or virtual service when true. + |  | 
-| *`host`* __string__ | Host is the base host name to route external traffic to this component. + |  | 
-| *`useVirtualService`* __boolean__ | UseVirtualService indicates whether to configure a service-mesh VirtualService instead of a standard Ingress. + |  | 
-| *`virtualServiceGateway`* __string__ | VirtualServiceGateway optionally specifies the gateway name to attach the VirtualService to. + |  | 
-| *`hostPrefix`* __string__ | HostPrefix is an optional prefix added before the host. + |  | 
-| *`annotations`* __object (keys:string, values:string)__ | Annotations to set on the generated Ingress/VirtualService resources. + |  | 
-| *`labels`* __object (keys:string, values:string)__ | Labels to set on the generated Ingress/VirtualService resources. + |  | 
-| *`tls`* __xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingresstlsspec[$$IngressTLSSpec$$]__ | TLS holds the TLS configuration used by the Ingress/VirtualService. + |  | 
-| *`hostSuffix`* __string__ | HostSuffix is an optional suffix appended after the host. + |  | 
-| *`ingressControllerClassName`* __string__ | IngressControllerClassName selects the ingress controller class (e.g., "nginx"). + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled exposes the component through an ingress or virtual service when true. |  |  |
+| `host` _string_ | Host is the base host name to route external traffic to this component. |  |  |
+| `useVirtualService` _boolean_ | UseVirtualService indicates whether to configure a service-mesh VirtualService instead of a standard Ingress. |  |  |
+| `virtualServiceGateway` _string_ | VirtualServiceGateway optionally specifies the gateway name to attach the VirtualService to. |  |  |
+| `hostPrefix` _string_ | HostPrefix is an optional prefix added before the host. |  |  |
+| `annotations` _object (keys:string, values:string)_ | Annotations to set on the generated Ingress/VirtualService resources. |  |  |
+| `labels` _object (keys:string, values:string)_ | Labels to set on the generated Ingress/VirtualService resources. |  |  |
+| `tls` _[IngressTLSSpec](#ingresstlsspec)_ | TLS holds the TLS configuration used by the Ingress/VirtualService. |  |  |
+| `hostSuffix` _string_ | HostSuffix is an optional suffix appended after the host. |  |  |
+| `ingressControllerClassName` _string_ | IngressControllerClassName selects the ingress controller class (e.g., "nginx"). |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingresstlsspec"]
-==== IngressTLSSpec
+#### IngressTLSSpec
 
 
 
@@ -374,20 +285,15 @@ The slice is merged by type on patch updates. + |  |
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-ingressspec[$$IngressSpec$$]
-****
+_Appears in:_
+- [IngressSpec](#ingressspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`secretName`* __string__ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. + |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-multinodespec"]
-==== MultinodeSpec
+#### MultinodeSpec
 
 
 
@@ -395,25 +301,17 @@ The slice is merged by type on patch updates. + |  |
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentsharedspec[$$DynamoComponentDeploymentSharedSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]
-****
+_Appears in:_
+- [DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec)
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`nodeCount`* __integer__ | Indicates the number of nodes to deploy for multinode components. +
-Total number of GPUs is NumberOfNodes * GPU limit. +
-Must be greater than 1. + | 2 | Minimum: 2 +
-
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1. | 2 | Minimum: 2 <br /> |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-pvc"]
-==== PVC
+#### PVC
 
 
 
@@ -421,27 +319,22 @@ Must be greater than 1. + | 2 | Minimum: 2 +
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentsharedspec[$$DynamoComponentDeploymentSharedSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]
-****
+_Appears in:_
+- [DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec)
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`create`* __boolean__ | Create indicates to create a new PVC + |  | 
-| *`name`* __string__ | Name is the name of the PVC + |  | 
-| *`storageClass`* __string__ | StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created. + |  | 
-| *`size`* __xref:{anchor_prefix}-k8s-io-apimachinery-pkg-api-resource-quantity[$$Quantity$$]__ | Size of the NIM cache in Gi, used during PVC creation + |  | 
-| *`volumeAccessMode`* __link:https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core[$$PersistentVolumeAccessMode$$]__ | VolumeAccessMode is the volume access mode of the PVC + |  | 
-| *`mountPoint`* __string__ |  |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `create` _boolean_ | Create indicates to create a new PVC |  |  |
+| `name` _string_ | Name is the name of the PVC |  |  |
+| `storageClass` _string_ | StorageClass to be used for PVC creation. Leave it as empty if the PVC is already created. |  |  |
+| `size` _[Quantity](#quantity)_ | Size of the NIM cache in Gi, used during PVC creation |  |  |
+| `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC |  |  |
+| `mountPoint` _string_ |  |  |  |
 
 
-[id="{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-sharedmemoryspec"]
-==== SharedMemorySpec
+#### SharedMemorySpec
 
 
 
@@ -449,18 +342,14 @@ Must be greater than 1. + | 2 | Minimum: 2 +
 
 
 
-.Appears In:
-****
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentoverridesspec[$$DynamoComponentDeploymentOverridesSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentsharedspec[$$DynamoComponentDeploymentSharedSpec$$]
-- xref:{anchor_prefix}-github-com-ai-dynamo-dynamo-deploy-cloud-operator-api-v1alpha1-dynamocomponentdeploymentspec[$$DynamoComponentDeploymentSpec$$]
-****
+_Appears in:_
+- [DynamoComponentDeploymentOverridesSpec](#dynamocomponentdeploymentoverridesspec)
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-[cols="20a,50a,15a,15a", options="header"]
-|===
-| Field | Description | Default | Validation
-| *`disabled`* __boolean__ |  |  | 
-| *`size`* __xref:{anchor_prefix}-k8s-io-apimachinery-pkg-api-resource-quantity[$$Quantity$$]__ |  |  | 
-|===
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `disabled` _boolean_ |  |  |  |
+| `size` _[Quantity](#quantity)_ |  |  |  |
 
 
