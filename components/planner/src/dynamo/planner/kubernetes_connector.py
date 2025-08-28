@@ -34,9 +34,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = await self.kube_api.get_graph_deployment()
         if deployment is None:
-            raise ValueError(
-                f"Parent DynamoGraphDeployment not found"
-            )
+            raise ValueError("Parent DynamoGraphDeployment not found")
 
         # get current replicas or 1 if not found
         current_replicas = self._get_current_replicas(deployment, component_name)
@@ -55,9 +53,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = await self.kube_api.get_graph_deployment()
         if deployment is None:
-            raise ValueError(
-                f"Parent DynamoGraphDeployment not found"
-            )
+            raise ValueError("Parent DynamoGraphDeployment not found")
 
         # get current replicas or 1 if not found
         current_replicas = self._get_current_replicas(deployment, component_name)
@@ -81,9 +77,7 @@ class KubernetesConnector(PlannerConnector):
             
         deployment = await self.kube_api.get_graph_deployment()
         if deployment is None:
-            raise ValueError(
-                f"Parent DynamoGraphDeployment not found"
-            )
+            raise ValueError("Parent DynamoGraphDeployment not found")
 
         if not await self.kube_api.is_deployment_ready(
             self._get_graph_deployment_name(deployment)
