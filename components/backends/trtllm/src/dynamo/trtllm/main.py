@@ -239,17 +239,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
 
-        if is_first_worker(config):
-            # Register the model with runtime config
-            await register_llm(
-                modelType,
-                endpoint,
-                config.model_path,
-                config.served_model_name,
-                kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
-                runtime_config=runtime_config,
-            )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
