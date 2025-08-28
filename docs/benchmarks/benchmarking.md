@@ -21,7 +21,7 @@ This guide shows how to benchmark NVIDIA Dynamo deployments on Kubernetes to com
 
 **Hardware Support**: This guide was initially developed and tested on H200 GPUs, but the benchmarking framework should work on other NVIDIA GPU types including H100, A100, and others.
 
-**Model Support**: The benchmarking framework supports any HuggingFace-compatible LLM model. While the default manifests use `Qwen/Qwen3-0.6B` and the default benchmarking model is `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, you can benchmark any model by modifying the deployment YAML files. The example performance plots shown in this guide were generated using `nvidia/Llama-3.1-8B-Instruct-FP8`.
+**Model Support**: The benchmarking framework supports any HuggingFace-compatible LLM model. The example performance plots shown in this guide were generated using `nvidia/Llama-3.1-8B-Instruct-FP8`. You can benchmark any model by modifying the deployment YAML files.
 
 ## What You'll Get
 

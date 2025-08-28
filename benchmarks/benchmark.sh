@@ -11,7 +11,7 @@ DYNAMO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration - all set via command line arguments
 NAMESPACE=""
-MODEL="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+MODEL="nvidia/Llama-3.1-8B-Instruct-FP8"
 ISL=200
 STD=10
 OSL=200
