@@ -16,6 +16,7 @@
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
 use crate::metrics::MetricsRegistry;
+use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
 use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
@@ -307,8 +308,6 @@ mod integration_tests {
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison
-            use crate::metrics::prometheus_names::{nats_client, nats_service};
-
             let filtered_response: String = response
                 .lines()
                 .filter(|line| {
