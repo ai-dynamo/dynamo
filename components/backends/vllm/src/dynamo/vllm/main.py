@@ -248,12 +248,14 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     try:
+        # for decode, we want to transfer the in-flight requests to other decode engines,
+        # because waiting them to finish can take a long time for long OSLs
+        # however, if migration_limit is 0, we will still gracefully shutdown the engine
+        graceful_shutdown = config.migration_limit > 0
         await asyncio.gather(
-            # for decode, we want to transfer the in-flight requests to other decode engines,
-            # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=False,
+                graceful_shutdown=graceful_shutdown,
                 metrics_labels=[("model", config.model)],
             ),
             clear_endpoint.serve_endpoint(
