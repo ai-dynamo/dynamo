@@ -1,4 +1,4 @@
-#/bin/bash
+#!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -16,6 +16,7 @@
 
 # Default Values
 model="neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic"
+model_path=""
 url="http://localhost:8000"
 mode="aggregated"
 artifacts_root_dir="artifacts_root"
@@ -46,6 +47,7 @@ print_help() {
   echo "  --decode-tensor-parallelism, --decode-tp <int>     Decode tensor parallelism (default: $decode_tp)"
   echo "  --decode-data-parallelism, --decode-dp <int>       Decode data parallelism (default: $decode_dp)"
   echo "  --model <model_id>                         Hugging Face model ID to benchmark (default: $model)"
+  echo "  --model-path <path>                        Local path to Hugging Face model (takes priority over --model if both specified, default: $model_path)"
   echo "  --input-sequence-length, --isl <int>       Input sequence length (default: $isl)"
   echo "  --output-sequence-length, --osl <int>      Output sequence length (default: $osl)"
   echo "  --url <http://host:port>                   Target URL for inference requests (default: $url)"
@@ -88,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       model="$2"
+      shift 2
+      ;;
+    --model-path)
+      model_path="$2"
       shift 2
       ;;
     --input-sequence-length|--isl)
@@ -141,6 +147,15 @@ validate_concurrency() {
 IFS=',' read -r -a concurrency_array <<< "$concurrency_list"
 # Validate concurrency values
 validate_concurrency
+
+# Determine which model to use for tokenizer - model_path takes priority if specified
+if [ -n "${model_path}" ]; then
+  # Use model path when specified
+  tokenizer_to_use="${model_path}"
+else
+  # Use model (either specified or default)
+  tokenizer_to_use="${model}"
+fi
 
 if [ "${mode}" == "aggregated" ]; then
   if [ "${tp}" == "0" ] && [ "${dp}" == "0" ]; then
@@ -204,6 +219,9 @@ fi
 
 echo "Running genai-perf with:"
 echo "Model: $model"
+if [ -n "${model_path}" ]; then
+  echo "Model Path: $model_path (using this instead of model)"
+fi
 echo "ISL: $isl"
 echo "OSL: $osl"
 echo "Concurrency levels: ${concurrency_array[@]}"
@@ -216,7 +234,7 @@ for concurrency in "${concurrency_array[@]}"; do
   # `ignore_eos` since they are not in the official OpenAI spec.
   genai-perf profile \
     --model ${model} \
-    --tokenizer ${model} \
+    --tokenizer ${model_to_use} \
     --endpoint-type chat \
     --endpoint /v1/chat/completions \
     --streaming \
