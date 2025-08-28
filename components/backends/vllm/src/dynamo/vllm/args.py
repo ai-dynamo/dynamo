@@ -46,6 +46,7 @@ class Config:
     kv_port: Optional[int] = None
     side_channel_port: Optional[int] = None
     port_range: DynamoPortRange
+    custom_jinja_template: Optional[str] = None
 
     # mirror vLLM
     model: str
@@ -90,6 +91,12 @@ def parse_args() -> Config:
         type=int,
         default=DEFAULT_DYNAMO_PORT_MAX,
         help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MAX}). Must be in registered ports range (1024-49151).",
+    )
+    parser.add_argument(
+        "--custom-jinja-template",
+        type=str,
+        default=None,
+        help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -140,6 +147,7 @@ def parse_args() -> Config:
     config.port_range = DynamoPortRange(
         min=args.dynamo_port_min, max=args.dynamo_port_max
     )
+    config.custom_jinja_template = args.custom_jinja_template
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
