@@ -16,8 +16,6 @@
 import asyncio
 import random
 import string
-import subprocess
-import time
 
 import pytest
 
@@ -133,18 +131,6 @@ def random_string(length=10):
     remaining_chars = string.ascii_lowercase + string.digits
     rest = "".join(random.choices(remaining_chars, k=length - 1))
     return first_char + rest
-
-
-@pytest.fixture(scope="module", autouse=True)
-def nats_and_etcd():
-    nats_server = subprocess.Popen(["nats-server", "-js"])
-    etcd = subprocess.Popen(["etcd"])
-    time.sleep(5)  # time to start services
-    yield
-    etcd.terminate()
-    nats_server.terminate()
-    etcd.wait()
-    nats_server.wait()
 
 
 @pytest.fixture
