@@ -12,6 +12,6 @@ pub mod keys;
 
 pub use descriptors::{
     CallerContext, CallerContextBuilder, CallerDescriptor, ObjectDescriptor, ObjectDescriptorBuilder, 
-    ObjectName, OscarDescriptorError,
+    OscarDescriptorError,
 };
 pub use keys::OscarKeyType as OscarKeyTypeV2;

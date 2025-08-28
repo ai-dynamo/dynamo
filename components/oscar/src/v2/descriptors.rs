@@ -18,6 +18,7 @@ use dynamo_runtime::v2::{
     DescriptorError, NamespaceDescriptor, ComponentDescriptor, EndpointDescriptor, 
     InstanceDescriptor, PathDescriptor
 };
+use dynamo_runtime::v2::entity::EntityDescriptor;
 use dynamo_runtime::v2::entity::ToPath;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -33,11 +34,6 @@ pub enum OscarDescriptorError {
     #[error("Builder validation error: {0}")]
     Builder(String),
     
-    #[error("Invalid object name: '{name}'. Object names must be 1-255 characters and contain only lowercase letters, numbers, hyphens, underscores, and dots")]
-    InvalidObjectName { name: String },
-    
-    #[error("Object name too long: {length} characters (max 255)")]
-    ObjectNameTooLong { length: usize },
     
     #[error("Invalid caller context: {message}")]
     InvalidCallerContext { message: String },
@@ -64,68 +60,6 @@ impl From<ObjectDescriptorSpecBuilderError> for OscarDescriptorError {
     }
 }
 
-/// Object name with Oscar-specific validation (allows dots for file-like names)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ObjectName {
-    name: String,
-}
-
-impl ObjectName {
-    /// Create a new object name with validation
-    pub fn new(name: impl Into<String>) -> Result<Self, OscarDescriptorError> {
-        let name = name.into();
-        Self::validate(&name)?;
-        Ok(Self { name })
-    }
-    
-    /// Get the object name
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    
-    /// Get slugified version for use in etcd keys (dots → underscores)
-    pub fn slugified(&self) -> String {
-        self.name.replace('.', "_")
-    }
-    
-    /// Validate object name according to Oscar rules
-    fn validate(name: &str) -> Result<(), OscarDescriptorError> {
-        if name.is_empty() {
-            return Err(OscarDescriptorError::InvalidObjectName {
-                name: name.to_string(),
-            });
-        }
-        
-        if name.len() > 255 {
-            return Err(OscarDescriptorError::ObjectNameTooLong {
-                length: name.len(),
-            });
-        }
-        
-        // Object names are more permissive than component names - allow dots
-        let is_valid = name.chars().all(|c| 
-            c.is_ascii_lowercase() || 
-            c.is_ascii_digit() || 
-            c == '-' || 
-            c == '_' || 
-            c == '.'  // Allow dots for file-like naming
-        );
-        
-        if !is_valid {
-            return Err(OscarDescriptorError::InvalidObjectName {
-                name: name.to_string(),
-            });
-        }
-        
-        Ok(())
-    }
-}
-
-impl fmt::Display for ObjectName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
 
 /// Context information about the caller registering an object
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -268,35 +202,60 @@ impl CallerContextSpec {
 pub type CallerContextBuilder = CallerContextSpecBuilder;
 
 /// Oscar object descriptor with caller context mirroring
+/// Uses descriptor path system where object name is the final path segment
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ObjectDescriptor {
-    /// The object name
-    object_name: ObjectName,
+    /// Object path descriptor (includes object name as final segment)
+    object_path: PathDescriptor,
     /// Content hash for content-addressable storage
     content_hash: ContentHash,
-    /// Caller context for namespace mirroring
-    caller_context: CallerContext,
 }
 
 impl ObjectDescriptor {
     /// Create a new object descriptor with caller context
+    /// Object name becomes the final path segment in the Oscar namespace hierarchy
     pub fn create(
         object_name: impl Into<String>,
         content_hash: ContentHash,
         caller_context: CallerContext,
     ) -> Result<Self, OscarDescriptorError> {
-        let object_name = ObjectName::new(object_name)?;
+        let object_name_str = object_name.into();
+        
+        // Validate object name as a path segment (allows dots)
+        EntityDescriptor::validate_object_name(&object_name_str)?;
+        
+        // Build Oscar namespace mirroring caller's context: _internal.oscar.{caller_namespace}
+        let caller_ns_segments = caller_context.namespace_segments();
+        let mut oscar_segments = vec!["_internal", "oscar"];
+        oscar_segments.extend(caller_ns_segments.iter().map(|s| s.as_str()));
+        
+        // Start with Oscar namespace
+        let oscar_ns = NamespaceDescriptor::new_internal(&oscar_segments)?;
+        let mut oscar_path = oscar_ns.to_path();
+        
+        // Add component if caller has one
+        if let Some(component_name) = caller_context.component_name() {
+            oscar_path = oscar_path.with_segment(&component_name)?;
+        }
+        
+        // Add endpoint if caller has one  
+        if let Some(endpoint_name) = caller_context.endpoint_name() {
+            oscar_path = oscar_path.with_segment(&endpoint_name)?;
+        }
+        
+        // Add object name as final path segment
+        let object_path = oscar_path.with_segment(&object_name_str)?;
         
         Ok(Self {
-            object_name,
+            object_path,
             content_hash,
-            caller_context,
         })
     }
     
-    /// Get the object name
-    pub fn object_name(&self) -> &ObjectName {
-        &self.object_name
+    /// Get the object name (final path segment)
+    pub fn object_name(&self) -> &str {
+        self.object_path.segments().last()
+            .expect("Object path must have at least one segment (the object name)")
     }
     
     /// Get the content hash
@@ -304,9 +263,24 @@ impl ObjectDescriptor {
         &self.content_hash
     }
     
-    /// Get the caller context
-    pub fn caller_context(&self) -> &CallerContext {
-        &self.caller_context
+    /// Get the Oscar namespace descriptor that mirrors the caller
+    pub fn oscar_namespace(&self) -> Result<NamespaceDescriptor, OscarDescriptorError> {
+        // Extract Oscar namespace from object path
+        // The Oscar path structure is: _internal.oscar.{caller_namespace_segments}...object_name
+        let namespace_segments = self.object_path.entity().namespace_segments();
+        
+        // Find where the caller namespace starts (after _internal.oscar)
+        if namespace_segments.len() < 2 || 
+           namespace_segments[0] != "_internal" || 
+           namespace_segments[1] != "oscar" {
+            return Err(OscarDescriptorError::InvalidCallerContext {
+                message: "Object path does not contain valid Oscar namespace".to_string(),
+            });
+        }
+        
+        // Convert Vec<String> to Vec<&str> for NamespaceDescriptor::new_internal
+        let segments_ref: Vec<&str> = namespace_segments.iter().map(|s| s.as_str()).collect();
+        Ok(NamespaceDescriptor::new_internal(&segments_ref)?)
     }
     
     /// Get the content hash (alias for backward compatibility)
@@ -314,174 +288,145 @@ impl ObjectDescriptor {
         &self.content_hash
     }
     
-    /// Generate the Oscar namespace mirroring the caller's context
-    /// Example: caller ns1.foo.generate → _internal.oscar.ns1
-    fn oscar_namespace(&self) -> Result<NamespaceDescriptor, OscarDescriptorError> {
-        let caller_ns_segments = self.caller_context.namespace_segments();
-        
-        // Build Oscar namespace: [_internal, oscar, ...caller_namespace_segments]
-        let mut oscar_segments = vec!["_internal", "oscar"];
-        oscar_segments.extend(caller_ns_segments.iter().map(|s| s.as_str()));
-        
-        Ok(NamespaceDescriptor::new_internal(&oscar_segments)?)
+    /// Get the object path descriptor
+    pub fn path_descriptor(&self) -> &PathDescriptor {
+        &self.object_path
     }
     
-    /// Generate Oscar descriptor mirroring caller's context
-    /// Examples:
-    /// - Caller ns1 → _internal.oscar.ns1
-    /// - Caller ns1.foo → _internal.oscar.ns1.foo
-    /// - Caller ns1.foo.generate → _internal.oscar.ns1.foo.generate
-    fn oscar_descriptor(&self) -> Result<PathDescriptor, OscarDescriptorError> {
-        let oscar_ns = self.oscar_namespace()?;
-        
-        let mut oscar_desc = oscar_ns.to_path();
-        
-        // Add component if caller has one
-        if let Some(component_name) = self.caller_context.component_name() {
-            oscar_desc = oscar_desc.with_segment(&component_name)?;
-        }
-        
-        // Add endpoint if caller has one  
-        if let Some(endpoint_name) = self.caller_context.endpoint_name() {
-            oscar_desc = oscar_desc.with_segment(&endpoint_name)?;
-        }
-        
-        Ok(oscar_desc)
+    /// Generate the base object path for prefix operations
+    /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4
+    pub fn object_path(&self) -> Result<String, OscarDescriptorError> {
+        self.object_key_path()
     }
     
-    /// Generate object key with hash suffix
+    /// Generate object key with hash suffix  
     /// Example: tokenizer.json + hash_a1b2c3d4... → tokenizer_json-a1b2c3d4
     fn object_key(&self) -> String {
+        let object_name = self.object_name();
         let hash_suffix = &self.content_hash.to_string()[..8]; // First 8 chars of hash
-        format!("{}-{}", self.object_name.slugified(), hash_suffix)
+        let slugified_name = object_name.replace('.', "_"); // Convert dots to underscores for etcd
+        format!("{}-{}", slugified_name, hash_suffix)
     }
     
-    /// Generate metadata key path
-    /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4.metadata
+    /// Generate metadata key path using existing object path structure
+    /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4.metadata  
     pub fn metadata_key(&self) -> Result<String, OscarDescriptorError> {
-        let oscar_desc = self.oscar_descriptor()?;
         let object_key = self.object_key();
-        let metadata_path = oscar_desc
+        
+        // The object path contains all segments: namespace + component + endpoint + object_name
+        // We need to rebuild the path with object_key instead of object_name
+        let namespace_segments = self.object_path.entity().namespace_segments();
+        let path_segments = self.object_path.segments();
+        
+        // Build full path excluding the last segment (object name)
+        let segments_ref: Vec<&str> = namespace_segments.iter().map(|s| s.as_str()).collect();
+        let oscar_ns = NamespaceDescriptor::new_internal(&segments_ref)?;
+        let mut key_path = oscar_ns.to_path();
+        
+        // Add all path segments except the last one (which is the object name)
+        if path_segments.len() > 1 {
+            for segment in &path_segments[..path_segments.len()-1] {
+                key_path = key_path.with_segment(segment)?;
+            }
+        }
+        
+        // Add object key and metadata
+        let metadata_path = key_path
             .with_segment(&object_key)?
             .with_segment("metadata")?;
         Ok(metadata_path.etcd_key())
     }
     
-    /// Generate lease attachment key path  
+    /// Generate lease attachment key path
     /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4.attaches.lease_123456789
     pub fn lease_attachment_key(&self, lease_id: i64) -> Result<String, OscarDescriptorError> {
-        let oscar_desc = self.oscar_descriptor()?;
         let object_key = self.object_key();
+        
+        // The object path contains all segments: namespace + component + endpoint + object_name
+        // We need to rebuild the path with object_key instead of object_name
+        let namespace_segments = self.object_path.entity().namespace_segments();
+        let path_segments = self.object_path.segments();
+        
+        // Build full path excluding the last segment (object name)
+        let segments_ref: Vec<&str> = namespace_segments.iter().map(|s| s.as_str()).collect();
+        let oscar_ns = NamespaceDescriptor::new_internal(&segments_ref)?;
+        let mut key_path = oscar_ns.to_path();
+        
+        // Add all path segments except the last one (which is the object name)
+        if path_segments.len() > 1 {
+            for segment in &path_segments[..path_segments.len()-1] {
+                key_path = key_path.with_segment(segment)?;
+            }
+        }
+        
+        // Add object key, attaches, and lease ID
         let lease_key = format!("lease_{}", lease_id);
-        let attachment_path = oscar_desc
+        let attachment_path = key_path
             .with_segment(&object_key)?
             .with_segment("attaches")?
             .with_segment(&lease_key)?;
         Ok(attachment_path.etcd_key())
     }
     
-    /// Generate the base object path for prefix operations
+    /// Generate the base object key path for prefix operations
     /// Example: dynamo://_internal.oscar.ns1.foo.generate.tokenizer_json-a1b2c3d4
-    pub fn object_path(&self) -> Result<String, OscarDescriptorError> {
-        let oscar_desc = self.oscar_descriptor()?;
+    pub fn object_key_path(&self) -> Result<String, OscarDescriptorError> {
         let object_key = self.object_key();
-        let object_path = oscar_desc.with_segment(&object_key)?;
-        Ok(object_path.etcd_key())
+        
+        // The object path contains all segments: namespace + component + endpoint + object_name
+        // We need to rebuild the path with object_key instead of object_name
+        let namespace_segments = self.object_path.entity().namespace_segments();
+        let path_segments = self.object_path.segments();
+        
+        // Build full path excluding the last segment (object name)
+        let segments_ref: Vec<&str> = namespace_segments.iter().map(|s| s.as_str()).collect();
+        let oscar_ns = NamespaceDescriptor::new_internal(&segments_ref)?;
+        let mut key_path = oscar_ns.to_path();
+        
+        // Add all path segments except the last one (which is the object name)
+        if path_segments.len() > 1 {
+            for segment in &path_segments[..path_segments.len()-1] {
+                key_path = key_path.with_segment(segment)?;
+            }
+        }
+        
+        // Add object key
+        let key_path = key_path.with_segment(&object_key)?;
+        Ok(key_path.etcd_key())
     }
 }
 
 impl fmt::Display for ObjectDescriptor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.object_name)
+        write!(f, "{}", self.object_name())
     }
 }
 
 /// Builder specification for creating ObjectDescriptor with ergonomic API
 #[derive(Builder)]
-#[builder(build_fn(validate = "Self::validate"))]
 #[builder(derive(Debug))]
 pub struct ObjectDescriptorSpec {
-    /// Object name
+    /// Object name (will become final path segment)
     #[builder(setter(into))]
     pub object_name: String,
     
     /// Content hash
     pub content_hash: ContentHash,
     
-    /// Namespace segments for the caller
-    #[builder(setter(into))]
-    pub namespace_segments: Vec<String>,
-    
-    /// Optional component name
-    #[builder(default, setter(strip_option, into))]
-    pub component: Option<String>,
-    
-    /// Optional endpoint name
-    #[builder(default, setter(strip_option, into))]
-    pub endpoint: Option<String>,
-}
-
-impl ObjectDescriptorSpecBuilder {
-    /// Validate the builder state before creating ObjectDescriptor
-    fn validate(&self) -> Result<(), String> {
-        // Check that namespace_segments is present and not empty
-        if let Some(ref segments) = self.namespace_segments {
-            if segments.is_empty() {
-                return Err("Namespace segments cannot be empty".to_string());
-            }
-        }
-        
-        // Check that object_name is present and valid
-        if let Some(name) = &self.object_name {
-            ObjectName::validate(name).map_err(|e| e.to_string())?;
-        }
-        
-        Ok(())
-    }
+    /// Caller context descriptor (can be namespace, component, or endpoint level)
+    pub caller_context: CallerContext,
 }
 
 impl ObjectDescriptorSpec {
     /// Build an ObjectDescriptor from this specification
     pub fn build_descriptor(self) -> Result<ObjectDescriptor, OscarDescriptorError> {
-        // Create the caller context first
-        let mut context_builder = CallerContextBuilder::default();
-        context_builder.namespace_segments(self.namespace_segments);
-        
-        if let Some(component) = self.component {
-            context_builder.component(component);
-        }
-        
-        if let Some(endpoint) = self.endpoint {
-            context_builder.endpoint(endpoint);
-        }
-        
-        let context_spec = context_builder.build()?;
-        let caller_context = context_spec.build_context()?;
-        
-        // Create the object descriptor
-        ObjectDescriptor::create(self.object_name, self.content_hash, caller_context)
+        ObjectDescriptor::create(self.object_name, self.content_hash, self.caller_context)
     }
 }
 
 /// Type alias for convenient builder access
 pub type ObjectDescriptorBuilder = ObjectDescriptorSpecBuilder;
 
-// Conversion helpers for ObjectName
-impl TryFrom<&str> for ObjectName {
-    type Error = OscarDescriptorError;
-    
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        ObjectName::new(value)
-    }
-}
-
-impl TryFrom<String> for ObjectName {
-    type Error = OscarDescriptorError;
-    
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        ObjectName::new(value)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -494,27 +439,28 @@ mod tests {
     
     #[test]
     fn test_object_name_validation() {
+        // Object name validation now handled by EntityDescriptor::validate_object_name
         // Valid names
-        assert!(ObjectName::new("simple").is_ok());
-        assert!(ObjectName::new("with-hyphens").is_ok());
-        assert!(ObjectName::new("with_underscores").is_ok());
-        assert!(ObjectName::new("with.dots").is_ok());
-        assert!(ObjectName::new("tokenizer.json").is_ok());
-        assert!(ObjectName::new("model-v1_final.bin").is_ok());
+        assert!(EntityDescriptor::validate_object_name("simple").is_ok());
+        assert!(EntityDescriptor::validate_object_name("with-hyphens").is_ok());
+        assert!(EntityDescriptor::validate_object_name("with_underscores").is_ok());
+        assert!(EntityDescriptor::validate_object_name("with.dots").is_ok());
+        assert!(EntityDescriptor::validate_object_name("tokenizer.json").is_ok());
+        assert!(EntityDescriptor::validate_object_name("model-v1_final.bin").is_ok());
         
         // Invalid names
-        assert!(ObjectName::new("").is_err());
-        assert!(ObjectName::new("With-Capital").is_err());
-        assert!(ObjectName::new("with spaces").is_err());
-        assert!(ObjectName::new("with/slash").is_err());
-        assert!(ObjectName::new("a".repeat(256)).is_err()); // Too long
+        assert!(EntityDescriptor::validate_object_name("").is_err());
+        assert!(EntityDescriptor::validate_object_name("With-Capital").is_err());
+        assert!(EntityDescriptor::validate_object_name("with spaces").is_err());
+        assert!(EntityDescriptor::validate_object_name("with/slash").is_err());
+        assert!(EntityDescriptor::validate_object_name(&"a".repeat(256)).is_err()); // Too long
     }
     
     #[test]
     fn test_object_name_slugification() {
-        let name = ObjectName::new("tokenizer.json").unwrap();
-        assert_eq!(name.name(), "tokenizer.json");
-        assert_eq!(name.slugified(), "tokenizer_json");
+        let name = "tokenizer.json";
+        let slugified = name.replace('.', "_");
+        assert_eq!(slugified, "tokenizer_json");
     }
     
     #[test]
@@ -656,23 +602,13 @@ mod tests {
     #[test]
     fn test_display_implementations() {
         let hash = test_hash();
-        let name = ObjectName::new("test.model").unwrap();
         let caller_ns = NamespaceDescriptor::new(&["test"]).unwrap();
         let context = CallerContext::from_namespace(caller_ns);
         let object = ObjectDescriptor::create("test.model", hash, context).unwrap();
         
-        assert_eq!(name.to_string(), "test.model");
         assert_eq!(object.to_string(), "test.model");
     }
     
-    #[test]
-    fn test_conversion_traits() {
-        let name_from_str = ObjectName::try_from("valid.name").unwrap();
-        assert_eq!(name_from_str.name(), "valid.name");
-        
-        let name_from_string = ObjectName::try_from("valid.name".to_string()).unwrap();
-        assert_eq!(name_from_string.name(), "valid.name");
-    }
     
     #[test]
     fn test_caller_context_builder_namespace() {
@@ -726,20 +662,28 @@ mod tests {
     fn test_object_descriptor_builder_ergonomics() {
         let hash = test_hash();
         
+        // Build caller context first
+        let caller_context = CallerContextBuilder::default()
+            .namespace_segments(vec!["prod".to_string()])
+            .component("api")
+            .endpoint("http")
+            .build()
+            .unwrap()
+            .build_context()
+            .unwrap();
+        
         // Demonstrate the improved ergonomics - single error handling point
         let object = ObjectDescriptorBuilder::default()
             .object_name("tokenizer.json")
             .content_hash(hash.clone())
-            .namespace_segments(vec!["prod".to_string()])
-            .component("api")
-            .endpoint("http")
+            .caller_context(caller_context)
             .build()
             .unwrap()
             .build_descriptor()
             .unwrap();
         
         // Verify the object was created correctly
-        assert_eq!(object.object_name().name(), "tokenizer.json");
+        assert_eq!(object.object_name(), "tokenizer.json");
         assert_eq!(object.content_hash(), &hash);
         
         // Check the generated key
@@ -770,12 +714,15 @@ mod tests {
             assert!(context_result.is_err());
         }
         
-        // Test invalid object name validation
-        let result = ObjectDescriptorBuilder::default()
-            .object_name("Invalid Name!")
-            .content_hash(hash)
+        // Test invalid object name validation through create method
+        let caller_context = CallerContextBuilder::default()
             .namespace_segments(vec!["prod".to_string()])
-            .build();
+            .build()
+            .unwrap()
+            .build_context()
+            .unwrap();
+            
+        let result = ObjectDescriptor::create("Invalid Name!", hash, caller_context);
         assert!(result.is_err());
     }
 }

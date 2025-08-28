@@ -7,7 +7,7 @@
 //! type-safe key generation and parsing using the descriptor-based approach.
 
 use crate::{ContentHash, OscarError, OscarResult};
-use crate::v2::descriptors::{CallerContext, ObjectDescriptor, ObjectName, OscarDescriptorError};
+use crate::v2::descriptors::{CallerContext, ObjectDescriptor, OscarDescriptorError};
 use dynamo_runtime::v2::NamespaceDescriptor;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -241,9 +241,11 @@ impl OscarKeysV2 {
         object.lease_attachment_key(lease_id)
     }
     
-    /// Validate and create object name
-    pub fn validate_object_name(name: impl Into<String>) -> Result<ObjectName, OscarDescriptorError> {
-        ObjectName::new(name)
+    /// Validate object name using EntityDescriptor validation
+    pub fn validate_object_name(name: impl Into<String>) -> Result<String, OscarDescriptorError> {
+        let name_str = name.into();
+        dynamo_runtime::v2::entity::EntityDescriptor::validate_object_name(&name_str)?;
+        Ok(name_str)
     }
 }
 
@@ -360,7 +362,7 @@ mod tests {
         let hash = test_hash();
         
         let object = OscarKeysV2::object_descriptor("test-object", hash.clone()).unwrap();
-        assert_eq!(object.object_name().name(), "test-object");
+        assert_eq!(object.object_name(), "test-object");
         
         let obj_key = OscarKeysV2::object_metadata_key(&object).unwrap();
         let lease_key = OscarKeysV2::lease_reference_key(&object, 456).unwrap();
@@ -370,7 +372,7 @@ mod tests {
         assert!(lease_key.contains("lease_456")); // lease attachment format
         
         let name = OscarKeysV2::validate_object_name("valid-name").unwrap();
-        assert_eq!(name.name(), "valid-name");
+        assert_eq!(name, "valid-name");
     }
 
     #[test]

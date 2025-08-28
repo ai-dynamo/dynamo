@@ -18,6 +18,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use derive_builder::Builder;
+use validator::{Validate, ValidationError};
+
+use super::validation;
 
 /// Errors that can occur during descriptor operations
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -57,6 +60,48 @@ pub enum DescriptorError {
     
     #[error("Builder error: {message}")]
     BuilderError { message: String },
+}
+
+impl From<validator::ValidationError> for DescriptorError {
+    fn from(err: validator::ValidationError) -> Self {
+        let message = match err.code.as_ref() {
+            "empty_identifier" => "Identifier cannot be empty".to_string(),
+            "invalid_identifier_chars" => "Identifier contains invalid characters. Only lowercase letters, numbers, hyphens, and underscores are allowed".to_string(),
+            "empty_path_segment" => "Path segment cannot be empty".to_string(),
+            "invalid_path_segment_chars" => "Path segment contains invalid characters. Only lowercase letters, numbers, hyphens, underscores, and dots are allowed".to_string(),
+            "reserved_internal_prefix" => "Names starting with '_' are reserved for internal use".to_string(),
+            "empty_collection" => "Collection cannot be empty".to_string(),
+            "component_name_too_long" => "Component name too long (max 63 characters)".to_string(),
+            "endpoint_name_too_long" => "Endpoint name too long (max 63 characters)".to_string(),
+            _ => format!("Validation error: {}", err.code),
+        };
+        DescriptorError::ValidationError { message }
+    }
+}
+
+/// Convert ValidationErrors (multiple errors) to DescriptorError
+impl From<validator::ValidationErrors> for DescriptorError {
+    fn from(errors: validator::ValidationErrors) -> Self {
+        // Take the first error or create a generic message
+        if let Some((_field, field_errors)) = errors.field_errors().iter().next() {
+            if let Some(error) = field_errors.first() {
+                return Self::from((*error).clone());
+            }
+        }
+        
+        DescriptorError::ValidationError { 
+            message: "Multiple validation errors occurred".to_string() 
+        }
+    }
+}
+
+/// Convert derive_builder errors to DescriptorError
+impl From<derive_builder::UninitializedFieldError> for DescriptorError {
+    fn from(err: derive_builder::UninitializedFieldError) -> Self {
+        DescriptorError::BuilderError {
+            message: format!("Required field not set: {}", err),
+        }
+    }
 }
 
 /// Instance type for descriptors
@@ -117,19 +162,22 @@ pub struct EntityDescriptor {
 /// //     .instance(456);
 ///
 /// // You can now write:
-/// let instance = DescriptorBuilder::default()
-///     .namespace_segments(&["prod"])
+/// let spec = DescriptorBuilder::default()
+///     .namespace_segments(vec!["prod".to_string()])
 ///     .component("api")
 ///     .endpoint("http")
 ///     .instance(456)
-///     .build()?;  // Single error handling point!
+///     .build()
+///     .unwrap();
+/// let instance = spec.build_instance().unwrap();
 /// ```
-#[derive(Builder)]
-#[builder(build_fn(validate = "Self::validate"))]
+#[derive(Builder, Validate)]
 #[builder(derive(Debug))]
+#[validate(schema(function = "validate_descriptor_spec"))]
 pub struct DescriptorSpec {
     /// Namespace segments (required)
     #[builder(setter(into))]
+    #[validate(length(min = 1))]
     pub namespace_segments: Vec<String>,
     
     /// Optional component name
@@ -153,116 +201,57 @@ pub struct DescriptorSpec {
     pub internal: bool,
 }
 
-impl DescriptorSpecBuilder {
-    /// Validation function called during build()
-    fn validate(&self) -> Result<(), String> {
-        // Validate namespace segments
-        if let Some(ref segments) = self.namespace_segments {
-            if segments.is_empty() {
-                return Err("Namespace segments cannot be empty".to_string());
-            }
-            
-            let is_internal = self.internal.unwrap_or(false);
-            
-            for segment in segments {
-                if segment.is_empty() {
-                    return Err("Empty namespace segment not allowed".to_string());
-                }
-                
-                if !is_internal && segment.starts_with('_') {
-                    return Err(format!("Reserved prefix '_' not allowed in namespace segment: '{}'", segment));
-                }
-                
-                if !Self::is_valid_identifier(segment) {
-                    return Err(format!("Invalid namespace segment: '{}'", segment));
-                }
-            }
-        } else {
-            return Err("Namespace segments are required".to_string());
-        }
-        
-        // Validate component if provided
-        if let Some(Some(ref component)) = self.component {
-            if component.is_empty() {
-                return Err("Empty component name not allowed".to_string());
-            }
-            
-            if component.starts_with('_') {
-                return Err(format!("Reserved prefix '_' not allowed in component name: '{}'", component));
-            }
-            
-            if !Self::is_valid_identifier(component) {
-                return Err(format!("Invalid component name: '{}'", component));
-            }
-        }
-        
-        // Validate endpoint if provided
-        if let Some(Some(ref endpoint)) = self.endpoint {
-            if endpoint.is_empty() {
-                return Err("Empty endpoint name not allowed".to_string());
-            }
-            
-            if endpoint.starts_with('_') {
-                return Err(format!("Reserved prefix '_' not allowed in endpoint name: '{}'", endpoint));
-            }
-            
-            if !Self::is_valid_identifier(endpoint) {
-                return Err(format!("Invalid endpoint name: '{}'", endpoint));
-            }
-        }
-        
-        // Validate path segments if provided
-        if let Some(ref segments) = self.path_segments {
-            for segment in segments {
-                if segment.is_empty() {
-                    return Err("Empty path segment not allowed".to_string());
-                }
-                
-                if !Self::is_valid_path_segment(segment) {
-                    return Err(format!("Invalid path segment: '{}'", segment));
-                }
-            }
-        }
-        
-        Ok(())
+/// Schema validation function for DescriptorSpec
+fn validate_descriptor_spec(spec: &DescriptorSpec) -> Result<(), ValidationError> {
+    // Validate namespace segments with internal prefix handling
+    for segment in &spec.namespace_segments {
+        validation::validate_namespace_segment(segment, spec.internal)
+            .map_err(|_| ValidationError::new("invalid_namespace_segment"))?;
     }
     
-    fn is_valid_identifier(name: &str) -> bool {
-        name.chars().all(|c| 
-            c.is_ascii_lowercase() || 
-            c.is_ascii_digit() || 
-            c == '-' || 
-            c == '_'
-        )
+    // Validate component name if provided
+    if let Some(ref component) = spec.component {
+        validation::validate_component_name(component)
+            .map_err(|_| ValidationError::new("invalid_component_name"))?;
     }
     
-    fn is_valid_path_segment(segment: &str) -> bool {
-        // Path segments can include dots for object names like "tokenizer.json"
-        segment.chars().all(|c| 
-            c.is_ascii_lowercase() || 
-            c.is_ascii_digit() || 
-            c == '-' || 
-            c == '_' ||
-            c == '.'
-        )
+    // Validate endpoint name if provided  
+    if let Some(ref endpoint) = spec.endpoint {
+        validation::validate_endpoint_name(endpoint)
+            .map_err(|_| ValidationError::new("invalid_endpoint_name"))?;
     }
+    
+    // Validate path segments if provided
+    for segment in &spec.path_segments {
+        validation::validate_path_segment(segment)
+            .map_err(|_| ValidationError::new("invalid_path_segment"))?;
+    }
+    
+    Ok(())
 }
+
+/// Convenience type alias for the builder
+pub type DescriptorBuilder = DescriptorSpecBuilder;
+
 
 impl DescriptorSpec {
     /// Build the EntityDescriptor from the spec
-    pub fn build_entity(self) -> EntityDescriptor {
-        EntityDescriptor {
+    pub fn build_entity(self) -> Result<EntityDescriptor, DescriptorError> {
+        // Validate the spec before building
+        self.validate()?;
+        
+        Ok(EntityDescriptor {
             namespace_segments: self.namespace_segments,
             component: self.component,
             endpoint: self.endpoint,
             instance: self.instance,
             path_segments: self.path_segments,
-        }
+        })
     }
     
     /// Build a NamespaceDescriptor
-    pub fn build_namespace(self) -> NamespaceDescriptor {
-        NamespaceDescriptor(self.build_entity())
+    pub fn build_namespace(self) -> Result<NamespaceDescriptor, DescriptorError> {
+        Ok(NamespaceDescriptor(self.build_entity()?))
     }
     
     /// Build a ComponentDescriptor (requires component to be set)
@@ -272,7 +261,7 @@ impl DescriptorSpec {
                 message: "Component name is required for ComponentDescriptor".to_string() 
             });
         }
-        Ok(ComponentDescriptor(self.build_entity()))
+        Ok(ComponentDescriptor(self.build_entity()?))
     }
     
     /// Build an EndpointDescriptor (requires component and endpoint to be set)
@@ -287,7 +276,7 @@ impl DescriptorSpec {
                 message: "Endpoint name is required for EndpointDescriptor".to_string() 
             });
         }
-        Ok(EndpointDescriptor(self.build_entity()))
+        Ok(EndpointDescriptor(self.build_entity()?))
     }
     
     /// Build an InstanceDescriptor (requires component, endpoint, and instance to be set)
@@ -307,12 +296,9 @@ impl DescriptorSpec {
                 message: "Instance ID is required for InstanceDescriptor".to_string() 
             });
         }
-        Ok(InstanceDescriptor(self.build_entity()))
+        Ok(InstanceDescriptor(self.build_entity()?))
     }
 }
-
-/// Convenience type alias for the builder
-pub type DescriptorBuilder = DescriptorSpecBuilder;
 
 impl EntityDescriptor {
     /// Create a new entity descriptor with namespace segments
@@ -459,110 +445,40 @@ impl EntityDescriptor {
     }
     
     // Validation functions
-    fn validate_namespace_segment(segment: &str) -> Result<(), DescriptorError> {
-        if segment.is_empty() {
-            return Err(DescriptorError::EmptyName);
-        }
-        
-        if segment.starts_with('_') {
-            return Err(DescriptorError::ReservedPrefix {
-                name: segment.to_string(),
-            });
-        }
-        
-        if !Self::is_valid_identifier(segment) {
-            return Err(DescriptorError::InvalidNamespaceSegment {
-                segment: segment.to_string(),
-            });
-        }
-        
+    /// Public validation method for namespace segments
+    pub fn validate_namespace_segment(segment: &str) -> Result<(), DescriptorError> {
+        validation::validate_namespace_segment(segment, false)?;
         Ok(())
     }
     
-    fn validate_internal_segment(segment: &str) -> Result<(), DescriptorError> {
-        if segment.is_empty() {
-            return Err(DescriptorError::EmptyName);
-        }
-        
-        if !Self::is_valid_identifier(segment) {
-            return Err(DescriptorError::InvalidNamespaceSegment {
-                segment: segment.to_string(),
-            });
-        }
-        
+    /// Public validation method for internal namespace segments
+    pub fn validate_internal_segment(segment: &str) -> Result<(), DescriptorError> {
+        validation::validate_namespace_segment(segment, true)?;
         Ok(())
     }
     
-    fn validate_component_name(name: &str) -> Result<(), DescriptorError> {
-        if name.is_empty() {
-            return Err(DescriptorError::EmptyName);
-        }
-        
-        if name.starts_with('_') {
-            return Err(DescriptorError::ReservedPrefix {
-                name: name.to_string(),
-            });
-        }
-        
-        if !Self::is_valid_identifier(name) {
-            return Err(DescriptorError::InvalidComponentName {
-                name: name.to_string(),
-            });
-        }
-        
+    /// Public validation method for component names
+    pub fn validate_component_name(name: &str) -> Result<(), DescriptorError> {
+        validation::validate_component_name(name)?;
         Ok(())
     }
     
-    fn validate_endpoint_name(name: &str) -> Result<(), DescriptorError> {
-        if name.is_empty() {
-            return Err(DescriptorError::EmptyName);
-        }
-        
-        if name.starts_with('_') {
-            return Err(DescriptorError::ReservedPrefix {
-                name: name.to_string(),
-            });
-        }
-        
-        if !Self::is_valid_identifier(name) {
-            return Err(DescriptorError::InvalidEndpointName {
-                name: name.to_string(),
-            });
-        }
-        
+    /// Public validation method for endpoint names
+    pub fn validate_endpoint_name(name: &str) -> Result<(), DescriptorError> {
+        validation::validate_endpoint_name(name)?;
         Ok(())
     }
     
-    fn validate_path_segment(segment: &str) -> Result<(), DescriptorError> {
-        if segment.is_empty() {
-            return Err(DescriptorError::EmptyPathSegment);
-        }
-        
-        // Path segments can include dots for object names like "tokenizer.json"
-        let is_valid = segment.chars().all(|c| 
-            c.is_ascii_lowercase() || 
-            c.is_ascii_digit() || 
-            c == '-' || 
-            c == '_' ||
-            c == '.'
-        );
-        
-        if !is_valid {
-            return Err(DescriptorError::InvalidPathSegment {
-                segment: segment.to_string(),
-            });
-        }
-        
+    /// Public validation method for path segments
+    pub fn validate_path_segment(segment: &str) -> Result<(), DescriptorError> {
+        validation::validate_path_segment(segment)?;
         Ok(())
     }
     
-    fn is_valid_identifier(name: &str) -> bool {
-        name.chars().all(|c| 
-            c.is_ascii_lowercase() || 
-            c.is_ascii_digit() || 
-            c == '-' || 
-            c == '_'
-        )
+    /// Public validation method for object names (Oscar compatibility)
+    pub fn validate_object_name(name: &str) -> Result<(), DescriptorError> {
+        validation::validate_object_name(name)?;
+        Ok(())
     }
 }
 
@@ -1083,29 +999,32 @@ mod tests {
     
     #[test]
     fn test_descriptor_builder_validation() {
-        // Test empty namespace segments
-        let result = DescriptorBuilder::default()
+        // Test empty namespace segments (validation happens in build_namespace)
+        let spec = DescriptorBuilder::default()
             .namespace_segments(Vec::<String>::new())
-            .build();
+            .build()
+            .unwrap();
+        let result = spec.build_namespace();
         assert!(result.is_err());
         
-        // Test invalid component name
-        let result = DescriptorBuilder::default()
+        // Test invalid component name (validation happens in build_component)
+        let spec = DescriptorBuilder::default()
             .namespace_segments(vec!["test".to_string()])
             .component("Invalid-Component!")
-            .build();
+            .build()
+            .unwrap();
+        let result = spec.build_component();
         assert!(result.is_err());
         
         // Test endpoint without component
-        let result = DescriptorBuilder::default()
+        let spec = DescriptorBuilder::default()
             .namespace_segments(vec!["test".to_string()])
             .endpoint("http")
-            .build();
+            .build()
+            .unwrap();
             
-        if let Ok(spec) = result {
-            let endpoint_result = spec.build_endpoint();
-            assert!(endpoint_result.is_err());
-        }
+        let endpoint_result = spec.build_endpoint();
+        assert!(endpoint_result.is_err());
     }
     
     #[test]
@@ -1115,7 +1034,8 @@ mod tests {
             .internal(true)
             .build()
             .unwrap()
-            .build_namespace();
+            .build_namespace()
+            .unwrap();
             
         assert!(namespace.is_internal());
         assert_eq!(namespace.segments(), &["_internal", "oscar"]);
