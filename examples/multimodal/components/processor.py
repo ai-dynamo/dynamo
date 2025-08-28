@@ -33,19 +33,22 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo.llm import ModelType, register_llm
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
+from utils.protocol import (
+    MultiModalInput,
+    MultiModalRequest,
+    MyRequestOutput,
+    vLLMMultimodalRequest,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-prompt_template = "USER: <image>\n<prompt> ASSISTANT:"
 
 
 class RequestType(Enum):
@@ -96,9 +99,14 @@ class Processor(ProcessMixIn):
 
         return args, config
 
-    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        engine_args: AsyncEngineArgs,
+        encode_worker_client: Client,
+    ):
+        self.encode_worker_client = encode_worker_client
         self.prompt_template = args.prompt_template
-        self.downstream_endpoint = args.downstream_endpoint
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -125,22 +133,11 @@ class Processor(ProcessMixIn):
         )
         return base_tokenizer
 
-    async def async_init(self, runtime: DistributedRuntime):
-        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-            self.downstream_endpoint
-        )
-        self.encode_worker_client = (
-            await runtime.namespace(parsed_namespace)
-            .component(parsed_component_name)
-            .endpoint(parsed_endpoint_name)
-            .client()
-        )
-
     # Main method to parse the request and send the request to the vllm worker.
     async def _generate(
         self,
         raw_request: Union[CompletionRequest, ChatCompletionRequest],
-        image: str,
+        multimodal_input: MultiModalInput,
         request_type: RequestType,
     ):
         request_id = str(uuid.uuid4().hex)
@@ -157,7 +154,7 @@ class Processor(ProcessMixIn):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
-            image_url=image,
+            multimodal_input=multimodal_input,
         )
 
         # model_dump_json() serializes the request to JSON string
@@ -239,16 +236,23 @@ class Processor(ProcessMixIn):
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
         )
-        image_url = None
+        multimodal_input = MultiModalInput()
 
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    image_url = item.image_url.url
-        if image_url is None:
-            raise ValueError("Image URL is required")
+                    multimodal_input.image_url = item.image_url.url
+                elif item.type == "video_url":
+                    if multimodal_input.image_url is not None:
+                        raise ValueError("Cannot provide both image and video URLs")
+                    multimodal_input.video_url = item.video_url.url
 
-        async for response in self._generate(chat_request, image_url, RequestType.CHAT):
+        if multimodal_input.image_url is None and multimodal_input.video_url is None:
+            raise ValueError("Either image URL or video URL is required")
+
+        async for response in self._generate(
+            chat_request, multimodal_input, RequestType.CHAT
+        ):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
             )
@@ -300,8 +304,20 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     generate_endpoint = component.endpoint(config.endpoint)
 
-    handler = Processor(args, config.engine_args)
-    await handler.async_init(runtime)
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        args.downstream_endpoint
+    )
+    encode_worker_client = (
+        await runtime.namespace(parsed_namespace)
+        .component(parsed_component_name)
+        .endpoint(parsed_endpoint_name)
+        .client()
+    )
+
+    handler = Processor(args, config.engine_args, encode_worker_client)
+
+    logger.info("Waiting for Encoder Worker Instances ...")
+    await encode_worker_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model
     await register_llm(

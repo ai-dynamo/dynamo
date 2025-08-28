@@ -42,9 +42,10 @@ fn is_weight_file(filename: &str) -> bool {
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let token = env::var(HF_TOKEN_ENV_VAR).ok();
-    let api = ApiBuilder::new()
+    let api = ApiBuilder::from_env()
         .with_progress(true)
         .with_token(token)
+        .high()
         .build()?;
     let model_name = name.display().to_string();
 

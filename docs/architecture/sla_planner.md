@@ -17,7 +17,7 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 * **Performance interpolation**: Leverages profiling results data from pre-deployment profiling for accurate scaling decisions
 * **Correction factors**: Adapts to real-world performance deviations from profiled data
 
-## Architecture
+## Design
 
 The SLA planner consists of several key components:
 
@@ -108,7 +108,7 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../guides/dynamo_deploy/sla_planner_deployment.md).
 
-**Quick Start:**
+**To deploy SLA Planner:**
 ```bash
 cd components/backends/vllm/deploy
 kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}

@@ -101,6 +101,15 @@ rules:
 - apiGroups:
   - grove.io
   resources:
+  - podcliques/scale
+  - podcliquescalinggroups/scale
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - grove.io
+  resources:
   - podgangsets
   verbs:
   - create
@@ -176,6 +185,13 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - scheduling.run.ai
+  resources:
+  - queues
+  verbs:
+  - get
+  - list
 - apiGroups:
   - scheduling.volcano.sh
   resources:

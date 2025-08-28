@@ -13,8 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:warning=Building with CUDA KV off");
+    build_protos()
+}
+
+fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
+    tonic_build::compile_protos("src/grpc/protos/kserve.proto")?;
+    Ok(())
 }
 
 // NOTE: Preserving this build.rs for reference. We may want to re-enable

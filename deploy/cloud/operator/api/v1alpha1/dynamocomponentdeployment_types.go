@@ -92,6 +92,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Ingress config to expose the component outside the cluster (or through a service mesh).
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
+	// SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
+	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
+
 	// +optional
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
 	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
@@ -199,17 +202,18 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-func (s *DynamoComponentDeployment) IsReady() bool {
-	return s.Status.IsReady()
+func (s *DynamoComponentDeployment) IsReady() (bool, string) {
+	ready, reason := s.Status.IsReady()
+	return ready, reason
 }
 
-func (s *DynamoComponentDeploymentStatus) IsReady() bool {
+func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {
 	for _, condition := range s.Conditions {
 		if condition.Type == DynamoGraphDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
-			return true
+			return true, ""
 		}
 	}
-	return false
+	return false, "Component deployment not ready - Available condition not true"
 }
 
 func (s *DynamoComponentDeployment) GetSpec() any {

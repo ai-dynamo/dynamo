@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Asynchronous Scheduler for LLM Request Management
 //!
@@ -43,15 +31,15 @@
 use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::{block_response_to_kv_event, MoveBlock, OutputSignal, PrefillCost};
 use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
+use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, block_response_to_kv_event};
 use crate::mocker::sequence::ActiveSequence;
-use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::BlockHash;
+use crate::tokens::blocks::UniqueBlock;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -207,7 +195,7 @@ impl SchedulerState {
 
     /// Remove a UUID and its associated Request from collections.
     fn complete(&mut self, uuid: &Uuid) {
-        tracing::debug!("Request {} will complete", uuid);
+        tracing::trace!("Request {uuid} will complete");
         self.decode.remove(uuid);
         self.requests.remove(uuid);
         self.prefill_costs.remove(uuid);
@@ -426,9 +414,7 @@ impl Scheduler {
                         }
 
                         // Drain KV events and forward to relay after prefill signal processing
-                        if let (Some(ref relay_tx), Some(ref mut rx)) =
-                            (&kv_events_tx, &mut block_resp_rx)
-                        {
+                        if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
                             while let Ok(event) = rx.try_recv() {
                                 let _ =
                                     relay_tx.send(block_response_to_kv_event(event, &block_hashes));
@@ -477,9 +463,7 @@ impl Scheduler {
                     }
 
                     // Drain KV events and forward to relay after decode signal processing
-                    if let (Some(ref relay_tx), Some(ref mut rx)) =
-                        (&kv_events_tx, &mut block_resp_rx)
-                    {
+                    if let (Some(relay_tx), Some(rx)) = (&kv_events_tx, &mut block_resp_rx) {
                         while let Ok(event) = rx.try_recv() {
                             let _ = relay_tx
                                 .send(block_response_to_kv_event(event, &sequence.block_hashes()));
@@ -675,7 +659,9 @@ fn process_signals(
 
         // Check we have a Use signal with blocks
         let MoveBlock::Use(blocks) = signal else {
-            panic!("Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}");
+            panic!(
+                "Failed signal is Invalid. Has to fail on generation signal, but failed on {signal:?}"
+            );
         };
 
         // Verify the signal contains exactly one block
@@ -720,7 +706,7 @@ mod tests {
         #[case] enable_prefix_caching: bool,
         #[case] enable_chunked_prefill: bool,
     ) {
-        std::env::set_var("RUST_LOG", "debug");
+        unsafe { std::env::set_var("RUST_LOG", "debug") };
 
         let kv_capacity: usize = 500;
         let block_size: usize = 64;

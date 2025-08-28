@@ -81,7 +81,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/quickstart.md)
+1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -219,14 +219,6 @@ Send a test request to verify your deployment. See the [client section](../../..
 
 The deployment templates support various TensorRT-LLM models and configurations. You can customize model-specific arguments in the worker configuration sections of the YAML files.
 
-### Multi-Token Prediction (MTP) Support
-
-For models supporting Multi-Token Prediction (such as DeepSeek R1), special configuration is available. Note that MTP requires the experimental TensorRT-LLM commit:
-
-```bash
-./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit
-```
-
 ## Monitoring and Health
 
 - **Frontend health endpoint**: `http://<frontend-service>:8000/health`
@@ -265,7 +257,7 @@ Configure the `model` name and `host` based on your deployment.
 ## Further Reading
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/quickstart.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
 - **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
@@ -285,4 +277,4 @@ Common issues and solutions:
 6. **Git LFS issues**: Ensure git-lfs is installed before building containers
 7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/quickstart.md#troubleshooting).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/README.md).

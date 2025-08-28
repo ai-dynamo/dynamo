@@ -53,6 +53,7 @@ xxhash-rust = { workspace = true }
 
 arc-swap = { version = "1" }
 async-once-cell = { version = "0.5.4" }
+bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }

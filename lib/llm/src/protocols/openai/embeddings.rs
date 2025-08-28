@@ -26,7 +26,7 @@ pub use nvext::{NvExt, NvExtProvider};
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingRequest {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateEmbeddingRequest,
+    pub inner: dynamo_async_openai::types::CreateEmbeddingRequest,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -41,17 +41,17 @@ pub struct NvCreateEmbeddingRequest {
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingResponse {
     #[serde(flatten)]
-    pub inner: async_openai::types::CreateEmbeddingResponse,
+    pub inner: dynamo_async_openai::types::CreateEmbeddingResponse,
 }
 
 impl NvCreateEmbeddingResponse {
     pub fn empty() -> Self {
         Self {
-            inner: async_openai::types::CreateEmbeddingResponse {
+            inner: dynamo_async_openai::types::CreateEmbeddingResponse {
                 object: "list".to_string(),
                 model: "embedding".to_string(),
                 data: vec![],
-                usage: async_openai::types::EmbeddingUsage {
+                usage: dynamo_async_openai::types::EmbeddingUsage {
                     prompt_tokens: 0,
                     total_tokens: 0,
                 },

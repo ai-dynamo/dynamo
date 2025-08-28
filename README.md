@@ -192,7 +192,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 
 > [!Note]
 > Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
-> For example, if you are using `tensorrt-llm==1.0.0rc4`, use the PyTorch container image version `25.05`.
+> For example, if you are using `tensorrt-llm==1.0.0rc6`, use the PyTorch container image version `25.06`.
 > To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
 
 > [!Important]
@@ -201,7 +201,10 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 ### Install prerequisites
 ```
 # Optional step: Only required for Blackwell and Grace Hopper
-pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# Required until the trtllm version is bumped to include this pinned dependency itself
+uv pip install "cuda-python>=12,<13"
 
 sudo apt-get -y install libopenmpi-dev
 ```

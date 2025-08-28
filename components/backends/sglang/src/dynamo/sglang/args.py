@@ -10,7 +10,7 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from sglang.srt.server_args import ServerArgs
 
@@ -38,6 +38,10 @@ class DynamoArgs:
     component: str
     endpoint: str
     migration_limit: int
+
+    # tool and reasoning parser options
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -69,6 +73,20 @@ def parse_args(args: list[str]) -> Config:
 
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Backend SGLang {__version__}"
+    )
+
+    # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
+    parser.add_argument(
+        "--dyn-tool-call-parser",
+        type=str,
+        default=None,
+        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4'.",
+    )
+    parser.add_argument(
+        "--dyn-reasoning-parser",
+        type=str,
+        default=None,
+        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss'.",
     )
 
     # Dynamo args
@@ -123,10 +141,19 @@ def parse_args(args: list[str]) -> Config:
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
+        tool_call_parser=parsed_args.dyn_tool_call_parser,
+        reasoning_parser=parsed_args.dyn_reasoning_parser,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
     server_args = ServerArgs.from_cli_args(parsed_args)
+
+    if not server_args.skip_tokenizer_init:
+        logging.warning(
+            "When using the dynamo frontend (python3 -m dynamo.frontend), we perform tokenization and detokenization "
+            "in the frontend. Automatically setting --skip-tokenizer-init to True."
+        )
+        server_args.skip_tokenizer_init = True
 
     return Config(server_args, dynamo_args)
 

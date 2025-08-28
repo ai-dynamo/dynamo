@@ -17,85 +17,130 @@ limitations under the License.
 
 # Deploying Inference Graphs to Kubernetes
 
- We expect users to deploy their inference graphs using CRDs or helm charts.
+High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
-# 1. Install Dynamo Cloud.
+## 1. Install Platform First
+**[Dynamo Kubernetes Platform](dynamo_cloud.md)** - Main installation guide with 3 paths
 
-Prior to deploying an inference graph the user should deploy the Dynamo Cloud Platform. Reference the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud with Helm.
+## 2. Choose Your Backend
 
-Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you. This is a one-time action, only necessary the first time you deploy a DynamoGraph.
+Each backend has deployment examples and configuration options:
 
-# 2. Deploy your inference graph.
+| Backend | Available Configurations |
+|---------|--------------------------|
+| **[vLLM](../../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
+| **[SGLang](../../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
+| **[TensorRT-LLM](../../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router |
 
-We provide a Custom Resource YAML file for many examples under the components/backends/{engine}/deploy folders. Consult the examples below for the CRs for a specific inference backend.
-
-[View SGLang K8s](../../../components/backends/sglang/deploy/README.md)
-
-[View vLLM K8s](../../../components/backends/vllm/deploy/README.md)
-
-[View TRT-LLM K8s](../../../components/backends/trtllm/deploy/README.md)
-
-### Deploying a particular example
+## 3. Deploy Your First Model
 
 ```bash
-# Set your dynamo root directory
-cd <root-dynamo-folder>
-export PROJECT_ROOT=$(pwd)
-export NAMESPACE=<your-namespace> # the namespace you used to deploy Dynamo cloud to.
-```
+# Set same namespace from platform install
+export NAMESPACE=dynamo-cloud
 
-Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
-
-```bash
+# Deploy any example (this uses vLLM with Qwen model using aggregated serving)
 kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+
+# Check status
+kubectl get dynamoGraphDeployment -n ${NAMESPACE}
+
+# Test it
+kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+curl http://localhost:8000/v1/models
 ```
 
-You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.
-You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
+## What's a DynamoGraphDeployment?
 
-We provide a Custom Resource YAML file for many examples under the `deploy/` folder.
-Use [VLLM YAML](../../../components/backends/vllm/deploy/agg.yaml) for an example.
+It's a Kubernetes Custom Resource that defines your inference pipeline:
+- Model configuration
+- Resource allocation (GPUs, memory)
+- Scaling policies
+- Frontend/backend connections
 
-**Note 1** Example Image
+The scripts in the `components/<backend>/launch` folder like `agg.sh` demonstrate how you can serve your models locally. The corresponding YAML files like `agg.yaml` show you how you could create a kubernetes deployment for your inference graph.
 
-The examples use a prebuilt image from the `nvcr.io` registry.
-You can utilize public images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) or build your own image and update the image location in your CR file prior to applying. Either way, you will need to overwrite the image in the example YAML.
+### Choosing Your Architecture Pattern
 
-To build your own image:
+When creating a deployment, select the architecture pattern that best fits your use case:
 
-```bash
-./container/build.sh --framework <your-inference-framework>
-```
+- **Development / Testing** - Use `agg.yaml` as the base configuration
+- **Production with Load Balancing** - Use `agg_router.yaml` to enable scalable, load-balanced inference
+- **High Performance / Disaggregated** - Use `disagg_router.yaml` for maximum throughput and modular scalability
 
-For example for the `sglang` run
-```bash
-./container/build.sh --framework sglang
-```
+### Frontend and Worker Components
 
-To overwrite the image in the example:
+You can run the Frontend on one machine (e.g., a CPU node) and workers on different machines (GPU nodes). The Frontend serves as a framework-agnostic HTTP entry point that:
 
-```bash
-extraPodSpec:
+- Provides OpenAI-compatible `/v1/chat/completions` endpoint
+- Auto-discovers backend workers via etcd
+- Routes requests and handles load balancing
+- Validates and preprocesses requests
+
+### Customizing Your Deployment
+
+Example structure:
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-llm
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: my-llm
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
         mainContainer:
-          image: <image-in-your-$DYNAMO_IMAGE>
+          image: your-image
+    VllmDecodeWorker:  # or SGLangDecodeWorker, TrtllmDecodeWorker
+      dynamoNamespace: dynamo-dev
+      componentType: worker
+      replicas: 1
+      envFromSecret: hf-token-secret  # for HuggingFace models
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: your-image
+          command: ["/bin/sh", "-c"]
+          args:
+            - python3 -m dynamo.vllm --model YOUR_MODEL [--your-flags]
 ```
 
-**Note 2**
-Setup port forward if needed when deploying to Kubernetes.
+Worker command examples per backend:
+```yaml
+# vLLM worker
+args:
+  - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
-List the services in your namespace:
+# SGLang worker
+args:
+  - >-
+    python3 -m dynamo.sglang
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    --tp 1
+    --trust-remote-code
 
-```bash
-kubectl get svc -n ${NAMESPACE}
+# TensorRT-LLM worker
+args:
+  - python3 -m dynamo.trtllm
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    --extra-engine-args engine_configs/agg.yaml
 ```
-Look for one that ends in `-frontend` and use it for port forward.
 
-```bash
-SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|.*/||' | sed 's|-frontend||' | head -n1)
-kubectl port-forward svc/${SERVICE_NAME}-frontend 8080:8080 -n ${NAMESPACE}
-```
+Key customization points include:
+- **Model Configuration**: Specify model in the args command
+- **Resource Allocation**: Configure GPU requirements under `resources.limits`
+- **Scaling**: Set `replicas` for number of worker instances
+- **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
+- **Worker Specialization**: Add `--is-prefill-worker` flag for disaggregated prefill workers
 
-Additional Resources:
-- [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
-- [Examples Deployment Guide](../../examples/README.md#deploying-a-particular-example)
+## Additional Resources
 
+- **[Examples](../../examples/README.md)** - Complete working examples
+- **[Create Custom Deployments](create_deployment.md)** - Build your own CRDs
+- **[Operator Documentation](dynamo_operator.md)** - How the platform works
+- **[Helm Charts](../../../deploy/helm/README.md)** - For advanced users

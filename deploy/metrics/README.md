@@ -40,7 +40,7 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 
 The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
 
-- `dynamo_component_concurrent_requests`: Requests currently being processed (gauge)
+- `dynamo_component_inflight_requests`: Requests currently being processed (gauge)
 - `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
 - `dynamo_component_request_duration_seconds`: Request processing time (histogram)
 - `dynamo_component_requests_total`: Total requests processed (counter)

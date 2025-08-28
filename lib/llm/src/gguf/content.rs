@@ -29,8 +29,8 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use candle_core::{
-    quantized::gguf_file::{self, Value},
     Result,
+    quantized::gguf_file::{self, Value},
 };
 use tracing::info;
 
@@ -66,7 +66,9 @@ impl Content {
                 accum
             });
         if n_splits.len() > 1 {
-            candle_core::bail!("GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?");
+            candle_core::bail!(
+                "GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?"
+            );
         }
         #[allow(clippy::cast_possible_truncation)]
         if !n_splits.is_empty() && n_readers != n_splits[0] as usize {

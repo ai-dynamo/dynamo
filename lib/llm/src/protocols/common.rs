@@ -98,27 +98,27 @@ impl std::str::FromStr for FinishReason {
     }
 }
 
-impl From<FinishReason> for async_openai::types::CompletionFinishReason {
+impl From<FinishReason> for dynamo_async_openai::types::CompletionFinishReason {
     fn from(reason: FinishReason) -> Self {
         match reason {
             FinishReason::EoS | FinishReason::Stop | FinishReason::Cancelled => {
-                async_openai::types::CompletionFinishReason::Stop
+                dynamo_async_openai::types::CompletionFinishReason::Stop
             }
             FinishReason::ContentFilter => {
-                async_openai::types::CompletionFinishReason::ContentFilter
+                dynamo_async_openai::types::CompletionFinishReason::ContentFilter
             }
-            FinishReason::Length => async_openai::types::CompletionFinishReason::Length,
-            FinishReason::Error(_) => async_openai::types::CompletionFinishReason::Stop,
+            FinishReason::Length => dynamo_async_openai::types::CompletionFinishReason::Length,
+            FinishReason::Error(_) => dynamo_async_openai::types::CompletionFinishReason::Stop,
         }
     }
 }
 
-impl From<async_openai::types::CompletionFinishReason> for FinishReason {
-    fn from(reason: async_openai::types::CompletionFinishReason) -> Self {
+impl From<dynamo_async_openai::types::CompletionFinishReason> for FinishReason {
+    fn from(reason: dynamo_async_openai::types::CompletionFinishReason) -> Self {
         match reason {
-            async_openai::types::CompletionFinishReason::Stop => FinishReason::Stop,
-            async_openai::types::CompletionFinishReason::Length => FinishReason::Length,
-            async_openai::types::CompletionFinishReason::ContentFilter => {
+            dynamo_async_openai::types::CompletionFinishReason::Stop => FinishReason::Stop,
+            dynamo_async_openai::types::CompletionFinishReason::Length => FinishReason::Length,
+            dynamo_async_openai::types::CompletionFinishReason::ContentFilter => {
                 FinishReason::ContentFilter
             }
         }
