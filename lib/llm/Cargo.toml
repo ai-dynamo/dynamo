@@ -110,6 +110,13 @@ tower-http = {workspace = true}
 rustls = { version = "0.23" }
 
 
+# grpc-service
+# ping version to 0.13.1 so it depends on prost 0.13.5
+# which is used across other libraries
+tonic = { version = "0.13.1" }
+# Request prost specifically so tonic-build properly compiles protobuf message
+prost = { version = "0.13.5" }
+
 # tokenizers
 tokenizers = { version = "0.21.4", default-features = false, features = [
   "onig",
@@ -148,6 +155,7 @@ reqwest = { workspace = true }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serial_test = "3"
+temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
 insta = { version = "1.41", features = [
   "glob",
@@ -157,3 +165,6 @@ insta = { version = "1.41", features = [
 ] }
 aligned-vec = "0.6.4"
 lazy_static = "1.4"
+
+[build-dependencies]
+tonic-build = { version = "0.13.1"}

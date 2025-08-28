@@ -176,6 +176,12 @@ def parse_args():
         default=None,
         help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
     )
+    parser.add_argument(
+        "--kserve-grpc-server",
+        action="store_true",
+        default=False,
+        help="Start KServe gRPC server.",
+    )
 
     flags = parser.parse_args()
 
@@ -246,6 +252,8 @@ async def async_main():
     try:
         if flags.interactive:
             await run_input(runtime, "text", engine)
+        elif flags.kserve_grpc_server:
+            await run_input(runtime, "grpc", engine)
         else:
             await run_input(runtime, "http", engine)
     except asyncio.exceptions.CancelledError:
