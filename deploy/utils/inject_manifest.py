@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 from deploy.utils.kubernetes import (
+    PVC_ACCESS_POD_NAME,
     check_kubectl_access,
     cleanup_access_pod,
     deploy_access_pod,
@@ -43,13 +44,20 @@ from deploy.utils.kubernetes import (
 
 def copy_manifest(namespace: str, manifest_path: Path, target_path: str) -> None:
     """Copy a manifest file into the PVC via the access pod."""
-    pod_name = "pvc-access-pod"
+    pod_name = PVC_ACCESS_POD_NAME
 
     if not manifest_path.exists():
         print(f"ERROR: Manifest file not found: {manifest_path}")
         sys.exit(1)
 
     print(f"Copying {manifest_path} to {target_path} in PVC...")
+
+    # Ensure destination directory exists
+    target_dir = str(Path(target_path).parent)
+    run_command(
+        ["kubectl", "exec", pod_name, "-n", namespace, "--", "mkdir", "-p", target_dir],
+        capture_output=False,
+    )
 
     # Copy file to pod
     run_command(
@@ -116,15 +124,14 @@ def main():
 
     # Deploy access pod
     deploy_access_pod(args.namespace)
-
-    # Copy disagg config
-    copy_manifest(args.namespace, args.src, args.dest)
-
-    # Cleanup
-    cleanup_access_pod(args.namespace)
-
-    print("\n✅ Manifest injection completed!")
-    print(f"📁 File available at: {args.dest}")
+    try:
+        # Copy manifest
+        copy_manifest(args.namespace, args.src, args.dest)
+        print("\n✅ Manifest injection completed!")
+        print(f"📁 File available at: {args.dest}")
+    finally:
+        # Cleanup even on failure
+        cleanup_access_pod(args.namespace)
 
 
 if __name__ == "__main__":

@@ -49,10 +49,16 @@ class VanillaBackendClient:
             if not manifest:
                 continue
 
-            # Set namespace
+            # Ensure metadata and namespace
+            manifest.setdefault("metadata", {})
             manifest["metadata"]["namespace"] = self.namespace
 
             if manifest["kind"] == "Deployment":
+                # Sync names (prefer explicitly provided client name; else adopt manifest's)
+                if "name" in manifest["metadata"]:
+                    self.deployment_name = manifest["metadata"]["name"]
+                else:
+                    manifest["metadata"]["name"] = self.deployment_name
                 try:
                     await self.apps_api.create_namespaced_deployment(
                         namespace=self.namespace, body=manifest
@@ -67,6 +73,10 @@ class VanillaBackendClient:
                         )
                         raise
             elif manifest["kind"] == "Service":
+                if "name" in manifest["metadata"]:
+                    self.service_name = manifest["metadata"]["name"]
+                else:
+                    manifest["metadata"]["name"] = self.service_name
                 try:
                     await self.core_api.create_namespaced_service(
                         namespace=self.namespace, body=manifest

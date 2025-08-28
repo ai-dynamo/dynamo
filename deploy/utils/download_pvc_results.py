@@ -32,12 +32,23 @@ import sys
 from pathlib import Path
 from typing import List
 
-from deploy.utils.kubernetes import (
-    check_kubectl_access,
-    cleanup_access_pod,
-    deploy_access_pod,
-    run_command,
-)
+try:
+    from deploy.utils.kubernetes import (
+        check_kubectl_access,
+        cleanup_access_pod,
+        deploy_access_pod,
+        run_command,
+    )
+except ModuleNotFoundError:
+    # Allow running as a script: add repo root to sys.path
+    repo_root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(repo_root))
+    from deploy.utils.kubernetes import (
+        check_kubectl_access,
+        cleanup_access_pod,
+        deploy_access_pod,
+        run_command,
+    )
 
 
 def list_pvc_contents(
@@ -184,13 +195,13 @@ def main():
 
     # Deploy access pod
     pod_name = deploy_access_pod(args.namespace)
-
-    # List and download files
-    files = list_pvc_contents(args.namespace, pod_name, args.folder, args.no_config)
-    download_files(args.namespace, pod_name, files, args.output_dir, args.folder)
-
-    # Cleanup info
-    cleanup_access_pod(args.namespace)
+    try:
+        # List and download files
+        files = list_pvc_contents(args.namespace, pod_name, args.folder, args.no_config)
+        download_files(args.namespace, pod_name, files, args.output_dir, args.folder)
+    finally:
+        # Cleanup
+        cleanup_access_pod(args.namespace)
 
     print("\n✅ Download completed!")
     print(f"📁 Results available at: {args.output_dir.absolute()}")

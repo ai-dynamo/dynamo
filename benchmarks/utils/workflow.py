@@ -30,7 +30,10 @@ def create_dynamo_client(namespace: str, manifest_path: str) -> DynamoDeployment
 
 def create_vanilla_client(namespace: str, manifest_path: str) -> VanillaBackendClient:
     """Factory function for VanillaBackendClient"""
-    return VanillaBackendClient(namespace=namespace)
+    name = Path(manifest_path).stem
+    return VanillaBackendClient(
+        namespace=namespace, deployment_name=name, service_name=name
+    )
 
 
 async def deploy_dynamo_client(
@@ -151,7 +154,9 @@ async def run_endpoint_benchmark(
 def print_final_summary(output_dir: str, deployed_types: List[str]) -> None:
     """Print final benchmark summary"""
     print("📊 Generating performance plots...")
-    generate_plots(base_output_dir=Path(output_dir))
+    generate_plots(
+        base_output_dir=Path(output_dir), output_dir=Path(output_dir) / "plots"
+    )
     print(f"📈 Plots saved to: {Path(output_dir) / 'plots'}")
     print(f"📋 Summary saved to: {Path(output_dir) / 'SUMMARY.txt'}")
 
