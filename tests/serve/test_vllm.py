@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 def create_payload_for_config(config: "VLLMConfig") -> Payload:
     """Create a payload using the model from the vLLM config"""
-    if "multimodal" in config.name:
+    if config.name in ["multimodal_agg_llava", "multimodal_agg_qwen"]:
         # Special handling for multimodal models
         return Payload(
             payload_chat={
@@ -49,6 +49,32 @@ def create_payload_for_config(config: "VLLMConfig") -> Payload:
             repeat_count=1,
             expected_log=[],
             expected_response=["bus"],
+        )
+    elif config.name == "multimodal_video_agg":
+        # Special handling for multimodal models
+        return Payload(
+            payload_chat={
+                "model": config.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe the video in detail"},
+                            {
+                                "type": "video_url",
+                                "video_url": {
+                                    "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 300,
+                "stream": False,
+            },
+            repeat_count=1,
+            expected_log=[],
+            expected_response=["rabbit"],
         )
     else:
         # Use base implementation for standard text models
@@ -192,6 +218,20 @@ vllm_configs = {
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
         args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        timeout=360,
+    ),
+    "multimodal_video_agg": VLLMConfig(
+        name="multimodal_video_agg",
+        directory="/workspace/examples/multimodal",
+        script_name="video_agg.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
+        endpoints=["v1/chat/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+        ],
+        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        delayed_start=0,
+        args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
         timeout=360,
     ),
     # TODO: Enable this test case when we have 4 GPUs runners.
