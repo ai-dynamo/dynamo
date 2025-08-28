@@ -1078,19 +1078,18 @@ mod test_exponential_backoff {
     }
 }
 
-#[cfg(test)]
-mod test_worker_metrics_publisher {
+#[cfg(all(test, feature = "integration"))]
+mod test_integration_publisher {
     use super::*;
     use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
-    use dynamo_runtime::traits::events::EventSubscriber; // Add this import
-    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+    use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
 
     #[tokio::test]
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::from_settings(rt.clone()).await?;
+        let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns2001".to_string())?;
 
         // Create a subscriber for the metrics events using subscribe_with_type
@@ -1184,26 +1183,15 @@ mod test_worker_metrics_publisher {
             "Expected no messages when load metrics don't change"
         );
 
-        rt.shutdown();
+        drt.shutdown();
 
         Ok(())
     }
-}
-
-#[cfg(feature = "integration")]
-#[cfg(test)]
-mod test_kvstats_prometheus_gauge_updates {
-    use {
-        crate::kv_router::publisher::{
-            ForwardPassMetrics, KvStats, WorkerMetricsPublisher, WorkerStats, kvstats,
-        },
-        dynamo_runtime::metrics::MetricsRegistry,
-        std::sync::Arc,
-    };
 
     #[tokio::test]
     async fn test_kvstats_prometheus_gauge_updates() {
-        use dynamo_runtime::distributed_test_utils::create_test_drt_async;
+        use crate::kv_router::publisher::kvstats;
+        use dynamo_runtime::metrics::MetricsRegistry;
 
         // Test that publish() updates Prometheus gauges correctly using real Component
         let publisher = WorkerMetricsPublisher::new().unwrap();
