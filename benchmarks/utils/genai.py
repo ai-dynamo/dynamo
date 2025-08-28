@@ -69,8 +69,11 @@ def run_genai_perf(
             print(stdout)
     else:
         print(f"Genai-perf failed with error code: {gap_process.returncode}")
-        print(f"stderr: {stderr}")
-        raise subprocess.CalledProcessError(gap_process.returncode, cmd)
+        if stderr:
+            print(f"stderr: {stderr}")
+        raise subprocess.CalledProcessError(
+            gap_process.returncode, cmd, output=stdout, stderr=stderr
+        )
 
 
 def run_concurrency_sweep(
