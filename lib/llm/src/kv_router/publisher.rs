@@ -1087,6 +1087,7 @@ mod test_integration_publisher {
     use futures::StreamExt;
 
     #[tokio::test]
+    #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_metrics_publishing_behavior() -> Result<()> {
         // Set up runtime and namespace
         let drt = create_test_drt_async().await;
@@ -1189,6 +1190,7 @@ mod test_integration_publisher {
     }
 
     #[tokio::test]
+    #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
     async fn test_kvstats_prometheus_gauge_updates() {
         use crate::kv_router::publisher::kvstats;
         use dynamo_runtime::metrics::MetricsRegistry;
