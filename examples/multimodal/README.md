@@ -595,3 +595,39 @@ You should see a response describing the audio's content similar to
 }
 ```
 
+## Multimodal Disaggregated Audio Serving
+
+This example demonstrates deploying a disaggregated multimodal model that can process audio inputs.
+
+### Components
+
+- workers: For disaggregated audio serving, we have three workers, [AudioEncodeWorker](components/audio_encode_worker.py) for decoding audio into embeddings,
+[VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for prefilling.
+- processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have three workers, [AudioEncodeWorker](components/audio_encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+For the LLaVA-NeXT-audio-7B model, frames are only required during the prefill stage. As such, the AudioEncodeWorker is connected directly to the prefill worker.
+The AudioEncodeWorker is responsible for decoding the audio into a series of frames and passing them to the prefill worker via RDMA.
+The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --audio_url--> audio_encode_worker
+  audio_encode_worker --> processor
+  audio_encode_worker --embeddings--> prefill_worker
+  prefill_worker --> audio_encode_worker
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/audio_disagg.sh
+```
