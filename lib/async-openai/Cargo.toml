@@ -10,6 +10,7 @@
 
 [package]
 name = "dynamo-async-openai"
+description = "Async OpenAI lib used by Dynamo."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
