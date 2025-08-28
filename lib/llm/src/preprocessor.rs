@@ -98,11 +98,7 @@ pub struct OpenAIPreprocessor {
 
 impl OpenAIPreprocessor {
     pub async fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        tracing::info!(
-            "OpenAIPreprocessor::new called. MDC display_name: {}, Has custom_chat_template: {}",
-            mdc.display_name,
-            mdc.custom_chat_template.is_some()
-        );
+
         let mdcsum = mdc.mdcsum();
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
         let PromptFormatter::OAI(formatter) = formatter;

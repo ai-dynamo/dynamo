@@ -124,53 +124,18 @@ impl KeyValueStoreManager {
         key: &str,
         obj: &mut T,
     ) -> anyhow::Result<StorageOutcome> {
-        let obj_json = serde_json::to_string(obj)?;
-
-        // Debug: Log what we're about to write to etcd
-        if bucket_name == "mdc" {
-            tracing::info!("KeyValueStoreManager::publish - Writing to etcd bucket '{}' key '{}', JSON length: {} bytes",
-                bucket_name, key, obj_json.len());
-            if obj_json.contains("custom_chat_template") {
-                tracing::info!("JSON being written to etcd contains 'custom_chat_template'");
-            } else {
-                tracing::warn!("JSON being written to etcd does NOT contain 'custom_chat_template'!");
-                tracing::info!("JSON preview: {}", obj_json.chars().take(300).collect::<String>());
-            }
-        }
-
+                let obj_json = serde_json::to_string(obj)?;
         let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
         let outcome = bucket
             .insert(key.to_string(), obj_json, obj.revision())
             .await?;
 
-        match outcome {
+                match outcome {
             StorageOutcome::Created(revision) | StorageOutcome::Exists(revision) => {
-                if bucket_name == "mdc" {
-                    tracing::info!("Setting revision {} on MDC after publish", revision);
-                }
                 obj.set_revision(revision);
             }
         }
-
-        // Debug: For MDC, verify what was actually stored
-        if bucket_name == "mdc" {
-            match bucket.get(key).await {
-                Ok(Some(stored_json)) => {
-                    let stored_str = String::from_utf8_lossy(&stored_json);
-                    if stored_str.contains("custom_chat_template") {
-                        tracing::info!("Verified: etcd now contains custom_chat_template for key {}", key);
-                    } else {
-                        tracing::error!("ERROR: etcd does NOT contain custom_chat_template for key {} after publish!", key);
-                        tracing::info!("Stored JSON preview: {}", stored_str.chars().take(300).collect::<String>());
-                    }
-                }
-                _ => {
-                    tracing::warn!("Could not verify what was stored in etcd");
-                }
-            }
-        }
-
         Ok(outcome)
     }
 

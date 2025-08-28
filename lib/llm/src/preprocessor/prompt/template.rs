@@ -18,11 +18,7 @@ use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<PromptFormatter> {
-        tracing::info!(
-            "Creating PromptFormatter from MDC. Has custom_chat_template: {}, Has chat_template_file: {}",
-            mdc.custom_chat_template.is_some(),
-            mdc.chat_template_file.is_some()
-        );
+
 
         match mdc
             .prompt_formatter
@@ -42,59 +38,37 @@ impl PromptFormatter {
                     mdc.custom_chat_template
                 {
                     // Custom template has highest priority
-                    tracing::info!("Loading custom chat template from: {}", custom_template_file);
+
                     let chat_template = std::fs::read_to_string(&custom_template_file)
                         .with_context(|| format!("fs:read_to_string '{}'", custom_template_file))?;
                     // clean up the string to remove newlines
                     let chat_template = chat_template.replace('\n', "");
 
                     // Log template details for debugging
-                    tracing::debug!(
-                        "Custom template loaded successfully. Length: {} chars, Preview: {}...",
-                        chat_template.len(),
-                        &chat_template.chars().take(100).collect::<String>()
-                    );
+
 
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
-                    tracing::info!("Using custom chat template from CLI flag: {}", custom_template_file);
+
                 } else if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
                     mdc.chat_template_file
                 {
                     // Repository chat template has second priority
-                    tracing::debug!("Loading repository chat template from: {}", chat_template_file);
+
                     let chat_template = std::fs::read_to_string(&chat_template_file)
                         .with_context(|| format!("fs:read_to_string '{}'", chat_template_file))?;
                     // clean up the string to remove newlines
                     let chat_template = chat_template.replace('\n', "");
 
                     // Log template details for debugging
-                    tracing::debug!(
-                        "Repository template loaded successfully. Length: {} chars, Preview: {}...",
-                        chat_template.len(),
-                        &chat_template.chars().take(100).collect::<String>()
-                    );
+
 
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
-                    tracing::info!("Using chat template from model repository: {}", chat_template_file);
+
                 } else if config.chat_template.is_some() {
                     // Use the chat_template already in config (from tokenizer_config.json)
-                    tracing::info!("Using chat template from tokenizer_config.json");
-                    if let Some(ref template_value) = config.chat_template {
-                        let template_str = match &template_value.0 {
-                            either::Left(s) => s.clone(),
-                            either::Right(templates) => {
-                                tracing::debug!("Found {} chat templates in tokenizer_config.json", templates.len());
-                                format!("Multiple templates: {:?}", templates.iter().take(1).collect::<Vec<_>>())
-                            }
-                        };
-                        tracing::debug!(
-                            "Tokenizer config template. Length: {} chars, Preview: {}...",
-                            template_str.len(),
-                            &template_str.chars().take(100).collect::<String>()
-                        );
-                    }
+
                 } else {
-                    tracing::warn!("No chat template found in any location!");
+
                 }
                 // Otherwise use the chat_template already in config (from tokenizer_config.json)
 

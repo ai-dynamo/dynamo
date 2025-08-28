@@ -141,13 +141,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         let add_generation_prompt = req.should_add_generation_prompt();
 
         // Log template selection
-        let template_name = if has_tools { "tool_use" } else { "default" };
-        tracing::debug!(
-            "Rendering prompt using '{}' template (has_tools: {}, add_generation_prompt: {})",
-            template_name,
-            has_tools,
-            add_generation_prompt
-        );
+
 
         tracing::trace!(
             "Rendering prompt with tools: {:?}, add_generation_prompt: {}",
@@ -176,16 +170,12 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         };
 
         // Log template source for debugging
-        tracing::trace!("Template source: {:?}", tmpl.source());
+
 
         let rendered = tmpl.render(&ctx)?;
 
         // Log rendered output for debugging
-        tracing::debug!(
-            "Template rendered successfully. Output length: {} chars, Preview: {}...",
-            rendered.len(),
-            rendered.chars().take(100).collect::<String>()
-        );
+
 
         Ok(rendered)
     }
