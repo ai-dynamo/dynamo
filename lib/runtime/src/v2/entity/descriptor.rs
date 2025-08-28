@@ -17,6 +17,7 @@
 use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use derive_builder::Builder;
 
 /// Errors that can occur during descriptor operations
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -53,6 +54,9 @@ pub enum DescriptorError {
     
     #[error("Invalid transition: {message}")]
     InvalidTransition { message: String },
+    
+    #[error("Builder error: {message}")]
+    BuilderError { message: String },
 }
 
 /// Instance type for descriptors
@@ -93,6 +97,222 @@ pub struct EntityDescriptor {
     /// Additional path segments for extension
     path_segments: Vec<String>,
 }
+
+/// Builder for ergonomic descriptor construction
+///
+/// This builder allows constructing complex descriptors with single-point error handling,
+/// replacing the need for multiple `.unwrap()` calls in descriptor chains.
+///
+/// # Example
+/// ```rust
+/// use dynamo_runtime::v2::DescriptorBuilder;
+/// 
+/// // Instead of:
+/// // let instance = NamespaceDescriptor::new(&["prod"])
+/// //     .unwrap()
+/// //     .component("api")
+/// //     .unwrap()
+/// //     .endpoint("http")
+/// //     .unwrap()
+/// //     .instance(456);
+///
+/// // You can now write:
+/// let instance = DescriptorBuilder::default()
+///     .namespace_segments(&["prod"])
+///     .component("api")
+///     .endpoint("http")
+///     .instance(456)
+///     .build()?;  // Single error handling point!
+/// ```
+#[derive(Builder)]
+#[builder(build_fn(validate = "Self::validate"))]
+#[builder(derive(Debug))]
+pub struct DescriptorSpec {
+    /// Namespace segments (required)
+    #[builder(setter(into))]
+    pub namespace_segments: Vec<String>,
+    
+    /// Optional component name
+    #[builder(default, setter(strip_option, into))]
+    pub component: Option<String>,
+    
+    /// Optional endpoint name  
+    #[builder(default, setter(strip_option, into))]
+    pub endpoint: Option<String>,
+    
+    /// Optional instance ID
+    #[builder(default, setter(strip_option))]
+    pub instance: Option<i64>,
+    
+    /// Path extension segments
+    #[builder(default, setter(into))]
+    pub path_segments: Vec<String>,
+    
+    /// Whether this is an internal namespace (allows underscore prefixes)
+    #[builder(default)]
+    pub internal: bool,
+}
+
+impl DescriptorSpecBuilder {
+    /// Validation function called during build()
+    fn validate(&self) -> Result<(), String> {
+        // Validate namespace segments
+        if let Some(ref segments) = self.namespace_segments {
+            if segments.is_empty() {
+                return Err("Namespace segments cannot be empty".to_string());
+            }
+            
+            let is_internal = self.internal.unwrap_or(false);
+            
+            for segment in segments {
+                if segment.is_empty() {
+                    return Err("Empty namespace segment not allowed".to_string());
+                }
+                
+                if !is_internal && segment.starts_with('_') {
+                    return Err(format!("Reserved prefix '_' not allowed in namespace segment: '{}'", segment));
+                }
+                
+                if !Self::is_valid_identifier(segment) {
+                    return Err(format!("Invalid namespace segment: '{}'", segment));
+                }
+            }
+        } else {
+            return Err("Namespace segments are required".to_string());
+        }
+        
+        // Validate component if provided
+        if let Some(Some(ref component)) = self.component {
+            if component.is_empty() {
+                return Err("Empty component name not allowed".to_string());
+            }
+            
+            if component.starts_with('_') {
+                return Err(format!("Reserved prefix '_' not allowed in component name: '{}'", component));
+            }
+            
+            if !Self::is_valid_identifier(component) {
+                return Err(format!("Invalid component name: '{}'", component));
+            }
+        }
+        
+        // Validate endpoint if provided
+        if let Some(Some(ref endpoint)) = self.endpoint {
+            if endpoint.is_empty() {
+                return Err("Empty endpoint name not allowed".to_string());
+            }
+            
+            if endpoint.starts_with('_') {
+                return Err(format!("Reserved prefix '_' not allowed in endpoint name: '{}'", endpoint));
+            }
+            
+            if !Self::is_valid_identifier(endpoint) {
+                return Err(format!("Invalid endpoint name: '{}'", endpoint));
+            }
+        }
+        
+        // Validate path segments if provided
+        if let Some(ref segments) = self.path_segments {
+            for segment in segments {
+                if segment.is_empty() {
+                    return Err("Empty path segment not allowed".to_string());
+                }
+                
+                if !Self::is_valid_path_segment(segment) {
+                    return Err(format!("Invalid path segment: '{}'", segment));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn is_valid_identifier(name: &str) -> bool {
+        name.chars().all(|c| 
+            c.is_ascii_lowercase() || 
+            c.is_ascii_digit() || 
+            c == '-' || 
+            c == '_'
+        )
+    }
+    
+    fn is_valid_path_segment(segment: &str) -> bool {
+        // Path segments can include dots for object names like "tokenizer.json"
+        segment.chars().all(|c| 
+            c.is_ascii_lowercase() || 
+            c.is_ascii_digit() || 
+            c == '-' || 
+            c == '_' ||
+            c == '.'
+        )
+    }
+}
+
+impl DescriptorSpec {
+    /// Build the EntityDescriptor from the spec
+    pub fn build_entity(self) -> EntityDescriptor {
+        EntityDescriptor {
+            namespace_segments: self.namespace_segments,
+            component: self.component,
+            endpoint: self.endpoint,
+            instance: self.instance,
+            path_segments: self.path_segments,
+        }
+    }
+    
+    /// Build a NamespaceDescriptor
+    pub fn build_namespace(self) -> NamespaceDescriptor {
+        NamespaceDescriptor(self.build_entity())
+    }
+    
+    /// Build a ComponentDescriptor (requires component to be set)
+    pub fn build_component(self) -> Result<ComponentDescriptor, DescriptorError> {
+        if self.component.is_none() {
+            return Err(DescriptorError::BuilderError { 
+                message: "Component name is required for ComponentDescriptor".to_string() 
+            });
+        }
+        Ok(ComponentDescriptor(self.build_entity()))
+    }
+    
+    /// Build an EndpointDescriptor (requires component and endpoint to be set)
+    pub fn build_endpoint(self) -> Result<EndpointDescriptor, DescriptorError> {
+        if self.component.is_none() {
+            return Err(DescriptorError::BuilderError { 
+                message: "Component name is required for EndpointDescriptor".to_string() 
+            });
+        }
+        if self.endpoint.is_none() {
+            return Err(DescriptorError::BuilderError { 
+                message: "Endpoint name is required for EndpointDescriptor".to_string() 
+            });
+        }
+        Ok(EndpointDescriptor(self.build_entity()))
+    }
+    
+    /// Build an InstanceDescriptor (requires component, endpoint, and instance to be set)
+    pub fn build_instance(self) -> Result<InstanceDescriptor, DescriptorError> {
+        if self.component.is_none() {
+            return Err(DescriptorError::BuilderError { 
+                message: "Component name is required for InstanceDescriptor".to_string() 
+            });
+        }
+        if self.endpoint.is_none() {
+            return Err(DescriptorError::BuilderError { 
+                message: "Endpoint name is required for InstanceDescriptor".to_string() 
+            });
+        }
+        if self.instance.is_none() {
+            return Err(DescriptorError::BuilderError { 
+                message: "Instance ID is required for InstanceDescriptor".to_string() 
+            });
+        }
+        Ok(InstanceDescriptor(self.build_entity()))
+    }
+}
+
+/// Convenience type alias for the builder
+pub type DescriptorBuilder = DescriptorSpecBuilder;
 
 impl EntityDescriptor {
     /// Create a new entity descriptor with namespace segments
@@ -817,5 +1037,87 @@ mod tests {
         assert!(EntityDescriptor::new_namespace(&["Invalid-Name"]).is_err()); // Uppercase
         assert!(EntityDescriptor::new_namespace(&["_internal"]).is_err()); // Reserved prefix
         assert!(EntityDescriptor::new_namespace(&["name.with.dots"]).is_err()); // Dots
+    }
+    
+    #[test]
+    fn test_descriptor_builder_ergonomics() {
+        // Before: Multiple .unwrap() calls with error handling at each step
+        // let instance = NamespaceDescriptor::new(&["prod"])
+        //     .unwrap()
+        //     .component("api")
+        //     .unwrap()
+        //     .endpoint("http")
+        //     .unwrap()
+        //     .instance(456);
+        
+        // After: Single error handling point with builder pattern
+        let instance = DescriptorBuilder::default()
+            .namespace_segments(vec!["prod".to_string()])
+            .component("api")
+            .endpoint("http")
+            .instance(456)
+            .build()
+            .unwrap()
+            .build_instance()
+            .unwrap();
+        
+        assert_eq!(instance.instance_id(), Some(456));
+        assert_eq!(instance.namespace().segments(), &["prod"]);
+        assert_eq!(instance.component().name(), Some("api"));
+        assert_eq!(instance.endpoint().name(), Some("http"));
+    }
+    
+    #[test]
+    fn test_descriptor_builder_component_only() {
+        let component = DescriptorBuilder::default()
+            .namespace_segments(vec!["test".to_string()])
+            .component("service")
+            .build()
+            .unwrap()
+            .build_component()
+            .unwrap();
+            
+        assert_eq!(component.namespace().segments(), &["test"]);
+        assert_eq!(component.name(), Some("service"));
+    }
+    
+    #[test]
+    fn test_descriptor_builder_validation() {
+        // Test empty namespace segments
+        let result = DescriptorBuilder::default()
+            .namespace_segments(Vec::<String>::new())
+            .build();
+        assert!(result.is_err());
+        
+        // Test invalid component name
+        let result = DescriptorBuilder::default()
+            .namespace_segments(vec!["test".to_string()])
+            .component("Invalid-Component!")
+            .build();
+        assert!(result.is_err());
+        
+        // Test endpoint without component
+        let result = DescriptorBuilder::default()
+            .namespace_segments(vec!["test".to_string()])
+            .endpoint("http")
+            .build();
+            
+        if let Ok(spec) = result {
+            let endpoint_result = spec.build_endpoint();
+            assert!(endpoint_result.is_err());
+        }
+    }
+    
+    #[test]
+    fn test_descriptor_builder_internal_namespace() {
+        let namespace = DescriptorBuilder::default()
+            .namespace_segments(vec!["_internal".to_string(), "oscar".to_string()])
+            .internal(true)
+            .build()
+            .unwrap()
+            .build_namespace();
+            
+        assert!(namespace.is_internal());
+        assert_eq!(namespace.segments(), &["_internal", "oscar"]);
     }
 }

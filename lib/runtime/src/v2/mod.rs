@@ -16,6 +16,6 @@
 pub mod entity;
 
 pub use entity::{
-    ComponentDescriptor, DescriptorError, EndpointDescriptor, 
+    ComponentDescriptor, DescriptorBuilder, DescriptorError, EndpointDescriptor, 
     InstanceDescriptor, NamespaceDescriptor, PathDescriptor,
 };

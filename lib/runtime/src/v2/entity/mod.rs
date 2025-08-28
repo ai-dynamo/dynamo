@@ -11,6 +11,7 @@ pub mod descriptor;
 
 pub use descriptor::{
     ComponentDescriptor,
+    DescriptorBuilder,
     DescriptorError,
     EntityDescriptor,
     EndpointDescriptor,
