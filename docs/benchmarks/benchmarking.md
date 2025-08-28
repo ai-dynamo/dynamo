@@ -249,21 +249,6 @@ benchmarks/results/
     └── avg_inter_token_latency_vs_concurrency.png      # Average latency
 ```
 
-Example plots -- **for demonstration purposes only** (generated using `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 hardware):
-
-<table>
-  <tr>
-    <td><img src="../images/p50_inter_token_latency_vs_concurrency.png" alt="P50 Inter-Token Latency vs Concurrency" width="400"></td>
-    <td><img src="../images/avg_time_to_first_token_vs_concurrency.png" alt="Average Time to First Token vs Concurrency" width="400"></td>
-    <td><img src="../images/request_throughput_vs_concurrency.png" alt="Request Throughput vs Concurrency" width="400"></td>
-  </tr>
-  <tr>
-    <td><img src="../images/efficiency_tok_s_gpu_vs_user.png" alt="GPU Efficiency (tokens/s/GPU)" width="400"></td>
-    <td><img src="../images/avg_inter_token_latency_vs_concurrency.png" alt="Average Inter-Token Latency vs Concurrency" width="400"></td>
-    <td></td>
-  </tr>
-</table>
-
 ### Data Files
 
 Raw data is organized by deployment/benchmark type and concurrency level:
