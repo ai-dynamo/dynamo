@@ -17,7 +17,10 @@
 apiVersion: scheduling.run.ai/v2
 kind: Queue
 metadata:
-  name: default
+  name: dynamo-default
+  annotations:
+    "helm.sh/hook": post-install, post-upgrade
+    "helm.sh/hook-weight": "100"
 spec:
   resources:
     cpu:
@@ -37,8 +40,11 @@ apiVersion: scheduling.run.ai/v2
 kind: Queue
 metadata:
   name: dynamo
+  annotations:
+    "helm.sh/hook": post-install, post-upgrade
+    "helm.sh/hook-weight": "101"
 spec:
-  parentQueue: default
+  parentQueue: dynamo-default
   resources:
     cpu:
       quota: -1
