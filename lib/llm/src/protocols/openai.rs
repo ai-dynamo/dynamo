@@ -8,7 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::protocols::openai::common_ext::CommonExtProvider;
+use crate::protocols::openai::common_ext::{CommonExtProvider, choose_with_deprecation};
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -61,9 +61,11 @@ trait OpenAIStopConditionsProvider {
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
     /// CommonExt (root-level) takes precedence over NvExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        // Check common first (takes precedence), then fall back to nvext
-        self.get_common_ignore_eos()
-            .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
+        choose_with_deprecation(
+            "ignore_eos",
+            self.get_common_ignore_eos().as_ref(),
+            self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
+        )
     }
 }
 
