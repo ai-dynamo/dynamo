@@ -6,11 +6,9 @@ import json
 import logging
 import os
 import random
-import time
 from typing import Any, Dict
 
 import aiohttp
-import httpx
 import pytest
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
@@ -792,28 +790,6 @@ def test_kv_push_router_bindings(request, runtime_services):
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
-
-
-def _wait_for_model(
-    model_id: str, base_url: str, timeout_s: int = 30, interval_s: float = 0.5
-):
-    """
-    Poll /v1/models until `model_id` is present or timeout.
-    Raises RuntimeError on timeout.
-    """
-    t0 = time.time()
-    with httpx.Client(timeout=2.0) as c:
-        while time.time() - t0 < timeout_s:
-            try:
-                r = c.get(f"{base_url}/v1/models")
-                if r.status_code == 200:
-                    ids = [m.get("id") for m in r.json().get("data", [])]
-                    if model_id in ids:
-                        return
-            except Exception:
-                pass
-            time.sleep(interval_s)
-    raise RuntimeError(f"Model {model_id} not visible in /v1/models after {timeout_s}s")
 
 
 @pytest.mark.pre_merge
