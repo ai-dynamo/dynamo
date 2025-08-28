@@ -380,9 +380,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         .await?
                 };
 
+                let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();
-                let query_instance_id = request.has_annotation("query_instance_id");
                 // if request has the annotation "query_instance_id", for example
                 // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
                 // request will not be routed to worker immediately.
