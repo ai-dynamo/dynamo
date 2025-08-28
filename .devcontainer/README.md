@@ -19,6 +19,56 @@ limitations under the License.
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
 
+```mermaid
+graph TB
+    subgraph "Developer Laptop"
+        subgraph IDE["Cursor/VS Code"]
+            EXT["Dev Container Extension"]
+            SSHEXT["Remote-SSH Extension"]
+        end
+        TERM["iTerm/Terminal"]
+    end
+
+    subgraph WS["Linux Workstation"]
+        DIR["~/dynamo<br/>(host directory)"]
+        HFCACHE["~/.cache/huggingface<br/>(host cache)"]
+        GITCONFIG["~/.gitconfig<br/>(host git config)"]
+
+        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: ubuntu user"]
+            MOUNT["/home/ubuntu/dynamo<br/>(mounted directory)"]
+            HFMOUNT["/home/ubuntu/.cache/huggingface<br/>(mounted cache)"]
+            GITCONFIGCOPY["/home/ubuntu/.gitconfig<br/>(via Dev Container setting)"]
+            TOOLS["rust-analyzer<br/>cargo<br/>etc."]
+        end
+
+        IMAGE["Docker Image<br/>dynamo:latest-vllm-local-dev"]
+
+        IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
+    end
+
+    TERM -->|"SSH Connection"| DIR
+    SSHEXT -->|"1. Remote-SSH"| DIR
+    EXT -->|"2. Dev Container:<br/>Open Folder (via ssh)"| IMAGE
+    EXT -->|"3. IDE/shell via<br/>ssh+docker exec"| CONTAINER
+    DIR <-.->|"Volume Mount<br/>(bidirectional)"| MOUNT
+    HFCACHE <-.->|"Volume Mount<br/>(HF cache)"| HFMOUNT
+    GITCONFIG -->|"Copy"| GITCONFIGCOPY
+
+    style IDE fill:#e1f5fe
+    style EXT fill:#cfe2ff
+    style SSHEXT fill:#cfe2ff
+    style TERM fill:#e1f5fe
+    style DIR fill:#fff3e0
+    style HFCACHE fill:#fff3e0
+    style GITCONFIG fill:#fff3e0
+    style IMAGE fill:#f3e5f5
+    style CONTAINER fill:#d4edda
+    style MOUNT fill:#fff9c4
+    style HFMOUNT fill:#fff9c4
+    style GITCONFIGCOPY fill:#fff9c4
+    style TOOLS fill:#ffebee
+```
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
@@ -42,7 +92,7 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 ### Step 1: Build the Development Container Image
 
 Build `dynamo:latest-vllm-local-dev` from scratch from the source:
-- Note that currently, `local-dev` are only implemented for `--framework VLLM` and `--framework SGLANG`, for now.
+- Note that currently, `local-dev` is only implemented.
 
 ```bash
 ./container/build.sh --target local-dev

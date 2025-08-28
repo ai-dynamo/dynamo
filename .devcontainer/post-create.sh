@@ -42,11 +42,6 @@ retry() {
 
 set -x
 
-# Changing permission to match local user since volume mounts default to root ownership
-# Note: sudo is used here because the volume mount may have root ownership
-mkdir -p $HOME/.cache
-sudo chown -R ubuntu:ubuntu $HOME/.cache $HOME/dynamo
-
 # Pre-commit hooks
 cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks
 pre-commit run --all-files || true # don't fail the build if pre-commit hooks fail
