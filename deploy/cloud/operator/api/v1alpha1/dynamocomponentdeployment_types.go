@@ -99,8 +99,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
 	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional
-	// ExtraPodSpec merges additional fields into the generated PodSpec for advanced
-	// customization (tolerations, node selectors, affinity, etc.).
+	// ExtraPodSpec allows to override the main pod spec configuration.
+	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
+	// that allows overriding the main container configuration.
 	ExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
