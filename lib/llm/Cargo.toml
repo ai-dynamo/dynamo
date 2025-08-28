@@ -36,6 +36,8 @@ testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda          = ["dep:cudarc"]
 integration = []
+# NOTE: This feature will be enabled once ModelExpress packages are published
+# model-express = ["dep:model_express_client", "dep:model_express_common"]
 
 [[bench]]
 name = "tokenizer"
@@ -80,6 +82,11 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+
+# ModelExpress client for model downloading
+# NOTE: These will be uncommented once the packages are published to crates.io
+# model_express_client = { version = "0.1.0", optional = true }
+# model_express_common = { version = "0.1.0", optional = true }
 
 akin = "0.4.0"
 blake3 = "1"
