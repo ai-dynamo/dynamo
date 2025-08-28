@@ -74,7 +74,7 @@ class KubernetesConnector(PlannerConnector):
         """Set the replicas for multiple components at once"""
         if not target_replicas:
             raise ValueError("target_replicas cannot be empty")
-            
+
         deployment = await self.kube_api.get_graph_deployment()
         if deployment is None:
             raise ValueError("Parent DynamoGraphDeployment not found")

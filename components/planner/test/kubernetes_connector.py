@@ -176,14 +176,14 @@ async def test_set_component_replicas_deployment_not_found(
     mock_kube_api.get_graph_deployment.return_value = None
 
     # Act & Assert
-    with pytest.raises(
-        ValueError, match="Parent DynamoGraphDeployment not found"
-    ):
+    with pytest.raises(ValueError, match="Parent DynamoGraphDeployment not found"):
         await kubernetes_connector.set_component_replicas(target_replicas)
 
 
 @pytest.mark.asyncio
-async def test_set_component_replicas_empty_target_replicas(kubernetes_connector, mock_kube_api):
+async def test_set_component_replicas_empty_target_replicas(
+    kubernetes_connector, mock_kube_api
+):
     # Arrange
     target_replicas: dict[str, int] = {}
 
