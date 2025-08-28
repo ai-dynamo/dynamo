@@ -1,6 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use tracing as log;
 
 use crate::{ParserResult, ReasoningParser};
 
@@ -34,13 +33,8 @@ impl BasicReasoningParser {
 
 impl ReasoningParser for BasicReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
-        log::debug!("detect_and_parse_reasoning called with text: {:?}", text);
-
         let in_reasoning = self._in_reasoning || text.contains(&self.think_start_token);
-        log::debug!("in_reasoning: {}", in_reasoning);
-
         if !in_reasoning {
-            log::debug!("No reasoning detected, returning normal text.");
             return ParserResult {
                 normal_text: text.to_string(),
                 reasoning_text: String::new(),
@@ -49,15 +43,8 @@ impl ReasoningParser for BasicReasoningParser {
 
         // The text is considered to be in a reasoning block.
         let processed_text = text.replace(&self.think_start_token, "").trim().to_string();
-        log::debug!(
-            "Processed text after removing think_start_token: {:?}",
-            processed_text
-        );
 
         if !processed_text.contains(&self.think_end_token) {
-            log::debug!(
-                "Reasoning truncated, think_end_token not found. Returning reasoning text."
-            );
             // Assume reasoning was truncated before `think_end_token`
             return ParserResult {
                 normal_text: String::new(),
@@ -72,9 +59,6 @@ impl ReasoningParser for BasicReasoningParser {
             .get(1)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-
-        log::debug!("Extracted reasoning_text: {:?}", reasoning_text);
-        log::debug!("Extracted normal_text: {:?}", normal_text);
 
         ParserResult {
             normal_text,
@@ -91,19 +75,6 @@ impl ReasoningParser for BasicReasoningParser {
         self._buffer.push_str(text);
         let mut current_text = self._buffer.to_string();
         // If the current text is a prefix of the think token, keep buffering
-
-        log::debug!(
-            "parse_reasoning_streaming_incremental called with text: {:?}",
-            text
-        );
-        log::debug!("current buffer: {:?}", self._buffer);
-        log::debug!("current_text: {:?}", current_text);
-        log::debug!(
-            "in_reasoning: {}, stripped_think_start: {}, stream_reasoning: {}",
-            self._in_reasoning,
-            self.stripped_think_start,
-            self.stream_reasoning
-        );
 
         if self.think_start_token.starts_with(&current_text)
             && self.think_start_token.as_str() != current_text.as_str()
