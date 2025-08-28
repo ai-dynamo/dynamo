@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 from benchmarks.utils.genai import run_concurrency_sweep
 from benchmarks.utils.plot import generate_plots
@@ -167,10 +167,10 @@ def print_final_summary(output_dir: str, deployed_types: List[str]) -> None:
 
 async def run_benchmark_workflow(
     namespace: str,
-    agg_manifest: str = None,
-    disagg_manifest: str = None,
-    vanilla_manifest: str = None,
-    endpoint: str = None,
+    agg_manifest: Optional[str] = None,
+    disagg_manifest: Optional[str] = None,
+    vanilla_manifest: Optional[str] = None,
+    endpoint: Optional[str] = None,
     isl: int = 200,
     std: int = 10,
     osl: int = 200,

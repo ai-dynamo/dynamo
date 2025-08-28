@@ -104,7 +104,7 @@ class DynamoDeploymentClient:
         ] = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
-        self.port_forward_process = None
+        self.port_forward_process: Optional[subprocess.Popen[bytes]] = None
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client"""
@@ -207,6 +207,11 @@ class DynamoDeploymentClient:
         else:
             self.deployment_spec = deployment
 
+        # Ensure deployment_spec is properly loaded
+        assert (
+            self.deployment_spec is not None
+        ), "Failed to load deployment specification"
+
         # Extract component names
         self.components = [
             svc.lower() for svc in self.deployment_spec["spec"]["services"].keys()
@@ -240,7 +245,7 @@ class DynamoDeploymentClient:
                 raise
 
     async def wait_for_deployment_ready(
-        self, timeout: int = 1800, verbose: bool = None
+        self, timeout: int = 1800, verbose: Optional[bool] = None
     ):
         """
         Wait for the custom resource to be ready with improved progress display.

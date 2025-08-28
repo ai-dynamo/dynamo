@@ -57,7 +57,7 @@ def run_genai_perf(
 
     gap_process = subprocess.Popen(
         cmd,
-        cwd=output_dir,
+        cwd=str(output_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

@@ -71,13 +71,16 @@ def extract_metric_series(
     concurrencies = []
     values = []
 
+    path_keys = metric_path.split(".")
     for concurrency, metrics in results:
         try:
-            metric_data = metrics[metric_path]
-            if stat in metric_data:
-                concurrencies.append(concurrency)
-                values.append(metric_data[stat])
-        except KeyError:
+            node = metrics
+            for k in path_keys:
+                node = node[k]
+            value = node[stat]
+            concurrencies.append(concurrency)
+            values.append(float(value))
+        except (KeyError, TypeError):
             print(
                 f"Warning: {metric_path}.{stat} not found for concurrency {concurrency}"
             )
@@ -242,18 +245,18 @@ def create_efficiency_plot(
     print(f"Saved efficiency plot: {output_path}")
 
 
-def generate_plots(base_output_dir: Path) -> None:
+def generate_plots(base_output_dir: Path, output_dir: Path) -> None:
     """
     Generate performance plots from benchmark results.
 
     Args:
         base_output_dir: Base directory containing benchmark results
+        output_dir: Directory to save plots
     """
     print(f"Generating plots from results in {base_output_dir}")
 
     # Create plots directory
-    plots_dir = base_output_dir / "plots"
-    plots_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
 
     # Parse results for each deployment type
     deployment_results = {}
@@ -288,7 +291,7 @@ def generate_plots(base_output_dir: Path) -> None:
         xlabel="Concurrency Level",
         ylabel="P50 Inter-Token Latency (ms)",
         data_series=p50_data,
-        output_path=plots_dir / "p50_inter_token_latency_vs_concurrency.png",
+        output_path=output_dir / "p50_inter_token_latency_vs_concurrency.png",
         log_scale_x=True,
     )
 
@@ -306,7 +309,7 @@ def generate_plots(base_output_dir: Path) -> None:
         xlabel="Concurrency Level",
         ylabel="Average Inter-Token Latency (ms)",
         data_series=avg_latency_data,
-        output_path=plots_dir / "avg_inter_token_latency_vs_concurrency.png",
+        output_path=output_dir / "avg_inter_token_latency_vs_concurrency.png",
         log_scale_x=True,
     )
 
@@ -326,7 +329,7 @@ def generate_plots(base_output_dir: Path) -> None:
         xlabel="Concurrency Level",
         ylabel="Request Throughput (req/s)",
         data_series=throughput_data,
-        output_path=plots_dir / "request_throughput_vs_concurrency.png",
+        output_path=output_dir / "request_throughput_vs_concurrency.png",
         log_scale_x=True,
     )
 
@@ -344,12 +347,12 @@ def generate_plots(base_output_dir: Path) -> None:
         xlabel="Concurrency Level",
         ylabel="Average Time to First Token (ms)",
         data_series=ttft_data,
-        output_path=plots_dir / "avg_time_to_first_token_vs_concurrency.png",
+        output_path=output_dir / "avg_time_to_first_token_vs_concurrency.png",
         log_scale_x=True,
     )
 
     # 5. Efficiency plot: tok/s/gpu vs tok/s/user
-    create_efficiency_plot(deployment_results, plots_dir)
+    create_efficiency_plot(deployment_results, output_dir)
 
     # Generate summary
     summary_lines = [
@@ -357,7 +360,7 @@ def generate_plots(base_output_dir: Path) -> None:
         "=" * 30,
         "",
         f"Results directory: {base_output_dir}",
-        f"Plots generated: {plots_dir}",
+        f"Plots generated: {output_dir}",
         "",
         "Deployment Types Found:",
     ]
@@ -380,11 +383,11 @@ def generate_plots(base_output_dir: Path) -> None:
         ]
     )
 
-    summary_path = base_output_dir / "SUMMARY.txt"
+    summary_path = output_dir / "SUMMARY.txt"
     summary_path.write_text("\n".join(summary_lines))
     print(f"Generated summary: {summary_path}")
 
-    print(f"All plots saved to: {plots_dir}")
+    print(f"All plots saved to: {output_dir}")
 
 
 if __name__ == "__main__":
@@ -407,7 +410,7 @@ if __name__ == "__main__":
         # If output dir specified, use it as base and call generate_plots
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        generate_plots(data_dir)
+        generate_plots(data_dir, output_dir)
     else:
         # Use data_dir as base output dir
-        generate_plots(data_dir)
+        generate_plots(data_dir, data_dir / "plots")

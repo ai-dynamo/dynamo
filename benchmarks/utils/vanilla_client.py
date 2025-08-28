@@ -4,6 +4,7 @@
 import asyncio
 import subprocess
 import time
+from typing import Optional
 
 import kubernetes_asyncio as kubernetes
 import yaml
@@ -22,7 +23,7 @@ class VanillaBackendClient:
         self.deployment_name = deployment_name
         self.service_name = service_name
         self.frontend_port = frontend_port
-        self.port_forward_process = None
+        self.port_forward_process: Optional[subprocess.Popen[bytes]] = None
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client"""

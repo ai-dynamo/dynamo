@@ -187,7 +187,7 @@ def main():
 
     # List and download files
     files = list_pvc_contents(args.namespace, pod_name, args.folder, args.no_config)
-    download_files(args.namespace, pod_name, files, args.output_dir)
+    download_files(args.namespace, pod_name, files, args.output_dir, args.folder)
 
     # Cleanup info
     cleanup_access_pod(args.namespace)
