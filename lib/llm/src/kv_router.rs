@@ -59,7 +59,7 @@ use tokio_util::sync::CancellationToken;
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv-events";
+pub const KV_EVENT_SUBJECT: &str = "kv_events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
@@ -167,75 +167,75 @@ pub struct KvRouter {
     block_size: u32,
 }
 
-impl KvRouter {
-    /// Start a background task to consume events from NatsQueue and forward them to the indexer
-    async fn start_event_consumer(
-        component: Component,
-        consumer_uuid: String,
-        kv_events_tx: mpsc::Sender<RouterEvent>,
-        cancellation_token: CancellationToken,
-    ) -> Result<()> {
-        let stream_name = format!("{}_{}", component.subject(), KV_EVENT_SUBJECT)
-            .replace(['/', '\\', '.', '_'], "-");
-        let nats_server =
-            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-        let mut nats_queue = NatsQueue::new_with_consumer(
-            stream_name,
-            nats_server,
-            std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
-            consumer_uuid,
-        );
+/// Start a background task to consume events from NatsQueue and forward them to the indexer
+pub async fn start_event_consumer(
+    component: Component,
+    consumer_uuid: String,
+    kv_events_tx: mpsc::Sender<RouterEvent>,
+    cancellation_token: CancellationToken,
+) -> Result<()> {
+    let stream_name =
+        format!("{}.{}", component.subject(), KV_EVENT_SUBJECT).replace(['/', '\\', '.', '_'], "-");
+    let nats_server =
+        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let mut nats_queue = NatsQueue::new_with_consumer(
+        stream_name,
+        nats_server,
+        std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
+        consumer_uuid,
+    );
 
-        nats_queue.connect().await?;
+    nats_queue.connect().await?;
 
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        tracing::info!("KvRouter event consumer received cancellation signal");
-                        break;
-                    }
-                    result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(300))) => {
-                        match result {
-                            Ok(Some(bytes)) => {
-                                let event: RouterEvent = match serde_json::from_slice(&bytes) {
-                                    Ok(event) => event,
-                                    Err(e) => {
-                                        tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                                        continue;
-                                    }
-                                };
-
-                                // Forward the RouterEvent to the indexer
-                                if let Err(e) = kv_events_tx.send(event).await {
-                                    tracing::warn!(
-                                        "failed to send kv event to indexer; shutting down: {:?}",
-                                        e
-                                    );
-                                    break;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    tracing::info!("Event consumer received cancellation signal");
+                    break;
+                }
+                result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(300))) => {
+                    match result {
+                        Ok(Some(bytes)) => {
+                            let event: RouterEvent = match serde_json::from_slice(&bytes) {
+                                Ok(event) => event,
+                                Err(e) => {
+                                    tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
+                                    continue;
                                 }
-                            },
-                            Ok(None) => {
-                                tracing::trace!("KvRouter dequeue timeout, continuing");
-                            },
-                            Err(e) => {
-                                tracing::error!("Failed to dequeue task: {:?}", e);
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            };
+
+                            // Forward the RouterEvent to the indexer
+                            if let Err(e) = kv_events_tx.send(event).await {
+                                tracing::warn!(
+                                    "failed to send kv event to indexer; shutting down: {:?}",
+                                    e
+                                );
+                                break;
                             }
+                        },
+                        Ok(None) => {
+                            tracing::trace!("Dequeue timeout, continuing");
+                        },
+                        Err(e) => {
+                            tracing::error!("Failed to dequeue task: {:?}", e);
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
                 }
             }
+        }
 
-            // Clean up the queue and remove the durable consumer
-            if let Err(e) = nats_queue.shutdown().await {
-                tracing::warn!("Failed to shutdown NatsQueue: {}", e);
-            }
-        });
+        // Clean up the queue and remove the durable consumer
+        if let Err(e) = nats_queue.shutdown().await {
+            tracing::warn!("Failed to shutdown NatsQueue: {}", e);
+        }
+    });
 
-        Ok(())
-    }
+    Ok(())
+}
 
+impl KvRouter {
     pub async fn new(
         component: Component,
         block_size: u32,
@@ -304,7 +304,7 @@ impl KvRouter {
 
         // Start event consumer if using KvIndexer
         if let Indexer::KvIndexer(ref kv_indexer) = indexer {
-            Self::start_event_consumer(
+            start_event_consumer(
                 component.clone(),
                 consumer_uuid,
                 kv_indexer.event_sender(),

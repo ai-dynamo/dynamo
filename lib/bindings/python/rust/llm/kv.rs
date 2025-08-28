@@ -400,39 +400,32 @@ pub(crate) struct KvIndexer {
 #[pymethods]
 impl KvIndexer {
     #[new]
-    fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (component, kv_block_size, consumer_uuid=None))]
+    fn new(
+        component: Component,
+        kv_block_size: usize,
+        consumer_uuid: Option<String>,
+    ) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
+            let cancellation_token = component.inner.drt().runtime().child_token();
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
-                    component.inner.drt().runtime().child_token(),
+                    cancellation_token.clone(),
                     kv_block_size as u32,
                 )
                 .into();
-            // [gluo TODO] try subscribe_with_type::<RouterEvent>,
-            // error checking below will be different.
-            let mut kv_events_rx = component
-                .inner
-                .subscribe(llm_rs::kv_router::KV_EVENT_SUBJECT)
-                .await
-                .map_err(to_pyerr)?;
-            let kv_events_tx = inner.event_sender();
 
-            // [FIXME] this is the added functionality to the indexer to subscribe to kv events,
-            // should have been made to a trait and implemented here? i.e. AsyncEngine style
-            tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: llm_rs::kv_router::indexer::RouterEvent =
-                        serde_json::from_slice(&event.payload).unwrap();
-                    tracing::debug!("received kv event: {:?}", event);
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::trace!(
-                            "failed to send kv event to indexer; shutting down: {:?}",
-                            e
-                        );
-                    }
-                }
-            });
+            // Use the shared start_event_consumer function instead of duplicating the logic
+            llm_rs::kv_router::start_event_consumer(
+                component.inner.clone(),
+                consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                inner.event_sender(),
+                cancellation_token,
+            )
+            .await
+            .map_err(to_pyerr)?;
+
             Ok(Self { inner })
         })
     }
