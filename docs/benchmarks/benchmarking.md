@@ -44,17 +44,9 @@ Both modes:
 
 ## Prerequisites
 
-1. **Kubernetes namespace setup** - If coming from [deploy/utils/README](../../deploy/utils/README.md), you should have already completed this:
-   ```bash
-   # Should already be done if following deploy/utils setup
-   NAMESPACE=benchmarking HF_TOKEN=$HF_TOKEN DOCKER_SERVER=$DOCKER_SERVER deploy/utils/setup_k8s_namespace.sh
-   ```
+1. **Kubernetes cluster with NVIDIA GPUs and Dynamo namespace setup** - You need a Kubernetes cluster with eligible NVIDIA GPUs and a properly configured namespace for Dynamo benchmarking. See the [deploy/utils/README](../../deploy/utils/README.md) for complete setup instructions.
 
-2. **Tools** - All included in Dynamo containers:
-   - kubectl
-   - GenAI-Perf (NVIDIA's LLM benchmarking tool). *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
-   - Python 3.8+
-   - requirements under `deploy/utils/requirements.txt`
+2. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster. All other required tools (GenAI-Perf, Python, etc.) are included in the Dynamo containers. If you are not working within a Dynamo container, you can install the necessary requirements using `deploy/utils/requirements.txt`. *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
 
 ## Quick Start
 
