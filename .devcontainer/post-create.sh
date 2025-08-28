@@ -57,13 +57,15 @@ cargo build --locked --profile dev --features mistralrs
 
 # install the python bindings
 
-# Install maturin if not already installed
-if ! command -v maturin &> /dev/null; then
-    echo "Installing maturin..."
-    retry uv pip install maturin[patchelf]
-else
-    echo "maturin is already installed"
-fi
+# Install maturin if not already installed.
+# TODO: Uncomment for SGLANG. Right now, the CI team is making a refactor
+#       to the Dockerfile, so this is a temporary fix.
+# if ! command -v maturin &> /dev/null; then
+#     echo "Installing maturin..."
+#     retry uv pip install maturin[patchelf]
+# else
+#     echo "maturin is already installed"
+# fi
 
 (cd $HOME/dynamo/lib/bindings/python && retry maturin develop)
 

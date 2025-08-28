@@ -255,7 +255,7 @@ Afterwards, edit your `.devcontainer/sglang/devcontainer.json` so that the name 
 ```json
     "name": "[sglang] This is my amazing custom Dev Container Development",
     ...
-    "image": "dynamo:latest-vllm-local-dev",
+    "image": "dynamo:latest-sglang-local-dev",
 ```
 
 Now, go to **Dev Containers: Open Folder in Container** and select `[sglang] This is my amazing custom Dev Container Development`. The post-create.sh script should be running.
