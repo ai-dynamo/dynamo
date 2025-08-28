@@ -417,7 +417,7 @@ impl KvIndexer {
                 .into();
 
             // Use the shared start_event_consumer function instead of duplicating the logic
-            llm_rs::kv_router::start_event_consumer(
+            llm_rs::kv_router::background::start_event_consumer(
                 component.inner.clone(),
                 consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 inner.event_sender(),

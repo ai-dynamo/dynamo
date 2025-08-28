@@ -15,12 +15,12 @@ use dynamo_runtime::{
     },
     prelude::*,
     protocols::annotated::Annotated,
-    transports::nats::NatsQueue,
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 pub mod approx;
+pub mod background;
 pub mod indexer;
 pub mod metrics_aggregator;
 pub mod prefill_counter;
@@ -35,8 +35,9 @@ use crate::{
     discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
+        background::{start_event_consumer, start_radix_uploader},
         indexer::{
-            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
+            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RadixUploader,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
@@ -47,10 +48,6 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
-
-use dynamo_runtime::traits::events::EventPublisher;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -165,74 +162,9 @@ pub struct KvRouter {
     scheduler: KvScheduler,
 
     block_size: u32,
-}
 
-/// Start a background task to consume events from NatsQueue and forward them to the indexer
-pub async fn start_event_consumer(
-    component: Component,
-    consumer_uuid: String,
-    kv_events_tx: mpsc::Sender<RouterEvent>,
-    cancellation_token: CancellationToken,
-) -> Result<()> {
-    let stream_name =
-        format!("{}.{}", component.subject(), KV_EVENT_SUBJECT).replace(['/', '\\', '.', '_'], "-");
-    let nats_server =
-        std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    let mut nats_queue = NatsQueue::new_with_consumer(
-        stream_name,
-        nats_server,
-        std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
-        consumer_uuid,
-    );
-
-    nats_queue.connect().await?;
-
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancellation_token.cancelled() => {
-                    tracing::info!("Event consumer received cancellation signal");
-                    break;
-                }
-                result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(300))) => {
-                    match result {
-                        Ok(Some(bytes)) => {
-                            let event: RouterEvent = match serde_json::from_slice(&bytes) {
-                                Ok(event) => event,
-                                Err(e) => {
-                                    tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                                    continue;
-                                }
-                            };
-
-                            // Forward the RouterEvent to the indexer
-                            if let Err(e) = kv_events_tx.send(event).await {
-                                tracing::warn!(
-                                    "failed to send kv event to indexer; shutting down: {:?}",
-                                    e
-                                );
-                                break;
-                            }
-                        },
-                        Ok(None) => {
-                            tracing::trace!("Dequeue timeout, continuing");
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to dequeue task: {:?}", e);
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Clean up the queue and remove the durable consumer
-        if let Err(e) = nats_queue.shutdown().await {
-            tracing::warn!("Failed to shutdown NatsQueue: {}", e);
-        }
-    });
-
-    Ok(())
+    /// Optional radix tree uploader for snapshot persistence
+    radix_uploader: Option<RadixUploader>,
 }
 
 impl KvRouter {
@@ -302,8 +234,8 @@ impl KvRouter {
         )
         .await?;
 
-        // Start event consumer if using KvIndexer
-        if let Indexer::KvIndexer(ref kv_indexer) = indexer {
+        // Start event consumer and radix uploader if using KvIndexer
+        let radix_uploader = if let Indexer::KvIndexer(ref kv_indexer) = indexer {
             start_event_consumer(
                 component.clone(),
                 consumer_uuid,
@@ -311,13 +243,26 @@ impl KvRouter {
                 cancellation_token.clone(),
             )
             .await?;
-        }
+
+            // Start radix uploader for snapshot persistence
+            let uploader = start_radix_uploader(
+                component.clone(),
+                kv_indexer.snapshot_event_sender(),
+                Duration::from_secs(30),
+                cancellation_token.clone(),
+            )
+            .await?;
+            Some(uploader)
+        } else {
+            None
+        };
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
             indexer,
             scheduler,
             block_size,
+            radix_uploader,
         })
     }
 
@@ -373,6 +318,17 @@ impl KvRouter {
 
     pub fn block_size(&self) -> u32 {
         self.block_size
+    }
+
+    /// Upload a snapshot of the radix tree to NATS object store
+    pub async fn upload_snapshot(&self) -> Result<(), KvRouterError> {
+        match &self.radix_uploader {
+            Some(uploader) => uploader.upload_snapshot().await,
+            None => {
+                tracing::warn!("Radix uploader not available (likely using ApproxKvIndexer)");
+                Ok(())
+            }
+        }
     }
 }
 
