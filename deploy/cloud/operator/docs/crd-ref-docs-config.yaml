@@ -34,12 +34,12 @@ processor:
 render:
   # Output format - use markdown instead of default asciidoc
   format: markdown
-  
-  # Kubernetes version for API compatibility info  
+
+  # Kubernetes version for API compatibility info
   kubernetesVersion: "1.28"
-  
+
   # Group related resources together
   groupByKind: true
-  
+
   # Include resource descriptions
   includeDescription: true
