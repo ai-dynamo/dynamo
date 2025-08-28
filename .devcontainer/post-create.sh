@@ -56,6 +56,15 @@ uv pip uninstall --yes ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 cargo build --locked --profile dev --features mistralrs
 
 # install the python bindings
+
+# Install maturin if not already installed
+if ! command -v maturin &> /dev/null; then
+    echo "Installing maturin..."
+    retry uv pip install maturin[patchelf]
+else
+    echo "maturin is already installed"
+fi
+
 (cd $HOME/dynamo/lib/bindings/python && retry maturin develop)
 
 # installs overall python packages, grabs binaries from .build/target/debug
