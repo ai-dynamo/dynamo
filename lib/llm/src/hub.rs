@@ -136,7 +136,7 @@ async fn mx_download_direct(model_name: &str) -> anyhow::Result<PathBuf> {
 async fn download_with_hf_hub(model_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let token = env::var(HF_TOKEN_ENV_VAR).ok();
 
-    let api = ApiBuilder::new()
+    let api = ApiBuilder::from_env()
         .with_progress(true)
         .with_token(token)
         .high()
