@@ -189,5 +189,3 @@ The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D con
 - kubectl configured and accessible
 - genai-perf available in PATH
 - Python dependencies installed
-
-For detailed configuration, troubleshooting, and architecture information, see [README_scaling_tests.md](README_scaling_tests.md).
