@@ -19,10 +19,14 @@ import logging
 import os
 import signal
 import sys
-from typing import AsyncIterator, Tuple
+from io import BytesIO
+from queue import Queue
+from typing import AsyncIterator, Optional, Tuple
 
+import av
+import numpy as np
+import torch
 import uvloop
-from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
@@ -32,10 +36,16 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
-from utils.encode_utils import encode_image_embeddings, get_encoder_components
-from utils.image_loader import ImageLoader
-from utils.model import load_vision_model
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+from utils.video_utils import (
+    calculate_frame_sampling_indices,
+    get_video_metadata,
+    load_video_content,
+    open_video_container,
+    prepare_tensor_for_rdma,
+    read_video_pyav,
+    resize_video_frames,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -66,18 +76,17 @@ class VllmEncodeWorker:
         self.pd_worker_client = pd_worker_client
         self.engine_args = engine_args
         self.model = self.engine_args.model
-
-        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-        self.vision_model = load_vision_model(self.model)
         self.min_workers = 1
 
-        # Get encoder components for the model
-        self.vision_encoder, self.projector = get_encoder_components(
-            self.model, self.vision_model
-        )
+        # Video processing parameters
+        self.num_frames_to_sample = args.num_frames_to_sample
+        self.frame_height = 336
+        self.frame_width = 336
+        self.frame_channels = 3
+        self._video_content_cache: dict[str, BytesIO] = {}
+        self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
+
+        self._http_timeout = 60.0
 
     def cleanup(self):
         pass
@@ -94,53 +103,72 @@ class VllmEncodeWorker:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
+        video_url = request.multimodal_input.video_url
 
-        # The following steps encode the requested image and provided useful embeddings.
-        # 1. Open the image from the provided URL.
-        # 2. Process the image using the image processor.
-        # 3. Run the image through the vision model's vision tower.
-        # 4. Run the results of the vision tower through the multi-modal projector.
-        # 5. Create a descriptor for the embeddings.
-        # 6. Create a write operation using the serialized request and the descriptor.
-        # 7. Await for the write operation to complete.
-        # 8. Yield the encode response.
+        if video_url is None:
+            raise ValueError("Video URL is required.")
+
+        container: Optional[av.container.InputContainer] = None
 
         try:
-            if not request.multimodal_input.image_url:
-                raise ValueError("image_url is required for the encode worker.")
-
-            image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
+            video_content_stream = await load_video_content(
+                video_url,
+                self._video_content_cache,
+                self._cache_queue,
+                self._http_timeout,
             )
 
-            logger.debug(f"Processing image for request: {{ id: {request_id} }}")
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
+            # Open video container using utility function
+            container = await open_video_container(video_content_stream, video_url)
 
-            # Encode the image embeddings using model-specific encoder
-            embeddings = encode_image_embeddings(
-                model_name=self.model,
-                image_embeds=image_embeds,
-                vision_encoder=self.vision_encoder,
-                projector=self.projector,
+            if not container or not container.streams.video:
+                logger.error(f"No video stream found in {video_url}.")
+                raise ValueError(f"No video stream in {video_url}.")
+
+            # Get video metadata using utility function
+            total_frames, duration_sec = get_video_metadata(container)
+
+            # Calculate frame sampling indices using utility function
+            indices = calculate_frame_sampling_indices(
+                total_frames, self.num_frames_to_sample, duration_sec, video_url
             )
 
-            image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
-            )
+            if not container:
+                raise ValueError(f"Container is None for {video_url}")
+
+            # Decode video frames
+            clip_np: np.ndarray = await read_video_pyav(container, indices)
+
+            if clip_np.size == 0:
+                raise ValueError(
+                    f"Failed to extract any video frames from {video_url} for indices {indices.tolist()}. Clip is empty."
+                )
+
             logger.debug(
-                f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
+                f"Successfully extracted {len(clip_np) if clip_np.ndim > 1 and clip_np.shape[0] > 0 else 0} frames for {video_url} with original shape {clip_np.shape}."
             )
 
-            request.image_grid_thw = image_grid_thw
-            request.embeddings_shape = tuple(embeddings.shape)
-            descriptor = connect.Descriptor(embeddings)
+            # Convert the NumPy array from the video decoder into a PyTorch tensor.
+            # This is a required step to use PyTorch functions for GPU-accelerated image processing.
+            frames_tensor_orig_res = torch.from_numpy(clip_np)  # Shape: (T, H, W, C)
+
+            # Resize frames using utility function
+            resized_frames_tensor_hwc = resize_video_frames(
+                frames_tensor_orig_res, self.frame_height, self.frame_width
+            )
+
+            # Prepare tensor for RDMA using utility function
+            tensor_for_descriptor = prepare_tensor_for_rdma(
+                resized_frames_tensor_hwc, request_id
+            )
+
+            request.embeddings_shape = tuple(tensor_for_descriptor.shape)
+            descriptor = connect.Descriptor(tensor_for_descriptor)
 
             with self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the image URL as hint that the image is passed as embeddings.
-                request.multimodal_input.image_url = None
+                request.multimodal_input.video_url = None
 
                 logger.debug(f"Request: {request.model_dump_json()}")
 
@@ -160,10 +188,23 @@ class VllmEncodeWorker:
                         outputs=output.outputs,
                         finished=output.finished,
                     ).model_dump_json()
-
+        except (
+            FileNotFoundError,
+            av.FFmpegError,
+            ValueError,
+        ) as e:
+            logger.error(
+                f"Error processing request {request_id} ({video_url[:100]}...): {type(e).__name__} - {e}"
+            )
+            raise  # Re-raise to be handled by the service framework
         except Exception as e:
-            logger.error(f"Error processing request {request_id}: {e}")
+            logger.exception(
+                f"Unexpected error processing request {request_id} ({video_url[:100]}...): {e}"
+            )
             raise
+        finally:
+            if container:
+                await asyncio.to_thread(container.close)
 
     async def async_init(self, runtime: DistributedRuntime):
         logger.info("Startup started.")
@@ -193,6 +234,12 @@ class VllmEncodeWorker:
             type=str,
             default=DEFAULT_DOWNSTREAM_ENDPOINT,
             help=f"The endpoint string of the downstream LLM in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_DOWNSTREAM_ENDPOINT}'",
+        )
+        parser.add_argument(
+            "--num-frames-to-sample",
+            type=int,
+            default=8,
+            help="Number of frames to sample from the video. Default: 8",
         )
 
         args, config = base_parse_args(parser)
