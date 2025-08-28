@@ -138,7 +138,7 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 ### Test Types
 
 1. **Unit Tests** (`test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
-2. **End-to-End Tests** (`run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
+2. **End-to-End Tests** (`scaling/run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
 
 ### Quick Start
 
@@ -153,17 +153,17 @@ python -m pytest test_replica_calculation.py -v
 Test complete scaling behavior including Kubernetes deployment and load generation:
 
 ```bash
-./run_scaling_test.sh
+./scaling/run_scaling_test.sh
 ```
 
 With custom namespace:
 ```bash
-./run_scaling_test.sh --namespace production
+./scaling/run_scaling_test.sh --namespace production
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 ```bash
-./run_scaling_test.sh --save-results
+./scaling/run_scaling_test.sh --save-results
 ```
 
 **E2E Test Deployment Management:**
