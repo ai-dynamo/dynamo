@@ -450,11 +450,31 @@ pub struct NatsQueue {
 }
 
 impl NatsQueue {
-    /// Create a new NatsQueue with the given configuration
+    /// Create a new NatsQueue with the default "worker-group" consumer
     pub fn new(stream_name: String, nats_server: String, dequeue_timeout: time::Duration) -> Self {
         // Sanitize stream name to remove path separators (like in Python version)
+        // rupei: are we sure NATs stream name accepts '_'?
         let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        let subject = format!("{}.*", sanitized_stream_name);
 
+        Self {
+            stream_name: sanitized_stream_name,
+            nats_server,
+            dequeue_timeout,
+            client: None,
+            subject,
+            subscriber: None,
+            consumer_name: Some("worker-group".to_string()),
+        }
+    }
+
+    /// Create a new NatsQueue without a consumer (publisher-only mode)
+    pub fn new_without_consumer(
+        stream_name: String,
+        nats_server: String,
+        dequeue_timeout: time::Duration,
+    ) -> Self {
+        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
         let subject = format!("{}.*", sanitized_stream_name);
 
         Self {
@@ -511,20 +531,18 @@ impl NatsQueue {
                 client.jetstream().create_stream(stream_config).await?;
             }
 
-            // Create persistent subscriber
-            let consumer_config = jetstream::consumer::pull::Config {
-                durable_name: Some(
-                    self.consumer_name
-                        .clone()
-                        .unwrap_or_else(|| "worker-group".to_string()),
-                ),
-                ..Default::default()
-            };
+            // Create persistent subscriber only if consumer_name is set
+            if let Some(ref consumer_name) = self.consumer_name {
+                let consumer_config = jetstream::consumer::pull::Config {
+                    durable_name: Some(consumer_name.clone()),
+                    ..Default::default()
+                };
 
-            let stream = client.jetstream().get_stream(&self.stream_name).await?;
-            let subscriber = stream.create_consumer(consumer_config).await?;
+                let stream = client.jetstream().get_stream(&self.stream_name).await?;
+                let subscriber = stream.create_consumer(consumer_config).await?;
+                self.subscriber = Some(subscriber);
+            }
 
-            self.subscriber = Some(subscriber);
             self.client = Some(client);
         }
 
@@ -767,6 +785,14 @@ impl EventPublisher for NatsQueue {
         event_name: impl AsRef<str> + Send + Sync,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        // Check if event_name is "queue", otherwise warn
+        if event_name.as_ref() != "queue" {
+            tracing::warn!(
+                "Expected event_name to be 'queue', but got '{}'",
+                event_name.as_ref()
+            );
+        }
+
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
 
         // Note: enqueue_task requires &mut self, but EventPublisher requires &self
@@ -1019,9 +1045,14 @@ mod tests {
             consumer2_name,
         );
 
-        // Connect both queues (first one creates the stream, second one reuses it)
+        // Create a third queue without consumer (publisher-only)
+        let mut queue3 =
+            NatsQueue::new_without_consumer(stream_name.clone(), nats_server.clone(), timeout);
+
+        // Connect all queues (first one creates the stream, others reuse it)
         queue1.connect().await.expect("Failed to connect queue1");
         queue2.connect().await.expect("Failed to connect queue2");
+        queue3.connect().await.expect("Failed to connect queue3");
 
         // Send 4 messages using the EventPublisher trait
         let message_strings = vec![

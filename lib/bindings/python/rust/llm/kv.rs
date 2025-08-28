@@ -870,12 +870,14 @@ impl KvPushRouter {
             // Get component from endpoint
             let component = endpoint.inner.component();
 
-            // Create KvRouter
+            // Create KvRouter with a unique consumer UUID
+            let consumer_uuid = uuid::Uuid::new_v4().to_string();
             let kv_router = llm_rs::kv_router::KvRouter::new(
                 component.clone(),
                 block_size as u32,
                 None, // default selector
                 Some(kv_router_config.inner()),
+                consumer_uuid,
             )
             .await
             .map_err(to_pyerr)?;

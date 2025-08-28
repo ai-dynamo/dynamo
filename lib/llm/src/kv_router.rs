@@ -15,6 +15,7 @@ use dynamo_runtime::{
     },
     prelude::*,
     protocols::annotated::Annotated,
+    transports::nats::NatsQueue,
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,9 @@ use crate::{
     protocols::common::llm_backend::LLMEngineOutput,
 };
 
-use dynamo_runtime::traits::events::EventSubscriber;
+use dynamo_runtime::traits::events::EventPublisher;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -56,7 +59,7 @@ use dynamo_runtime::traits::events::EventSubscriber;
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
-pub const KV_EVENT_SUBJECT: &str = "kv_events";
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 
@@ -165,11 +168,80 @@ pub struct KvRouter {
 }
 
 impl KvRouter {
+    /// Start a background task to consume events from NatsQueue and forward them to the indexer
+    async fn start_event_consumer(
+        component: Component,
+        consumer_uuid: String,
+        kv_events_tx: mpsc::Sender<RouterEvent>,
+        cancellation_token: CancellationToken,
+    ) -> Result<()> {
+        let stream_name = format!("{}_{}", component.subject(), KV_EVENT_SUBJECT)
+            .replace(['/', '\\', '.', '_'], "-");
+        let nats_server =
+            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+        let mut nats_queue = NatsQueue::new_with_consumer(
+            stream_name,
+            nats_server,
+            std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
+            consumer_uuid,
+        );
+
+        nats_queue.connect().await?;
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        tracing::info!("KvRouter event consumer received cancellation signal");
+                        break;
+                    }
+                    result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(300))) => {
+                        match result {
+                            Ok(Some(bytes)) => {
+                                let event: RouterEvent = match serde_json::from_slice(&bytes) {
+                                    Ok(event) => event,
+                                    Err(e) => {
+                                        tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
+                                        continue;
+                                    }
+                                };
+
+                                // Forward the RouterEvent to the indexer
+                                if let Err(e) = kv_events_tx.send(event).await {
+                                    tracing::warn!(
+                                        "failed to send kv event to indexer; shutting down: {:?}",
+                                        e
+                                    );
+                                    break;
+                                }
+                            },
+                            Ok(None) => {
+                                tracing::trace!("KvRouter dequeue timeout, continuing");
+                            },
+                            Err(e) => {
+                                tracing::error!("Failed to dequeue task: {:?}", e);
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clean up the queue and remove the durable consumer
+            if let Err(e) = nats_queue.shutdown().await {
+                tracing::warn!("Failed to shutdown NatsQueue: {}", e);
+            }
+        });
+
+        Ok(())
+    }
+
     pub async fn new(
         component: Component,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
+        consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
 
@@ -230,31 +302,15 @@ impl KvRouter {
         )
         .await?;
 
-        // [gluo TODO] try subscribe_with_type::<RouterEvent>,
-        // error checking below will be different.
+        // Start event consumer if using KvIndexer
         if let Indexer::KvIndexer(ref kv_indexer) = indexer {
-            let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
-            let kv_events_tx = kv_indexer.event_sender();
-
-            tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: RouterEvent = match serde_json::from_slice(&event.payload) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                            // Choosing warn and continue to process other events from other workers
-                            // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
-                            continue;
-                        }
-                    };
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!(
-                            "failed to send kv event to indexer; shutting down: {:?}",
-                            e
-                        );
-                    }
-                }
-            });
+            Self::start_event_consumer(
+                component.clone(),
+                consumer_uuid,
+                kv_indexer.event_sender(),
+                cancellation_token.clone(),
+            )
+            .await?;
         }
 
         tracing::info!("KV Routing initialized");
