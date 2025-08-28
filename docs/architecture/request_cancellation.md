@@ -84,15 +84,3 @@ async def generate(self, request, context):
 ```
 
 This design enables seamless cancellation propagation through multi-tier request chains, ensuring that when a client cancels a request, all associated sub-requests are automatically cancelled, saving computational resources across the entire request pipeline.
-
-## Future Roadmap
-
-### Implicit Cancellation
-
-We are planning to enhance the request cancellation system with implicit cancellation support to make cancellation handling more automatic and Pythonic.
-
-- **Automatic AsyncIO CancelledError Injection**: When a request is cancelled, Dynamo will automatically raise an `asyncio.CancelledError` into the Python generator function, eliminating the need for manual cancellation checking in most cases.
-
-- **Implicit Outgoing Request Cancellation**: Outgoing requests will be automatically cancelled when a Python worker receives an `asyncio.CancelledError`, with the `CancelledError` being propagated into any in-flight outgoing requests, making cancellation propagate through request chains without requiring explicit context passing.
-
-These enhancements will make request cancellation more robust and easier to implement while maintaining backward compatibility with the existing explicit cancellation API.
