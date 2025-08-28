@@ -405,7 +405,6 @@ impl LocalModel {
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
 
-        // Option 1 implementation: Check if MDC exists and update if different
         let slug_key = self.card.slug().clone();
         match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, &slug_key).await {
             Ok(Some(existing_mdc)) => {
