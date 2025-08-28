@@ -53,14 +53,17 @@ def setup_lmcache_environment():
 
 async def graceful_shutdown(runtime):
     """
-    Shutdown dynamo distributed runtime.
-    The endpoints will be immediately invalidated so no new requests will be accepted.
-    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
-    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
+    Shutdown dynamo distributed runtime using graceful mode.
+    - Endpoints will be immediately disabled so no new requests will be accepted
+    - NATS/etcd infrastructure remains active until all in-flight requests complete
+    - Once all requests are done, the full infrastructure shuts down
+    - Requests are tracked via RAII guards that automatically decrement when done
     """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
+    logging.info("Received shutdown signal, initiating graceful shutdown")
+    runtime.shutdown_graceful()
+    logging.info(
+        "Graceful shutdown initiated - endpoints disabled, infrastructure will shutdown when all requests complete"
+    )
 
 
 @dynamo_worker(static=False)

@@ -162,6 +162,7 @@ impl Client {
 
     /// Monitor the ETCD instance source and update instance_avail.
     fn monitor_instance_source(&self) {
+        // Use primary token (not endpoint token) so monitoring continues during graceful shutdown
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         tokio::task::spawn(async move {

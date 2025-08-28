@@ -35,6 +35,15 @@ use tokio::{signal, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
+/// Shutdown mode for the runtime
+#[derive(Debug, Clone, Copy)]
+pub enum ShutdownMode {
+    /// Immediate shutdown - all components shutdown at once, then waits for requests if graceful is enabled when serving the endpoint
+    Immediate,
+    /// Graceful shutdown - endpoints shutdown first, then waits for requests, then infrastructure
+    Graceful,
+}
+
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> Result<Runtime> {
         // worker id
@@ -42,6 +51,10 @@ impl Runtime {
 
         // create a cancellation token
         let cancellation_token = CancellationToken::new();
+
+        // create endpoint cancellation token as a child of the main token
+        // this ensures endpoints are cancelled if runtime is forcefully shutdown
+        let endpoint_cancellation_token = cancellation_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -57,6 +70,8 @@ impl Runtime {
             primary: runtime,
             secondary,
             cancellation_token,
+            endpoint_cancellation_token,
+            request_tracker: crate::RequestTracker::new(),
         })
     }
 
@@ -112,9 +127,56 @@ impl Runtime {
         self.cancellation_token.child_token()
     }
 
+    /// Creates a child [`CancellationToken`] for endpoints, cancelled first during graceful shutdown
+    pub fn endpoint_child_token(&self) -> CancellationToken {
+        self.endpoint_cancellation_token.child_token()
+    }
+
+    /// Access the endpoint [`CancellationToken`]
+    pub fn endpoint_token(&self) -> CancellationToken {
+        self.endpoint_cancellation_token.clone()
+    }
+
+    /// Access the request tracker for tracking in-flight requests
+    pub fn request_tracker(&self) -> crate::RequestTracker {
+        self.request_tracker.clone()
+    }
+
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
-        self.cancellation_token.cancel();
+        self.shutdown_with_mode(ShutdownMode::Immediate);
+    }
+
+    /// Shuts down the [`Runtime`] instance with the specified mode
+    pub fn shutdown_with_mode(&self, mode: ShutdownMode) {
+        match mode {
+            ShutdownMode::Immediate => {
+                // Cancel everything at once
+                self.cancellation_token.cancel();
+            }
+            ShutdownMode::Graceful => {
+                // First, cancel only endpoints
+                self.endpoint_cancellation_token.cancel();
+
+                // Schedule infrastructure shutdown after all requests complete
+                let token = self.cancellation_token.clone();
+                let tracker = self.request_tracker.clone();
+                tokio::spawn(async move {
+                    tracing::info!(
+                        "Endpoints shutdown initiated, waiting for {} in-flight requests to complete",
+                        tracker.inflight_count()
+                    );
+
+                    // Wait for all in-flight requests to complete
+                    tracker.wait_for_completion().await;
+
+                    tracing::info!(
+                        "All in-flight requests completed, shutting down runtime infrastructure"
+                    );
+                    token.cancel();
+                });
+            }
+        }
     }
 }
 

@@ -116,12 +116,13 @@ impl EndpointConfigBuilder {
 
         let cancel_token = lease
             .map(|l| l.child_token())
-            .unwrap_or_else(|| endpoint.drt().child_token());
+            .unwrap_or_else(|| endpoint.drt().runtime().endpoint_child_token());
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
             .cancellation_token(cancel_token.clone())
             .graceful_shutdown(graceful_shutdown)
+            .request_tracker(endpoint.drt().runtime().request_tracker())
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 

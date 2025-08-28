@@ -74,17 +74,17 @@ For TP1 H200 engine, planner should scale between 1P1D and 3P3D.
 ```bash
 python benchmarks/sin_load_generator/sin_synth.py \
   --time-duration 1800 \
-  --request-rate-min 15 \
-  --request-rate-max 60 \
+  --request-rate-min 5 \
+  --request-rate-max 45 \
   --request-rate-period 600 \
   --isl1 3000 \
   --osl1 300 \
   --isl2 3000 \
   --osl2 300 \
-  --output-file rr-15-60_i3000o300.jsonl
+  --output-file rr-5-45_i3000o300.jsonl
 ```
 
-The dataset starts at 15 requests/s, increases to 60 requests/s at t=300s, decreases back to 15 requests/s at t=600s, and repeats.
+The dataset starts at 5 requests/s, increases to 45 requests/s at t=300s, decreases back to 5 requests/s at t=600s, and repeats.
 The total duration is 30 minutes or 1800 seconds.
 ## Planner Dry Run
 
@@ -104,7 +104,7 @@ python components/planner/test/planner_sla_dryrun.py \
     --output-plot <path_to_output_plot>
 ```
 
-For example, to dry run SLA planner for the previous FP8 8B on H200 using the generated `rr-12-36_i3000o300.jsonl` dataset,
+For example, to dry run SLA planner for the previous FP8 8B on H200 using the generated `rr-5-45_i3000o300.jsonl` dataset,
 
 ```bash
 python components/planner/test/planner_sla_dryrun.py \
@@ -112,7 +112,7 @@ python components/planner/test/planner_sla_dryrun.py \
     --itl 0.01 \
     --adjustment-interval 60 \
     --profile-results-dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
-    --dataset rr-15-60_i3000o300.jsonl \
+    --dataset rr-5-45_i3000o300.jsonl \
     --start-num-p 1 \
     --start-num-d 1 \
     --output-plot dryrun_plot.png
