@@ -56,6 +56,8 @@ type Config struct {
 	EtcdAddress         string
 	NatsAddress         string
 	IngressConfig       IngressConfig
+	// ModelExpressURL is the URL of the Model Express server to inject into all pods
+	ModelExpressURL string
 }
 
 type IngressConfig struct {
