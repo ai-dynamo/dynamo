@@ -8,6 +8,10 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
+    # Skip docs only changes
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.rst'
 
 jobs:
   build-test:

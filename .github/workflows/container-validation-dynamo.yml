@@ -6,8 +6,16 @@ name: NVIDIA Github Validation
 on:
   push:
     branches:
-    - main
+      - main
+    # Skip docs only changes
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.rst'
   pull_request:
+    # Skip docs only changes
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.rst'
 
 # Do not cancel main branch runs
 concurrency:
