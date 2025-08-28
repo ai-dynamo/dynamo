@@ -278,7 +278,7 @@ pub const KVSTATS_METRICS: &[&str] = &[
     kvstats::GPU_CACHE_USAGE_PERCENT,
     kvstats::GPU_PREFIX_CACHE_HIT_RATE,
 ];
-=======
+
 // Shared regex patterns for Prometheus sanitization
 static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
