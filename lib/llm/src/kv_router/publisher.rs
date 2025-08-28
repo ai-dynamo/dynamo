@@ -1197,9 +1197,9 @@ mod test_integration_publisher {
         let publisher = WorkerMetricsPublisher::new().unwrap();
 
         // Create a real DRT and component for integration testing
-        let drt = std::sync::Arc::new(create_test_drt_async().await);
-        let namespace = drt.namespace("ns2002").unwrap();
-        let component = namespace.component("comp2002").unwrap();
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns2002".to_string()).unwrap();
+        let component = namespace.component("comp2002".to_string()).unwrap();
 
         // Register Prometheus metrics using the real constructor
         publisher.register_prometheus_metrics(&component).unwrap();
