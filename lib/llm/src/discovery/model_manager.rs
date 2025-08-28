@@ -12,7 +12,7 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 use dynamo_runtime::slug::Slug;
 
-use crate::discovery::ModelEntry;
+use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
@@ -220,7 +220,8 @@ impl ModelManager {
             .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
         let router_uuid = uuid::Uuid::new_v4();
         let router_key = format!(
-            "kv_routers/{}/{}",
+            "{}/{}/{}",
+            KV_ROUTERS_ROOT_PATH,
             Slug::from_string(model_name),
             router_uuid
         );
