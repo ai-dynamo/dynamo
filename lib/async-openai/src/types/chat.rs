@@ -213,6 +213,19 @@ pub struct ImageUrl {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[builder(name = "VideoUrlArgs")]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct VideoUrl {
+    /// Either a URL of the video or the base64 encoded video data.
+    pub url: String,
+    /// Specifies the detail level of the video processing.
+    pub detail: Option<ImageDetail>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
 #[builder(name = "ChatCompletionRequestMessageContentPartImageArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -220,6 +233,16 @@ pub struct ImageUrl {
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ChatCompletionRequestMessageContentPartImage {
     pub image_url: ImageUrl,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[builder(name = "ChatCompletionRequestMessageContentPartVideoArgs")]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct ChatCompletionRequestMessageContentPartVideo {
+    pub video_url: VideoUrl,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -255,6 +278,7 @@ pub struct ChatCompletionRequestMessageContentPartAudio {
 pub enum ChatCompletionRequestUserMessageContentPart {
     Text(ChatCompletionRequestMessageContentPartText),
     ImageUrl(ChatCompletionRequestMessageContentPartImage),
+    VideoUrl(ChatCompletionRequestMessageContentPartVideo),
     InputAudio(ChatCompletionRequestMessageContentPartAudio),
 }
 

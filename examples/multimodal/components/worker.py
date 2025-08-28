@@ -245,8 +245,13 @@ class VllmPDWorker(VllmBaseWorker):
                 .client()
             )
 
-        self.EMBEDDINGS_DTYPE = torch.float16
+        if "video" in self.engine_args.model.lower():
+            self.EMBEDDINGS_DTYPE = torch.uint8
+        else:
+            self.EMBEDDINGS_DTYPE = torch.float16
+
         self.EMBEDDINGS_DEVICE = "cpu"
+
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
         parsed_namespace, _, _ = parse_endpoint(self.endpoint)
@@ -277,7 +282,10 @@ class VllmPDWorker(VllmBaseWorker):
         )
         descriptor = connect.Descriptor(embeddings)
 
-        if request.image_url is None:
+        if (
+            request.multimodal_input.image_url is None
+            and request.multimodal_input.video_url is None
+        ):
             if descriptor is None:
                 raise RuntimeError(
                     "Descriptor is None in PD worker - cannot process embeddings"
@@ -287,20 +295,31 @@ class VllmPDWorker(VllmBaseWorker):
                 request.serialized_request, descriptor
             )
             await read_op.wait_for_completion()
-            multi_modal_data = construct_mm_data(
-                self.engine_args.model,
-                embeddings,
-                self.EMBEDDINGS_DTYPE,
-                request.image_grid_thw,
-            )
+            if "video" in self.engine_args.model.lower():
+                video_numpy = embeddings.numpy()
+                multi_modal_data = construct_mm_data(
+                    self.engine_args.model,
+                    self.EMBEDDINGS_DTYPE,
+                    video_numpy=video_numpy,
+                )
+            else:
+                multi_modal_data = construct_mm_data(
+                    self.engine_args.model,
+                    self.EMBEDDINGS_DTYPE,
+                    image_embeds=embeddings,
+                    image_grid_thw=request.image_grid_thw,
+                )
         else:
             # Use PIL image instead of image embeddings
             multi_modal_data = {
-                "image": await self.image_loader.load_image(request.image_url)
+                "image": await self.image_loader.load_image(
+                    request.multimodal_input.image_url
+                )
             }
 
         # Remove the image features from the request as they are not required
-        request.image_url = None
+        request.multimodal_input.image_url = None
+        request.multimodal_input.video_url = None
         request.serialized_request = None
 
         pd_request = copy.deepcopy(request)
