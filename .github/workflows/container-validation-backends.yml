@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: NVIDIA Github Validation
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+
+jobs:
+  build-test:
+    runs-on: gpu-l40-runners
+    strategy:
+      matrix:
+        framework: [vllm]
+        include:
+          - framework: vllm
+            target: runtime
+            pytest_marks: "e2e and vllm and gpu_1 and not slow"
+    # Do not cancel main branch runs
+    concurrency:
+      group: ${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
+      cancel-in-progress: ${{ github.ref_name != 'main' }}
+
+    name: Build and Test - ${{ matrix.framework }}
+    env:
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
+      PYTEST_XML_FILE: pytest_test_report.xml
+      FRAMEWORK: ${{ matrix.framework }}
+      TARGET: ${{ matrix.target }}
+      PYTEST_MARKS: ${{ matrix.pytest_marks }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to NGC
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+        run: |
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+      - name: Cleanup
+        if: always()
+        run: |
+          docker system prune -af
+      - name: Debug
+        run: |
+          lsmod | grep nvidia
+          sudo dmesg | grep -i nvrm || true
+          nvidia-smi
+      - name: Build image
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
+        run: |
+          ./container/build.sh --tag ${{ matrix.framework }}:latest \
+            --target ${{ matrix.target }} \
+            --framework ${{ matrix.framework }} \
+            --use-sccache \
+            --sccache-bucket "$SCCACHE_S3_BUCKET" \
+            --sccache-region "$AWS_DEFAULT_REGION"
+      - name: Run pytest
+        run: |
+          docker run --rm --gpus all -w /workspace \
+            --name ${{ env.CONTAINER_ID }}_pytest \
+            ${{ matrix.framework }}:latest \
+            bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
