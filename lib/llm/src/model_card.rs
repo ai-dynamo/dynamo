@@ -290,35 +290,11 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfChatTemplate,
             "chat_template.jinja"
         );
-        // Debug custom_chat_template upload
-        if let Some(PromptFormatterArtifact::HfChatTemplate(ref src_file)) = self.custom_chat_template {
-            tracing::info!("Before nats_upload macro: custom_chat_template = Some(HfChatTemplate({}))", src_file);
-        } else if self.custom_chat_template.is_some() {
-            tracing::warn!("custom_chat_template is Some but not HfChatTemplate variant!");
-        } else {
-            tracing::warn!("custom_chat_template is None before upload!");
-        }
-
         nats_upload!(
             self.custom_chat_template,
             PromptFormatterArtifact::HfChatTemplate,
             "custom_chat_template.jinja"
         );
-
-        // Debug: Verify custom_chat_template after upload
-        if let Some(PromptFormatterArtifact::HfChatTemplate(ref nats_url)) = self.custom_chat_template {
-            tracing::info!("custom_chat_template uploaded to NATS: {}", nats_url);
-        } else {
-            tracing::error!("CRITICAL: custom_chat_template is None after NATS upload!");
-        }
-
-        // Debug: Verify the entire card can still be serialized with all fields
-        let test_json = serde_json::to_string(&self)?;
-        if !test_json.contains("custom_chat_template") {
-            tracing::error!("CRITICAL: After NATS upload, MDC JSON does NOT contain custom_chat_template!");
-        } else {
-            tracing::info!("After NATS upload, MDC JSON still contains custom_chat_template");
-        }
         nats_upload!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
@@ -373,25 +349,11 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfChatTemplate,
             "chat_template.jinja"
         );
-        // Debug: Check custom_chat_template before download
-        if let Some(PromptFormatterArtifact::HfChatTemplate(ref nats_url)) = self.custom_chat_template {
-            tracing::info!("Downloading custom_chat_template from NATS: {}", nats_url);
-        } else {
-            tracing::info!("No custom_chat_template to download from NATS");
-        }
-
         nats_download!(
             self.custom_chat_template,
             PromptFormatterArtifact::HfChatTemplate,
             "custom_chat_template.jinja"
         );
-
-        // Debug: Verify custom_chat_template after download
-        if let Some(PromptFormatterArtifact::HfChatTemplate(ref local_path)) = self.custom_chat_template {
-            tracing::info!("custom_chat_template downloaded to: {}", local_path);
-        } else {
-            tracing::info!("custom_chat_template is None after download");
-        }
         nats_download!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
@@ -568,26 +530,18 @@ impl ModelDeploymentCard {
 
         // Load custom template if provided
         let custom_chat_template = if let Some(template_path) = custom_template_path {
-            tracing::info!("Custom template path provided: {}", template_path.display());
             if !template_path.exists() {
-                tracing::error!("Custom template file does not exist: {}", template_path.display());
                 anyhow::bail!("Custom template file does not exist: {}", template_path.display());
             }
 
             // Verify the file is readable
-            let template_content = std::fs::read_to_string(template_path)
+            let _template_content = std::fs::read_to_string(template_path)
                 .with_context(|| format!("Failed to read custom template file: {}", template_path.display()))?;
-            tracing::info!(
-                "Custom template file verified. Size: {} bytes, Preview: {}...",
-                template_content.len(),
-                template_content.chars().take(100).collect::<String>()
-            );
 
             Some(PromptFormatterArtifact::HfChatTemplate(
                 template_path.display().to_string()
             ))
         } else {
-            tracing::debug!("No custom template path provided");
             None
         };
 
@@ -617,8 +571,6 @@ impl Versioned for ModelDeploymentCard {
     }
 
     fn set_revision(&mut self, revision: u64) {
-        tracing::info!("ModelDeploymentCard::set_revision called with revision: {}, has custom_chat_template: {}",
-            revision, self.custom_chat_template.is_some());
         self.last_published = Some(chrono::Utc::now());
         self.revision = revision;
     }
