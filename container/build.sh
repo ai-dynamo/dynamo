@@ -121,6 +121,11 @@ NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
 
+# sccache configuration for S3
+USE_SCCACHE=""
+SCCACHE_BUCKET=""
+SCCACHE_REGION=""
+
 get_options() {
     while :; do
         case $1 in
@@ -282,9 +287,25 @@ get_options() {
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
-        --)
-            shift
-            break
+        --use-sccache)
+            USE_SCCACHE=true
+            ;;
+        --sccache-bucket)
+            if [ "$2" ]; then
+                SCCACHE_BUCKET=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+
+        --sccache-region)
+            if [ "$2" ]; then
+                SCCACHE_REGION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
             ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
@@ -345,6 +366,16 @@ get_options() {
     else
         TARGET_STR="--target dev"
     fi
+
+    # Validate sccache configuration
+    if [ "$USE_SCCACHE" = true ]; then
+        if [ -z "$SCCACHE_BUCKET" ]; then
+            error "ERROR: --sccache-bucket is required when --use-sccache is specified"
+        fi
+        if [ -z "$SCCACHE_REGION" ]; then
+            error "ERROR: --sccache-region is required when --use-sccache is specified"
+        fi
+    fi
 }
 
 
@@ -360,6 +391,15 @@ show_image_options() {
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
+    if [ "$USE_SCCACHE" = true ]; then
+        echo "   sccache: Enabled"
+        echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
+        echo "   sccache Region: '${SCCACHE_REGION}'"
+
+        if [ -n "$SCCACHE_S3_KEY_PREFIX" ]; then
+            echo "   sccache S3 Key Prefix: '${SCCACHE_S3_KEY_PREFIX}'"
+        fi
+    fi
     echo ""
 }
 
@@ -386,6 +426,9 @@ show_help() {
     echo "  [--make-efa Enables EFA support for NIXL]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
+    echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
+    echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
+    echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     exit 0
 }
 
@@ -399,6 +442,7 @@ error() {
 }
 
 get_options "$@"
+
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
@@ -545,6 +589,15 @@ fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# Add sccache build arguments
+if [ "$USE_SCCACHE" = true ]; then
+    BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
+    BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
+    BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
+
+
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

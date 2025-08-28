@@ -166,6 +166,10 @@ RUN rm -rf /opt/hpcx/ucx && \
     cd /usr/local/src && \
     git clone https://github.com/openucx/ucx.git && \
     cd ucx && git checkout $NIXL_UCX_REF && \
+    CC=${USE_SCCACHE:+sccache gcc} && \
+    CXX=${USE_SCCACHE:+sccache g++} && \
+    export CC=${CC} && \
+    export CXX=${CXX} && \
     ./autogen.sh && \
     ./configure \
       --prefix=/usr/local/ucx \
