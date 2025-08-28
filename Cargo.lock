@@ -2015,6 +2015,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "strum",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.16",
  "tmq",
