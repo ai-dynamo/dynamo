@@ -263,7 +263,6 @@ def vllm_config_test(request):
 
 
 @pytest.mark.e2e
-@pytest.mark.slow
 def test_serve_deployment(vllm_config_test, request, runtime_services):
     """
     Test dynamo serve deployments with different graph configurations.
