@@ -21,7 +21,6 @@ use crate::{
     backend::Backend,
     entrypoint,
     kv_router::KvRouterConfig,
-    model_card::PromptFormatterArtifact,
     model_type::ModelType,
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest},
     protocols::{
@@ -239,12 +238,7 @@ impl ModelWatcher {
         };
         let card = match model_entry.load_mdc(&etcd_client).await {
             Ok(card) => {
-                tracing::info!(
-                    "Watcher: Loaded MDC from etcd. Has custom_chat_template: {}, display_name: {}",
-                    card.custom_chat_template.is_some(),
-                    card.display_name
-                );
-                tracing::debug!(card.display_name, "adding model");
+                                        tracing::debug!(card.display_name, "adding model");
                 Some(card)
             }
             Err(err) => {
@@ -262,11 +256,7 @@ impl ModelWatcher {
                     anyhow::bail!("Missing model deployment card");
                 };
 
-                tracing::info!(
-                    "Watcher: Got MDC from etcd. Has custom_chat_template: {}, model: {}",
-                    card.custom_chat_template.is_some(),
-                    model_entry.name
-                );
+
 
                 // CRITICAL: Download tokenizer.json etc to local disk BEFORE creating pipelines
                 // The PromptFormatter needs these files to be on local disk, not NATS URLs
@@ -275,14 +265,7 @@ impl ModelWatcher {
                 // function. Needs checking carefully, possibly we need to store it in state.
                 let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                tracing::info!(
-                    "Watcher: Downloaded MDC files from NATS to local disk for model: {}, custom_chat_template path is now: {:?}",
-                    model_entry.name,
-                    card.custom_chat_template.as_ref().map(|t| match t {
-                        PromptFormatterArtifact::HfChatTemplate(path) => path.as_str(),
-                        _ => "not HfChatTemplate"
-                    })
-                );
+
 
                 let kv_chooser = if self.router_mode == RouterMode::KV {
                     Some(

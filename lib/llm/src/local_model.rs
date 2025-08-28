@@ -20,7 +20,6 @@ use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
-use crate::model_card::PromptFormatterArtifact;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
@@ -245,10 +244,8 @@ impl LocalModelBuilder {
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
         let mut card = if self.custom_template_path.is_some() {
-            tracing::info!("Loading ModelDeploymentCard with custom template: {:?}", self.custom_template_path);
             ModelDeploymentCard::load_with_custom_template(&model_config_path, self.custom_template_path.as_deref()).await?
         } else {
-            tracing::debug!("Loading ModelDeploymentCard without custom template");
             ModelDeploymentCard::load(&model_config_path).await?
         };
 
@@ -401,79 +398,12 @@ impl LocalModel {
 
         // Store model config files in NATS object store
         let nats_client = endpoint.drt().nats_client();
-        tracing::info!("Uploading ModelDeploymentCard to NATS. Has custom_chat_template: {}",
-            self.card.custom_chat_template.is_some());
-
-        // Debug: Check JSON before NATS upload
-        let json_before_nats = self.card.to_json()?;
-        if !json_before_nats.contains("custom_chat_template") {
-            tracing::error!("CRITICAL: MDC JSON missing custom_chat_template BEFORE NATS upload!");
-        }
-
         self.card.move_to_nats(nats_client.clone()).await?;
-
-        // Debug: Check JSON after NATS upload
-        let json_after_nats = self.card.to_json()?;
-        if !json_after_nats.contains("custom_chat_template") {
-            tracing::error!("CRITICAL: MDC JSON missing custom_chat_template AFTER NATS upload!");
-        } else {
-            tracing::info!("MDC JSON still has custom_chat_template after NATS upload");
-        }
-
-        tracing::info!("ModelDeploymentCard uploaded to NATS successfully. Has custom_chat_template: {}",
-            self.card.custom_chat_template.is_some());
 
         // Publish the Model Deployment Card to etcd
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
-        tracing::info!(
-            "Publishing MDC to etcd. Key: {}, Has custom_chat_template: {}, display_name: {}",
-            key,
-            self.card.custom_chat_template.is_some(),
-            self.card.display_name
-        );
-
-        // Critical debug: Print the actual value
-        match &self.card.custom_chat_template {
-            Some(PromptFormatterArtifact::HfChatTemplate(path)) => {
-                tracing::info!("custom_chat_template value before publish: HfChatTemplate({})", path);
-            }
-            Some(_) => {
-                tracing::warn!("custom_chat_template is Some but unexpected variant");
-            }
-            None => {
-                tracing::error!("CRITICAL: custom_chat_template is None before publish!");
-            }
-        }
-
-        // Debug: Let's verify the MDC can be serialized properly
-        let json_before = self.card.to_json()?;
-        tracing::info!("MDC JSON length before publish: {} bytes", json_before.len());
-        // Check if custom_chat_template is in the JSON
-        if json_before.contains("\"custom_chat_template\"") {
-            tracing::info!("MDC JSON contains 'custom_chat_template' field");
-            // Extract the custom_chat_template value
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&json_before) {
-                if let Some(custom_template) = json_value.get("custom_chat_template") {
-                    tracing::info!("custom_chat_template in JSON: {:?}", custom_template);
-                } else {
-                    tracing::error!("Parsed JSON object but couldn't find custom_chat_template field!");
-                    tracing::info!("JSON keys: {:?}", json_value.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-                }
-            }
-        } else {
-            tracing::warn!("MDC JSON does NOT contain 'custom_chat_template' field!");
-            tracing::info!("JSON preview: {}", json_before.chars().take(200).collect::<String>());
-        }
-
-        // Debug: Log the actual JSON that will be published
-        let json_to_publish = serde_json::to_string(&self.card)?;
-        tracing::info!("Actual JSON being published to etcd (first 500 chars): {}",
-            json_to_publish.chars().take(500).collect::<String>());
-        if !json_to_publish.contains("custom_chat_template") {
-            tracing::error!("CRITICAL: JSON being published does NOT contain custom_chat_template!");
-        }
 
         // Option 1 implementation: Check if MDC exists and update if different
         let slug_key = self.card.slug().clone();
