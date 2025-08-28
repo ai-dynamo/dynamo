@@ -66,7 +66,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 ```
 
 > [!TIP]
-> By default, Grove and Kai Scheduler are NOT installed. You can enable them by setting the following values in the `dynamo-platform` Helm chart:
+> By default, Grove and Kai Scheduler are NOT installed. You can enable them by setting the following flags in the helm install command:
 
 ```bash
 --set "grove.enabled=true"
