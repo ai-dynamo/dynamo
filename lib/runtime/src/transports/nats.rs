@@ -1055,7 +1055,7 @@ mod tests {
         queue3.connect().await.expect("Failed to connect queue3");
 
         // Send 4 messages using the EventPublisher trait
-        let message_strings = vec![
+        let message_strings = [
             "message1".to_string(),
             "message2".to_string(),
             "message3".to_string(),
@@ -1067,7 +1067,7 @@ mod tests {
             queue1
                 .publish("queue", msg)
                 .await
-                .expect(&format!("Failed to publish message {}", idx + 1));
+                .unwrap_or_else(|_| panic!("Failed to publish message {}", idx + 1));
         }
 
         // Convert messages to JSON-serialized Bytes for comparison
