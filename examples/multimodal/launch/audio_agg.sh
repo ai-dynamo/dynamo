@@ -5,8 +5,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
-MODEL_NAME="llava-hf/llava-1.5-7b-hf"
-PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
+MODEL_NAME="Qwen/Qwen2-Audio-7B-Instruct"
+PROMPT_TEMPLATE=""
 PROVIDED_PROMPT_TEMPLATE=""
 
 # Parse command line arguments
@@ -39,12 +39,8 @@ done
 # Set PROMPT_TEMPLATE based on the MODEL_NAME
 if [[ -n "$PROVIDED_PROMPT_TEMPLATE" ]]; then
     PROMPT_TEMPLATE="$PROVIDED_PROMPT_TEMPLATE"
-elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
-elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
-    PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
+elif [[ "$MODEL_NAME" == "Qwen/Qwen2-Audio-7B-Instruct" ]]; then
+    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\n<prompt><|im_end|>\n<|im_start|>assistant\n"
 else
     echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
     echo "Please provide a prompt template using --prompt-template option."
@@ -53,13 +49,13 @@ else
 fi
 
 # run ingress
-python -m dynamo.frontend --http-port=8000 &
+python -m dynamo.frontend --http-port 8000 &
 
 # run processor
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model $MODEL_NAME &
+CUDA_VISIBLE_DEVICES=0 python3 components/audio_encode_worker.py --model $MODEL_NAME &
 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill &
 
 # Wait for all background processes to complete

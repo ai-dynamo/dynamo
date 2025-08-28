@@ -502,3 +502,96 @@ You should see a response describing the video's content similar to
   "usage": null
 }
 ```
+## Multimodal Aggregated Audio Serving
+
+This example demonstrates deploying an aggregated multimodal model that can process audio inputs.
+
+### Components
+
+- workers: For audio serving, we use the [AudioEncodeWorker](components/audio_encode_worker.py) for decoding audio into audio embeddings, and send the embeddings to [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have two workers, [AudioEncodeWorker](components/audio_encode_worker.py) and [VllmPDWorker](components/worker.py).
+The AudioEncodeWorker is responsible for decoding the audio into embeddings.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
+By separating the audio processing from the prefill and decode stages, we can have a more flexible deployment and scale the
+AudioEncodeWorker independently from the prefill and decode workers if needed.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --audio_url--> audio_encode_worker
+  audio_encode_worker --> processor
+  audio_encode_worker --frames--> pd_worker
+  pd_worker --> audio_encode_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/audio_agg.sh
+```
+
+### Client
+
+In another terminal:
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "Qwen/Qwen2-Audio-7B-Instruct",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is recited in the audio?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 6000,
+      "temperature": 0.8,
+      "stream": false
+    }' | jq
+```
+
+You should see a response describing the audio's content similar to
+```json
+{
+  "id": "e2d8d67c37634b309400974eaa058ce8",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "The original content of this audio is:'yet these thoughts affected Hester Pynne less with hope than apprehension.'",
+        "refusal": null,
+        "tool_calls": null,
+        "role": "assistant",
+        "function_call": null,
+        "audio": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "created": 1756368148,
+  "model": "Qwen/Qwen2-Audio-7B-Instruct",
+  "service_tier": null,
+  "system_fingerprint": null,
+  "object": "chat.completion",
+  "usage": null
+}
+```
+
