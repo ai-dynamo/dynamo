@@ -262,6 +262,23 @@ async def init(runtime: DistributedRuntime, config: Config):
             multimodal_processor=multimodal_processor,
         )
 
+        if next_client:
+            logging.info(
+                f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
+            )
+            next_client.wait_for_instances()
+
+        if is_first_worker(config):
+            # Register the model with runtime config
+            await register_llm(
+                modelType,
+                endpoint,
+                config.model_path,
+                config.served_model_name,
+                kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
+            )
+
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
