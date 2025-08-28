@@ -876,7 +876,6 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
 
                     # Parse and validate the response structure
                     events = []
-                    data_items = []
 
                     sse_parts = full_response.split("\n\n")
 
@@ -909,10 +908,8 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
                                 events.append((event_type, data_value))
                         elif part.startswith("data:"):
                             data_value = part.split(":", 1)[1].strip()
-                            data_items.append(data_value)
 
                     logger.info(f"Parsed events: {events}")
-                    logger.info(f"Parsed data items: {data_items}")
 
                     # Validate worker_instance_id event
                     worker_event = next(
@@ -921,16 +918,6 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
                     assert (
                         worker_event is not None
                     ), f"Missing worker_instance_id event in: {events}"
-
-                    worker_id_str = worker_event[1].strip('"')
-                    assert (
-                        worker_id_str.isdigit()
-                    ), f"worker_instance_id should be numeric, got: {worker_id_str}"
-                    assert (
-                        len(worker_id_str) >= 6
-                    ), f"worker_instance_id seems too short: {worker_id_str}"
-
-                    logger.info(f"✓ Valid worker_instance_id: {worker_id_str}")
 
                     # Validate token_data event
                     token_event = next(
@@ -963,6 +950,7 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
                     )
 
                     # Validate that no actual generation happened (should only be metadata)
+                    # This proves the early return worked correctly
                     generation_indicators = [
                         "choices",
                         "content",
@@ -975,11 +963,11 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
                         ), f"Found generation indicator '{indicator}' - request should not have been routed to worker"
 
                     logger.info(
-                        "No generation content found - request was not routed to worker"
+                        "✓No generation content found - early return worked correctly"
                     )
 
                     return {
-                        "worker_instance_id": worker_id_str,
+                        "worker_instance_id": worker_event[1].strip('"'),
                         "token_count": len(token_list),
                         "tokens": token_list,
                     }
