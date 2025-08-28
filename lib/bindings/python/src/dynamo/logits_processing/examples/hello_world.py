@@ -21,6 +21,10 @@ class HelloWorldLogitsProcessor(BaseLogitsProcessor):
         self.tokenizer = tokenizer
         self.token_ids = tokenizer.encode(RESPONSE, add_special_tokens=False)
         self.eos_id = tokenizer.eos_token_id
+        if self.eos_id is None:
+            raise ValueError(
+                "Tokenizer has no eos_token_id; HelloWorldLogitsProcessor requires one."
+            )
         self.state = 0
 
     def __call__(self, input_ids: Sequence[int], scores: torch.Tensor):
