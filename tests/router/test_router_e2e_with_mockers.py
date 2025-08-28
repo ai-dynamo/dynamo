@@ -6,10 +6,11 @@ import json
 import logging
 import os
 import random
-import re
+import time
 from typing import Any, Dict
 
 import aiohttp
+import httpx
 import pytest
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
@@ -793,24 +794,51 @@ def test_kv_push_router_bindings(request, runtime_services):
             os.unlink(mocker_args_file)
 
 
+def _wait_for_model(
+    model_id: str, base_url: str, timeout_s: int = 30, interval_s: float = 0.5
+):
+    """
+    Poll /v1/models until `model_id` is present or timeout.
+    Raises RuntimeError on timeout.
+    """
+    t0 = time.time()
+    with httpx.Client(timeout=2.0) as c:
+        while time.time() - t0 < timeout_s:
+            try:
+                r = c.get(f"{base_url}/v1/models")
+                if r.status_code == 200:
+                    ids = [m.get("id") for m in r.json().get("data", [])]
+                    if model_id in ids:
+                        return
+            except Exception:
+                pass
+            time.sleep(interval_s)
+    raise RuntimeError(f"Model {model_id} not visible in /v1/models after {timeout_s}s")
+
+
 @pytest.mark.pre_merge
 def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
     """
-    When 'nvext.annotations' includes 'query_instance_id', the router should not
-    route to a worker immediately. Instead, it should stream annotations:
-      - event: worker_instance_id
-      - event: token_data
-    and then terminate the stream with: data: [DONE]
+    Test that the KV router correctly handles query_instance_id annotation.
 
-    Example expected wire format (SSE):
-      event: worker_instance_id\n: "8228244551594056720"\n\n
-      event: token_data\n: "[151644,872,...]"\n\n
-      data: [DONE]\n\n
+    When a request includes 'nvext.annotations': ['query_instance_id'], the router should:
+    1. NOT route the request to a worker immediately
+    2. Return worker_instance_id as an SSE event
+    3. Return token_data as an SSE event containing the request tokens
+    4. Terminate the stream with [DONE]
+
+    This tests the specific code block:
+        if query_instance_id {
+            let instance_id_str = instance_id.to_string();
+            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
+            let stream = stream::iter(vec![response, response_tokens]);
+            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+        }
     """
 
-    logger.info("Starting query_instance_id annotation test")
+    logger.info("Starting KV router query_instance_id annotation test")
 
-    # Create mocker args file
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
     mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
     os.makedirs(request.node.name, exist_ok=True)
@@ -821,77 +849,170 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
 
     try:
         # Start KV router (frontend)
-        frontend_port = PORT + 20  # keep separate from other tests in same run
+        frontend_port = PORT + 30  # Use unique port to avoid conflicts
         logger.info(f"Starting KV router frontend on port {frontend_port}")
         kv_router = KVRouterProcess(request, frontend_port)
         kv_router.__enter__()
 
-        # Start mocker engines
+        # Start multiple mocker engines to ensure worker selection logic
         endpoint = "dyn://test-namespace.mocker.generate"
         for i in range(NUM_MOCKERS):
             logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
             mocker = MockerProcess(request, endpoint, mocker_args_file)
             mocker_processes.append(mocker)
+
         for mocker in mocker_processes:
             mocker.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
-        logger.info("Warming up with a regular request (no annotations)...")
+        # Send a warming request first to ensure system is ready
+        logger.info("Sending warming request without annotations...")
         asyncio.run(send_request_with_retry(url, TEST_PAYLOAD))
 
+        # Test payload with query_instance_id annotation
         annotated_payload = {
             **TEST_PAYLOAD,
             "nvext": {"annotations": ["query_instance_id"]},
         }
 
-        async def send_and_capture_sse():
+        async def test_annotation_response():
+            """Send request with query_instance_id and validate response structure"""
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=annotated_payload) as resp:
-                    assert resp.status == 200, f"Unexpected status: {resp.status}"
-                    chunks = []
-                    async for part in resp.content:
-                        if part:
-                            chunks.append(part)
-                    return b"".join(chunks).decode("utf-8", errors="replace")
+                logger.info("Sending request with query_instance_id annotation...")
 
-        sse_text = asyncio.run(send_and_capture_sse())
-        logger.debug(f"SSE stream received ({len(sse_text)} bytes):\n{sse_text}")
+                async with session.post(url, json=annotated_payload) as response:
+                    assert (
+                        response.status == 200
+                    ), f"Expected 200 but got {response.status}"
 
-        # Check for worker_instance_id event with a numeric string ID
-        worker_event = re.search(
-            r"event:\s*worker_instance_id[\s\S]{0,200}?(?:data:|:)\s*\"(?P<id>\d{6,30})\"",
-            sse_text,
-        )
-        assert worker_event, (
-            "Did not find 'event: worker_instance_id' with a quoted numeric id "
-            "in the SSE stream"
-        )
-        worker_id = worker_event.group("id")
-        assert worker_id.isdigit(), "worker_instance_id should be numeric"
+                    # Collect all response chunks
+                    response_chunks = []
+                    async for chunk in response.content:
+                        if chunk:
+                            chunk_str = chunk.decode("utf-8", errors="replace")
+                            response_chunks.append(chunk_str)
 
-        # 2) Check for a token_data event
-        token_event = re.search(
-            r"event:\s*token_data[\s\S]{0,500}?(?:data:|:)\s*\"(?P<tokens>\[.*?\])\"",
-            sse_text,
-        )
-        assert (
-            token_event
-        ), "Did not find 'event: token_data' with a quoted JSON list in the SSE stream"
-        tokens_json = token_event.group("tokens")
-        try:
-            token_list = json.loads(tokens_json)
-        except Exception as e:
-            raise AssertionError(f"token_data payload is not valid JSON: {e}")
-        assert isinstance(token_list, list) and all(
-            isinstance(t, int) for t in token_list
-        ), "token_data must be a JSON list of integers"
-        assert len(token_list) > 0, "token_data should not be an empty list"
+                    full_response = "".join(response_chunks)
+                    logger.info(
+                        f"Full SSE response ({len(full_response)} bytes):\n{full_response}"
+                    )
 
-        logger.info(
-            f"query_instance_id path OK — worker_instance_id={worker_id}, "
-            f"{len(token_list)} tokens returned"
-        )
+                    # Parse and validate the response structure
+                    events = []
+                    data_items = []
+
+                    sse_parts = full_response.split("\n\n")
+
+                    for part in sse_parts:
+                        part = part.strip()
+                        if not part:
+                            continue
+
+                        if part.startswith("event:"):
+                            lines = part.split("\n")
+                            event_line = next(
+                                (line for line in lines if line.startswith("event:")),
+                                None,
+                            )
+                            data_line = next(
+                                (
+                                    line
+                                    for line in lines
+                                    if line.startswith("data:") or line.startswith(":")
+                                ),
+                                None,
+                            )
+
+                            if event_line and data_line:
+                                event_type = event_line.split(":", 1)[1].strip()
+                                if data_line.startswith("data:"):
+                                    data_value = data_line.split(":", 1)[1].strip()
+                                else:
+                                    data_value = data_line.split(":", 1)[1].strip()
+                                events.append((event_type, data_value))
+                        elif part.startswith("data:"):
+                            data_value = part.split(":", 1)[1].strip()
+                            data_items.append(data_value)
+
+                    logger.info(f"Parsed events: {events}")
+                    logger.info(f"Parsed data items: {data_items}")
+
+                    # Validate worker_instance_id event
+                    worker_event = next(
+                        (e for e in events if e[0] == "worker_instance_id"), None
+                    )
+                    assert (
+                        worker_event is not None
+                    ), f"Missing worker_instance_id event in: {events}"
+
+                    worker_id_str = worker_event[1].strip('"')
+                    assert (
+                        worker_id_str.isdigit()
+                    ), f"worker_instance_id should be numeric, got: {worker_id_str}"
+                    assert (
+                        len(worker_id_str) >= 6
+                    ), f"worker_instance_id seems too short: {worker_id_str}"
+
+                    logger.info(f"✓ Valid worker_instance_id: {worker_id_str}")
+
+                    # Validate token_data event
+                    token_event = next(
+                        (e for e in events if e[0] == "token_data"), None
+                    )
+                    assert (
+                        token_event is not None
+                    ), f"Missing token_data event in: {events}"
+
+                    token_data_str = token_event[1].strip('"')
+                    try:
+                        token_list = json.loads(token_data_str)
+                    except json.JSONDecodeError as e:
+                        raise AssertionError(
+                            f"token_data is not valid JSON: {token_data_str}, error: {e}"
+                        )
+
+                    assert isinstance(
+                        token_list, list
+                    ), f"token_data should be a list, got: {type(token_list)}"
+                    assert (
+                        len(token_list) > 0
+                    ), f"token_data should not be empty: {token_list}"
+                    assert all(
+                        isinstance(token, int) for token in token_list
+                    ), f"All tokens should be integers: {token_list}"
+
+                    logger.info(
+                        f"Valid token_data with {len(token_list)} tokens: {token_list[:10]}{'...' if len(token_list) > 10 else ''}"
+                    )
+
+                    # Validate that no actual generation happened (should only be metadata)
+                    generation_indicators = [
+                        "choices",
+                        "content",
+                        "delta",
+                        "finish_reason",
+                    ]
+                    for indicator in generation_indicators:
+                        assert (
+                            indicator not in full_response.lower()
+                        ), f"Found generation indicator '{indicator}' - request should not have been routed to worker"
+
+                    logger.info(
+                        "No generation content found - request was not routed to worker"
+                    )
+
+                    return {
+                        "worker_instance_id": worker_id_str,
+                        "token_count": len(token_list),
+                        "tokens": token_list,
+                    }
+
+        result = asyncio.run(test_annotation_response())
+
+        logger.info("Successfully validated query_instance_id annotation response:")
+        logger.info(f"Worker ID: {result['worker_instance_id']}")
+        logger.info(f"Token count: {result['token_count']}")
 
     finally:
         if "kv_router" in locals():
