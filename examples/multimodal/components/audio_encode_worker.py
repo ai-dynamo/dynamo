@@ -147,11 +147,11 @@ class VllmEncodeWorker:
 
         request_id = request.request_id
 
-        # The following steps encode the requested image and provided useful embeddings.
-        # 1. Open the image from the provided URL.
-        # 2. Process the image using the image processor.
-        # 3. Run the image through the vision model's vision tower.
-        # 4. Run the results of the vision tower through the multi-modal projector.
+        # The following steps encode the requested audio and provided useful embeddings.
+        # 1. Open the audio from the provided URL.
+        # 2. Process the audio using the audio processor.
+        # 3. Run the audio through the audio model's audio tower.
+        # 4. Run the results of the audio tower through the multi-modal projector.
         # 5. Create a descriptor for the embeddings.
         # 6. Create a write operation using the serialized request and the descriptor.
         # 7. Await for the write operation to complete.

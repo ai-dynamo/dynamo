@@ -527,7 +527,7 @@ flowchart LR
   processor --> HTTP
   processor --audio_url--> audio_encode_worker
   audio_encode_worker --> processor
-  audio_encode_worker --frames--> pd_worker
+  audio_encode_worker --embeddings--> pd_worker
   pd_worker --> audio_encode_worker
 ```
 

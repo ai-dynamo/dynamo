@@ -251,7 +251,7 @@ class Processor(ProcessMixIn):
                         multimodal_input.image_url is not None
                         or multimodal_input.video_url is not None
                     ):
-                        raise ValueError("Cannot provide both image and video URLs")
+                        raise ValueError("Cannot mix image, video and audio URLs")
                     multimodal_input.audio_url = item.audio_url.url
 
         if (
