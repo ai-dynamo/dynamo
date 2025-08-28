@@ -179,7 +179,7 @@ async def run_benchmark_workflow(
     isl: int = 200,
     std: int = 10,
     osl: int = 200,
-    model: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    model: str = "nvidia/Llama-3.1-8B-Instruct-FP8",
     output_dir: str = "benchmarks/results",
 ) -> None:
     """Main benchmark workflow orchestrator"""

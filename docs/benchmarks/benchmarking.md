@@ -107,7 +107,7 @@ You'll see output like this confirming your configuration:
 ```text
 === Benchmark Configuration ===
 Namespace:              benchmarking
-Model:                  deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+Model:                  nvidia/Llama-3.1-8B-Instruct-FP8
 Input Sequence Length:  200 tokens      # Auto-configured default
 Output Sequence Length: 200 tokens      # Auto-configured default
 Sequence Std Dev:       10 tokens       # Auto-configured default
@@ -205,7 +205,7 @@ REQUIRED:
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+  -m, --model MODEL             Model name (default: nvidia/Llama-3.1-8B-Instruct-FP8)
   -i, --isl LENGTH              Input sequence length (default: 200)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
   -o, --osl LENGTH              Output sequence length (default: 200)
