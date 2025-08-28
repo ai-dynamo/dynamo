@@ -17,6 +17,12 @@
 
 This guide shows how to benchmark NVIDIA Dynamo deployments on Kubernetes to compare performance between aggregated, disaggregated, and vanilla backend configurations. You can benchmark existing endpoints or deploy and test new configurations.
 
+## Hardware and Model Support
+
+**Hardware Support**: This guide was initially developed and tested on H200 GPUs, but the benchmarking framework should work on other NVIDIA GPU types including H100, A100, and others.
+
+**Model Support**: The benchmarking framework supports any HuggingFace-compatible LLM model. While the default manifests use `Qwen/Qwen3-0.6B` and the default benchmarking model is `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, you can benchmark any model by modifying the deployment YAML files. The example performance plots shown in this guide were generated using `nvidia/Llama-3.1-8B-Instruct-FP8`.
+
 ## What You'll Get
 
 The benchmark script supports two modes:
@@ -78,9 +84,11 @@ This will:
 
 #### Important: Check Image Accessibility
 
-Before running deployment benchmarks, ensure the container images in your YAML manifests are accessible. The example manifests may contain private registry images that need to be updated.
+Before running deployment benchmarks, ensure the container images in your YAML manifests are accessible. Some example manifests may reference private development images that need to be updated.
 
-Manually edit your manifests to use accessible images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) or your own registry with proper credentials configured.
+**For public use**: Edit your manifests to use publicly available images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). These public release images are accessible without requiring private NGC accounts or special credentials.
+
+**For custom setups**: Alternatively, you can use your own registry with proper credentials configured in your Kubernetes namespace.
 
 #### Running Deployment Benchmarks
 
@@ -136,7 +144,10 @@ The script automatically:
 
 ### Using Your Own Models
 
-To benchmark your specific model, customize the manifests:
+The benchmarking framework supports any HuggingFace-compatible LLM model. To benchmark your specific model:
+
+1. **Edit your deployment YAML files** to specify your model in the `--model` argument of the container command
+2. **Use the corresponding model name** in the benchmark script's `--model` parameter
 
 ```bash
 # With custom manifests and parameters
@@ -151,7 +162,7 @@ To benchmark your specific model, customize the manifests:
    --output-dir my_benchmark_results
 ```
 
-**Important**: The model in your manifests must match what you're benchmarking. The `--model` flag is for GenAI-Perf configuration, not deployment.
+**Important**: The model specified in your deployment manifests must match the `--model` flag used for benchmarking. The `--model` flag configures GenAI-Perf for testing, while the deployment manifest determines what model is actually loaded.
 
 ### Direct Python Execution
 
@@ -246,7 +257,7 @@ benchmarks/results/
     └── avg_inter_token_latency_vs_concurrency.png      # Average latency
 ```
 
-Example plots -- **for demonstration purposes only**:
+Example plots -- **for demonstration purposes only** (generated using `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 hardware):
 
 <table>
   <tr>
@@ -328,7 +339,7 @@ For multi-node Dynamo deployments:
 
 For custom benchmarking scenarios, you can:
 
-1. **Create custom deployment manifests**: Configure your own agg, disagg, and vanilla manifests for your specific models and hardware configurations
+1. **Create custom deployment manifests**: Configure your own agg, disagg, and vanilla manifests for your specific models and hardware configurations. The framework supports any HuggingFace-compatible model and works across different NVIDIA GPU types (H200, H100, A100, etc.)
 
 2. **Modify concurrency levels**: Edit `benchmarks/utils/genai.py` to customize test parameters
    ```python
