@@ -963,7 +963,7 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
                         ), f"Found generation indicator '{indicator}' - request should not have been routed to worker"
 
                     logger.info(
-                        "✓No generation content found - early return worked correctly"
+                        "No generation content found - early return worked correctly"
                     )
 
                     return {
