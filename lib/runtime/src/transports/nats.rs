@@ -1027,6 +1027,20 @@ mod tests {
         let nats_server = "nats://localhost:4222".to_string();
         let timeout = time::Duration::from_secs(0);
 
+        // Connect to NATS client first to delete stream if it exists
+        let client_options = Client::builder()
+            .server(nats_server.clone())
+            .build()
+            .expect("Failed to build client options");
+
+        let client = client_options
+            .connect()
+            .await
+            .expect("Failed to connect to NATS");
+
+        // Delete the stream if it exists (to ensure clean start)
+        let _ = client.jetstream().delete_stream(&stream_name).await;
+
         // Create two consumers with different names for the same stream
         let consumer1_name = format!("consumer-{}", Uuid::new_v4());
         let consumer2_name = format!("consumer-{}", Uuid::new_v4());
@@ -1038,21 +1052,8 @@ mod tests {
             consumer1_name,
         );
 
-        let mut queue2 = NatsQueue::new_with_consumer(
-            stream_name.clone(),
-            nats_server.clone(),
-            timeout,
-            consumer2_name,
-        );
-
-        // Create a third queue without consumer (publisher-only)
-        let mut queue3 =
-            NatsQueue::new_without_consumer(stream_name.clone(), nats_server.clone(), timeout);
-
-        // Connect all queues (first one creates the stream, others reuse it)
+        // Connect queue1 first (it will create the stream)
         queue1.connect().await.expect("Failed to connect queue1");
-        queue2.connect().await.expect("Failed to connect queue2");
-        queue3.connect().await.expect("Failed to connect queue3");
 
         // Send 4 messages using the EventPublisher trait
         let message_strings = [
@@ -1079,17 +1080,21 @@ mod tests {
         // Give JetStream a moment to persist the messages
         tokio::time::sleep(time::Duration::from_millis(100)).await;
 
-        // Get stream info to find the sequence numbers
-        // We need to know the sequence of message 2 to purge up to it
-        let client_options = Client::builder()
-            .server(nats_server.clone())
-            .build()
-            .expect("Failed to build client options");
+        // Now create and connect queue2 and queue3 AFTER messages are published (to test persistence)
+        let mut queue2 = NatsQueue::new_with_consumer(
+            stream_name.clone(),
+            nats_server.clone(),
+            timeout,
+            consumer2_name,
+        );
 
-        let client = client_options
-            .connect()
-            .await
-            .expect("Failed to connect to NATS");
+        // Create a third queue without consumer (publisher-only)
+        let mut queue3 =
+            NatsQueue::new_without_consumer(stream_name.clone(), nats_server.clone(), timeout);
+
+        // Connect queue2 and queue3 after messages are already published
+        queue2.connect().await.expect("Failed to connect queue2");
+        queue3.connect().await.expect("Failed to connect queue3");
 
         // Purge the first two messages (sequence 1 and 2)
         // Note: JetStream sequences start at 1, and purge is exclusive of the sequence number
