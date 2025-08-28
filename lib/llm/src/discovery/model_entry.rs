@@ -55,11 +55,41 @@ impl ModelEntry {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let card_key = self.slug();
+        tracing::info!("ModelEntry::load_mdc - Loading MDC from etcd with key: {}, model name: {}", card_key, self.name);
+
+        // Debug: Let's fetch the raw JSON first to inspect it
+        let etcd_key = format!("{}/{}", model_card::ROOT_PATH, card_key);
+        match etcd_client
+            .kv_get(etcd_key.as_str(), None)
+            .await
+        {
+            Ok(kv_list) => {
+                if let Some(first_kv) = kv_list.first() {
+                    let raw_json = String::from_utf8_lossy(first_kv.value());
+                    tracing::info!("Raw MDC JSON from etcd (first 500 chars): {}",
+                        &raw_json.chars().take(500).collect::<String>());
+                    if raw_json.contains("custom_chat_template") {
+                        tracing::info!("Raw JSON contains 'custom_chat_template' field");
+                    } else {
+                        tracing::warn!("Raw JSON does NOT contain 'custom_chat_template' field!");
+                    }
+                } else {
+                    tracing::warn!("No KV entries found in etcd for this key");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not fetch raw MDC JSON from etcd: {}", e);
+            }
+        }
+
         match card_store
             .load::<ModelDeploymentCard>(model_card::ROOT_PATH, &card_key)
             .await
         {
-            Ok(Some(mdc)) => Ok(mdc),
+            Ok(Some(mdc)) => {
+                tracing::info!("ModelEntry::load_mdc - Successfully loaded MDC. Has custom_chat_template: {}", mdc.custom_chat_template.is_some());
+                Ok(mdc)
+            }
             Ok(None) => {
                 anyhow::bail!("Missing ModelDeploymentCard in etcd under key {card_key}");
             }

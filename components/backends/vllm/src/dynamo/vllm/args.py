@@ -49,6 +49,7 @@ class Config:
     migration_limit: int = 0
     kv_port: Optional[int] = None
     port_range: DynamoPortRange
+    custom_jinja_template: Optional[str] = None
 
     # mirror vLLM
     model: str
@@ -123,6 +124,12 @@ def parse_args() -> Config:
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model.",
     )
+    parser.add_argument(
+        "--custom-jinja-template",
+        type=str,
+        default=None,
+        help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -174,6 +181,7 @@ def parse_args() -> Config:
     )
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
+    config.custom_jinja_template = args.custom_jinja_template
     # Check for conflicting flags
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")

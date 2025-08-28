@@ -258,6 +258,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_cache_block_size=config.engine_args.block_size,
             migration_limit=config.migration_limit,
             runtime_config=runtime_config,
+            custom_template_path=config.custom_jinja_template,
         )
 
     try:

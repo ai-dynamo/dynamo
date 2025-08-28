@@ -158,6 +158,15 @@ impl EtcdBucket {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
+        // Debug: Log what we're creating
+        if self.bucket_name == "mdc" {
+            tracing::info!("EtcdBucket::create - Creating key {}, value contains custom_chat_template: {}",
+                key, value.contains("custom_chat_template"));
+            if !value.contains("custom_chat_template") {
+                tracing::info!("Value preview: {}", value.chars().take(300).collect::<String>());
+            }
+        }
+
         // Use atomic transaction to check and create in one operation
         let put_options = PutOptions::new();
 
@@ -180,16 +189,46 @@ impl EtcdBucket {
 
         if result.succeeded() {
             // Key was created successfully
+
+            // Debug: Verify what was actually created
+            if self.bucket_name == "mdc" {
+                if let Ok(kvs) = self.client.kv_get(k.as_str(), None).await {
+                    if let Some(kv) = kvs.first() {
+                        let stored = String::from_utf8_lossy(kv.value());
+                        if stored.contains("custom_chat_template") {
+                            tracing::info!("EtcdBucket::create - Successfully created with custom_chat_template");
+                        } else {
+                            tracing::error!("EtcdBucket::create - Created but stored value does NOT contain custom_chat_template!");
+                            tracing::info!("Stored value preview: {}", stored.chars().take(300).collect::<String>());
+                        }
+                    }
+                }
+            }
+
             return Ok(StorageOutcome::Created(1)); // version of new key is always 1
         }
 
         // Key already existed, get its version
         if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
             result.op_responses().into_iter().next()
-            && let Some(kv) = get_resp.kvs().first()
         {
-            let version = kv.version() as u64;
-            return Ok(StorageOutcome::Exists(version));
+            if let Some(kv) = get_resp.kvs().first() {
+                let version = kv.version() as u64;
+
+                // Debug: Log what's in the existing key
+                if self.bucket_name == "mdc" {
+                    let existing = String::from_utf8_lossy(kv.value());
+                    tracing::warn!("EtcdBucket::create - Key already exists with version {}", version);
+                    if existing.contains("custom_chat_template") {
+                        tracing::info!("Existing value contains custom_chat_template");
+                    } else {
+                        tracing::warn!("Existing value does NOT contain custom_chat_template!");
+                        tracing::info!("Existing value preview: {}", existing.chars().take(300).collect::<String>());
+                    }
+                }
+
+                return Ok(StorageOutcome::Exists(version));
+            }
         }
         // Shouldn't happen, but handle edge case
         Err(StorageError::EtcdError(
@@ -227,11 +266,29 @@ impl EtcdBucket {
             // So we do too in etcd.
         }
 
+        // Debug: Log what we're writing
+        if self.bucket_name == "mdc" {
+            tracing::info!("EtcdBucket::update - Writing to key {}, value contains custom_chat_template: {}",
+                key, value.contains("custom_chat_template"));
+        }
+
         let mut put_resp = self
             .client
-            .kv_put_with_options(k, value, Some(PutOptions::new().with_prev_key()))
+            .kv_put_with_options(k.clone(), value, Some(PutOptions::new().with_prev_key()))
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+
+        // Debug: Verify what was written
+        if self.bucket_name == "mdc" {
+            if let Ok(kvs) = self.client.kv_get(k.as_str(), None).await {
+                if let Some(kv) = kvs.first() {
+                    let stored = String::from_utf8_lossy(kv.value());
+                    if !stored.contains("custom_chat_template") {
+                        tracing::error!("EtcdBucket::update - After write, stored value does NOT contain custom_chat_template!");
+                    }
+                }
+            }
+        }
         Ok(match put_resp.take_prev_key() {
             // Should this be an error?
             // The key was deleted between our get and put. We re-created it.

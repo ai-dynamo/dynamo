@@ -36,7 +36,7 @@ pub const ROOT_PATH: &str = "mdc";
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
 const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
     HfConfigJson(String),
@@ -48,6 +48,17 @@ pub enum ModelInfoType {
 pub enum TokenizerKind {
     HfTokenizerJson(String),
     GGUF(Box<HfTokenizer>),
+}
+
+impl PartialEq for TokenizerKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TokenizerKind::HfTokenizerJson(a), TokenizerKind::HfTokenizerJson(b)) => a == b,
+            // GGUF tokenizers can't be compared directly, so we treat them as always different
+            (TokenizerKind::GGUF(_), TokenizerKind::GGUF(_)) => false,
+            _ => false,
+        }
+    }
 }
 
 /// Supported types of prompt formatters.
@@ -62,7 +73,7 @@ pub enum TokenizerKind {
 /// TODO(): Add an enum for the PromptFormatDataModel with at minimum arms for:
 /// - OaiChat
 /// - OaiChatToolUse
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(String),
@@ -80,14 +91,14 @@ pub enum PromptContextMixin {
     Llama3DateTime,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationConfig {
     HfGenerationConfigJson(String),
     GGUF(PathBuf),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Builder, Default, PartialEq)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
     pub display_name: String,
@@ -108,6 +119,10 @@ pub struct ModelDeploymentCard {
     /// chat template may be stored as a separate file instead of in `prompt_formatter`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_file: Option<PromptFormatterArtifact>,
+
+    /// Custom chat template provided via CLI flag
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_chat_template: Option<PromptFormatterArtifact>,
 
     /// Generation config - default sampling params
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +294,35 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfChatTemplate,
             "chat_template.jinja"
         );
+        // Debug custom_chat_template upload
+        if let Some(PromptFormatterArtifact::HfChatTemplate(ref src_file)) = self.custom_chat_template {
+            tracing::info!("Before nats_upload macro: custom_chat_template = Some(HfChatTemplate({}))", src_file);
+        } else if self.custom_chat_template.is_some() {
+            tracing::warn!("custom_chat_template is Some but not HfChatTemplate variant!");
+        } else {
+            tracing::warn!("custom_chat_template is None before upload!");
+        }
+
+        nats_upload!(
+            self.custom_chat_template,
+            PromptFormatterArtifact::HfChatTemplate,
+            "custom_chat_template.jinja"
+        );
+
+        // Debug: Verify custom_chat_template after upload
+        if let Some(PromptFormatterArtifact::HfChatTemplate(ref nats_url)) = self.custom_chat_template {
+            tracing::info!("custom_chat_template uploaded to NATS: {}", nats_url);
+        } else {
+            tracing::error!("CRITICAL: custom_chat_template is None after NATS upload!");
+        }
+
+        // Debug: Verify the entire card can still be serialized with all fields
+        let test_json = serde_json::to_string(&self)?;
+        if !test_json.contains("custom_chat_template") {
+            tracing::error!("CRITICAL: After NATS upload, MDC JSON does NOT contain custom_chat_template!");
+        } else {
+            tracing::info!("After NATS upload, MDC JSON still contains custom_chat_template");
+        }
         nats_upload!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
@@ -333,6 +377,25 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::HfChatTemplate,
             "chat_template.jinja"
         );
+        // Debug: Check custom_chat_template before download
+        if let Some(PromptFormatterArtifact::HfChatTemplate(ref nats_url)) = self.custom_chat_template {
+            tracing::info!("Downloading custom_chat_template from NATS: {}", nats_url);
+        } else {
+            tracing::info!("No custom_chat_template to download from NATS");
+        }
+
+        nats_download!(
+            self.custom_chat_template,
+            PromptFormatterArtifact::HfChatTemplate,
+            "custom_chat_template.jinja"
+        );
+
+        // Debug: Verify custom_chat_template after download
+        if let Some(PromptFormatterArtifact::HfChatTemplate(ref local_path)) = self.custom_chat_template {
+            tracing::info!("custom_chat_template downloaded to: {}", local_path);
+        } else {
+            tracing::info!("custom_chat_template is None after download");
+        }
         nats_download!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
@@ -372,10 +435,22 @@ impl ModelDeploymentCard {
     /// - a folder containing config.json, tokenizer.json and token_config.json
     /// - a GGUF file
     pub async fn load(config_path: impl AsRef<Path>) -> anyhow::Result<ModelDeploymentCard> {
+        Self::load_with_custom_template(config_path, None).await
+    }
+
+    /// Build an in-memory ModelDeploymentCard with an optional custom template
+    pub async fn load_with_custom_template(
+        config_path: impl AsRef<Path>,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<ModelDeploymentCard> {
         let config_path = config_path.as_ref();
         if config_path.is_dir() {
-            Self::from_local_path(config_path).await
+            Self::from_local_path_with_custom_template(config_path, custom_template_path).await
         } else {
+            // GGUF files don't support custom templates yet
+            if custom_template_path.is_some() {
+                anyhow::bail!("Custom templates are not supported for GGUF files");
+            }
             Self::from_gguf(config_path).await
         }
     }
@@ -395,7 +470,15 @@ impl ModelDeploymentCard {
     /// - The path doesn't exist or isn't a directory
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
+    #[allow(dead_code)]
     async fn from_local_path(local_root_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::from_local_path_with_custom_template(local_root_dir, None).await
+    }
+
+    async fn from_local_path_with_custom_template(
+        local_root_dir: impl AsRef<Path>,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         let local_root_dir = local_root_dir.as_ref();
         check_valid_local_repo_path(local_root_dir)?;
         let repo_id = local_root_dir
@@ -407,7 +490,13 @@ impl ModelDeploymentCard {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
-        Self::from_repo(&repo_id, model_name).await
+
+        tracing::info!(
+            "from_local_path_with_custom_template: repo_id={}, model_name={}, custom_template={:?}",
+            repo_id, model_name, custom_template_path
+        );
+
+        Self::from_repo_with_custom_template(&repo_id, model_name, custom_template_path).await
     }
 
     async fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
@@ -438,6 +527,7 @@ impl ModelDeploymentCard {
             gen_config: None, // AFAICT there is no equivalent in a GGUF
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
             chat_template_file: None,
+            custom_chat_template: None,  // Ensure this field is included
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
@@ -456,7 +546,16 @@ impl ModelDeploymentCard {
         ))
     }
 
+    #[allow(dead_code)]
     async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
+        Self::from_repo_with_custom_template(repo_id, model_name, None).await
+    }
+
+    async fn from_repo_with_custom_template(
+        repo_id: &str,
+        model_name: &str,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         // This is usually the right choice
         let context_length = crate::file_json_field(
             &PathBuf::from(repo_id).join("config.json"),
@@ -472,6 +571,31 @@ impl ModelDeploymentCard {
         // If neither of those are present let the engine default it
         .unwrap_or(0);
 
+        // Load custom template if provided
+        let custom_chat_template = if let Some(template_path) = custom_template_path {
+            tracing::info!("Custom template path provided: {}", template_path.display());
+            if !template_path.exists() {
+                tracing::error!("Custom template file does not exist: {}", template_path.display());
+                anyhow::bail!("Custom template file does not exist: {}", template_path.display());
+            }
+
+            // Verify the file is readable
+            let template_content = std::fs::read_to_string(template_path)
+                .with_context(|| format!("Failed to read custom template file: {}", template_path.display()))?;
+            tracing::info!(
+                "Custom template file verified. Size: {} bytes, Preview: {}...",
+                template_content.len(),
+                template_content.chars().take(100).collect::<String>()
+            );
+
+            Some(PromptFormatterArtifact::HfChatTemplate(
+                template_path.display().to_string()
+            ))
+        } else {
+            tracing::debug!("No custom template path provided");
+            None
+        };
+
         Ok(Self {
             display_name: model_name.to_string(),
             slug: Slug::from_string(model_name),
@@ -480,6 +604,7 @@ impl ModelDeploymentCard {
             gen_config: GenerationConfig::from_repo(repo_id).await.ok(), // optional
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
             chat_template_file: PromptFormatterArtifact::chat_template_from_repo(repo_id).await?,
+            custom_chat_template,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
@@ -498,6 +623,8 @@ impl Versioned for ModelDeploymentCard {
     }
 
     fn set_revision(&mut self, revision: u64) {
+        tracing::info!("ModelDeploymentCard::set_revision called with revision: {}, has custom_chat_template: {}",
+            revision, self.custom_chat_template.is_some());
         self.last_published = Some(chrono::Utc::now());
         self.revision = revision;
     }
