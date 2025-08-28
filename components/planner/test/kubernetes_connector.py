@@ -183,7 +183,7 @@ async def test_set_component_replicas_deployment_not_found(kubernetes_connector,
 @pytest.mark.asyncio
 async def test_set_component_replicas_empty_target_replicas(kubernetes_connector, mock_kube_api):
     # Arrange
-    target_replicas = {}
+    target_replicas: dict[str, int] = {}
 
     # Act & Assert
     with pytest.raises(
