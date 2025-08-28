@@ -124,14 +124,14 @@ impl KeyValueStoreManager {
         key: &str,
         obj: &mut T,
     ) -> anyhow::Result<StorageOutcome> {
-                let obj_json = serde_json::to_string(obj)?;
+        let obj_json = serde_json::to_string(obj)?;
         let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
         let outcome = bucket
             .insert(key.to_string(), obj_json, obj.revision())
             .await?;
 
-                match outcome {
+        match outcome {
             StorageOutcome::Created(revision) | StorageOutcome::Exists(revision) => {
                 obj.set_revision(revision);
             }

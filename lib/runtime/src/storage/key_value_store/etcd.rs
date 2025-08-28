@@ -155,7 +155,7 @@ impl KeyValueBucket for EtcdBucket {
 
 impl EtcdBucket {
     async fn create(&self, key: &str, value: &str) -> Result<StorageOutcome, StorageError> {
-                let k = make_key(&self.bucket_name, key);
+        let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd create: {k}");
 
         // Use atomic transaction to check and create in one operation
@@ -178,7 +178,7 @@ impl EtcdBucket {
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
 
-                if result.succeeded() {
+        if result.succeeded() {
             // Key was created successfully
             return Ok(StorageOutcome::Created(1)); // version of new key is always 1
         }
@@ -187,7 +187,7 @@ impl EtcdBucket {
         if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
             result.op_responses().into_iter().next()
         {
-                        if let Some(kv) = get_resp.kvs().first() {
+            if let Some(kv) = get_resp.kvs().first() {
                 let version = kv.version() as u64;
                 return Ok(StorageOutcome::Exists(version));
             }
@@ -224,7 +224,7 @@ impl EtcdBucket {
                 key,
                 "update: Wrong revision"
             );
-                        // NATS does a resync_update, overwriting the key anyway and getting the new revision.
+            // NATS does a resync_update, overwriting the key anyway and getting the new revision.
             // So we do too in etcd.
         }
 
@@ -232,7 +232,7 @@ impl EtcdBucket {
             .client
             .kv_put_with_options(k.clone(), value, Some(PutOptions::new().with_prev_key()))
             .await
-                        .map_err(|e| StorageError::EtcdError(e.to_string()))?;
+            .map_err(|e| StorageError::EtcdError(e.to_string()))?;
 
         Ok(match put_resp.take_prev_key() {
             // Should this be an error?
