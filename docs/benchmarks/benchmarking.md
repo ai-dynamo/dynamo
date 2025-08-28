@@ -101,11 +101,6 @@ export NAMESPACE=benchmarking
 ./benchmarks/benchmark.sh \
    --namespace $NAMESPACE \
    --disagg components/backends/vllm/deploy/disagg.yaml
-
-# 2c. Or benchmark TensorRT-LLM with GPT-OSS
-./benchmarks/benchmark.sh \
-   --namespace $NAMESPACE \
-   --disagg components/backends/trtllm/deploy/gpt-oss-disagg.yaml
 ```
 
 You'll see output like this confirming your configuration:
