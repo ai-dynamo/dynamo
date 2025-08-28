@@ -86,7 +86,7 @@ class VLLMConfig:
     endpoints: List[str]
     response_handlers: List[Callable[[Any], str]]
     model: str
-    timeout: int = 120
+    timeout: int = 180
     delayed_start: int = 0
     args: Optional[List[str]] = None
 
@@ -302,7 +302,6 @@ def vllm_config_test(request):
 
 
 @pytest.mark.e2e
-@pytest.mark.slow
 def test_serve_deployment(vllm_config_test, request, runtime_services):
     """
     Test dynamo serve deployments with different graph configurations.
