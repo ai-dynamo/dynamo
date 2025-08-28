@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import re
 from typing import Any, Dict
 
 import aiohttp
@@ -788,5 +789,114 @@ def test_kv_push_router_bindings(request, runtime_services):
         for mocker in mocker_processes:
             mocker.__exit__(None, None, None)
 
+        if os.path.exists(mocker_args_file):
+            os.unlink(mocker_args_file)
+
+
+@pytest.mark.pre_merge
+def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
+    """
+    When 'nvext.annotations' includes 'query_instance_id', the router should not
+    route to a worker immediately. Instead, it should stream annotations:
+      - event: worker_instance_id
+      - event: token_data
+    and then terminate the stream with: data: [DONE]
+
+    Example expected wire format (SSE):
+      event: worker_instance_id\n: "8228244551594056720"\n\n
+      event: token_data\n: "[151644,872,...]"\n\n
+      data: [DONE]\n\n
+    """
+
+    logger.info("Starting query_instance_id annotation test")
+
+    # Create mocker args file
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
+    os.makedirs(request.node.name, exist_ok=True)
+    with open(mocker_args_file, "w") as f:
+        json.dump(mocker_args, f)
+
+    mocker_processes = []
+
+    try:
+        # Start KV router (frontend)
+        frontend_port = PORT + 20  # keep separate from other tests in same run
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        kv_router = KVRouterProcess(request, frontend_port)
+        kv_router.__enter__()
+
+        # Start mocker engines
+        endpoint = "dyn://test-namespace.mocker.generate"
+        for i in range(NUM_MOCKERS):
+            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
+            mocker = MockerProcess(request, endpoint, mocker_args_file)
+            mocker_processes.append(mocker)
+        for mocker in mocker_processes:
+            mocker.__enter__()
+
+        url = f"http://localhost:{frontend_port}/v1/chat/completions"
+
+        logger.info("Warming up with a regular request (no annotations)...")
+        asyncio.run(send_request_with_retry(url, TEST_PAYLOAD))
+
+        annotated_payload = {
+            **TEST_PAYLOAD,
+            "nvext": {"annotations": ["query_instance_id"]},
+        }
+
+        async def send_and_capture_sse():
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=annotated_payload) as resp:
+                    assert resp.status == 200, f"Unexpected status: {resp.status}"
+                    chunks = []
+                    async for part in resp.content:
+                        if part:
+                            chunks.append(part)
+                    return b"".join(chunks).decode("utf-8", errors="replace")
+
+        sse_text = asyncio.run(send_and_capture_sse())
+        logger.debug(f"SSE stream received ({len(sse_text)} bytes):\n{sse_text}")
+
+        # Check for worker_instance_id event with a numeric string ID
+        worker_event = re.search(
+            r"event:\s*worker_instance_id[\s\S]{0,200}?(?:data:|:)\s*\"(?P<id>\d{6,30})\"",
+            sse_text,
+        )
+        assert worker_event, (
+            "Did not find 'event: worker_instance_id' with a quoted numeric id "
+            "in the SSE stream"
+        )
+        worker_id = worker_event.group("id")
+        assert worker_id.isdigit(), "worker_instance_id should be numeric"
+
+        # 2) Check for a token_data event
+        token_event = re.search(
+            r"event:\s*token_data[\s\S]{0,500}?(?:data:|:)\s*\"(?P<tokens>\[.*?\])\"",
+            sse_text,
+        )
+        assert (
+            token_event
+        ), "Did not find 'event: token_data' with a quoted JSON list in the SSE stream"
+        tokens_json = token_event.group("tokens")
+        try:
+            token_list = json.loads(tokens_json)
+        except Exception as e:
+            raise AssertionError(f"token_data payload is not valid JSON: {e}")
+        assert isinstance(token_list, list) and all(
+            isinstance(t, int) for t in token_list
+        ), "token_data must be a JSON list of integers"
+        assert len(token_list) > 0, "token_data should not be an empty list"
+
+        logger.info(
+            f"query_instance_id path OK — worker_instance_id={worker_id}, "
+            f"{len(token_list)} tokens returned"
+        )
+
+    finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)
+        for mocker in mocker_processes:
+            mocker.__exit__(None, None, None)
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
