@@ -123,6 +123,7 @@ impl EndpointConfigBuilder {
             .cancellation_token(cancel_token.clone())
             .graceful_shutdown(graceful_shutdown)
             .request_tracker(endpoint.drt().runtime().request_tracker())
+            .runtime_token(endpoint.drt().runtime().primary_token())
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 

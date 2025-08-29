@@ -25,6 +25,9 @@ pub struct PushEndpoint {
     pub graceful_shutdown: bool,
     #[builder(setter(strip_option))]
     pub request_tracker: Option<RequestTracker>,
+    /// Main runtime cancellation token to wait for complete shutdown
+    #[builder(setter(strip_option))]
+    pub runtime_token: Option<CancellationToken>,
 }
 
 /// version of crate
@@ -167,10 +170,24 @@ impl PushEndpoint {
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
             if use_external_tracker {
-                // External tracker handles waiting via the runtime graceful shutdown
-                tracing::info!(
-                    "Endpoint shutdown complete, runtime will wait for inflight requests"
-                );
+                // When using external tracker, we need to wait for the runtime's
+                // graceful shutdown to complete before returning, otherwise Python
+                // will clean up resources (like the vLLM engine) prematurely
+                tracing::info!("Endpoint stopped accepting requests, waiting for runtime graceful shutdown");
+                
+                // First wait for all requests to complete
+                if let Some(tracker) = &self.request_tracker {
+                    tracker.wait_for_completion().await;
+                    tracing::info!("All inflight requests completed");
+                }
+                
+                // Then wait for the runtime to fully shutdown
+                // This ensures Python doesn't clean up resources prematurely
+                if let Some(runtime_token) = &self.runtime_token {
+                    tracing::info!("Waiting for runtime infrastructure shutdown");
+                    runtime_token.cancelled().await;
+                    tracing::info!("Runtime shutdown complete");
+                }
             } else {
                 // Local tracking - wait here
                 tracing::info!(
