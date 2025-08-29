@@ -28,6 +28,7 @@ To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest
 > - To enable disk cache offloading, you must first enable a CPU memory cache offloading.
 > - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
 > - KVBM requires TensorRT-LLM at commit ce580ce4f52af3ad0043a800b3f9469e1f1109f6 or newer.
+> - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
 ## Quick Start
 
@@ -88,37 +89,3 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "max_tokens": 30
   }'
 ```
-
-## Enable and View KVBM Metrics
-
-Follow below steps to enable metrics collection and view via Grafana dashboard:
-```bash
-# Start the basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-compose.yml --profile metrics up -d
-
-# write an example LLM API config
-cat > "/tmp/kvbm_llm_api_config.yaml" <<EOF
-backend: pytorch
-cuda_graph_config: null
-kv_cache_config:
-  enable_partial_reuse: false
-  free_gpu_memory_fraction: 0.80
-kv_connector_config:
-  connector_module: dynamo.llm.trtllm_integration.connector
-  connector_scheduler_class: DynamoKVBMConnectorLeader
-  connector_worker_class: DynamoKVBMConnectorWorker
-EOF
-
-# serve an example LLM model
-trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
-
-# start trtllm-serve with DYN_SYSTEM_ENABLED set to true and DYN_SYSTEM_PORT set to 6880
-# NOTE: Ensure ports 6880 (KVBM worker metrics) and 6881 (KVBM leader metrics) are available.
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=6880 trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
-
-# optional if firewall blocks KVBM metrics ports to send prometheus metrics
-sudo ufw allow 6880/tcp
-sudo ufw allow 6881/tcp
-```
-
-View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
