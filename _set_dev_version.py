@@ -7,10 +7,10 @@ import os
 import re
 import subprocess
 import sys
+import tomlkit
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import tomlkit
 
 
 def find_all_pyproject_toml_files():
@@ -88,11 +88,11 @@ def align_versions(projects, version, dependencies):
         for dep in dep_group:
             matched = False
             for proj in projects:
+                # Matches both ==version and >=... style constraints
                 if (
                     dep.startswith(f"{proj}==")
                     or dep.startswith(f"{proj}>=")
                     or dep.startswith(f"{proj}<=")
-                    or dep.startswith(f"{proj}")
                 ):
                     new_group.append(f"{proj}=={version}")
                     matched = True
@@ -105,69 +105,56 @@ def align_versions(projects, version, dependencies):
 
 def update_pyproject_toml_version(files, version):
     for file in files:
-        with open(file, "r") as f:
+        with open(file, 'r') as f:
             doc = tomlkit.parse(f.read())
-        doc["project"]["version"] = version
-        with open(file, "w") as f:
+        doc['project']['version'] = version
+        with open(file, 'w') as f:
             f.write(tomlkit.dumps(doc))
 
 
 def update_pyproject_toml_dependencies(files, dependencies):
     for file, dep_group in zip(files, dependencies):
-        with open(file, "r") as f:
+        with open(file, 'r') as f:
             doc = tomlkit.parse(f.read())
-        doc["project"]["dependencies"] = dep_group
-        with open(file, "w") as f:
+        doc['project']['dependencies'] = dep_group
+        with open(file, 'w') as f:
             f.write(tomlkit.dumps(doc))
 
 
 def display_version_summary(
-    pyproject_files,
-    package_names,
-    current_versions,
-    current_dependencies,
-    updated_dependencies,
-    dev_version,
+    pyproject_files, 
+    package_names, 
+    current_versions, 
+    current_dependencies, 
+    updated_dependencies, 
+    dev_version
 ):
     """Display a comprehensive summary of version management operations."""
     # Display summary in a structured format
-    print("\n" + "=" * 80)
+    print("\n" + "="*80)
     print("VERSION MANAGEMENT SUMMARY")
-    print("=" * 80)
-
+    print("="*80)
+    
     print(f"\n📁 Working Directory: {Path(__file__).parent}")
     print(f"🔍 Found {len(pyproject_files)} pyproject.toml file(s)")
     print(f"🚀 New Development Version: {dev_version}")
-
+    
     # Display project versions table
     print("\n📊 PROJECT VERSIONS")
     print("-" * 80)
     print(f"{'Project Name':<25} {'Current Version':<20} {'New Version':<20}")
     print("-" * 80)
-    for i, (file_path, name, old_ver) in enumerate(
-        zip(pyproject_files, package_names, current_versions)
-    ):
-        if (
-            name
-            and old_ver
-            and not isinstance(name, dict)
-            and not isinstance(old_ver, dict)
-        ):
+    for i, (file_path, name, old_ver) in enumerate(zip(pyproject_files, package_names, current_versions)):
+        if name and old_ver and not isinstance(name, dict) and not isinstance(old_ver, dict):
             print(f"{name:<25} {old_ver:<20} {dev_version:<20}")
         else:
-            status = (
-                "❌ Error"
-                if isinstance(name, dict) or isinstance(old_ver, dict)
-                else "⚠️  Missing"
-            )
+            status = "❌ Error" if isinstance(name, dict) or isinstance(old_ver, dict) else "⚠️  Missing"
             print(f"{file_path:<25} {status:<20} {dev_version:<20}")
-
+    
     # Display dependencies alignment
     print("\n🔗 DEPENDENCIES ALIGNMENT")
     print("-" * 80)
-    for i, (file_path, old_deps, new_deps) in enumerate(
-        zip(pyproject_files, current_dependencies, updated_dependencies)
-    ):
+    for i, (file_path, old_deps, new_deps) in enumerate(zip(pyproject_files, current_dependencies, updated_dependencies)):
         if old_deps and not isinstance(old_deps, dict):
             print(f"\n📁 {file_path}:")
             print("  Before → After:")
@@ -178,13 +165,13 @@ def display_version_summary(
                     print(f"    {old_dep:<30} → (unchanged)")
         elif isinstance(old_deps, dict):
             print(f"\n📁 {file_path}: ❌ Error reading dependencies")
-
-    print("\n" + "=" * 80)
+    
+    print("\n" + "="*80)
     print("SUMMARY")
-    print("=" * 80)
+    print("="*80)
     print(f"✅ Versions will be updated to: {dev_version}")
     print(f"✅ Dependencies will be aligned across {len(pyproject_files)} projects")
-    print("=" * 80)
+    print("="*80)
 
 
 def main():
@@ -200,31 +187,30 @@ def main():
         current_package_names, dev_version, current_dependencies
     )
     display_version_summary(
-        pyproject_toml_files,
-        current_package_names,
-        current_versions,
-        current_dependencies,
-        updated_dependencies,
-        dev_version,
+        pyproject_toml_files, 
+        current_package_names, 
+        current_versions, 
+        current_dependencies, 
+        updated_dependencies, 
+        dev_version
     )
 
     print("\n🔄 UPDATING FILES...")
     print("-" * 40)
-
+    
     # Update versions
     print("📝 Updating project versions...")
     update_pyproject_toml_version(pyproject_toml_files, dev_version)
     print("✅ Project versions updated successfully")
-
+    
     # Update dependencies
     print("🔗 Updating dependencies...")
     update_pyproject_toml_dependencies(pyproject_toml_files, updated_dependencies)
     print("✅ Dependencies updated successfully")
-
+    
     print("\n🎉 All updates completed successfully!")
     print(f"📊 {len(pyproject_toml_files)} pyproject.toml files processed")
-    print("=" * 80)
-
+    print("="*80)
 
 if __name__ == "__main__":
     main()
