@@ -6,7 +6,7 @@
 import os
 import re
 import subprocess
-import sys
+import warnings
 import tomlkit
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -62,7 +62,7 @@ def define_dev_version(current_version: str):
     if not validate_python_version(current_version):
         raise ValueError(f"Invalid version format: {current_version}")
     if not os.environ.get("CI_PIPELINE_ID"):
-        raise ValueError(
+        warnings.warn(
             "CI_PIPELINE_ID is not set, please set it in the environment variables"
         )
     if not get_git_hash():
