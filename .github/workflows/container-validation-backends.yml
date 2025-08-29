@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: gpu-l40-runners
+    runs-on: gpu-l40-amd64
     strategy:
       matrix:
         framework: [vllm]
