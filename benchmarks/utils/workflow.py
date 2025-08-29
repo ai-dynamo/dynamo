@@ -21,9 +21,10 @@ class DeploymentConfig:
     deploy_func: Callable  # Function to deploy the client
 
 
-def create_dynamo_client(namespace: str, manifest_path: str) -> DynamoDeploymentClient:
+def create_dynamo_client(
+    namespace: str, deployment_name: str
+) -> DynamoDeploymentClient:
     """Factory function for DynamoDeploymentClient"""
-    deployment_name = Path(manifest_path).stem
     return DynamoDeploymentClient(namespace=namespace, deployment_name=deployment_name)
 
 
@@ -87,7 +88,7 @@ async def run_single_deployment_benchmark(
     print_deployment_start(config, output_dir)
 
     # Create and deploy client
-    client = config.client_factory(namespace, config.manifest_path)
+    client = config.client_factory(namespace, config.output_subdir)
     await config.deploy_func(client, config.manifest_path)
 
     try:
@@ -237,7 +238,13 @@ async def run_benchmark_workflow(
     deployed_labels = list(endpoints.keys())
     for config in deployment_configs:
         await run_single_deployment_benchmark(
-            config, namespace, output_dir, model, isl, osl, std
+            config=config,
+            namespace=namespace,
+            output_dir=output_dir,
+            model=model,
+            isl=isl,
+            osl=osl,
+            std=std,
         )
         deployed_labels.append(config.name)
 
