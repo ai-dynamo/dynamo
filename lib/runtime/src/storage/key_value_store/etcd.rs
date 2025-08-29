@@ -233,7 +233,6 @@ impl EtcdBucket {
             .kv_put_with_options(k, value, Some(PutOptions::new().with_prev_key()))
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
-
         Ok(match put_resp.take_prev_key() {
             // Should this be an error?
             // The key was deleted between our get and put. We re-created it.
