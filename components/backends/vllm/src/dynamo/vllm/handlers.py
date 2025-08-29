@@ -34,7 +34,10 @@ class BaseWorkerHandler(ABC):
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publisher = None
-        self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        if os.environ.get("DYNAMO_ENGINE_MONITOR_DISABLE") is None:
+            self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        else:
+            logger.warning("Dynamo vLLM Engine Monitor is disabled.")
 
     @abstractmethod
     async def generate(self, request) -> AsyncGenerator[dict, None]:
@@ -121,8 +124,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise
             except Exception as e:
                 logger.error(f"Error in prefill check loop: {e}")
-
-            await asyncio.sleep(5)
+                await asyncio.sleep(5)
 
     def cleanup(self):
         """Cancel background tasks."""

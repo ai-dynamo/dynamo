@@ -82,7 +82,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/quickstart.md)
+1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -236,7 +236,7 @@ args:
 ## Further Reading
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/quickstart.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
 - **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
 - **SLA Planner**: [SLA Planner Deployment Guide](../../../../docs/guides/dynamo_deploy/sla_planner_deployment.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
@@ -252,4 +252,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/quickstart.md#troubleshooting).
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/README.md).

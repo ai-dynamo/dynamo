@@ -9,6 +9,15 @@ SPDX-License-Identifier: Apache-2.0
 
 SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires 4 nodes of 8xH100 GPUs.
 
+**Prerequisite**: Building the Dynamo container.
+
+```bash
+cd $DYNAMO_ROOT
+docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
+```
+
+You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+
 **Step 1**: Use the provided helper script to generate commands to start NATS/ETCD on your head prefill node. This script will also give you environment variables to export on each other node. You will need the IP addresses of your head prefill and head decode node to run this script.
 ```bash
 ./utils/gen_env_vars.sh

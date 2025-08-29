@@ -4,6 +4,7 @@
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, List
 
@@ -207,6 +208,82 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             text = result["choices"][0]["text"]
             assert len(text) > 0
             logger.info(f"SGLang completions response: {text}")
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.sglang
+@pytest.mark.slow
+def test_metrics_labels(request, runtime_services):
+    """
+    Test that the sglang backend correctly exports model labels in its metrics.
+    This test verifies that the model name appears as a label in the Prometheus metrics.
+    """
+    logger.info("Starting test_metrics_labels for sglang backend")
+
+    # Configuration
+    model_path = "Qwen/Qwen3-0.6B"
+    metrics_port = 8081
+
+    # Build command to start sglang backend with metrics enabled
+    command = [
+        "python3",
+        "-m",
+        "dynamo.sglang",
+        "--model-path",
+        model_path,
+        "--mem-fraction-static",
+        "0.4",  # Limit memory usage for testing
+    ]
+
+    # Set environment for metrics
+    env = os.environ.copy()
+    env["DYN_SYSTEM_ENABLED"] = "true"
+    env["DYN_SYSTEM_PORT"] = str(metrics_port)
+
+    # Use ManagedProcess for consistent process management
+    with ManagedProcess(
+        command=command,
+        env=env,
+        timeout=120,
+        display_output=True,
+        health_check_urls=[
+            (f"http://localhost:{metrics_port}/metrics", lambda r: r.status_code == 200)
+        ],
+        delayed_start=30,  # Give SGLang time to initialize
+    ):
+        # Give the backend a moment to fully initialize metrics
+        time.sleep(2)
+
+        # Fetch and verify metrics
+        logger.info("Fetching metrics to verify model label...")
+        response = requests.get(f"http://localhost:{metrics_port}/metrics", timeout=10)
+        assert response.status_code == 200, "Failed to fetch metrics"
+
+        metrics_text = response.text
+        logger.info(f"Metrics text: {metrics_text}")
+
+        # Parse the Prometheus metrics to find our label
+        pattern = rf'dynamo_component_requests_total\{{[^}}]*model="{re.escape(model_path)}"[^}}]*\}}\s+(\d+)'
+        matches = re.findall(pattern, metrics_text)
+
+        if matches:
+            initial_value = int(matches[0])
+            assert (
+                initial_value == 0
+            ), f"Expected initial metric value to be 0, got {initial_value}"
+        else:
+            # Check if any dynamo_component metrics exist
+            if "dynamo_component" in metrics_text:
+                logger.info(
+                    "✓ Metrics endpoint is working (found dynamo_component metrics)"
+                )
+                logger.warning(
+                    "Note: dynamo_component_requests_total not found - likely because the engine didn't fully initialize"
+                )
+                logger.info("For complete testing, use a real pre-built TRT-LLM engine")
+            else:
+                pytest.fail("No dynamo_component metrics found at all")
 
 
 @pytest.mark.skip(

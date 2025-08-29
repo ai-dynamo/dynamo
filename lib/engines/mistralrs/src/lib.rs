@@ -212,9 +212,9 @@ impl MistralRsEngine {
 
         // Perform warmup request
         let (tx, mut rx) = channel(1);
-        let request_id = engine.mistralrs.next_request_id();
+        let mistralrs_request_id = engine.mistralrs.next_request_id();
         let warmup_request = Request::Normal(Box::new(NormalRequest {
-            id: request_id,
+            id: mistralrs_request_id,
             model_id: Some(display_name.to_string()),
             messages: RequestMessage::Chat {
                 messages: vec![IndexMap::from([
@@ -246,10 +246,10 @@ impl MistralRsEngine {
         {
             match response.as_result() {
                 Ok(r) => {
-                    tracing::debug!(request_id, "Warmup response: {r:?}");
+                    tracing::debug!(mistralrs_request_id, "Warmup response: {r:?}");
                 }
                 Err(err) => {
-                    tracing::error!(request_id, %err, "Failed converting response to result.");
+                    tracing::error!(mistralrs_request_id, %err, "Failed converting response to result.");
                 }
             }
         }
@@ -272,6 +272,7 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = request.transfer(());
         let ctx = context.context();
+        let request_id = ctx.id().to_string();
         let (tx, mut rx) = channel(10_000);
 
         let mut messages = vec![];
@@ -338,9 +339,9 @@ impl
             n_choices: 1,
             dry_params: det.dry_params,
         };
-        let request_id = self.mistralrs.next_request_id();
+        let mistralrs_request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
-            id: request_id,
+            id: mistralrs_request_id,
             model_id: Some(self.display_name.clone()),
             messages: RequestMessage::Chat {
                 messages,
@@ -369,14 +370,14 @@ impl
                 let response = match response.as_result() {
                     Ok(r) => r,
                     Err(err) => {
-                        tracing::error!(request_id, %err, "Failed converting mistralrs channel response to result.");
+                        tracing::error!(mistralrs_request_id, %err, "Failed converting mistralrs channel response to result.");
                         break;
                     }
                 };
                 match response {
                     ResponseOk::Chunk(c) => {
                         let Some(from_assistant) = c.choices[0].delta.content.clone() else {
-                            tracing::warn!(request_id, "No content from mistralrs. Abandoning request.");
+                            tracing::warn!(mistralrs_request_id, "No content from mistralrs. Abandoning request.");
                             break;
                         };
                         let finish_reason = match &c.choices[0].finish_reason.as_deref() {
@@ -387,7 +388,7 @@ impl
                                 Some(FinishReason::Length)
                             }
                             Some(s) => {
-                                tracing::warn!(request_id, stop_reason = s, "Unknow stop reason");
+                                tracing::warn!(mistralrs_request_id, stop_reason = s, "Unknow stop reason");
                                 Some(FinishReason::Stop)
                             }
                             None => None,
@@ -396,7 +397,7 @@ impl
 
                         #[allow(deprecated)]
                         let delta = NvCreateChatCompletionStreamResponse {
-                            id: c.id,
+                            id: format!("chatcmpl-{request_id}"),
                             choices: vec![dynamo_async_openai::types::ChatChoiceStream{
                                 index: 0,
                                 delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta{
@@ -427,11 +428,11 @@ impl
                         yield ann;
 
                         if finish_reason.is_some() {
-                            //tracing::trace!(request_id, "Finish reason: {finish_reason:?}");
+                            //tracing::trace!(mistralrs_request_id, "Finish reason: {finish_reason:?}");
                             break;
                         }
                     },
-                    x => tracing::error!(request_id, "Unhandled. {x:?}"),
+                    x => tracing::error!(mistralrs_request_id, "Unhandled. {x:?}"),
                 }
             }
         };
@@ -485,7 +486,7 @@ impl
         let (request, context) = request.transfer(());
         let ctx = context.context();
         let (tx, mut rx) = channel(10_000);
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(ctx.id().to_string());
 
         let messages = RequestMessage::Completion {
             text: prompt_to_string(&request.inner.prompt),
@@ -539,9 +540,9 @@ impl
             dry_params: det.dry_params,
         };
 
-        let request_id = self.mistralrs.next_request_id();
+        let mistralrs_request_id = self.mistralrs.next_request_id();
         let mistralrs_request = Request::Normal(Box::new(NormalRequest {
-            id: request_id,
+            id: mistralrs_request_id,
             model_id: Some(self.display_name.clone()),
             messages,
             sampling_params,
@@ -567,7 +568,7 @@ impl
                 let response = match response.as_result() {
                     Ok(r) => r,
                     Err(err) => {
-                        tracing::error!(request_id, %err, "Failed converting mistralrs channel response to result.");
+                        tracing::error!(mistralrs_request_id, %err, "Failed converting mistralrs channel response to result.");
                         break;
                     }
                 };
@@ -583,7 +584,7 @@ impl
                                 Some(FinishReason::Length)
                             }
                             Some(s) => {
-                                tracing::warn!(request_id, stop_reason = s, "Unknow stop reason");
+                                tracing::warn!(mistralrs_request_id, stop_reason = s, "Unknow stop reason");
                                 Some(FinishReason::Stop)
                             }
                             None => None,
@@ -602,7 +603,7 @@ impl
                             break;
                         }
                     },
-                    x => tracing::error!(request_id, "Unhandled. {x:?}"),
+                    x => tracing::error!(mistralrs_request_id, "Unhandled. {x:?}"),
                 }
             }
         };

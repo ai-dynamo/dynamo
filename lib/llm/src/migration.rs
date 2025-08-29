@@ -176,22 +176,19 @@ mod tests {
 
     // Helper to create a mock preprocessed request
     fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
-        PreprocessedRequest {
-            model: "mock".to_string(),
-            token_ids: vec![1, 2, 3],
-            batch_token_ids: None,
-            stop_conditions: StopConditions {
+        PreprocessedRequest::builder()
+            .model("mock".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions {
                 max_tokens: Some(max_tokens),
                 ..Default::default()
-            },
-            sampling_options: SamplingOptions::default(),
-            output_options: OutputOptions::default(),
-            eos_token_ids: vec![],
-            mdc_sum: None,
-            annotations: vec![],
-            estimated_prefix_hit_num_blocks: None,
-            backend_instance_id: None,
-        }
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .eos_token_ids(vec![])
+            .annotations(vec![])
+            .build()
+            .unwrap()
     }
 
     // Helper to create mock LLM engine output

@@ -46,9 +46,7 @@ The metadata contains required information (identifiers, keys, etc.) which enabl
 ```python
     @async_on_start
     async def async_init(self):
-      runtime = dynamo_context["runtime"]
-
-      self.connector = dynamo.nixl_connect.Connector(runtime=runtime)
+      self.connector = dynamo.nixl_connect.Connector()
       await self.connector.initialize()
 ```
 

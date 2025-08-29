@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -82,6 +83,10 @@ class ManagedProcess:
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
 
+    # Ensure attributes exist even if startup fails early
+    proc: Optional[subprocess.Popen] = None
+    _pgid: Optional[int] = None
+
     _logger = logging.getLogger()
     _command_name = None
     _log_path = None
@@ -107,20 +112,30 @@ class ManagedProcess:
 
             return self
 
-        except Exception as e:
-            self.__exit__(None, None, None)
-            raise e
+        except Exception:
+            try:
+                self.__exit__(None, None, None)
+            except Exception as cleanup_err:
+                self._logger.warning(
+                    "Error during cleanup in __enter__: %s", cleanup_err
+                )
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self._terminate_process_group()
+
         process_list = [self.proc, self._tee_proc, self._sed_proc]
         for process in process_list:
             if process:
-                if process.stdout:
-                    process.stdout.close()
-                if process.stdin:
-                    process.stdin.close()
-                terminate_process_tree(process.pid, self._logger)
-                process.wait()
+                try:
+                    if process.stdout:
+                        process.stdout.close()
+                    if process.stdin:
+                        process.stdin.close()
+                    terminate_process_tree(process.pid, self._logger)
+                    process.wait()
+                except Exception as e:
+                    self._logger.warning("Error terminating process: %s", e)
         if self.data_dir:
             self._remove_directory(self.data_dir)
 
@@ -169,6 +184,12 @@ class ManagedProcess:
                 stderr=stderr,
                 start_new_session=True,  # Isolate process group to prevent kill 0 from affecting parent
             )
+            # Capture the child's process group id for robust cleanup even if parent shell exits
+            try:
+                self._pgid = os.getpgid(self.proc.pid)
+            except Exception as e:
+                self._logger.warning("Could not get process group id: %s", e)
+                self._pgid = None
             self._sed_proc = subprocess.Popen(
                 ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
                 stdin=self.proc.stdout,
@@ -190,6 +211,12 @@ class ManagedProcess:
                     stderr=stderr,
                     start_new_session=True,  # Isolate process group to prevent kill 0 from affecting parent
                 )
+                # Capture the child's process group id for robust cleanup even if parent shell exits
+                try:
+                    self._pgid = os.getpgid(self.proc.pid)
+                except Exception as e:
+                    self._logger.warning("Could not get process group id: %s", e)
+                    self._pgid = None
 
                 self._sed_proc = subprocess.Popen(
                     ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
@@ -197,6 +224,38 @@ class ManagedProcess:
                     stdout=f,
                 )
             self._tee_proc = None
+
+    def _terminate_process_group(self, timeout: float = 5.0):
+        """Terminate the entire process group/session started for the child.
+
+        This catches cases where the launcher shell exits and its children are reparented,
+        leaving no parent PID to traverse, but they remain in the same process group.
+        """
+        if self._pgid is None:
+            return
+        try:
+            self._logger.info("Terminating process group: %s", self._pgid)
+            os.killpg(self._pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception as e:
+            self._logger.warning(
+                "Error sending SIGTERM to process group %s: %s", self._pgid, e
+            )
+            return
+
+        # Give processes a brief moment to exit gracefully
+        time.sleep(timeout)
+
+        # Force kill if anything remains
+        try:
+            os.killpg(self._pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            self._logger.warning(
+                "Error sending SIGKILL to process group %s: %s", self._pgid, e
+            )
 
     def _remove_directory(self, path: str) -> None:
         """Remove a directory."""

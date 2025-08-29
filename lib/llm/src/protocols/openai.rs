@@ -8,7 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::protocols::openai::common_ext::CommonExtProvider;
+use crate::protocols::openai::common_ext::{CommonExtProvider, choose_with_deprecation};
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -61,9 +61,11 @@ trait OpenAIStopConditionsProvider {
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
     /// CommonExt (root-level) takes precedence over NvExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        // Check common first (takes precedence), then fall back to nvext
-        self.get_common_ignore_eos()
-            .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
+        choose_with_deprecation(
+            "ignore_eos",
+            self.get_common_ignore_eos().as_ref(),
+            self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
+        )
     }
 }
 
@@ -93,6 +95,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
         let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
+        let top_k = CommonExtProvider::get_top_k(self);
+        let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -128,10 +132,10 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             best_of: None,
             frequency_penalty,
             presence_penalty,
-            repetition_penalty: None,
+            repetition_penalty,
             temperature,
             top_p,
-            top_k: None,
+            top_k,
             min_p: None,
             seed: None,
             use_beam_search: None,

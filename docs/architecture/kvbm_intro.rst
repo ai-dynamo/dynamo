@@ -48,9 +48,6 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
    * -
      - ❌
      - SGLang
-   * -
-     - ❌
-     - llama.cpp
    * - **Serving Type**
      - ✅
      - Aggregated
@@ -61,7 +58,9 @@ The Dynamo KV Block Manager serves as a reference implementation that emphasizes
 .. toctree::
    :hidden:
 
+   Overview <self>
    Motivation <kvbm_motivation.md>
    KVBM Architecture <kvbm_architecture.md>
    Understanding KVBM components <kvbm_components.md>
    KVBM Further Reading <kvbm_reading>
+   LMCache Integration <../components/backends/vllm/LMCache_Integration.md>

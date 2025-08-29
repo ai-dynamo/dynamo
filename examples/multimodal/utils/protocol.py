@@ -15,10 +15,10 @@
 
 
 import json
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
@@ -107,7 +107,16 @@ class ImageContent(BaseModel):
     image_url: ImageURLDetail
 
 
-MessageContent = Union[TextContent, ImageContent]
+class VideoURLDetail(BaseModel):
+    url: str
+
+
+class VideoContent(BaseModel):
+    type: Literal["video_url"]
+    video_url: VideoURLDetail
+
+
+MessageContent = Union[TextContent, ImageContent, VideoContent]
 
 
 class ChatMessage(BaseModel):
@@ -124,31 +133,19 @@ class MultiModalRequest(BaseModel):
     stream: Optional[bool] = True
 
 
+class MultiModalInput(BaseModel):
+    image_url: Optional[str] = None
+    video_url: Optional[str] = None
+
+
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    image_url: Optional[str] = None
-    # image_features: Optional[List[List[List[float]]]] = None # Remove once have NIXL support
-    serialized_request: Optional[connect.RdmaMetadata] = None
-
-
-class EncodeRequest(BaseModel):
-    """
-    Serializable class of all the fields vLLM engine requires for inference
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    image_url: str
-    request_id: str
-    serialized_request: Optional[connect.RdmaMetadata] = None
-
-
-class EncodeResponse(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    request_id: str
+    multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
-    image_sizes: Optional[List[Any]] = None
+    embeddings_shape: Optional[
+        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+    ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
-    image_features: List[List[List[float]]]  # Remove once have NIXL support
 
 
 class MyRequestOutput(BaseModel):

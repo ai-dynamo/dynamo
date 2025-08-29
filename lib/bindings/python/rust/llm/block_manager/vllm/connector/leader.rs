@@ -80,6 +80,7 @@ pub struct KvConnectorLeader {
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorLeader {
@@ -114,12 +115,13 @@ impl KvConnectorLeader {
                 block_manager.clone(),
                 leader,
                 drt.clone(),
-                kvbm_metrics,
+                kvbm_metrics.clone(),
             ),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
+            kvbm_metrics,
         }
     }
 }
@@ -188,6 +190,9 @@ impl Leader for KvConnectorLeader {
                 "scheduling onboarding for {} external tokens",
                 num_external_tokens
             );
+            self.kvbm_metrics
+                .matched_tokens
+                .inc_by(num_external_tokens as u64);
             Ok((num_external_tokens, true))
         } else {
             Ok((0, false))

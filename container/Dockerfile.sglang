@@ -422,6 +422,9 @@ COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
 ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
+# Copy prometheus from base image
+COPY --from=base /usr/local/bin/prometheus /usr/local/bin/prometheus
+
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
 ARG ARCH_ALT

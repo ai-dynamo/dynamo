@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
@@ -137,6 +138,9 @@ pub struct ModelDeploymentCard {
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub runtime_config: ModelRuntimeConfig,
 }
 
 impl ModelDeploymentCard {
@@ -441,6 +445,7 @@ impl ModelDeploymentCard {
             kv_cache_block_size: 0,
             migration_limit: 0,
             user_data: None,
+            runtime_config: ModelRuntimeConfig::default(),
         })
     }
 
@@ -482,6 +487,7 @@ impl ModelDeploymentCard {
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             user_data: None,
+            runtime_config: ModelRuntimeConfig::default(),
         })
     }
 }
