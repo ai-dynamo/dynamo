@@ -32,7 +32,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -483,11 +483,10 @@ enum RawKvEvent {
 pub struct WorkerMetricsPublisher {
     tx: tokio::sync::watch::Sender<Arc<ForwardPassMetrics>>,
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
-    // Prometheus metrics for KvStats (wrapped in Mutex for thread-safe access)
     /// Prometheus gauges for KvStats metrics
-    /// We use Option<Arc<KvStatsPrometheusGauges>> for lock-free reads after initialization
+    /// We use OnceLock for efficient one-time initialization and lock-free reads
     /// The Arc is set once during register_prometheus_metrics and then only read
-    prometheus_gauges: std::sync::RwLock<Option<Arc<KvStatsPrometheusGauges>>>,
+    prometheus_gauges: OnceLock<Arc<KvStatsPrometheusGauges>>,
 }
 
 #[derive(Default)]
@@ -558,7 +557,7 @@ impl WorkerMetricsPublisher {
         Ok(WorkerMetricsPublisher {
             tx,
             rx,
-            prometheus_gauges: std::sync::RwLock::new(None),
+            prometheus_gauges: OnceLock::new(),
         })
     }
 
@@ -568,13 +567,10 @@ impl WorkerMetricsPublisher {
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
         tracing::trace!("Publish metrics: {metrics:?}");
 
-        // Update Prometheus gauges using read lock for better performance
-        // This is the hot path - we only read the Arc, no writes needed
-        #[allow(clippy::collapsible_if)] // Necessary to keep guard alive
-        if let Ok(guard) = self.prometheus_gauges.read() {
-            if let Some(gauges) = guard.as_ref() {
-                gauges.update_from_kvstats(&metrics.kv_stats);
-            }
+        // Update Prometheus gauges - OnceLock provides lock-free reads after initialization
+        // This is the hot path - we only read the Arc, no locking overhead
+        if let Some(gauges) = self.prometheus_gauges.get() {
+            gauges.update_from_kvstats(&metrics.kv_stats);
         }
 
         self.tx.send(metrics)
@@ -582,15 +578,14 @@ impl WorkerMetricsPublisher {
 
     /// Register KvStats Prometheus metrics with the component's registry
     pub fn register_prometheus_metrics(&self, component: &Component) -> Result<()> {
-        let mut gauges = self
-            .prometheus_gauges
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on prometheus_gauges"))?;
-
-        // Only initialize if not already done
-        if gauges.is_none() {
-            *gauges = Some(Arc::new(KvStatsPrometheusGauges::new(component)?));
-        }
+        // Use get_or_init for thread-safe one-time initialization
+        // This will only initialize once, subsequent calls will return immediately
+        self.prometheus_gauges.get_or_init(|| {
+            Arc::new(
+                KvStatsPrometheusGauges::new(component)
+                    .expect("Failed to create Prometheus gauges"),
+            )
+        });
 
         Ok(())
     }
@@ -1207,8 +1202,7 @@ mod test_integration_publisher {
         publisher.register_prometheus_metrics(&component).unwrap();
 
         // Get references to the gauges for testing
-        let gauges_guard = publisher.prometheus_gauges.read().unwrap();
-        let gauges = gauges_guard.as_ref().unwrap();
+        let gauges = publisher.prometheus_gauges.get().unwrap();
         let active_blocks_gauge = gauges.kv_active_blocks_gauge.as_ref().unwrap().clone();
         let total_blocks_gauge = gauges.kv_total_blocks_gauge.as_ref().unwrap().clone();
         let cache_usage_gauge = gauges.gpu_cache_usage_gauge.as_ref().unwrap().clone();
@@ -1217,7 +1211,6 @@ mod test_integration_publisher {
             .as_ref()
             .unwrap()
             .clone();
-        drop(gauges_guard); // Release the read lock
 
         // Create test metrics with specific values
         let test_metrics = Arc::new(ForwardPassMetrics {
