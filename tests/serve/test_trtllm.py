@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 class TRTLLMConfig(EngineConfig):
     """Configuration for trtllm test scenarios"""
 
-    timeout: int = 60
-
 
 class TRTLLMProcess(EngineProcess):
     """Simple process manager for trtllm shell scripts"""
@@ -71,9 +69,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
     "disaggregated": TRTLLMConfig(
         name="disaggregated",
@@ -85,9 +81,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
     # TODO: These are sanity tests that the kv router examples launch
     # and inference without error, but do not do detailed checks on the
@@ -102,9 +96,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
@@ -116,9 +108,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
 }
 
