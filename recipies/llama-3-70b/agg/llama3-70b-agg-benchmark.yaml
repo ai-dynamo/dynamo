@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: llama-benchmark-job
+  name: llama3-70b-agg-benchmark
 spec:
   backoffLimit: 3
   completions: 1
@@ -9,7 +9,7 @@ spec:
   template:
     metadata:
       labels:
-        app: llama-benchmark-job
+        app: llama3-70b-agg-benchmark
     spec:
       restartPolicy: Never
       containers:
@@ -32,8 +32,8 @@ spec:
           echo "✅ Model '$TARGET_MODEL' is now available!"
           curl -s "http://$ENDPOINT/v1/models" | jq .
           # now run the benchmark
-          ARTIFACT_DIR=/tmp/genai-$RANDOM
-          mkdir -p $ARTIFACT_DIR
+          ARTIFACT_DIR=/tmp/genai-"$RANDOM"
+          mkdir -p "$ARTIFACT_DIR"
           echo "Running benchmark..."
 
           genai-perf profile \
@@ -55,8 +55,8 @@ spec:
             --artifact-dir $ARTIFACT_DIR \
             --num-dataset-entries=3000 -- \
             --max-threads 64
-          PERF_CSV=$(find $ARTIFACT_DIR -name profile_export_genai_perf.csv)
-          cat $PERF_CSV
+          PERF_JSON=$(find $ARTIFACT_DIR -name profile_export_genai_perf.json)
+          cat $PERF_JSON | jq .
           echo "Benchmark completed successfully!"
         resources:
           limits:

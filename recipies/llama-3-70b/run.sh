@@ -14,8 +14,8 @@ kubectl wait --for=condition=Complete job/model-download-llama-3-70b -n $NAMESPA
 kubectl apply -n $NAMESPACE -f $CUR_DIR/agg/llama3-70b-agg.yaml
 
 # launch the benchmark job
-kubectl apply -n $NAMESPACE -f $CUR_DIR/agg/benchmark-job.yaml
-kubectl wait --for=condition=Complete job/llama-benchmark-job -n $NAMESPACE --timeout=6000s
+kubectl apply -n $NAMESPACE -f $CUR_DIR/agg/llama3-70b-agg-benchmark.yaml
+kubectl wait --for=condition=Complete job/llama3-70b-agg-benchmark -n $NAMESPACE --timeout=6000s
 
 # print logs from the benchmark job
-kubectl logs job/llama-benchmark-job  -n $NAMESPACE
+kubectl logs job/llama3-70b-agg-benchmark  -n $NAMESPACE
