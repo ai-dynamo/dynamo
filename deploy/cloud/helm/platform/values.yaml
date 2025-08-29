@@ -26,12 +26,12 @@ global:
     service:
       # -- Port that the model-express-server service exposes
       port: 8080
-      # -- Service name (default: model-express-server)
+      # -- Service name
       name: "model-express-server"
       # -- Protocol (http/https)
       protocol: "http"
 
-# -- Dynamo operator configuration
+# Dynamo operator configuration
 dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true

@@ -54,9 +54,16 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| global.model-express.enabled | bool | `false` | Whether to enable the Model Express server deployment. If enabled, the Model Express chart will be deployed. |
+| global.model-express.service | object | `{"name":"model-express-server","port":8080,"protocol":"http"}` | Service configuration for the Model Express server |
+| global.model-express.service.port | int | `8080` | Port that the model-express-server service exposes |
+| global.model-express.service.name | string | `"model-express-server"` | Service name |
+| global.model-express.service.protocol | string | `"http"` | Protocol (http/https) |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port" |
+| dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":true,"targetNamespace":null}` | Namespace access controls for the operator |
 | dynamo-operator.namespaceRestriction.enabled | bool | `true` | Whether to restrict operator to specific namespaces |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | Target namespace for operator deployment (leave empty for current namespace) |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
