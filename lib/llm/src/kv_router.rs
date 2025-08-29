@@ -20,7 +20,6 @@ use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 pub mod approx;
-pub mod background;
 pub mod indexer;
 pub mod metrics_aggregator;
 pub mod prefill_counter;
@@ -30,12 +29,12 @@ pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
+pub mod subscriber;
 
 use crate::{
     discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
-        background::start_kv_router_background,
         indexer::{
             KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
             compute_block_hash_for_seq, compute_seq_hash_for_block,
@@ -43,6 +42,7 @@ use crate::{
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
+        subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
