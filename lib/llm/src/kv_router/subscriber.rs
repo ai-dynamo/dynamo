@@ -10,14 +10,21 @@ use dynamo_runtime::{
     component::Component,
     prelude::*,
     traits::events::EventPublisher,
-    transports::nats::{NatsQueue, Slug},
+    transports::{
+        etcd::WatchEvent,
+        nats::{NatsQueue, Slug},
+    },
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::kv_router::{
-    KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, ROUTER_SNAPSHOT_LOCK,
-    indexer::{DumpRequest, RouterEvent},
+use crate::{
+    discovery::KV_ROUTERS_ROOT_PATH,
+    kv_router::{
+        KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, ROUTER_CLEANUP_LOCK,
+        ROUTER_SNAPSHOT_LOCK,
+        indexer::{DumpRequest, RouterEvent},
+    },
 };
 
 /// Resources required for snapshot operations
@@ -81,7 +88,7 @@ pub async fn start_kv_router_background(
     let mut nats_queue = NatsQueue::new_with_consumer(
         stream_name.clone(),
         nats_server.clone(),
-        std::time::Duration::from_secs(3600), // Very long timeout (1 hour)
+        std::time::Duration::from_secs(60), // 1 minute timeout
         consumer_uuid,
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
@@ -136,21 +143,27 @@ pub async fn start_kv_router_background(
         }
     }
 
+    // Get etcd client (needed for both snapshots and router watching)
+    let etcd_client = component
+        .drt()
+        .etcd_client()
+        .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
+
+    // Watch for router deletions to clean up orphaned consumers
+    let (_prefix_str, _watcher, mut router_replicas_rx) = etcd_client
+        .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
+        .await?
+        .dissolve();
+    let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.name());
+
     // Only set up snapshot-related resources if snapshot_tx is provided and threshold is set
     let snapshot_resources = if snapshot_tx.is_some() && router_snapshot_threshold.is_some() {
-        // Get etcd client for distributed locking
-        let etcd_client = component
-            .drt()
-            .etcd_client()
-            .ok_or_else(|| anyhow::anyhow!("etcd client not available for distributed locking"))?;
-
-        // Lock name for snapshot uploads (etcd's lock mechanism uses a different namespace)
         let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.name());
 
         Some(SnapshotResources {
             nats_client,
             bucket_name,
-            etcd_client,
+            etcd_client: etcd_client.clone(),
             lock_name,
         })
     } else {
@@ -163,10 +176,12 @@ pub async fn start_kv_router_background(
 
         loop {
             tokio::select! {
+                biased;
+
                 _ = cancellation_token.cancelled() => {
                     tracing::debug!("KV Router background task received cancellation signal");
                     // Clean up the queue and remove the durable consumer
-                    if let Err(e) = nats_queue.shutdown().await {
+                    if let Err(e) = nats_queue.shutdown(None).await {
                         tracing::warn!("Failed to shutdown NatsQueue: {e}");
                     }
                     break;
@@ -240,11 +255,64 @@ pub async fn start_kv_router_background(
                     // Release the lock
                     resources.unlock(lock_response).await;
                 }
+
+                // Handle router deletion events
+                Some(event) = router_replicas_rx.recv() => {
+                    let WatchEvent::Delete(kv) = event else {
+                        // We only care about deletions for cleaning up consumers
+                        continue;
+                    };
+
+                    let key = String::from_utf8_lossy(kv.key());
+                    tracing::info!("Router deleted: {}", key);
+
+                    // Extract the router UUID from the key (format: kv_routers/<model>/<uuid>)
+                    let Some(router_uuid) = key.split('/').next_back() else {
+                        tracing::warn!("Could not extract UUID from router key: {}", key);
+                        continue;
+                    };
+
+                    // The consumer UUID is the router UUID
+                    let consumer_to_delete = router_uuid.to_string();
+
+                    tracing::info!("Attempting to delete orphaned consumer: {}", consumer_to_delete);
+
+                    // Try to acquire cleanup lock before deleting consumer
+                    match etcd_client
+                        .lock(cleanup_lock_name.clone(), Some(etcd_client.lease_id()))
+                        .await
+                    {
+                        Ok(lock_response) => {
+                            tracing::debug!(
+                                "Acquired cleanup lock for deleting consumer: {}",
+                                consumer_to_delete
+                            );
+
+                            // Delete the consumer
+                            if let Err(e) = nats_queue.shutdown(Some(consumer_to_delete.clone())).await {
+                                tracing::warn!("Failed to delete consumer {}: {}", consumer_to_delete, e);
+                            } else {
+                                tracing::info!("Successfully deleted orphaned consumer: {}", consumer_to_delete);
+                            }
+
+                            // Release the lock
+                            if let Err(e) = etcd_client.unlock(lock_response.key()).await {
+                                tracing::warn!("Failed to release cleanup lock: {e:?}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "Could not acquire cleanup lock for consumer {}: {e:?}",
+                                consumer_to_delete
+                            );
+                        }
+                    }
+                }
             }
         }
 
         // Clean up the queue and remove the durable consumer
-        if let Err(e) = nats_queue.shutdown().await {
+        if let Err(e) = nats_queue.shutdown(None).await {
             tracing::warn!("Failed to shutdown NatsQueue: {e}");
         }
     });

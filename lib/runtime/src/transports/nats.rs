@@ -549,8 +549,8 @@ impl NatsQueue {
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
-                // messages older than 10 mins in the stream will be automatically purged
-                max_age: time::Duration::from_secs(60 * 10),
+                // messages older than a hour in the stream will be automatically purged
+                max_age: time::Duration::from_secs(60 * 60),
                 ..Default::default()
             };
 
@@ -603,28 +603,52 @@ impl NatsQueue {
 
     /// Shutdown the consumer by deleting it from the stream and closing the connection
     /// This permanently removes the consumer from the server
-    pub async fn shutdown(&mut self) -> Result<()> {
-        if let (Some(client), Some(consumer_name)) = (&self.client, &self.consumer_name) {
+    ///
+    /// If `consumer_name` is provided, that specific consumer will be deleted instead of the
+    /// current consumer. This allows deletion of other consumers on the same stream.
+    pub async fn shutdown(&mut self, consumer_name: Option<String>) -> Result<()> {
+        // Determine which consumer to delete
+        let target_consumer = consumer_name.as_ref().or(self.consumer_name.as_ref());
+
+        // Warn if deleting our own consumer via explicit parameter
+        if let Some(ref passed_name) = consumer_name
+            && self.consumer_name.as_ref() == Some(passed_name)
+        {
+            log::warn!(
+                "Deleting our own consumer '{}' via explicit consumer_name parameter. \
+                Consider calling shutdown without arguments instead.",
+                passed_name
+            );
+        }
+
+        if let (Some(client), Some(consumer_to_delete)) = (&self.client, target_consumer) {
             // Get the stream and delete the consumer
             let stream = client.jetstream().get_stream(&self.stream_name).await?;
-            stream.delete_consumer(consumer_name).await.map_err(|e| {
-                anyhow::anyhow!("Failed to delete consumer {}: {}", consumer_name, e)
-            })?;
+            stream
+                .delete_consumer(consumer_to_delete)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to delete consumer {}: {}", consumer_to_delete, e)
+                })?;
             log::debug!(
                 "Deleted consumer {} from stream {}",
-                consumer_name,
+                consumer_to_delete,
                 self.stream_name
             );
         } else {
             log::debug!(
-                "Cannot shutdown consumer: client or consumer_name is None (client: {:?}, consumer_name: {:?})",
+                "Cannot shutdown consumer: client or target consumer is None (client: {:?}, target_consumer: {:?})",
                 self.client.is_some(),
-                self.consumer_name.is_some()
+                target_consumer.is_some()
             );
         }
 
-        // Then close the connection
-        self.close().await
+        // Only close the connection if we deleted our own consumer
+        if consumer_name.is_none() {
+            self.close().await
+        } else {
+            Ok(())
+        }
     }
 
     /// Count the number of consumers for the stream
@@ -1257,7 +1281,10 @@ mod tests {
         queue1.connect().await.expect("Failed to reconnect queue1");
 
         // Shutdown consumer 1 and verify via consumer 2 that there is only one consumer left
-        queue1.shutdown().await.expect("Failed to shutdown queue1");
+        queue1
+            .shutdown(None)
+            .await
+            .expect("Failed to shutdown queue1");
 
         let consumer_count = queue2
             .count_consumers()
