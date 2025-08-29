@@ -21,8 +21,9 @@
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock, Weak},
+    sync::atomic::{AtomicUsize, Ordering},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 pub use anyhow::{
     Context as ErrorContext, Error, Ok as OK, Result, anyhow as error, bail as raise,
@@ -70,6 +71,69 @@ enum RuntimeType {
     External(tokio::runtime::Handle),
 }
 
+/// Tracks graceful shutdown state for endpoints
+pub(crate) struct GracefulShutdownTracker {
+    active_endpoints: Arc<AtomicUsize>,
+    shutdown_complete: Arc<Notify>,
+}
+
+impl std::fmt::Debug for GracefulShutdownTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GracefulShutdownTracker")
+            .field("active_endpoints", &self.active_endpoints.load(Ordering::SeqCst))
+            .finish()
+    }
+}
+
+impl GracefulShutdownTracker {
+    fn new() -> Self {
+        Self {
+            active_endpoints: Arc::new(AtomicUsize::new(0)),
+            shutdown_complete: Arc::new(Notify::new()),
+        }
+    }
+
+    fn register_endpoint(&self) {
+        let count = self.active_endpoints.fetch_add(1, Ordering::SeqCst);
+        tracing::debug!("Endpoint registered, total active: {} -> {}", count, count + 1);
+    }
+
+    fn unregister_endpoint(&self) {
+        let prev = self.active_endpoints.fetch_sub(1, Ordering::SeqCst);
+        tracing::debug!("Endpoint unregistered, remaining active: {} -> {}", prev, prev - 1);
+        if prev == 1 {
+            // Last endpoint completed
+            tracing::info!("Last endpoint completed, notifying all waiters");
+            self.shutdown_complete.notify_waiters();
+        }
+    }
+
+    async fn wait_for_completion(&self) {
+        loop {
+            // Create the waiter BEFORE checking the condition
+            let notified = self.shutdown_complete.notified();
+            
+            let count = self.active_endpoints.load(Ordering::SeqCst);
+            tracing::trace!("Checking completion status, active endpoints: {}", count);
+            
+            if count == 0 {
+                tracing::debug!("All endpoints completed");
+                break;
+            }
+            
+            // Only wait if there are still active endpoints
+            tracing::debug!("Waiting for {} endpoints to complete", count);
+            notified.await;
+            tracing::trace!("Received notification, rechecking...");
+        }
+    }
+    
+    // Get references to internal state without holding the lock
+    pub(crate) fn get_state(&self) -> (Arc<AtomicUsize>, Arc<Notify>) {
+        (self.active_endpoints.clone(), self.shutdown_complete.clone())
+    }
+}
+
 /// Local [Runtime] which provides access to shared resources local to the physical node/machine.
 #[derive(Debug, Clone)]
 pub struct Runtime {
@@ -77,6 +141,8 @@ pub struct Runtime {
     primary: RuntimeType,
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
+    endpoint_shutdown_token: CancellationToken,
+    graceful_shutdown_tracker: Arc<Mutex<GracefulShutdownTracker>>,
 }
 
 /// Current Health Status
