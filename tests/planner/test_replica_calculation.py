@@ -20,8 +20,6 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from dynamo.planner.utils.planner_core import Metrics, Planner
-
 # Create mock modules for dependencies that might not be available in test environment
 mock_prometheus = MagicMock()
 mock_prometheus.Gauge = MagicMock()
@@ -35,6 +33,9 @@ mock_runtime.logging.configure_dynamo_logging = MagicMock()
 sys.modules["prometheus_client"] = mock_prometheus
 sys.modules["dynamo.runtime"] = mock_runtime
 sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
+
+# Now import after mocking
+from dynamo.planner.utils.planner_core import Metrics, Planner  # noqa: E402
 
 
 @pytest.fixture
