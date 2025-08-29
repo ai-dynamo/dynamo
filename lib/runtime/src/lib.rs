@@ -56,6 +56,7 @@ pub mod utils;
 pub mod worker;
 
 pub mod distributed;
+pub use distributed::distributed_test_utils;
 pub use futures::stream;
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
