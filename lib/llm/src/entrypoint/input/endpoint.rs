@@ -55,7 +55,9 @@ pub async fn run(
             >::for_engine(engine)?;
 
             if !is_static {
-                model.attach(&endpoint, ModelType::Chat, ModelInput::Text).await?;
+                model
+                    .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                    .await?;
             }
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
@@ -83,9 +85,11 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                            // Default to supporting both Chat and Completions endpoints
-            let model_type = ModelType::Chat | ModelType::Completions;
-                model.attach(&endpoint, model_type, ModelInput::Tokens).await?;
+                // Default to supporting both Chat and Completions endpoints
+                let model_type = ModelType::Chat | ModelType::Completions;
+                model
+                    .attach(&endpoint, model_type, ModelInput::Tokens)
+                    .await?;
             }
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();

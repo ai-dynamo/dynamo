@@ -103,7 +103,10 @@ impl OpenAIPreprocessor {
         Self::new_with_formatter(mdc, formatter).await
     }
 
-    pub async fn new_with_formatter(mdc: ModelDeploymentCard, formatter: Arc<dyn OAIPromptFormatter>) -> Result<Arc<Self>> {
+    pub async fn new_with_formatter(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+    ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum();
 
         let tokenizer = match &mdc.tokenizer {

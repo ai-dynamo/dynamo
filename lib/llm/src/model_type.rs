@@ -15,8 +15,8 @@
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
-use strum::Display;
 use std::fmt;
+use strum::Display;
 
 bitflags! {
     #[derive(Copy, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -44,9 +44,15 @@ impl ModelType {
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
-        if self.supports_chat() { result.push("chat"); }
-        if self.supports_completions() { result.push("completions"); }
-        if self.supports_embedding() { result.push("embedding"); }
+        if self.supports_chat() {
+            result.push("chat");
+        }
+        if self.supports_completions() {
+            result.push("completions");
+        }
+        if self.supports_embedding() {
+            result.push("embedding");
+        }
         result
     }
 

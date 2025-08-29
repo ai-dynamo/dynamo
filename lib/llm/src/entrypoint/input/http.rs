@@ -240,12 +240,12 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
             for endpoint_type in model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, true);
             }
-        },
+        }
         ModelUpdate::Removed(model_type) => {
             // Handle all supported endpoint types, not just the first one
             for endpoint_type in model_type.as_endpoint_types() {
                 service.enable_model_endpoint(endpoint_type, false);
             }
-        },
+        }
     }
 }

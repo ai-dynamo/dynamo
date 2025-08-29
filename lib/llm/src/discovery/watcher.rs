@@ -53,8 +53,11 @@ pub struct ModelWatcher {
     busy_threshold: Option<f64>,
 }
 
-const ALL_MODEL_TYPES: &[ModelType] =
-    &[ModelType::Chat, ModelType::Completions, ModelType::Embedding];
+const ALL_MODEL_TYPES: &[ModelType] = &[
+    ModelType::Chat,
+    ModelType::Completions,
+    ModelType::Embedding,
+];
 
 impl ModelWatcher {
     pub fn new(
@@ -285,7 +288,10 @@ impl ModelWatcher {
             }
         };
 
-        if model_entry.model_input == ModelInput::Tokens && (model_entry.model_type.supports_chat() || model_entry.model_type.supports_completions()) {
+        if model_entry.model_input == ModelInput::Tokens
+            && (model_entry.model_type.supports_chat()
+                || model_entry.model_type.supports_completions())
+        {
             // Case 1: Tokens + (Chat OR Completions OR Both)
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
@@ -299,60 +305,62 @@ impl ModelWatcher {
             // function. Needs checking carefully, possibly we need to store it in state.
             let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                let kv_chooser = if self.router_mode == RouterMode::KV {
-                    Some(
-                        self.manager
-                            .kv_chooser_for(
-                                &model_entry.name,
-                                &component,
-                                card.kv_cache_block_size,
-                                self.kv_router_config,
-                            )
-                            .await?,
-                    )
-                } else {
-                    None
-                };
-
-                // Add chat engine only if the model supports chat
-                if model_entry.model_type.supports_chat() {
-                    let chat_engine = entrypoint::build_routed_pipeline::<
-                        NvCreateChatCompletionRequest,
-                        NvCreateChatCompletionStreamResponse,
-                    >(
-                        &card,
-                        &client,
-                        self.router_mode,
-                        self.busy_threshold,
-                        kv_chooser.clone(),
-                    )
-                    .await?;
+            let kv_chooser = if self.router_mode == RouterMode::KV {
+                Some(
                     self.manager
-                        .add_chat_completions_model(&model_entry.name, chat_engine)?;
-                }
+                        .kv_chooser_for(
+                            &model_entry.name,
+                            &component,
+                            card.kv_cache_block_size,
+                            self.kv_router_config,
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
 
-                // Add completions engine only if the model supports completions
-                if model_entry.model_type.supports_completions() {
-                    let formatter = PromptFormatter::no_op();
-                    let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor = OpenAIPreprocessor::new_with_formatter(card.clone(), formatter).await?;
-                    let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
-                        NvCreateCompletionRequest,
-                        NvCreateCompletionResponse,
-                    >(
-                        &card,
-                        &client,
-                        self.router_mode,
-                        self.busy_threshold,
-                        kv_chooser,
-                        preprocessor,
-                    )
-                    .await?;
-                    self.manager
-                        .add_completions_model(&model_entry.name, completions_engine)?;
-                }
+            // Add chat engine only if the model supports chat
+            if model_entry.model_type.supports_chat() {
+                let chat_engine = entrypoint::build_routed_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(
+                    &card,
+                    &client,
+                    self.router_mode,
+                    self.busy_threshold,
+                    kv_chooser.clone(),
+                )
+                .await?;
+                self.manager
+                    .add_chat_completions_model(&model_entry.name, chat_engine)?;
             }
-        else if model_entry.model_input == ModelInput::Text && model_entry.model_type.supports_chat() {
+
+            // Add completions engine only if the model supports completions
+            if model_entry.model_type.supports_completions() {
+                let formatter = PromptFormatter::no_op();
+                let PromptFormatter::OAI(formatter) = formatter;
+                let preprocessor =
+                    OpenAIPreprocessor::new_with_formatter(card.clone(), formatter).await?;
+                let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
+                    NvCreateCompletionRequest,
+                    NvCreateCompletionResponse,
+                >(
+                    &card,
+                    &client,
+                    self.router_mode,
+                    self.busy_threshold,
+                    kv_chooser,
+                    preprocessor,
+                )
+                .await?;
+                self.manager
+                    .add_completions_model(&model_entry.name, completions_engine)?;
+            }
+        } else if model_entry.model_input == ModelInput::Text
+            && model_entry.model_type.supports_chat()
+        {
             // Case 3: Text + Chat
             let push_router = PushRouter::<
                 NvCreateChatCompletionRequest,
@@ -364,21 +372,23 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_chat_completions_model(&model_entry.name, engine)?;
-        }
-        else if model_entry.model_input == ModelInput::Text && model_entry.model_type.supports_completions() {
+        } else if model_entry.model_input == ModelInput::Text
+            && model_entry.model_type.supports_completions()
+        {
             // Case 2: Text + Completions
             let push_router = PushRouter::<
-                    NvCreateCompletionRequest,
-                    Annotated<NvCreateCompletionResponse>,
-                >::from_client_with_threshold(
-                    client, Default::default(), self.busy_threshold
-                )
-                .await?;
-                let engine = Arc::new(push_router);
-                self.manager
-                    .add_completions_model(&model_entry.name, engine)?;
-        }
-        else if model_entry.model_input == ModelInput::Tokens && model_entry.model_type.supports_embedding() {
+                NvCreateCompletionRequest,
+                Annotated<NvCreateCompletionResponse>,
+            >::from_client_with_threshold(
+                client, Default::default(), self.busy_threshold
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_completions_model(&model_entry.name, engine)?;
+        } else if model_entry.model_input == ModelInput::Tokens
+            && model_entry.model_type.supports_embedding()
+        {
             // Case 4: Tokens + Embeddings
             let Some(mut card) = card else {
                 anyhow::bail!("Missing model deployment card for embedding model");
@@ -393,15 +403,14 @@ impl ModelWatcher {
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
             >::new();
 
-
             let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
             let backend = Backend::from_mdc(card.clone()).await?.into_operator();
 
             let router = PushRouter::<
-                    PreprocessedEmbeddingRequest,
-                    Annotated<EmbeddingsEngineOutput>,
-                >::from_client_with_threshold(
-                    client, self.router_mode, self.busy_threshold
+                PreprocessedEmbeddingRequest,
+                Annotated<EmbeddingsEngineOutput>,
+            >::from_client_with_threshold(
+                client, self.router_mode, self.busy_threshold
             )
             .await?;
 
@@ -419,8 +428,7 @@ impl ModelWatcher {
 
             self.manager
                 .add_embeddings_model(&model_entry.name, embedding_engine)?;
-        }
-        else {
+        } else {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
