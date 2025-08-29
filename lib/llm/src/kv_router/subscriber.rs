@@ -200,8 +200,8 @@ pub async fn start_kv_router_background(
                         continue;
                     }
 
-                    // Perform purge and snapshot upload
-                    match perform_purge_and_snapshot(
+                    // Perform snapshot upload and purge
+                    match perform_snapshot_and_purge(
                         &mut nats_queue,
                         nats_client,
                         snapshot_tx,
@@ -228,21 +228,17 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
-/// Perform purge and snapshot upload operations
-async fn perform_purge_and_snapshot(
+/// Perform snapshot upload and purge operations
+async fn perform_snapshot_and_purge(
     nats_queue: &mut NatsQueue,
     nats_client: &dynamo_runtime::transports::nats::Client,
     snapshot_tx: &mpsc::Sender<DumpRequest>,
     bucket_name: &str,
 ) -> anyhow::Result<()> {
-    // TODO: Radix tree snapshot may not match ack floor unless this replica has min ack'ed seq.
-    // Could add sleep to increase likelihood. However, radix tree can only be ahead of purge point
-    // (not behind), and KV events are idempotent, so replaying already-applied events is safe.
+    // Snapshot before purge ensures we capture the current state before removing any messages.
+    // This guarantees the snapshot matches what has been acknowledged up to this point.
 
-    // First, perform the purge of acknowledged messages
-    nats_queue.purge_acknowledged().await?;
-
-    // Request a snapshot from the indexer
+    // First, request a snapshot from the indexer
     let (resp_tx, resp_rx) = oneshot::channel();
     let dump_req = DumpRequest { resp: resp_tx };
 
@@ -271,6 +267,9 @@ async fn perform_purge_and_snapshot(
         "Successfully uploaded radix tree snapshot with {} events to bucket {bucket_name}",
         events.len()
     );
+
+    // Now purge acknowledged messages from the stream
+    nats_queue.purge_acknowledged().await?;
 
     Ok(())
 }
