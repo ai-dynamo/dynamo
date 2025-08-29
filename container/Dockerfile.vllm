@@ -304,16 +304,20 @@ RUN apt-get update -y && \
     wget \
     tmux \
     vim \
-    autoconf \
-    automake \
-    libtool \
-    net-tools \
     git \
+    openssh-client \
+    iproute2 \
+    curl \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    sudo \
     # Build Dependencies
+    build-essential \
     autoconf \
     automake \
     cmake \
-    git \
     libtool \
     meson \
     net-tools \
