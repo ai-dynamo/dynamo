@@ -485,44 +485,43 @@ pub struct WorkerMetricsPublisher {
     rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
     /// Prometheus gauges for KvStats metrics
     /// We use OnceLock for efficient one-time initialization and lock-free reads
-    /// The Arc is set once during register_prometheus_metrics and then only read
-    prometheus_gauges: OnceLock<Arc<KvStatsPrometheusGauges>>,
+    /// The gauges are set once during register_prometheus_metrics and then only read
+    prometheus_gauges: OnceLock<KvStatsPrometheusGauges>,
 }
 
-#[derive(Default)]
 struct KvStatsPrometheusGauges {
-    kv_active_blocks_gauge: Option<prometheus::Gauge>,
-    kv_total_blocks_gauge: Option<prometheus::Gauge>,
-    gpu_cache_usage_gauge: Option<prometheus::Gauge>,
-    gpu_prefix_cache_hit_rate_gauge: Option<prometheus::Gauge>,
+    kv_active_blocks_gauge: prometheus::Gauge,
+    kv_total_blocks_gauge: prometheus::Gauge,
+    gpu_cache_usage_gauge: prometheus::Gauge,
+    gpu_prefix_cache_hit_rate_gauge: prometheus::Gauge,
 }
 
 impl KvStatsPrometheusGauges {
     /// Create a new KvStatsPrometheusGauges instance with all metrics registered
     fn new(component: &Component) -> Result<Self> {
-        let kv_active_blocks_gauge = Some(component.create_gauge(
+        let kv_active_blocks_gauge = component.create_gauge(
             kvstats::ACTIVE_BLOCKS,
             "Number of active KV cache blocks currently in use",
             &[],
-        )?);
+        )?;
 
-        let kv_total_blocks_gauge = Some(component.create_gauge(
+        let kv_total_blocks_gauge = component.create_gauge(
             kvstats::TOTAL_BLOCKS,
             "Total number of KV cache blocks available",
             &[],
-        )?);
+        )?;
 
-        let gpu_cache_usage_gauge = Some(component.create_gauge(
+        let gpu_cache_usage_gauge = component.create_gauge(
             kvstats::GPU_CACHE_USAGE_PERCENT,
             "GPU cache usage as a percentage (0.0-1.0)",
             &[],
-        )?);
+        )?;
 
-        let gpu_prefix_cache_hit_rate_gauge = Some(component.create_gauge(
+        let gpu_prefix_cache_hit_rate_gauge = component.create_gauge(
             kvstats::GPU_PREFIX_CACHE_HIT_RATE,
             "GPU prefix cache hit rate as a percentage (0.0-1.0)",
             &[],
-        )?);
+        )?;
 
         tracing::info!("Registered KvStats Prometheus metrics");
 
@@ -536,18 +535,14 @@ impl KvStatsPrometheusGauges {
 
     /// Update all gauges with values from KvStats
     fn update_from_kvstats(&self, kv_stats: &KvStats) {
-        if let Some(gauge) = &self.kv_active_blocks_gauge {
-            gauge.set(kv_stats.kv_active_blocks as f64);
-        }
-        if let Some(gauge) = &self.kv_total_blocks_gauge {
-            gauge.set(kv_stats.kv_total_blocks as f64);
-        }
-        if let Some(gauge) = &self.gpu_cache_usage_gauge {
-            gauge.set(kv_stats.gpu_cache_usage_perc as f64);
-        }
-        if let Some(gauge) = &self.gpu_prefix_cache_hit_rate_gauge {
-            gauge.set(kv_stats.gpu_prefix_cache_hit_rate as f64);
-        }
+        self.kv_active_blocks_gauge
+            .set(kv_stats.kv_active_blocks as f64);
+        self.kv_total_blocks_gauge
+            .set(kv_stats.kv_total_blocks as f64);
+        self.gpu_cache_usage_gauge
+            .set(kv_stats.gpu_cache_usage_perc as f64);
+        self.gpu_prefix_cache_hit_rate_gauge
+            .set(kv_stats.gpu_prefix_cache_hit_rate as f64);
     }
 }
 
@@ -581,10 +576,7 @@ impl WorkerMetricsPublisher {
         // Use get_or_init for thread-safe one-time initialization
         // This will only initialize once, subsequent calls will return immediately
         self.prometheus_gauges.get_or_init(|| {
-            Arc::new(
-                KvStatsPrometheusGauges::new(component)
-                    .expect("Failed to create Prometheus gauges"),
-            )
+            KvStatsPrometheusGauges::new(component).expect("Failed to create Prometheus gauges")
         });
 
         Ok(())
@@ -1203,14 +1195,10 @@ mod test_integration_publisher {
 
         // Get references to the gauges for testing
         let gauges = publisher.prometheus_gauges.get().unwrap();
-        let active_blocks_gauge = gauges.kv_active_blocks_gauge.as_ref().unwrap().clone();
-        let total_blocks_gauge = gauges.kv_total_blocks_gauge.as_ref().unwrap().clone();
-        let cache_usage_gauge = gauges.gpu_cache_usage_gauge.as_ref().unwrap().clone();
-        let hit_rate_gauge = gauges
-            .gpu_prefix_cache_hit_rate_gauge
-            .as_ref()
-            .unwrap()
-            .clone();
+        let active_blocks_gauge = gauges.kv_active_blocks_gauge.clone();
+        let total_blocks_gauge = gauges.kv_total_blocks_gauge.clone();
+        let cache_usage_gauge = gauges.gpu_cache_usage_gauge.clone();
+        let hit_rate_gauge = gauges.gpu_prefix_cache_hit_rate_gauge.clone();
 
         // Create test metrics with specific values
         let test_metrics = Arc::new(ForwardPassMetrics {
