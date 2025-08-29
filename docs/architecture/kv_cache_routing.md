@@ -56,6 +56,8 @@ For improved fault tolerance, you can launch two frontend + router replicas. Sin
 
 To enable state sharing between the router replicas (which provides more accurate routing decisions), use the `--router-replica-sync` flag when starting the frontend:
 
+Router replicas are currently tied to a component, and state syncing and sharing can only happen within the component group. Here's an example of running multiple router replicas:
+
 ```bash
 # Router replica 1
 python -m dynamo.frontend --router-mode kv --port 8000 --router-replica-sync
@@ -64,9 +66,16 @@ python -m dynamo.frontend --router-mode kv --port 8000 --router-replica-sync
 python -m dynamo.frontend --router-mode kv --port 8001 --router-replica-sync --persist-states
 ```
 
-The second replica can be started after the first has already been handling requests. As long as `--persist-states` is set, the new replica will sync its KV block indexer by consuming the JetStream events and/or downloading the latest snapshot, ensuring both replicas have the same view of cached blocks across workers.
+After these two replicas are launched, they will share the same JetStream and snapshot state. The second replica can be started after the first has already been handling requests. As long as `--persist-states` is set, the new replica will sync its KV block indexer by consuming the JetStream events and/or downloading the latest snapshot, ensuring both replicas have the same view of cached blocks across workers.
 
-When `--router-replica-sync` is enabled, the router replicas will additionally share their local routing decisions and active sequence predictions via NATS, helping maintain consistent load estimates across instances even when requests are distributed between routers.
+It's okay for one router to go down, or even both to go down - the state persistence ensures continuity. When a third router starts (with `--persist-states`), the states will still persist:
+
+```bash
+# Router replica 3 (can be started even after replicas 1 and 2 have gone down)
+python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync --persist-states
+```
+
+When `--router-replica-sync` is enabled, the router replicas will additionally share their local routing decisions and active sequence predictions via NATS. Active blocks information is communicated between routers in a fire-and-forget manner, but the routers will quickly become consistent as this information is tied to the request cycle. This helps maintain consistent load estimates across instances even when requests are distributed between routers.
 
 ## Understanding KV Cache
 The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
