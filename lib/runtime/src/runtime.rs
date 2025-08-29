@@ -35,8 +35,6 @@ use tokio::{signal, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
-
-
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> Result<Runtime> {
         // worker id
@@ -44,8 +42,6 @@ impl Runtime {
 
         // create a cancellation token
         let cancellation_token = CancellationToken::new();
-
-
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -61,8 +57,6 @@ impl Runtime {
             primary: runtime,
             secondary,
             cancellation_token,
-
-            request_tracker: crate::RequestTracker::new(),
         })
     }
 
@@ -118,22 +112,9 @@ impl Runtime {
         self.cancellation_token.child_token()
     }
 
-
-
-    /// Access the request tracker for tracking in-flight requests
-    pub fn request_tracker(&self) -> crate::RequestTracker {
-        self.request_tracker.clone()
-    }
-
     /// Shuts down the [`Runtime`] instance
-    /// This will wait for all in-flight requests to complete before shutting down infrastructure
     pub fn shutdown(&self) {
-        // Cancel the token immediately to stop accepting new requests
         self.cancellation_token.cancel();
-        
-        // The actual infrastructure shutdown will happen when endpoints complete
-        // This is handled by PushEndpoint waiting for requests when graceful_shutdown=true
-        tracing::info!("Runtime shutdown initiated");
     }
 }
 

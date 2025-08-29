@@ -325,8 +325,6 @@ impl DistributedRuntime {
         self.inner.runtime().shutdown();
     }
 
-
-
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }

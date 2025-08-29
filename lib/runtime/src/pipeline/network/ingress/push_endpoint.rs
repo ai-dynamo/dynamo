@@ -4,10 +4,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::logging::TraceParent;
 use crate::protocols::LeaseId;
-use crate::{RequestTracker, SystemHealth};
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
@@ -23,11 +23,6 @@ pub struct PushEndpoint {
     pub cancellation_token: CancellationToken,
     #[builder(default = "true")]
     pub graceful_shutdown: bool,
-    #[builder(setter(strip_option))]
-    pub request_tracker: Option<RequestTracker>,
-    /// Main runtime cancellation token to wait for complete shutdown
-    #[builder(setter(strip_option))]
-    pub runtime_token: Option<CancellationToken>,
 }
 
 /// version of crate
@@ -49,15 +44,8 @@ impl PushEndpoint {
     ) -> Result<()> {
         let mut endpoint = endpoint;
 
-        // Use external tracker if provided, otherwise create local tracking
-        let (inflight, notify, use_external_tracker) = if self.request_tracker.is_some() {
-            // External tracker handles everything
-            (Arc::new(AtomicU64::new(0)), Arc::new(Notify::new()), true)
-        } else {
-            // Local tracking for backward compatibility
-            (Arc::new(AtomicU64::new(0)), Arc::new(Notify::new()), false)
-        };
-
+        let inflight = Arc::new(AtomicU64::new(0));
+        let notify = Arc::new(Notify::new());
         let component_name_local: Arc<String> = Arc::from(component_name);
         let endpoint_name_local: Arc<String> = Arc::from(endpoint_name);
         let namespace_local: Arc<String> = Arc::from(namespace);
@@ -100,13 +88,8 @@ impl PushEndpoint {
                 let component_name: Arc<String> = Arc::clone(&component_name_local);
                 let namespace: Arc<String> = Arc::clone(&namespace_local);
 
-                // Track the request - either with external tracker or local counter
-                let request_guard = if use_external_tracker {
-                    self.request_tracker.as_ref().map(|t| t.track_request())
-                } else {
-                    inflight.fetch_add(1, Ordering::SeqCst);
-                    None
-                };
+                // increment the inflight counter
+                inflight.fetch_add(1, Ordering::SeqCst);
                 let inflight_clone = inflight.clone();
                 let notify_clone = notify.clone();
 
@@ -119,9 +102,6 @@ impl PushEndpoint {
                 }
 
                 tokio::spawn(async move {
-                    // Keep the guard alive for the duration of the request
-                    let _guard = request_guard;
-
                     tracing::trace!(instance_id, "handling new request");
                     let result = ingress
                         .handle_payload(req.message.payload)
@@ -151,11 +131,9 @@ impl PushEndpoint {
                         }
                     }
 
-                    // For local tracking, decrease the counter
-                    if _guard.is_none() {
-                        inflight_clone.fetch_sub(1, Ordering::SeqCst);
-                        notify_clone.notify_one();
-                    }
+                    // decrease the inflight counter
+                    inflight_clone.fetch_sub(1, Ordering::SeqCst);
+                    notify_clone.notify_one();
                 });
             } else {
                 break;
@@ -169,36 +147,14 @@ impl PushEndpoint {
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
-            if use_external_tracker {
-                // When using external tracker, we need to wait for the runtime's
-                // graceful shutdown to complete before returning, otherwise Python
-                // will clean up resources (like the vLLM engine) prematurely
-                tracing::info!("Endpoint stopped accepting requests, waiting for runtime graceful shutdown");
-                
-                // First wait for all requests to complete
-                if let Some(tracker) = &self.request_tracker {
-                    tracker.wait_for_completion().await;
-                    tracing::info!("All inflight requests completed");
-                }
-                
-                // Then wait for the runtime to fully shutdown
-                // This ensures Python engines do not clean up resources prematurely 
-                if let Some(runtime_token) = &self.runtime_token {
-                    tracing::info!("Waiting for runtime infrastructure shutdown");
-                    runtime_token.cancelled().await;
-                    tracing::info!("Runtime shutdown complete");
-                }
-            } else {
-                // Local tracking - wait here
-                tracing::info!(
-                    "Waiting for {} inflight requests to complete",
-                    inflight.load(Ordering::SeqCst)
-                );
-                while inflight.load(Ordering::SeqCst) > 0 {
-                    notify.notified().await;
-                }
-                tracing::info!("All inflight requests completed");
+            tracing::info!(
+                "Waiting for {} inflight requests to complete",
+                inflight.load(Ordering::SeqCst)
+            );
+            while inflight.load(Ordering::SeqCst) > 0 {
+                notify.notified().await;
             }
+            tracing::info!("All inflight requests completed");
         } else {
             tracing::info!("Skipping graceful shutdown, not waiting for inflight requests");
         }

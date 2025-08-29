@@ -92,7 +92,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     try:
         # TODO: add in native endpoints
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=dynamo_args.migration_limit <= 0),
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

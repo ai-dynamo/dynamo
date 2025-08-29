@@ -201,13 +201,6 @@ impl DistributedRuntime {
         self.runtime.shutdown();
     }
 
-
-
-    /// Access the request tracker for tracking in-flight requests
-    pub fn request_tracker(&self) -> crate::RequestTracker {
-        self.runtime.request_tracker()
-    }
-
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         Namespace::new(self.clone(), name.into(), self.is_static)

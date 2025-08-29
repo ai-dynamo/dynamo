@@ -20,12 +20,9 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        Arc, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, OnceLock, Weak},
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 
 pub use anyhow::{
     Context as ErrorContext, Error, Ok as OK, Result, anyhow as error, bail as raise,
@@ -73,83 +70,13 @@ enum RuntimeType {
     External(tokio::runtime::Handle),
 }
 
-/// Tracks in-flight requests for graceful shutdown
-#[derive(Clone)]
-pub struct RequestTracker {
-    inflight_count: Arc<AtomicU64>,
-    notify: Arc<Notify>,
-}
-
-impl std::fmt::Debug for RequestTracker {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RequestTracker")
-            .field(
-                "inflight_count",
-                &self.inflight_count.load(Ordering::SeqCst),
-            )
-            .finish()
-    }
-}
-
-impl RequestTracker {
-    fn new() -> Self {
-        Self {
-            inflight_count: Arc::new(AtomicU64::new(0)),
-            notify: Arc::new(Notify::new()),
-        }
-    }
-
-    pub fn track_request(&self) -> RequestGuard {
-        self.inflight_count.fetch_add(1, Ordering::SeqCst);
-        RequestGuard {
-            tracker: self.clone(),
-        }
-    }
-
-    pub async fn wait_for_completion(&self) {
-        while self.inflight_count.load(Ordering::SeqCst) > 0 {
-            self.notify.notified().await;
-        }
-    }
-
-    pub fn inflight_count(&self) -> u64 {
-        self.inflight_count.load(Ordering::SeqCst)
-    }
-}
-
-/// RAII guard that decrements the request count when dropped
-pub struct RequestGuard {
-    tracker: RequestTracker,
-}
-
-impl Drop for RequestGuard {
-    fn drop(&mut self) {
-        self.tracker.inflight_count.fetch_sub(1, Ordering::SeqCst);
-        self.tracker.notify.notify_one();
-    }
-}
-
 /// Local [Runtime] which provides access to shared resources local to the physical node/machine.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Runtime {
     id: Arc<String>,
     primary: RuntimeType,
     secondary: RuntimeType,
-    /// Primary cancellation token for complete runtime shutdown
     cancellation_token: CancellationToken,
-    /// Tracks in-flight requests
-    request_tracker: RequestTracker,
-}
-
-impl std::fmt::Debug for Runtime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Runtime")
-            .field("id", &self.id)
-            .field("primary", &self.primary)
-            .field("secondary", &self.secondary)
-            .field("request_tracker", &self.request_tracker)
-            .finish()
-    }
 }
 
 /// Current Health Status
