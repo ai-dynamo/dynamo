@@ -110,8 +110,8 @@ use super::{
 };
 
 use super::super::storage::{
-    nixl::{NixlAgent, NixlRegisterableStorage, NixlStorage, OptArgs},
     Storage, StorageAllocator,
+    nixl::{NixlAgent, NixlRegisterableStorage, NixlStorage, OptArgs},
 };
 use super::{FullyContiguous, FullyContiguousConfig, LayerSeparate, LayerSeparateConfig};
 use serde::{Deserialize, Serialize};

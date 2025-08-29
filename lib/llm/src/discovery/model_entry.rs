@@ -21,11 +21,12 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelEntry {
     /// Public name of the model
-    /// This will be used to identify the model in the HTTP service from the value used in an an OpenAI ChatRequest.
+    /// Used to identify the model in the HTTP service from the value used in an OpenAI ChatRequest.
     pub name: String,
 
     /// How to address this on the network
-    pub endpoint: protocols::Endpoint,
+    #[serde(rename = "endpoint")]
+    pub endpoint_id: protocols::EndpointId,
 
     /// Specifies whether the model is a chat, completions, etc model.
     pub model_type: ModelType,
@@ -45,8 +46,8 @@ impl ModelEntry {
         matches!(self.model_type, ModelType::Backend)
     }
 
-    /// Fetch the ModelDeploymentCard from NATS.
-    /// This does not touch it's fields so you may need to call move_from_nats on it.
+    /// Fetch the ModelDeploymentCard from etcd.
+    /// This does not touch its fields so you may need to call move_from_nats on it.
     pub async fn load_mdc(
         &self,
         etcd_client: &etcd::Client,

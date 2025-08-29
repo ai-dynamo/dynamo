@@ -4,13 +4,13 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use dynamo_llm::backend::Decoder;
 use dynamo_llm::protocols::common::StopConditions;
+use dynamo_llm::tokenizers::DecodeStream;
 use dynamo_llm::tokenizers::hf::HuggingFaceTokenizer;
 use dynamo_llm::tokenizers::traits::{Encoder, Tokenizer};
-use dynamo_llm::tokenizers::DecodeStream;
 use dynamo_llm::types::TokenIdType;
 
 const TEST_TOKENIZER: &str = concat!(

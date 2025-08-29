@@ -37,8 +37,8 @@ use serde::{Deserialize, Serialize};
 
 #[allow(unused_imports)]
 use super::{
-    codec::TwoPartCodec, ConnectionInfo, PendingConnections, RegisteredStream, ResponseService,
-    StreamOptions, StreamReceiver, StreamSender, StreamType,
+    ConnectionInfo, PendingConnections, RegisteredStream, ResponseService, StreamOptions,
+    StreamReceiver, StreamSender, StreamType, codec::TwoPartCodec,
 };
 
 const TCP_TRANSPORT: &str = "tcp_server";

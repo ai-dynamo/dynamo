@@ -31,6 +31,7 @@ use ahash::AHashMap;
 use anyhow::Result;
 use itertools::Itertools;
 use tokenizers::{
+    AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper, Tokenizer,
     decoders::{
         self, byte_fallback::ByteFallback, byte_level::ByteLevel, fuse::Fuse, strip::Strip,
     },
@@ -41,7 +42,6 @@ use tokenizers::{
         self,
         template::{self, TemplateProcessing},
     },
-    AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper, Tokenizer,
 };
 use tracing::info;
 
@@ -402,7 +402,7 @@ impl TryFrom<Normalizer<'_>> for NormalizerWrapper {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+    use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
     use tokenizers::Tokenizer;
 
     #[allow(dead_code)]

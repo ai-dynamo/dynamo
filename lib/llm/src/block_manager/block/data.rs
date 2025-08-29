@@ -46,7 +46,11 @@ pub trait BlockDataExt<S: Storage>: Send + Sync + 'static + std::fmt::Debug {
     fn is_local_mut(&mut self) -> Option<&mut dyn BlockDataViews<S>>;
 
     /// Get a read-only view of this block's storage for a layer
-    fn layer_view(&self, layer_idx: usize, outer_idx: usize) -> BlockResult<view::LayerView<S>> {
+    fn layer_view(
+        &self,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> BlockResult<view::LayerView<'_, S>> {
         match self.is_local() {
             Some(views) => views.local_layer_view(layer_idx, outer_idx),
             None => Err(BlockError::ViewsNotAvailableOnLogicalBlocks),
@@ -58,7 +62,7 @@ pub trait BlockDataExt<S: Storage>: Send + Sync + 'static + std::fmt::Debug {
         &mut self,
         layer_idx: usize,
         outer_idx: usize,
-    ) -> BlockResult<view::LayerViewMut<S>> {
+    ) -> BlockResult<view::LayerViewMut<'_, S>> {
         match self.is_local_mut() {
             Some(views) => views.local_layer_view_mut(layer_idx, outer_idx),
             None => Err(BlockError::ViewsNotAvailableOnLogicalBlocks),
@@ -66,7 +70,7 @@ pub trait BlockDataExt<S: Storage>: Send + Sync + 'static + std::fmt::Debug {
     }
 
     /// Get a read-only view of this block's storage
-    fn block_view(&self) -> BlockResult<view::BlockView<S>> {
+    fn block_view(&self) -> BlockResult<view::BlockView<'_, S>> {
         match self.is_local() {
             Some(views) => views.local_block_view(),
             None => Err(BlockError::ViewsNotAvailableOnLogicalBlocks),
@@ -74,7 +78,7 @@ pub trait BlockDataExt<S: Storage>: Send + Sync + 'static + std::fmt::Debug {
     }
 
     /// Get a mutable view of this block's storage
-    fn block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<S>> {
+    fn block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<'_, S>> {
         match self.is_local_mut() {
             Some(views) => views.local_block_view_mut(),
             None => Err(BlockError::ViewsNotAvailableOnLogicalBlocks),
@@ -88,20 +92,20 @@ pub trait BlockDataViews<S: Storage> {
         &self,
         layer_idx: usize,
         outer_idx: usize,
-    ) -> BlockResult<view::LayerView<S>>;
+    ) -> BlockResult<view::LayerView<'_, S>>;
 
     /// Get a mutable view of this block's storage for a layer
     fn local_layer_view_mut(
         &mut self,
         layer_idx: usize,
         outer_idx: usize,
-    ) -> BlockResult<view::LayerViewMut<S>>;
+    ) -> BlockResult<view::LayerViewMut<'_, S>>;
 
     /// Get a read-only view of this block's storage
-    fn local_block_view(&self) -> BlockResult<view::BlockView<S>>;
+    fn local_block_view(&self) -> BlockResult<view::BlockView<'_, S>>;
 
     /// Get a mutable view of this block's storage
-    fn local_block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<S>>;
+    fn local_block_view_mut(&mut self) -> BlockResult<view::BlockViewMut<'_, S>>;
 }
 
 pub trait BlockDataProvider: StorageTypeProvider {

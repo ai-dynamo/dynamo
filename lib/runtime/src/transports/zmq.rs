@@ -28,7 +28,7 @@
 //! equivalent of a connection pool per upstream service at the cost of needing an extra internal
 //! routing step per service endpoint.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_zmq::{Context, Dealer, Router, Sink, SinkExt, StreamExt};
 use bytes::Bytes;
 use derive_getters::Dissolve;
@@ -36,7 +36,7 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, os::fd::FromRawFd, sync::Arc, time::Duration, vec::IntoIter};
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     task::{JoinError, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;

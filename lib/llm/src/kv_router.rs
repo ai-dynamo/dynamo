@@ -6,16 +6,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
     pipeline::{
-        async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
+        SingleIn, async_trait,
     },
     prelude::*,
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
 
 pub mod approx;
 pub mod indexer;
@@ -29,12 +31,12 @@ pub mod scoring;
 pub mod sequence;
 
 use crate::{
-    discovery::{ModelEntry, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
-            compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
-            KvRouterError, OverlapScores, RouterEvent,
+            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
@@ -72,8 +74,18 @@ pub trait WorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
+/// Override configuration for router settings that can be specified per-request
+#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
+pub struct RouterConfigOverride {
+    #[builder(default)]
+    pub overlap_score_weight: Option<f64>,
+
+    #[builder(default)]
+    pub router_temperature: Option<f64>,
+}
+
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 
@@ -260,6 +272,7 @@ impl KvRouter {
         &self,
         context_id: &str,
         tokens: &[u32],
+        router_config_override: Option<&RouterConfigOverride>,
     ) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
 
@@ -275,6 +288,7 @@ impl KvRouter {
                 isl_tokens,
                 seq_hashes.clone(),
                 overlap_scores.clone(),
+                router_config_override,
             )
             .await?;
 
@@ -314,7 +328,9 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let (worker_id, _) = self.find_best_match(ctx.id(), &request.tokens).await?;
+        let (worker_id, _) = self
+            .find_best_match(ctx.id(), &request.tokens, None)
+            .await?;
 
         let response = RouterResponse { worker_id };
         let response = Annotated::from_data(response);
@@ -356,28 +372,40 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 } else {
                     // Otherwise, find the best match
                     self.chooser
-                        .find_best_match(&context_id, &request.token_ids)
+                        .find_best_match(
+                            &context_id,
+                            &request.token_ids,
+                            request.router_config_override.as_ref(),
+                        )
                         .await?
                 };
 
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();
-                // Update the request with the estimated prefix hit blocks
-                let (mut backend_input, context) = request.into_parts();
-                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
-                let updated_request = context.map(|_| backend_input);
-
                 // if request has the annotation "query_instance_id", for example
                 // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
-                // request will not be routed to worker immediately
+                // request will not be routed to worker immediately.
+                // The gateway EPP will receive the worker_instance_id and the tokens.
                 if query_instance_id {
                     let instance_id_str = instance_id.to_string();
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
-                    let stream = stream::iter(vec![response]);
+
+                    // Return the tokens in nvext.token_data format
+                    let response_tokens =
+                        Annotated::from_annotation("token_data", &request.token_ids)?;
+                    tracing::trace!(
+                        "Tokens requested in the response through the query_instance_id annotation: {:?}",
+                        response_tokens
+                    );
+                    let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
+                // Update the request with the estimated prefix hit blocks
+                let (mut backend_input, context) = request.into_parts();
+                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+                let updated_request = context.map(|_| backend_input);
 
                 let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
                 let stream_context = response_stream.context();

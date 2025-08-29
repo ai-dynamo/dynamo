@@ -33,7 +33,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.trtllm --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B --extra-engine-args engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy prefill_first --publish-events-and-metrics"
+            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args engine_configs/prefill.yaml --disaggregation-mode prefill --disaggregation-strategy prefill_first --publish-events-and-metrics"
     TRTLLMDecodeWorker:
       dynamoNamespace: trtllm-v1-disagg-router
       envFromSecret: hf-token-secret
@@ -50,4 +50,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.trtllm --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B --extra-engine-args engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy prefill_first"
+            - "python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args engine_configs/decode.yaml --disaggregation-mode decode --disaggregation-strategy prefill_first"

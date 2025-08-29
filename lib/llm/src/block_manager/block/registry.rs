@@ -109,19 +109,19 @@ impl BlockRegistry {
                 {
                     let mut blocks = blocks.lock().unwrap();
 
-                    if let Some(handle) = blocks.get(&sequence_hash) {
-                        if handle.upgrade().is_none() {
-                            blocks.remove(&sequence_hash);
-                        }
+                    if let Some(handle) = blocks.get(&sequence_hash)
+                        && handle.upgrade().is_none()
+                    {
+                        blocks.remove(&sequence_hash);
                     }
                 }
 
                 let mut global_registry = global_registry.lock().unwrap();
 
-                if let Some(entry) = global_registry.get(&sequence_hash) {
-                    if entry.upgrade().is_none() {
-                        global_registry.remove(&sequence_hash);
-                    }
+                if let Some(entry) = global_registry.get(&sequence_hash)
+                    && entry.upgrade().is_none()
+                {
+                    global_registry.remove(&sequence_hash);
                 }
             }
         });
@@ -136,10 +136,10 @@ impl BlockRegistry {
 
     pub fn is_registered(&self, sequence_hash: SequenceHash) -> bool {
         let blocks = self.blocks.lock().unwrap();
-        if let Some(handle) = blocks.get(&sequence_hash) {
-            if let Some(_handle) = handle.upgrade() {
-                return true;
-            }
+        if let Some(handle) = blocks.get(&sequence_hash)
+            && let Some(_handle) = handle.upgrade()
+        {
+            return true;
         }
         false
     }
@@ -161,12 +161,12 @@ impl BlockRegistry {
                 let mut blocks = self.blocks.lock().unwrap();
 
                 // If an identical block already exists in this pool, return an error.
-                if let Some(handle) = blocks.get(&sequence_hash) {
-                    if let Some(_handle) = handle.upgrade() {
-                        return Err(BlockRegistrationError::BlockAlreadyRegistered(
-                            sequence_hash,
-                        ));
-                    }
+                if let Some(handle) = blocks.get(&sequence_hash)
+                    && let Some(_handle) = handle.upgrade()
+                {
+                    return Err(BlockRegistrationError::BlockAlreadyRegistered(
+                        sequence_hash,
+                    ));
                 }
 
                 let mut publish_handle = None;
@@ -179,10 +179,10 @@ impl BlockRegistry {
                     let mut global_registry = self.global_registry.lock().unwrap();
 
                     // If an identical block exists in other pool, use the same registration handle.
-                    if let Some(handle) = global_registry.get(&sequence_hash) {
-                        if let Some(handle) = handle.upgrade() {
-                            break 'reg_block handle;
-                        }
+                    if let Some(handle) = global_registry.get(&sequence_hash)
+                        && let Some(handle) = handle.upgrade()
+                    {
+                        break 'reg_block handle;
                     }
 
                     // Otherwise, create a new registration handle.

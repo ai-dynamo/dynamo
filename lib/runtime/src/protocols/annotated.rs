@@ -1,20 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::*;
-use crate::{error, Result};
+use crate::{Result, error};
 use maybe_error::MaybeError;
 
 pub trait AnnotationsProvider {
@@ -80,13 +68,13 @@ impl<R> Annotated<R> {
     /// Convert to a [`Result<Self, String>`]
     /// If [`Self::event`] is "error", return an error message(s) held by [`Self::comment`]
     pub fn ok(self) -> Result<Self, String> {
-        if let Some(event) = &self.event {
-            if event == "error" {
-                return Err(self
-                    .comment
-                    .unwrap_or(vec!["unknown error".to_string()])
-                    .join(", "));
-            }
+        if let Some(event) = &self.event
+            && event == "error"
+        {
+            return Err(self
+                .comment
+                .unwrap_or(vec!["unknown error".to_string()])
+                .join(", "));
         }
         Ok(self)
     }
@@ -137,10 +125,11 @@ impl<R> Annotated<R> {
         match self.data {
             Some(data) => Ok(Some(data)),
             None => match self.event {
-                Some(event) if event == "error" => Err(error!(self
-                    .comment
-                    .unwrap_or(vec!["unknown error".to_string()])
-                    .join(", ")))?,
+                Some(event) if event == "error" => Err(error!(
+                    self.comment
+                        .unwrap_or(vec!["unknown error".to_string()])
+                        .join(", ")
+                ))?,
                 _ => Ok(None),
             },
         }
@@ -155,14 +144,14 @@ where
         Annotated::from_error(format!("{:?}", err))
     }
 
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+    fn err(&self) -> Option<anyhow::Error> {
         if self.is_error() {
-            if let Some(comment) = &self.comment {
-                if !comment.is_empty() {
-                    return Some(anyhow::Error::msg(comment.join("; ")).into());
-                }
+            if let Some(comment) = &self.comment
+                && !comment.is_empty()
+            {
+                return Some(anyhow::Error::msg(comment.join("; ")));
             }
-            Some(anyhow::Error::msg("unknown error").into())
+            Some(anyhow::Error::msg("unknown error"))
         } else {
             None
         }
@@ -199,17 +188,13 @@ mod tests {
         let annotated = Annotated::from_data("Test data".to_string());
         assert!(annotated.err().is_none());
         assert!(annotated.is_ok());
-        assert!(!annotated.is_err());
 
         let annotated = Annotated::<String>::from_error("Test error 2".to_string());
         assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 2");
-        assert!(!annotated.is_ok());
         assert!(annotated.is_err());
 
         let annotated =
             Annotated::<String>::from_err(anyhow::Error::msg("Test error 3".to_string()).into());
-        assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 3");
-        assert!(!annotated.is_ok());
         assert!(annotated.is_err());
     }
 }

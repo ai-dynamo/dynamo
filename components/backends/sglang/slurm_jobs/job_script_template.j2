@@ -12,8 +12,12 @@
 # Constants
 PREFILL_NODES={{ prefill_nodes }}
 DECODE_NODES={{ decode_nodes }}
+PREFILL_WORKERS={{ prefill_workers }}
+DECODE_WORKERS={{ decode_workers }}
 TOTAL_NODES=$((PREFILL_NODES + DECODE_NODES))
 GPUS_PER_NODE={{ gpus_per_node }}
+PREFILL_NODES_PER_WORKER=$((PREFILL_NODES / PREFILL_WORKERS))
+DECODE_NODES_PER_WORKER=$((DECODE_NODES / DECODE_WORKERS))
 LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}/"
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
 OUTPUT_DIR="${SLURM_SUBMIT_DIR}/outputs"
@@ -22,7 +26,6 @@ CONFIG_DIR="{{ config_dir }}"
 CONTAINER_IMAGE="{{ container_image }}"
 NETWORK_INTERFACE="{{ network_interface }}"
 GPU_TYPE="{{ gpu_type | default('h100') }}"
-USE_SGLANG_COMMANDS="{{ use_sglang_commands | default(false) }}"
 
 {% raw %}
 
@@ -39,19 +42,29 @@ for i in "${!nodes[@]}"; do
     echo "Node $i: ${nodes[$i]}"
 done
 
-PREFILL_HOST_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[0]} ip route get $(getent ahosts ${nodes[0]} | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
-if [ -z "$PREFILL_HOST_IP" ]; then
-    echo "Error: Could not retrieve IP address for prefill host ${nodes[0]} on interface $NETWORK_INTERFACE"
+# Get IP address of the master node (first prefill node) for NATS/ETCD
+MASTER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[0]} ip addr show $NETWORK_INTERFACE | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+if [ -z "$MASTER_IP" ]; then
+    echo "Error: Could not retrieve IP address for master host ${nodes[0]} on interface $NETWORK_INTERFACE"
     exit 1
 fi
-echo "Prefill host IP address: $PREFILL_HOST_IP"
+echo "Master IP address: $MASTER_IP"
 
-DECODE_HOST_IP=$(srun --nodes=1 --ntasks=1 --nodelist=${nodes[$PREFILL_NODES]} ip route get $(getent ahosts ${nodes[$PREFILL_NODES]} | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
-if [ -z "$DECODE_HOST_IP" ]; then
-    echo "Error: Could not retrieve IP address for decode host ${nodes[$PREFILL_NODES]} on interface $NETWORK_INTERFACE"
-    exit 1
-fi
-echo "Decode host IP address: $DECODE_HOST_IP"
+# Compute leader nodes for each worker
+prefill_leaders=()
+for i in $(seq 0 $((PREFILL_WORKERS - 1))); do
+    leader_idx=$((i * PREFILL_NODES_PER_WORKER))
+    prefill_leaders[$i]=$leader_idx
+done
+
+decode_leaders=()
+for i in $(seq 0 $((DECODE_WORKERS - 1))); do
+    leader_idx=$((PREFILL_NODES + i * DECODE_NODES_PER_WORKER))
+    decode_leaders[$i]=$leader_idx
+done
+
+echo "Prefill worker leaders: ${prefill_leaders[@]}"
+echo "Decode worker leaders: ${decode_leaders[@]}"
 
 # Prepare enroot arguments to pass to srun commands
 ENROOT_ARGS="\
@@ -62,31 +75,52 @@ ENROOT_ARGS="\
 "
 
 # Build common worker arguments
-WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE}"
-if [ "$USE_SGLANG_COMMANDS" = "True" ]; then
-    WORKER_ARGS="${WORKER_ARGS} --use-sglang-commands"
-fi
+WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE} --master_ip ${MASTER_IP}"
 
-# Launch prefill tasks on the first PREFILL_NODES nodes
-for i in $(seq 0 $((PREFILL_NODES - 1))); do
-    node=${nodes[$i]}
-    rank=$i
-    echo "Launching prefill task on node ${i} (rank ${rank}): $node"
+# Launch prefill workers
+for worker_idx in $(seq 0 $((PREFILL_WORKERS - 1))); do
+    leader_idx=${prefill_leaders[$worker_idx]}
+    leader_node=${nodes[$leader_idx]}
 
-    cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill.out --error=${LOG_DIR}/${node}_prefill.err python /scripts/worker_setup.py --prefill_host_ip ${PREFILL_HOST_IP} --decode_host_ip ${DECODE_HOST_IP} --rank ${rank} --total_nodes ${PREFILL_NODES} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_gpu_utilization.log ${WORKER_ARGS}"
-    echo "$cmd"
-    $cmd &
+    # Get leader IP for this worker group
+    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    echo "Prefill worker $worker_idx leader: $leader_node ($LEADER_IP)"
+
+    # Launch all nodes for this worker
+    for node_idx in $(seq 0 $((PREFILL_NODES_PER_WORKER - 1))); do
+        global_node_idx=$((leader_idx + node_idx))
+        node=${nodes[$global_node_idx]}
+        local_rank=$node_idx
+
+        echo "Launching prefill worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
+
+        cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill_w${worker_idx}.out --error=${LOG_DIR}/${node}_prefill_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${PREFILL_NODES_PER_WORKER} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
+        echo "$cmd"
+        $cmd &
+    done
 done
 
-# Launch decode tasks on the next DECODE_NODES nodes
-for i in $(seq $PREFILL_NODES $((PREFILL_NODES + DECODE_NODES - 1))); do
-    node=${nodes[$i]}
-    rank=$((i - PREFILL_NODES))
-    echo "Launching decode task on node ${i} (rank ${rank}): $node"
+# Launch decode workers
+for worker_idx in $(seq 0 $((DECODE_WORKERS - 1))); do
+    leader_idx=${decode_leaders[$worker_idx]}
+    leader_node=${nodes[$leader_idx]}
 
-    cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode.out --error=${LOG_DIR}/${node}_decode.err python /scripts/worker_setup.py --decode_host_ip ${DECODE_HOST_IP} --prefill_host_ip ${PREFILL_HOST_IP} --rank ${rank} --total_nodes ${DECODE_NODES} --worker_type decode --gpu_utilization_log /logs/${node}_decode_gpu_utilization.log ${WORKER_ARGS}"
-    echo "$cmd"
-    $cmd &
+    # Get leader IP for this worker group
+    LEADER_IP=$(srun --nodes=1 --ntasks=1 --nodelist=$leader_node ip route get $(getent ahosts $leader_node | grep STREAM | head -1 | awk '{print $1}') | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+    echo "Decode worker $worker_idx leader: $leader_node ($LEADER_IP)"
+
+    # Launch all nodes for this worker
+    for node_idx in $(seq 0 $((DECODE_NODES_PER_WORKER - 1))); do
+        global_node_idx=$((leader_idx + node_idx))
+        node=${nodes[$global_node_idx]}
+        local_rank=$node_idx
+
+        echo "Launching decode worker $worker_idx, node $global_node_idx (local_rank $local_rank): $node"
+
+        cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode_w${worker_idx}.out --error=${LOG_DIR}/${node}_decode_w${worker_idx}.err python /scripts/worker_setup.py --leader_ip ${LEADER_IP} --worker_idx ${worker_idx} --local_rank ${local_rank} --nodes_per_worker ${DECODE_NODES_PER_WORKER} --worker_type decode --gpu_utilization_log /logs/${node}_decode_w${worker_idx}_gpu_utilization.log ${WORKER_ARGS}"
+        echo "$cmd"
+        $cmd &
+    done
 done
 
 echo ""

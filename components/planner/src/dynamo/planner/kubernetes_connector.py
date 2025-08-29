@@ -32,13 +32,9 @@ class KubernetesConnector(PlannerConnector):
     async def add_component(self, component_name: str, blocking: bool = True):
         """Add a component by increasing its replica count by 1"""
 
-        deployment = await self.kube_api.get_graph_deployment(
-            component_name, self.dynamo_namespace
-        )
+        deployment = await self.kube_api.get_graph_deployment()
         if deployment is None:
-            raise ValueError(
-                f"Graph not found for component {component_name} in dynamo namespace {self.dynamo_namespace}"
-            )
+            raise ValueError("Parent DynamoGraphDeployment not found")
 
         # get current replicas or 1 if not found
         current_replicas = self._get_current_replicas(deployment, component_name)
@@ -55,13 +51,9 @@ class KubernetesConnector(PlannerConnector):
     async def remove_component(self, component_name: str, blocking: bool = True):
         """Remove a component by decreasing its replica count by 1"""
 
-        deployment = await self.kube_api.get_graph_deployment(
-            component_name, self.dynamo_namespace
-        )
+        deployment = await self.kube_api.get_graph_deployment()
         if deployment is None:
-            raise ValueError(
-                f"Graph {component_name} not found for namespace {self.dynamo_namespace}"
-            )
+            raise ValueError("Parent DynamoGraphDeployment not found")
 
         # get current replicas or 1 if not found
         current_replicas = self._get_current_replicas(deployment, component_name)
@@ -76,48 +68,17 @@ class KubernetesConnector(PlannerConnector):
                     self._get_graph_deployment_name(deployment)
                 )
 
-    async def _validate_components_same_deployment(
-        self, target_replicas: dict[str, int]
-    ) -> dict:
-        """
-        Validate that all target components belong to the same DynamoGraphDeployment.
-        """
-        if not target_replicas:
-            raise ValueError("target_replicas cannot be empty")
-
-        # Get deployment for first component
-        first_component = next(iter(target_replicas))
-        deployment = await self.kube_api.get_graph_deployment(
-            first_component, self.dynamo_namespace
-        )
-        if deployment is None:
-            raise ValueError(
-                f"Component {first_component} not found in namespace {self.dynamo_namespace}"
-            )
-
-        # Validate that all components belong to the same DGD
-        graph_name = deployment["metadata"]["name"]
-        for component in target_replicas:
-            comp_deployment = await self.kube_api.get_graph_deployment(
-                component, self.dynamo_namespace
-            )
-            if comp_deployment is None:
-                raise ValueError(
-                    f"Component {component} not found in namespace {self.dynamo_namespace}"
-                )
-            if comp_deployment["metadata"]["name"] != graph_name:
-                raise ValueError(
-                    f"Component {component} belongs to graph '{comp_deployment['metadata']['name']}' "
-                    f"but expected graph '{graph_name}'. All components must belong to the same GraphDeployment."
-                )
-
-        return deployment
-
     async def set_component_replicas(
         self, target_replicas: dict[str, int], blocking: bool = True
     ):
         """Set the replicas for multiple components at once"""
-        deployment = await self._validate_components_same_deployment(target_replicas)
+        if not target_replicas:
+            raise ValueError("target_replicas cannot be empty")
+
+        deployment = await self.kube_api.get_graph_deployment()
+        if deployment is None:
+            raise ValueError("Parent DynamoGraphDeployment not found")
+
         if not await self.kube_api.is_deployment_ready(
             self._get_graph_deployment_name(deployment)
         ):

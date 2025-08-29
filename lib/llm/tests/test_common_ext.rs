@@ -132,7 +132,7 @@ fn test_chat_completions_common_overrides_nvext() {
         Some(true)
     );
     assert_eq!(request.get_guided_regex(), Some(".*".to_string())); // common value takes precedence
-                                                                    // Verify precedence through stop conditions extraction
+    // Verify precedence through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
     assert_eq!(stop_conditions.min_tokens, Some(50));
@@ -279,4 +279,27 @@ fn test_min_tokens_only_at_root_level() {
     // Verify through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.min_tokens, Some(150));
+}
+
+#[test]
+fn test_sampling_parameters_extraction() {
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_llm::protocols::openai::common_ext::CommonExt;
+
+    // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
+    let request = NvCreateChatCompletionRequest {
+        inner: Default::default(),
+        common: CommonExt::builder()
+            .top_k(42)
+            .repetition_penalty(1.3)
+            .build()
+            .unwrap(),
+        nvext: None,
+    };
+
+    let sampling_options = request.extract_sampling_options().unwrap();
+
+    assert_eq!(sampling_options.top_k, Some(42));
+    assert_eq!(sampling_options.repetition_penalty, Some(1.3));
 }

@@ -15,7 +15,7 @@
 
 use std::sync::atomic::AtomicU64;
 
-use crate::block_manager::block::{locality::LocalityProvider, BlockState};
+use crate::block_manager::block::{BlockState, locality::LocalityProvider};
 
 use super::*;
 use priority_key::PriorityKey;
@@ -113,7 +113,9 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     fn insert_with_sequence_hash(&mut self, block: Block<S, L, M>, sequence_hash: SequenceHash) {
         let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
         if self.priority_set.contains(&priority_key) {
-            tracing::trace!("multiple entries with the same sequence hash, resetting block and inserting into uninitialized set");
+            tracing::trace!(
+                "multiple entries with the same sequence hash, resetting block and inserting into uninitialized set"
+            );
             let mut block = block;
             block.reset();
             self.uninitialized_set.push_back(block);
@@ -546,8 +548,8 @@ pub(crate) mod tests {
     use crate::{
         block_manager::{
             block::{
-                locality::Local, registry::BlockRegistry, state::CompleteState, Blocks,
-                PrivateBlockExt,
+                Blocks, PrivateBlockExt, locality::Local, registry::BlockRegistry,
+                state::CompleteState,
             },
             events::NullEventManager,
             layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},

@@ -24,22 +24,22 @@ use tracing as log;
 use crate::model_card::{ModelDeploymentCard, TokenizerKind};
 use dynamo_runtime::{
     pipeline::{
-        async_trait, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
-        ServerStreamingEngine, SingleIn,
+        AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
+        SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
 
 use crate::protocols::{
+    TokenIdType,
     common::{
+        StopConditions,
         llm_backend::{
             BackendOutput, EmbeddingsEngineOutput, FinishReason, LLMEngineOutput,
             PreprocessedRequest,
         },
         preprocessor::PreprocessedEmbeddingRequest,
-        StopConditions,
     },
-    TokenIdType,
 };
 use crate::tokenizers::{DecodeStream, HuggingFaceTokenizer, Tokenizer};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -149,10 +149,11 @@ impl
                     }
 
                     // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data {
-                        if data.text.is_some() && !state.validate_engine_decode {
-                            return Some((output, state));
-                        }
+                    if let Some(data) = &output.data
+                        && data.text.is_some()
+                        && !state.validate_engine_decode
+                    {
+                        return Some((output, state));
                     }
 
                     let data = output.data.as_ref().unwrap();
@@ -425,45 +426,44 @@ impl Decoder {
 
         // check stop sequences - the jail will always hold at least the largest stop sequence
         // if jail_max_bytes is 0, then there are no stop sequences
-        if self.jail_max_bytes > 0 {
-            if let Some(token) = &token {
-                let pre_append = self.jail.len();
-                log::debug!("pre_append: {}", pre_append);
-                log::debug!("jail: {}", self.jail);
-                self.jail.push_str(token);
-                log::debug!("post_append: {}", self.jail.len());
-                log::debug!("jail: {}", self.jail);
+        if self.jail_max_bytes > 0
+            && let Some(token) = &token
+        {
+            let pre_append = self.jail.len();
+            log::debug!("pre_append: {}", pre_append);
+            log::debug!("jail: {}", self.jail);
+            self.jail.push_str(token);
+            log::debug!("post_append: {}", self.jail.len());
+            log::debug!("jail: {}", self.jail);
 
-                for seq in &self.hidden_stop_sequences {
-                    log::debug!("stop seq: {}", seq);
-                    if let Some(offset) =
-                        galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
-                    {
-                        log::debug!("offset: {}", offset);
-                        // return only new bytes after pre_append .. offset+seq.len()
-                        // example: seq = "ox", token = "boxes", return "b"
-                        // note: this changes when we start jailing tokens for partial matches
-                        // on the suffix of the jail with prefixes of the stop sequences
-                        //
-                        // we might have returned a partial match, if so, then offset < pre_append
-                        // in that case, we return the empty string
-                        let partial_token = if offset >= pre_append {
-                            self.jail[pre_append..offset].to_string()
-                        } else {
-                            "".to_string()
-                        };
-                        return Ok(StepResult::with_stop_trigger(
-                            Some(partial_token),
-                            StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
-                        ));
-                    }
+            for seq in &self.hidden_stop_sequences {
+                log::debug!("stop seq: {}", seq);
+                if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
+                {
+                    log::debug!("offset: {}", offset);
+                    // return only new bytes after pre_append .. offset+seq.len()
+                    // example: seq = "ox", token = "boxes", return "b"
+                    // note: this changes when we start jailing tokens for partial matches
+                    // on the suffix of the jail with prefixes of the stop sequences
+                    //
+                    // we might have returned a partial match, if so, then offset < pre_append
+                    // in that case, we return the empty string
+                    let partial_token = if offset >= pre_append {
+                        self.jail[pre_append..offset].to_string()
+                    } else {
+                        "".to_string()
+                    };
+                    return Ok(StepResult::with_stop_trigger(
+                        Some(partial_token),
+                        StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
+                    ));
                 }
+            }
 
-                if self.jail.len() > self.jail_max_bytes {
-                    // truncate the jail
-                    let drain_len = self.jail.len() - self.jail_max_bytes;
-                    self.jail.drain(0..drain_len);
-                }
+            if self.jail.len() > self.jail_max_bytes {
+                // truncate the jail
+                let drain_len = self.jail.len() - self.jail_max_bytes;
+                self.jail.drain(0..drain_len);
             }
         }
 
@@ -485,11 +485,9 @@ impl Decoder {
                 .map(|x| x.should_hide_text())
                 .unwrap_or(false);
 
-            if !hide_text {
-                if let Some(token) = &token {
-                    text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
-                        .push_str(token);
-                }
+            if !hide_text && let Some(token) = &token {
+                text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
+                    .push_str(token);
             }
             tokens.push(token);
 

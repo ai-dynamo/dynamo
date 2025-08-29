@@ -102,7 +102,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if finish_reason:
                 out = {"token_ids": [], "finish_reason": finish_reason["type"]}
             else:
-                next_total_toks = len(res["output_ids"])
+                try:
+                    next_total_toks = len(res["output_ids"])
+                except KeyError:
+                    raise ValueError(
+                        f"Missing 'output_ids' in response. This often happens when using skip_tokenizer_init=True. "
+                        f"If you're using ModelType.CHAT or custom model configurations, you may need to modify "
+                        f"the tokenization/detokenization logic in your handler. Response keys: {list(res.keys())}"
+                    )
                 out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
                 num_output_tokens_so_far = next_total_toks
 

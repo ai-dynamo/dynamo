@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context as _;
-use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig;
+use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
-use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::CancellationToken;
+use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 mod flags;
@@ -83,7 +83,6 @@ pub async fn run(
         rt.clone(),
     )
     .await?;
-
     //
     // Run in from an input
     //

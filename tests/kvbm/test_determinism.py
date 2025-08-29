@@ -28,12 +28,13 @@ import pytest
 import requests
 
 # Test markers to align with repository conventions
+# Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
     pytest.mark.kvbm,
-    pytest.mark.e2e,
-    pytest.mark.slow,
-    pytest.mark.nightly,
-    pytest.mark.gpu_1,
+    #    pytest.mark.e2e,
+    #    pytest.mark.slow,
+    #    pytest.mark.nightly,
+    #    pytest.mark.gpu_1,
 ]
 
 

@@ -27,8 +27,8 @@ use dynamo_runtime::engine::{
 };
 
 use dynamo_runtime::pipeline::{
-    context::{Context, StreamContext},
     Error, ManyOut, SingleIn,
+    context::{Context, StreamContext},
 };
 
 pub type AsyncFn<T, U> = dyn Fn(T) -> Pin<Box<dyn Future<Output = U> + Send>> + Send + Sync;

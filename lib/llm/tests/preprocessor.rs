@@ -8,7 +8,7 @@ use dynamo_llm::preprocessor::prompt::PromptFormatter;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde::{Deserialize, Serialize};
 
-use hf_hub::{api::tokio::ApiBuilder, Cache, Repo, RepoType};
+use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
 
 use std::path::PathBuf;
 

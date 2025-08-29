@@ -14,12 +14,14 @@
 // limitations under the License.
 
 use super::*;
+use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::info_span;
+use std::time::Instant;
 use tracing::Instrument;
+use tracing::info_span;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
@@ -54,43 +56,45 @@ impl WorkHandlerMetrics {
     /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
     pub fn from_endpoint(
         endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let metrics_labels = metrics_labels.unwrap_or(&[]);
         let request_counter = endpoint.create_intcounter(
-            "requests_total",
+            work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let request_duration = endpoint.create_histogram(
-            "request_duration_seconds",
+            work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
-            &[],
+            metrics_labels,
             None,
         )?;
 
         let inflight_requests = endpoint.create_intgauge(
-            "inflight_requests",
+            work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let request_bytes = endpoint.create_intcounter(
-            "request_bytes_total",
+            work_handler::REQUEST_BYTES_TOTAL,
             "Total number of bytes received in requests by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let response_bytes = endpoint.create_intcounter(
-            "response_bytes_total",
+            work_handler::RESPONSE_BYTES_TOTAL,
             "Total number of bytes sent in responses by work handler",
-            &[],
+            metrics_labels,
         )?;
 
         let error_counter = endpoint.create_intcountervec(
-            "errors_total",
+            work_handler::ERRORS_TOTAL,
             "Total number of errors in work handler processing",
-            &["error_type"],
-            &[],
+            &[work_handler::ERROR_TYPE_LABEL],
+            metrics_labels,
         )?;
 
         Ok(Self::new(
@@ -104,26 +108,50 @@ impl WorkHandlerMetrics {
     }
 }
 
+// RAII guard to ensure inflight gauge is decremented and request duration is observed on all code paths.
+struct RequestMetricsGuard {
+    inflight_requests: prometheus::IntGauge,
+    request_duration: prometheus::Histogram,
+    start_time: Instant,
+}
+impl Drop for RequestMetricsGuard {
+    fn drop(&mut self) {
+        self.inflight_requests.dec();
+        self.request_duration
+            .observe(self.start_time.elapsed().as_secs_f64());
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
 {
-    fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
+    fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
         // Call the Ingress-specific add_metrics implementation
         use crate::pipeline::network::Ingress;
-        Ingress::add_metrics(self, endpoint)
+        Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 
-        if let Some(m) = self.metrics() {
+        // Increment inflight and ensure it's decremented on all exits via RAII guard
+        let _inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
-        }
+            RequestMetricsGuard {
+                inflight_requests: m.inflight_requests.clone(),
+                request_duration: m.request_duration.clone(),
+                start_time,
+            }
+        });
 
         // decode the control message and the request
         let msg = TwoPartCodec::default()
@@ -145,12 +173,12 @@ where
                         let json_str = String::from_utf8_lossy(&header);
                         if let Some(m) = self.metrics() {
                             m.error_counter
-                                .with_label_values(&["deserialization"])
+                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
                                 .inc();
                         }
-                        return Err(PipelineError::DeserializationError(
-                            format!("Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"),
-                        ));
+                        return Err(PipelineError::DeserializationError(format!(
+                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
+                        )));
                     }
                 };
                 let request: T = serde_json::from_slice(&data)?;
@@ -159,10 +187,12 @@ where
             _ => {
                 if let Some(m) = self.metrics() {
                     m.error_counter
-                        .with_label_values(&["invalid_message"])
+                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
                         .inc();
                 }
-                return Err(PipelineError::Generic(String::from("Unexpected message from work queue; unable extract a TwoPartMessage with a header and data")));
+                return Err(PipelineError::Generic(String::from(
+                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
+                )));
             }
         };
 
@@ -182,7 +212,7 @@ where
         .map_err(|e| {
             if let Some(m) = self.metrics() {
                 m.error_counter
-                    .with_label_values(&["response_stream"])
+                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
                     .inc();
             }
             PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
@@ -197,7 +227,9 @@ where
             .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
-                    m.error_counter.with_label_values(&["generate"]).inc();
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::GENERATE])
+                        .inc();
                 }
                 PipelineError::GenerateError(e)
             });
@@ -259,7 +291,7 @@ where
                 send_complete_final = false;
                 if let Some(m) = self.metrics() {
                     m.error_counter
-                        .with_label_values(&["publish_response"])
+                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                         .inc();
                 }
                 break;
@@ -281,16 +313,15 @@ where
                     context.id()
                 );
                 if let Some(m) = self.metrics() {
-                    m.error_counter.with_label_values(&["publish_final"]).inc();
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                        .inc();
                 }
             }
         }
 
-        if let Some(m) = self.metrics() {
-            let duration = start_time.elapsed();
-            m.request_duration.observe(duration.as_secs_f64());
-            m.inflight_requests.dec();
-        }
+        // Ensure the metrics guard is not dropped until the end of the function.
+        drop(_inflight_guard);
 
         Ok(())
     }

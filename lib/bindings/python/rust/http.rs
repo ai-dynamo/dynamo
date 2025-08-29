@@ -19,8 +19,8 @@ use pyo3::{exceptions::PyException, prelude::*};
 
 use crate::{engine::*, to_pyerr, CancellationToken};
 
+pub use dynamo_llm::endpoint_type::EndpointType;
 pub use dynamo_llm::http::service::{error as http_error, service_v2};
-
 pub use dynamo_runtime::{
     error,
     pipeline::{async_trait, AsyncEngine, Data, ManyOut, SingleIn},
@@ -91,6 +91,27 @@ impl HttpService {
             service.run(token.inner).await.map_err(to_pyerr)?;
             Ok(())
         })
+    }
+
+    fn enable_endpoint(&self, endpoint_type: String, enabled: bool) -> PyResult<()> {
+        let endpoint_type = EndpointType::all()
+            .iter()
+            .find(|&&ep_type| ep_type.as_str().to_lowercase() == endpoint_type.to_lowercase())
+            .copied()
+            .ok_or_else(|| {
+                let valid_types = EndpointType::all()
+                    .iter()
+                    .map(|&ep_type| ep_type.as_str().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                to_pyerr(format!(
+                    "Invalid endpoint type: '{}'. Valid types are: {}",
+                    endpoint_type, valid_types
+                ))
+            })?;
+
+        self.inner.enable_model_endpoint(endpoint_type, enabled);
+        Ok(())
     }
 }
 
