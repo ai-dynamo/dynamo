@@ -230,7 +230,7 @@ impl EtcdBucket {
 
         let mut put_resp = self
             .client
-            .kv_put_with_options(k.clone(), value, Some(PutOptions::new().with_prev_key()))
+            .kv_put_with_options(k, value, Some(PutOptions::new().with_prev_key()))
             .await
             .map_err(|e| StorageError::EtcdError(e.to_string()))?;
 
