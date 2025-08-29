@@ -1,1 +1,2 @@
-file://*
+# Ignore all file:// protocol URLs (examples, local references, etc.)
+^file://
