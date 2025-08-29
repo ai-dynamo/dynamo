@@ -81,7 +81,7 @@ pub async fn start_kv_router_background(
     let mut nats_queue = NatsQueue::new_with_consumer(
         stream_name.clone(),
         nats_server.clone(),
-        std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
+        std::time::Duration::from_secs(3600), // Very long timeout (1 hour)
         consumer_uuid,
     );
     nats_queue.connect_with_reset(router_reset_states).await?;

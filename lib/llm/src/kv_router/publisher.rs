@@ -143,7 +143,7 @@ impl KvEventPublisher {
         let mut nats_queue = NatsQueue::new_without_consumer(
             stream_name,
             nats_server,
-            std::time::Duration::from_secs(60), // Default timeout
+            std::time::Duration::from_secs(3600), // 1 hour timeout
         );
 
         // Connect the NatsQueue before passing it to the event processor
