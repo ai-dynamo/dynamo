@@ -39,7 +39,7 @@ helm version             # v3.0+
 docker version           # Running daemon
 
 # Set your inference runtime image
-export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
 # Also available: sglang-runtime, tensorrtllm-runtime
 ```
 
@@ -53,7 +53,7 @@ Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidi
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-kubernetes
-export RELEASE_VERSION=0.4.1 # any version of Dynamo 0.3.2+
+export RELEASE_VERSION=0.5.0 # any version of Dynamo 0.3.2+
 
 # 2. Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
@@ -64,6 +64,15 @@ kubectl create namespace ${NAMESPACE}
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
+
+> [!TIP]
+> By default, Grove and Kai Scheduler are NOT installed. You can enable them by setting the following flags in the helm install command:
+
+```bash
+--set "grove.enabled=true"
+--set "kai-scheduler.enabled=true"
+```
+
 
 → [Verify Installation](#verify-installation)
 
@@ -79,7 +88,7 @@ export NAMESPACE=dynamo-cloud
 export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
 export DOCKER_USERNAME='$oauthtoken'
 export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
-export IMAGE_TAG=0.4.1
+export IMAGE_TAG=0.5.0
 
 # 2. Build operator
 cd deploy/cloud/operator
@@ -176,6 +185,7 @@ kubectl create secret generic hf-token-secret \
 
 ## Advanced Options
 
+- [Helm Chart Configuration](../../../deploy/cloud/helm/platform/README.md)
 - [GKE-specific setup](gke_setup.md)
 - [Create custom deployments](create_deployment.md)
 - [Dynamo Operator details](dynamo_operator.md)
