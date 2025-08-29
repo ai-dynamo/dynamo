@@ -21,15 +21,10 @@ on:
     branches:
     - main
 
-  # Run this workflow on pull requests targeting main but only if files in runtime/rust change.
+  # Run this workflow on pull requests targeting main but only on rust changes.
   pull_request:
     paths:
     - .github/workflows/pre-merge-rust.yml
-    - 'lib/runtime/**'
-    - 'lib/llm/**'
-    - 'lib/bindings/**'
-    - 'launch/**'
-    - 'components/**'
     - '**.rs'
     - 'Cargo.toml'
     - 'Cargo.lock'

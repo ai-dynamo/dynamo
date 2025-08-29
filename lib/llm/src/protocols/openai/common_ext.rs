@@ -35,6 +35,11 @@ pub struct CommonExt {
     #[validate(range(exclusive_min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
 
+    /// include_stop_str_in_output
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub include_stop_str_in_output: Option<bool>,
+
     /// Guided Decoding Options
     /// If specified, the output will be a JSON object. Can be a string, an object, or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +88,7 @@ pub trait CommonExtProvider {
     /// Other sampling Options
     fn get_top_k(&self) -> Option<i32>;
     fn get_repetition_penalty(&self) -> Option<f32>;
+    fn get_include_stop_str_in_output(&self) -> Option<bool>;
 }
 
 /// Helper function to emit deprecation warnings for nvext parameters
@@ -132,6 +138,7 @@ mod tests {
         assert_eq!(common_ext.guided_grammar, None);
         assert_eq!(common_ext.guided_choice, None);
         assert_eq!(common_ext.guided_decoding_backend, None);
+        assert_eq!(common_ext.include_stop_str_in_output, None);
     }
 
     #[test]
@@ -141,6 +148,7 @@ mod tests {
             .min_tokens(10)
             .top_k(50)
             .repetition_penalty(1.2)
+            .include_stop_str_in_output(true)
             .guided_json(serde_json::json!({"key": "value"}))
             .guided_regex("regex".to_string())
             .guided_grammar("grammar".to_string())
@@ -153,6 +161,7 @@ mod tests {
         assert_eq!(common_ext.min_tokens, Some(10));
         assert_eq!(common_ext.top_k, Some(50));
         assert_eq!(common_ext.repetition_penalty, Some(1.2));
+        assert_eq!(common_ext.include_stop_str_in_output, Some(true));
         assert_eq!(
             common_ext.guided_json.as_ref(),
             Some(&serde_json::json!({"key": "value"}))
@@ -175,11 +184,13 @@ mod tests {
         let common_ext = CommonExt::builder()
             .ignore_eos(false)
             .min_tokens(5)
+            .include_stop_str_in_output(true)
             .build()
             .unwrap();
 
         assert_eq!(common_ext.ignore_eos, Some(false));
         assert_eq!(common_ext.min_tokens, Some(5));
+        assert_eq!(common_ext.include_stop_str_in_output, Some(true));
     }
 
     #[test]
@@ -190,6 +201,7 @@ mod tests {
             min_tokens: Some(0), // Should be valid (min = 0)
             top_k: None,
             repetition_penalty: None,
+            include_stop_str_in_output: None,
             guided_json: None,
             guided_regex: None,
             guided_grammar: None,
@@ -208,6 +220,7 @@ mod tests {
         assert_eq!(common_ext.min_tokens, None);
         assert_eq!(common_ext.top_k, None);
         assert_eq!(common_ext.repetition_penalty, None);
+        assert_eq!(common_ext.include_stop_str_in_output, None);
         assert!(common_ext.validate().is_ok());
     }
 
@@ -220,6 +233,7 @@ mod tests {
         assert_eq!(common_ext.min_tokens, None);
         assert_eq!(common_ext.top_k, None);
         assert_eq!(common_ext.repetition_penalty, None);
+        assert_eq!(common_ext.include_stop_str_in_output, None);
         assert!(common_ext.validate().is_ok());
     }
 

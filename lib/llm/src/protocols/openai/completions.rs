@@ -210,6 +210,10 @@ impl CommonExtProvider for NvCreateCompletionRequest {
                 .and_then(|nv| nv.repetition_penalty.as_ref()),
         )
     }
+
+    fn get_include_stop_str_in_output(&self) -> Option<bool> {
+        self.common.include_stop_str_in_output
+    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {

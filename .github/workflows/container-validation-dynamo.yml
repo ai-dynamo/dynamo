@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: NVIDIA Github Validation
+name: NVIDIA Dynamo Github Validation
 
 on:
   push:
@@ -11,8 +11,8 @@ on:
 
 # Do not cancel main branch runs
 concurrency:
-  group: dynamo-build-test-${{ github.ref_name || github.run_id }}
-  cancel-in-progress: ${{ github.ref_name != 'main' }}
+  group: ${{ github.workflow }}-dynamo-build-test-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build-test:
