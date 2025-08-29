@@ -265,14 +265,22 @@ struct ModelType {
 #[pymethods]
 impl ModelType {
     #[classattr]
-    const Chat: Self = ModelType { inner: llm_rs::model_type::ModelType::Chat };
+    const Chat: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Chat,
+    };
     #[classattr]
-    const Completions: Self = ModelType { inner: llm_rs::model_type::ModelType::Completions };
+    const Completions: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Completions,
+    };
     #[classattr]
-    const Embedding: Self = ModelType { inner: llm_rs::model_type::ModelType::Embedding };
+    const Embedding: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Embedding,
+    };
 
     fn __or__(&self, other: &Self) -> Self {
-        ModelType { inner: self.inner | other.inner }
+        ModelType {
+            inner: self.inner | other.inner,
+        }
     }
 
     fn __str__(&self) -> String {
