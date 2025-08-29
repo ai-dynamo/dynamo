@@ -15,32 +15,23 @@
 
 # Dynamo Benchmarking Guide
 
-This guide shows how to benchmark NVIDIA Dynamo deployments on Kubernetes to compare performance between aggregated, disaggregated, and vanilla backend configurations. You can benchmark existing endpoints or deploy and test new configurations.
+This benchmarking framework lets you compare performance across any combination of:
+- **DynamoGraphDeployments** (automatically deployed from your manifests)
+- **External HTTP endpoints** (existing services, vLLM, TensorRT-LLM, etc.)
 
-## Hardware and Model Support
+You can mix and match these in a single benchmark run using custom labels. Configure your DynamoGraphDeployment manifests for your specific models, hardware, and parallelization needs.
 
-**Hardware Support**: This guide was initially developed and tested on H200 GPUs, but the benchmarking framework should work on other NVIDIA GPU types including H100, A100, and others.
+## What This Tool Does
 
-**Model Support**: The benchmarking framework supports any HuggingFace-compatible LLM model. The example performance plots shown in this guide were generated using `nvidia/Llama-3.1-8B-Instruct-FP8`. You can benchmark any model by modifying the deployment YAML files.
+The framework is a wrapper around `genai-perf` that:
+- Deploys DynamoGraphDeployments automatically (with cleanup)
+- Benchmarks any HTTP endpoints (no deployment needed)
+- Runs concurrency sweeps across configurable load levels
+- Generates comparison plots with your custom labels
+- Works with any HuggingFace-compatible model on NVIDIA GPUs (H200, H100, A100, etc.)
+- Runs locally and connects to your Kubernetes deployments/endpoints
 
-## What You'll Get
-
-The benchmark script supports two modes:
-
-**Deployment Benchmarking**: Deploy and test Dynamo configurations:
-- Deploy and test one or more configurations: Dynamo aggregated, Dynamo disaggregated, and vanilla backends
-- Automatically handle deployment lifecycle (create, wait, benchmark, cleanup)
-- Generate performance plots comparing latency and throughput across configurations
-
-**Endpoint Benchmarking**: Test existing endpoints:
-- Benchmark any existing HTTP endpoint without deployment overhead
-- Test your already-running services or external APIs
-- Ideal for comparing against baselines or testing production endpoints
-
-Both modes:
-- Run concurrency sweeps across multiple load levels (1, 2, 4, 8, 16, 32, 64, 128 concurrent requests)
-- Generate comprehensive performance plots and analysis
-- Save all results for detailed analysis of optimal configurations
+**Default model**: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` (configurable with `--model`)
 
 ## Prerequisites
 
@@ -48,80 +39,61 @@ Both modes:
 
 2. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster. All other required tools (GenAI-Perf, Python, etc.) are included in the Dynamo containers. If you are not working within a Dynamo container, you can install the necessary requirements using `deploy/utils/requirements.txt`. *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
 
-## Quick Start
-
-Choose one of the approaches below based on whether you want to benchmark existing endpoints or deploy new configurations.
-
-### Option A: Benchmark an Existing Endpoint
-
-If you already have a running LLM endpoint (Dynamo, vLLM, or any OpenAI-compatible API):
+## Quick Start Examples
 
 ```bash
-# Set your namespace
 export NAMESPACE=benchmarking
 
-# Benchmark your existing endpoint
-./benchmarks/benchmark.sh \
-   --namespace $NAMESPACE \
-   --endpoint "http://your-endpoint:8000"
+# Compare multiple DynamoGraphDeployments
+./benchmarks/benchmark.sh --namespace $NAMESPACE \
+   --input agg=components/backends/vllm/deploy/agg.yaml \
+   --input disagg=components/backends/vllm/deploy/disagg.yaml
+
+# Compare Dynamo vs external endpoint
+./benchmarks/benchmark.sh --namespace $NAMESPACE \
+   --input dynamo=components/backends/vllm/deploy/disagg.yaml \
+   --input vllm-baseline=http://localhost:8000
+
+# Benchmark single external endpoint
+./benchmarks/benchmark.sh --namespace $NAMESPACE \
+   --input production-api=http://your-api:8000
+
+# Custom model and sequence lengths
+./benchmarks/benchmark.sh --namespace $NAMESPACE \
+   --input my-setup=my-custom-manifest.yaml \
+   --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 256
 ```
 
-This will:
-- Connect directly to your endpoint without deploying anything
-- Run performance tests at multiple concurrency levels
-- Save results to `./benchmarks/results/benchmarking/`
-- Generate comparison plots
+**Key**: Configure your manifests for your specific models, hardware, and parallelization strategy before benchmarking.
 
-### Option B: Deploy and Benchmark Dynamo Configurations
+### Important: Image Accessibility
 
-#### Important: Check Image Accessibility
+Ensure container images in your DynamoGraphDeployment manifests are accessible:
+- **Public images**: Use [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) public releases
+- **Custom registries**: Configure proper credentials in your Kubernetes namespace
 
-Before running deployment benchmarks, ensure the container images in your YAML manifests are accessible. Some example manifests may reference private development images that need to be updated.
-
-**For public use**: Edit your manifests to use publicly available images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). These public release images are accessible without requiring private NGC accounts or special credentials.
-
-**For custom setups**: Alternatively, you can use your own registry with proper credentials configured in your Kubernetes namespace.
-
-#### Running Deployment Benchmarks
-
-You can benchmark any combination of deployment types. The script will automatically skip unspecified types:
-
-```bash
-# 1. Set your namespace (same one from deploy/utils setup)
-export NAMESPACE=benchmarking
-
-# 2a. Benchmark all three deployment types
-./benchmarks/benchmark.sh \
-   --namespace $NAMESPACE \
-   --agg components/backends/vllm/deploy/agg.yaml \
-   --disagg components/backends/vllm/deploy/disagg.yaml \
-   --vanilla benchmarks/utils/templates/vanilla-vllm.yaml
-
-# 2b. Or benchmark just disaggregated deployment
-./benchmarks/benchmark.sh \
-   --namespace $NAMESPACE \
-   --disagg components/backends/vllm/deploy/disagg.yaml
-```
+## How It Works
 
 You'll see output like this confirming your configuration:
 ```text
 === Benchmark Configuration ===
 Namespace:              benchmarking
-Model:                  nvidia/Llama-3.1-8B-Instruct-FP8
+Model:                  deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 Input Sequence Length:  200 tokens      # Auto-configured default
 Output Sequence Length: 200 tokens      # Auto-configured default
 Sequence Std Dev:       10 tokens       # Auto-configured default
 Output Directory:       ./benchmarks/results
-Aggregated Config:      components/backends/vllm/deploy/agg.yaml
-Disaggregated Config:   components/backends/vllm/deploy/disagg.yaml
-Vanilla Config:         benchmarks/utils/templates/vanilla-vllm.yaml
+
+Benchmark Inputs:
+  agg: manifest components/backends/vllm/deploy/agg.yaml
+  disagg: manifest components/backends/vllm/deploy/disagg.yaml
 ===============================
 ```
 
 The script will then:
-1. Deploy each configuration (aggregated, disaggregated, vanilla vLLM)
-2. Run GenAI-Perf benchmarks at various concurrency levels
-3. Generate comparison plots in `./benchmarks/results/plots/`
+1. Deploy each DynamoGraphDeployment configuration
+2. Run GenAI-Perf benchmarks at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
+3. Generate comparison plots using your custom labels in `./benchmarks/results/plots/`
 4. Clean up deployments when complete
 
 **Note**: The script auto-configures reasonable defaults for ISL/OSL (200 tokens each). You can override these with `--isl` and `--osl` flags if needed for your specific workload.
@@ -129,7 +101,7 @@ The script will then:
 ### What Happens During Benchmarking
 
 The script automatically:
-- Tests concurrency levels: 1, 2, 4, 8, 16, 32, 64, 128 concurrent requests
+- Tests concurrency levels
 - Measures key metrics: latency, throughput, time-to-first-token
 - Runs each test for sufficient duration to get stable results
 - Handles all deployment lifecycle (create, wait, benchmark, cleanup)
@@ -154,7 +126,10 @@ The benchmarking framework supports any HuggingFace-compatible LLM model. To ben
    --output-dir my_benchmark_results
 ```
 
-**Important**: The model specified in your deployment manifests must match the `--model` flag used for benchmarking. The `--model` flag configures GenAI-Perf for testing, while the deployment manifest determines what model is actually loaded.
+**Important**:
+- The model specified in your deployment manifests must match the `--model` flag used for benchmarking. The `--model` flag configures GenAI-Perf for testing, while the deployment manifest determines what model is actually loaded.
+- Only DynamoGraphDeployment manifests are supported for automatic deployment.
+- **To benchmark non-Dynamo backends**: To compare against vanilla backends like vLLM, TensorRT-LLM, SGLang, etc., deploy them manually following their respective Kubernetes deployment guides, expose a port (typically via port-forwarding), and use the endpoint option with `--input label=http://your-endpoint:port`.
 
 ### Direct Python Execution
 
@@ -185,27 +160,36 @@ python3 -u -m benchmarks.utils.benchmark \
 python3 -m benchmarks.utils.plot --data-dir $OUTPUT_DIR
 ```
 
+### Comparison Limitations
+
+The plotting system supports up to 12 different inputs in a single comparison. If you need to compare more than 12 different deployments/endpoints, consider running separate benchmark sessions or grouping related comparisons together.
+
+### Concurrency Configuration
+
+You can customize the concurrency levels using the CONCURRENCIES environment variable:
+
+```bash
+# Custom concurrency levels
+CONCURRENCIES="1,5,20,50" ./benchmarks/benchmark.sh --namespace $NAMESPACE --input my-test=components/backends/vllm/deploy/disagg.yaml
+```
+
 ## Configuration Options
 
 The benchmarking script supports flexible configuration options:
 
 ```bash
-./benchmarks/benchmark.sh --namespace NAMESPACE [--endpoint URL | --agg CONFIG] [--disagg CONFIG] [--vanilla CONFIG] [OPTIONS]
+./benchmarks/benchmark.sh --namespace NAMESPACE --input <label>=<manifest_path_or_endpoint> [--input <label>=<manifest_path_or_endpoint>]... [OPTIONS]
 
 REQUIRED:
-  -n, --namespace NAMESPACE     Kubernetes namespace
-
-  Either:
-  --endpoint URL                Existing endpoint URL to benchmark
-
-  Or at least one of:
-  --agg CONFIG                  Aggregated deployment manifest
-  --disagg CONFIG               Disaggregated deployment manifest
-  --vanilla CONFIG              Vanilla backend deployment manifest
+  -n, --namespace NAMESPACE           Kubernetes namespace
+  --input <label>=<manifest_path_or_endpoint>  Benchmark input with custom label
+                                        - <label>: becomes the name/label in plots
+                                        - <manifest_path_or_endpoint>: either a DynamoGraphDeployment manifest or HTTP endpoint URL
+                                        Can be specified multiple times for comparisons
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name (default: nvidia/Llama-3.1-8B-Instruct-FP8)
+  -m, --model MODEL             Model name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
   -i, --isl LENGTH              Input sequence length (default: 200)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
   -o, --osl LENGTH              Output sequence length (default: 200)
@@ -214,22 +198,26 @@ OPTIONS:
 
 EXAMPLES:
   # Benchmark existing endpoint
-  ./benchmarks/benchmark.sh --namespace my-ns --endpoint "http://localhost:8000"
+  ./benchmarks/benchmark.sh --namespace my-ns --input my-endpoint=http://localhost:8000
 
-  # Benchmark only disaggregated deployment
-  ./benchmarks/benchmark.sh --namespace my-ns --disagg disagg.yaml
+  # Benchmark single DynamoGraphDeployment
+  ./benchmarks/benchmark.sh --namespace my-ns --input disagg=components/backends/vllm/deploy/disagg.yaml
 
-  # Benchmark all deployment types
-  ./benchmarks/benchmark.sh --namespace my-ns --agg agg.yaml --disagg disagg.yaml --vanilla vanilla.yaml
+  # Compare multiple deployments
+  ./benchmarks/benchmark.sh --namespace my-ns --input agg=agg.yaml --input disagg=disagg.yaml
+
+  # Compare deployment vs endpoint
+  ./benchmarks/benchmark.sh --namespace my-ns --input dynamo=disagg.yaml --input external=http://my-api:8000
 
   # Custom parameters
-  ./benchmarks/benchmark.sh --namespace my-ns --endpoint "http://my-api:8000" --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 512
+  ./benchmarks/benchmark.sh --namespace my-ns --input test=disagg.yaml --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 512
 ```
 
 ### Important Notes
 
-- **Mutual Exclusivity**: You cannot use `--endpoint` together with deployment options (`--agg`, `--disagg`, `--vanilla`)
-- **Flexible Deployment**: When using deployment options, you can specify any combination - the script will skip unspecified types
+- **Custom Labels**: Each input must have a unique label that becomes the name in plots and results
+- **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
+- **Input Types**: Supports DynamoGraphDeployment manifests for automatic deployment, or HTTP endpoints for existing services
 - **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing, not deployment (deployment model is determined by the manifest files)
 
 ## Understanding Your Results
@@ -253,37 +241,35 @@ benchmarks/results/
 
 Raw data is organized by deployment/benchmark type and concurrency level:
 
-**For Deployment Benchmarking:**
+**For Any Benchmarking (uses your custom labels):**
 ```text
 benchmarks/results/
-├── SUMMARY.txt                  # Human-readable benchmark summary
 ├── plots/                       # Performance visualization plots
+│   ├── SUMMARY.txt             # Human-readable benchmark summary
 │   ├── p50_inter_token_latency_vs_concurrency.png
 │   ├── avg_inter_token_latency_vs_concurrency.png
 │   ├── request_throughput_vs_concurrency.png
 │   ├── efficiency_tok_s_gpu_vs_user.png
 │   └── avg_time_to_first_token_vs_concurrency.png
-├── agg/                         # Aggregated deployment results (if run)
+├── <your-label-1>/              # Results for first input (uses your custom label)
 │   ├── c1/                      # Concurrency level 1
 │   │   └── profile_export_genai_perf.json
 │   ├── c2/                      # Concurrency level 2
-│   └── ...                      # Other concurrency levels
-├── disagg/                      # Disaggregated deployment results (if run)
-│   └── c*/                      # Same structure as agg/
-└── vanilla/                     # Vanilla backend deployment results (if run)
-    └── c*/                      # Same structure as agg/
+│   ├── c5/                      # Concurrency level 5
+│   └── ...                      # Other concurrency levels (10, 50, 100, 250)
+├── <your-label-2>/              # Results for second input (if provided)
+│   └── c*/                      # Same structure as above
+└── <your-label-N>/              # Results for additional inputs
+    └── c*/                      # Same structure as above
 ```
 
-**For Endpoint Benchmarking:**
+**Example with actual labels:**
 ```text
 benchmarks/results/
-├── SUMMARY.txt                  # Human-readable benchmark summary
-├── plots/                       # Performance visualization plots
-└── benchmarking/                # Endpoint benchmark results
-    ├── c1/                      # Concurrency level 1
-    │   └── profile_export_genai_perf.json
-    ├── c2/                      # Concurrency level 2
-    └── ...                      # Other concurrency levels
+├── plots/
+├── dynamo-agg/                  # --input dynamo-agg=agg.yaml
+├── dynamo-disagg/               # --input dynamo-disagg=disagg.yaml
+└── external-vllm/               # --input external-vllm=http://localhost:8000
 ```
 
 Each concurrency directory contains:
@@ -295,11 +281,15 @@ Each concurrency directory contains:
 
 ### Custom Concurrency Levels
 
-Modify the benchmark script to test specific concurrency patterns:
+Customize concurrency levels using the CONCURRENCIES environment variable:
 
-```python
-# Edit the CONCURRENCIES array in benchmarks/utils/genai.py
-CONCURRENCIES=[1, 2, 5, 10, 50, 100, 250]
+```bash
+# Custom concurrency levels
+CONCURRENCIES="1,5,20,50" ./benchmarks/benchmark.sh --namespace $NAMESPACE --input my-test=disagg.yaml
+
+# Or set permanently
+export CONCURRENCIES="1,2,5,10,25,50,100"
+./benchmarks/benchmark.sh --namespace $NAMESPACE --input test=disagg.yaml
 ```
 
 ### Multi-Node Testing (TODO)
@@ -310,30 +300,12 @@ For multi-node Dynamo deployments:
 2. Use appropriate tensor parallelism settings (`SCALE > 1`)
 3. Monitor resource utilization across nodes
 
-## Custom Benchmarking
+## Customize Benchmarking Behavior
 
-### Bring Your Own Scripts
+The built-in workflow handles DynamoGraphDeployment deployment, benchmarking with genai-perf, and plot generation automatically. If you want to modify the behavior:
 
-For custom benchmarking scenarios, you can:
+1. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
 
-1. **Create custom deployment manifests**: Configure your own agg, disagg, and vanilla manifests for your specific models and hardware configurations. The framework supports any HuggingFace-compatible model and works across different NVIDIA GPU types (H200, H100, A100, etc.)
-
-2. **Modify concurrency levels**: Edit `benchmarks/utils/genai.py` to customize test parameters
-   ```python
-   CONCURRENCIES = [1, 5, 10, 25, 50, 100]  # Your custom levels
-   ```
-
-3. **Use direct Python modules**: Call the Python modules directly for full control
-   ```bash
-   # Custom benchmark workflow
-   python3 -m benchmarks.utils.benchmark --help
-
-   # Custom plot generation
-   python3 -m benchmarks.utils.plot --help
-   ```
-
-4. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
-
-5. **Generate different plots**: Modify `benchmarks/utils/plot.py` to generate a different set of plots for whatever you wish to visualize.
+2. **Generate different plots**: Modify `benchmarks/utils/plot.py` to generate a different set of plots for whatever you wish to visualize.
 
 The `benchmark.sh` script provides a complete end-to-end benchmarking experience. For more granular control, use the Python modules directly.

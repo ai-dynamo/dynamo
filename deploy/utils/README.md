@@ -4,7 +4,7 @@ This directory contains small utilities and manifests used by benchmarking and p
 
 ## Contents
 
-- `setup_k8s_namespace.sh` — one-time per Kubernetes namespace. Creates namespace (if missing), applies common manifests, and installs the Dynamo operator. If `DOCKER_SERVER`/`IMAGE_TAG` are provided, it installs your custom operator image; otherwise it installs the default published image. If your registry is private, provide `DOCKER_USERNAME`/`DOCKER_PASSWORD` or respond to the prompt to create an image pull secret.
+- `setup_k8s_namespace.sh` — **fully encapsulated deployment setup** that provides one-time per Kubernetes namespace setup. Creates namespace (if missing), applies common manifests, installs CRDs, and deploys the Dynamo operator. If `DOCKER_SERVER`/`IMAGE_TAG` are provided, it installs your custom operator image; otherwise it installs the default published image. If your registry is private, provide `DOCKER_USERNAME`/`DOCKER_PASSWORD` or respond to the prompt to create an image pull secret.
 - `manifests/`
   - `serviceaccount.yaml` — ServiceAccount `dynamo-sa`
   - `role.yaml` — Role `dynamo-role`
@@ -17,8 +17,9 @@ This directory contains small utilities and manifests used by benchmarking and p
 
 ### Kubernetes Setup (one-time per namespace)
 
-Use the helper script to prepare a Kubernetes namespace with the common manifests and install the operator.
-This script creates a Kubernetes namespace with the given name if it does not yet exist. It then applies common manifests (serviceaccount, role, rolebinding, pvc), creates secrets, and deploys the Dynamo Cloud Operator to your namespace.
+Use the helper script to prepare a Kubernetes namespace with the common manifests and install the operator. This provides a **fully encapsulated deployment setup**.
+
+This script creates a Kubernetes namespace with the given name if it does not yet exist. It then applies common manifests (serviceaccount, role, rolebinding, pvc), installs CRDs, creates secrets, and deploys the Dynamo Cloud Operator to your namespace.
 If your namespace is already set up, you can skip this step.
 
 ```bash
@@ -70,7 +71,6 @@ dynamo-platform-dynamo-operator-controller-manager-xxxxx       2/2     Running  
 dynamo-platform-etcd-0                                          1/1     Running   0          5m
 dynamo-platform-nats-0                                          2/2     Running   0          5m
 dynamo-platform-nats-box-xxxxx                                  1/1     Running   0          5m
-pvc-access-pod                                                   0/1     Completed 0          5m
 ```
 
 ### PVC Manipulation Scripts
@@ -108,7 +108,7 @@ python3 deploy/utils/download_pvc_results.py \
 #### Next Steps
 
 For complete benchmarking workflows:
-- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing aggregated vs disaggregated vs vanilla vLLM deployments
+- **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
 - **Pre-Deployment Profiling**: See [docs/benchmarks/pre_deployment_profiling.md](../../docs/benchmarks/pre_deployment_profiling.md) for optimizing configurations before deployment
 
 ## Notes

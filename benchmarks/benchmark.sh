@@ -11,15 +11,15 @@ DYNAMO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration - all set via command line arguments
 NAMESPACE=""
-MODEL="nvidia/Llama-3.1-8B-Instruct-FP8"
+MODEL="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 ISL=200
 STD=10
 OSL=200
 OUTPUT_DIR="./benchmarks/results"
-AGG_CONFIG=""
-DISAGG_CONFIG=""
-VANILLA_CONFIG=""
-ENDPOINT=""
+
+# Input configurations stored as associative arrays
+declare -A INPUT_LABELS
+declare -A INPUT_VALUES
 
 # Flags
 VERBOSE=false
@@ -28,26 +28,25 @@ show_help() {
     cat << EOF
 Dynamo Benchmark Runner
 
-This script runs complete LLM performance benchmarks across aggregated, disaggregated,
-and vanilla deployments, then generates performance plots.
+This script is a wrapper around genai-perf that benchmarks Dynamo LLM deployments and
+plots the results in an easy-to-use way. It supports comparing multiple DynamoGraphDeployments
+or endpoints with custom labels defined by you.
+
+The client runs locally and connects to your deployments/endpoints for benchmarking.
 
 USAGE:
-    $0 --namespace NAMESPACE [--endpoint URL | --agg CONFIG] [--disagg CONFIG] [--vanilla CONFIG] [OPTIONS]
+    $0 --namespace NAMESPACE --input <label>=<manifest_or_endpoint> [--input <label>=<manifest_or_endpoint>]... [OPTIONS]
 
 REQUIRED:
-    -n, --namespace NAMESPACE     Kubernetes namespace
-
-    Either:
-    --endpoint URL                Existing endpoint URL to benchmark
-
-    Or at least one of:
-    --agg CONFIG                  Aggregated deployment manifest
-    --disagg CONFIG               Disaggregated deployment manifest
-    --vanilla CONFIG              Vanilla backend deployment manifest
+    -n, --namespace NAMESPACE           Kubernetes namespace
+    --input <label>=<manifest_path_or_endpoint>  Benchmark input with custom label
+                                          - <label>: becomes the name/label in plots
+                                          - <manifest_path_or_endpoint>: either a DynamoGraphDeployment manifest or HTTP endpoint URL
+                                          Can be specified multiple times for comparisons
 
 OPTIONS:
     -h, --help                    Show this help message
-    -m, --model MODEL             Model name (default: $MODEL)
+    -m, --model MODEL             Model name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
     -i, --isl LENGTH              Input sequence length (default: $ISL)
     -s, --std STDDEV              Input sequence standard deviation (default: $STD)
     -o, --osl LENGTH              Output sequence length (default: $OSL)
@@ -55,29 +54,82 @@ OPTIONS:
     --verbose                     Enable verbose output
 
 EXAMPLES:
-    # Basic benchmark with all deployment types
-    $0 --namespace my-namespace \\
-       --agg components/backends/vllm/deploy/agg.yaml \\
-       --disagg components/backends/vllm/deploy/disagg.yaml \\
-       --vanilla benchmarks/utils/templates/vanilla-vllm.yaml
+    # Compare aggregated vs disaggregated Dynamo deployments
+    $0 --namespace \$NAMESPACE \\
+       --input agg=components/backends/vllm/deploy/agg.yaml \\
+       --input disagg=components/backends/vllm/deploy/disagg.yaml
 
-    # Benchmark only aggregated deployment
-    $0 --namespace my-namespace \\
-       --agg components/backends/vllm/deploy/agg.yaml
+    # Compare Dynamo deployment vs external endpoint
+    $0 --namespace \$NAMESPACE \\
+       --input dynamo=components/backends/vllm/deploy/disagg.yaml \\
+       --input external=http://localhost:8000
 
-    # Benchmark existing endpoint
-    $0 --namespace my-namespace \\
-       --endpoint "http://localhost:8000"
+    # Benchmark a single Dynamo deployment
+    $0 --namespace \$NAMESPACE \\
+       --input my-setup=components/backends/vllm/deploy/disagg.yaml
 
-    # Custom model and sequence lengths
-    $0 --namespace my-namespace \\
-       --agg my-agg.yaml --disagg my-disagg.yaml --vanilla my-vanilla.yaml \\
-       --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 512
+    # Benchmark single external endpoint
+    $0 --namespace \$NAMESPACE \\
+       --input production=http://localhost:8000
 
-NOTE: Use deployment manifests configured for your desired model. The manifests
-      determine which model is actually deployed and benchmarked.
+DEPLOYMENT TYPES:
+    - DynamoGraphDeployment: Supports various Dynamo deployment configurations including:
+      * Aggregated deployments (prefill and decode together)
+      * Disaggregated deployments (prefill and decode separate)
+      * Router deployments
+      * Planner deployments
+      * And other Dynamo configurations
+    - External Endpoints: For comparing against non-Dynamo backends
+
+NOTE:
+    - Only DynamoGraphDeployment manifests are supported for automatic deployment.
+    - To benchmark non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), deploy them
+      manually following their Kubernetes deployment guides, expose a port (i.e. via port-forward),
+      and use the endpoint option.
+    - For Dynamo deployment setup, setup_k8s_namespace.sh provides fully encapsulated
+      deployment setup including namespace creation, CRDs, and operator installation.
+    - The --model flag should match what's configured in your deployment manifests.
 
 EOF
+}
+
+parse_input() {
+    local input_arg="$1"
+
+    # Basic format validation: must contain exactly one '=' character
+    if [[ ! "$input_arg" =~ ^[^=]+=[^=]+$ ]]; then
+        echo "ERROR: Invalid input format. Expected: <label>=<manifest_path_or_endpoint>" >&2
+        echo "Got: $input_arg" >&2
+        echo "Format must be: key=value with exactly one '=' character" >&2
+        exit 1
+    fi
+
+    # Split on the first '=' character
+    local label="${input_arg%%=*}"
+    local value="${input_arg#*=}"
+
+    # Basic validation - detailed validation will be done in Python
+    if [[ -z "$label" ]]; then
+        echo "ERROR: Label cannot be empty in input: $input_arg" >&2
+        exit 1
+    fi
+
+    if [[ -z "$value" ]]; then
+        echo "ERROR: Value cannot be empty in input: $input_arg" >&2
+        exit 1
+    fi
+
+    # Check for duplicate labels
+    if [[ -n "${INPUT_LABELS[$label]:-}" ]]; then
+        echo "ERROR: Duplicate label '$label' found. Each label must be unique." >&2
+        exit 1
+    fi
+
+    # Store the input
+    INPUT_LABELS["$label"]=1
+    INPUT_VALUES["$label"]="$value"
+
+    echo "Added input: $label -> $value"
 }
 
 parse_args() {
@@ -111,20 +163,8 @@ parse_args() {
                 OUTPUT_DIR="$2"
                 shift 2
                 ;;
-            --agg)
-                AGG_CONFIG="$2"
-                shift 2
-                ;;
-            --disagg)
-                DISAGG_CONFIG="$2"
-                shift 2
-                ;;
-            --vanilla)
-                VANILLA_CONFIG="$2"
-                shift 2
-                ;;
-            --endpoint)
-                ENDPOINT="$2"
+            --input)
+                parse_input "$2"
                 shift 2
                 ;;
             --verbose)
@@ -147,24 +187,9 @@ validate_config() {
         errors+=("--namespace is required")
     fi
 
-    # Check mutual exclusivity between endpoint and deployment manifests
-    has_endpoint=false
-    has_deployments=false
-
-    if [[ -n "$ENDPOINT" ]]; then
-        has_endpoint=true
-    fi
-
-    if [[ -n "$AGG_CONFIG" || -n "$DISAGG_CONFIG" || -n "$VANILLA_CONFIG" ]]; then
-        has_deployments=true
-    fi
-
-    if [[ "$has_endpoint" == "true" && "$has_deployments" == "true" ]]; then
-        errors+=("--endpoint cannot be used together with --agg, --disagg, or --vanilla")
-    fi
-
-    if [[ "$has_endpoint" == "false" && "$has_deployments" == "false" ]]; then
-        errors+=("Must specify either --endpoint OR at least one deployment type (--agg, --disagg, or --vanilla)")
+    # Check that at least one input is specified
+    if [[ ${#INPUT_LABELS[@]} -eq 0 ]]; then
+        errors+=("At least one --input must be specified")
     fi
 
     if [[ ${#errors[@]} -gt 0 ]]; then
@@ -176,21 +201,22 @@ validate_config() {
         exit 1
     fi
 
-    # Validate that specified configuration files exist
-    if [[ -n "$AGG_CONFIG" && ! -f "$AGG_CONFIG" ]]; then
-        echo "ERROR: Configuration file not found: $AGG_CONFIG" >&2
-        exit 1
-    fi
+    # Validate that specified files exist and endpoints are valid URLs
+    for label in "${!INPUT_VALUES[@]}"; do
+        local value="${INPUT_VALUES[$label]}"
 
-    if [[ -n "$DISAGG_CONFIG" && ! -f "$DISAGG_CONFIG" ]]; then
-        echo "ERROR: Configuration file not found: $DISAGG_CONFIG" >&2
-        exit 1
-    fi
-
-    if [[ -n "$VANILLA_CONFIG" && ! -f "$VANILLA_CONFIG" ]]; then
-        echo "ERROR: Configuration file not found: $VANILLA_CONFIG" >&2
-        exit 1
-    fi
+        # Check if it's a URL (starts with http:// or https://)
+        if [[ "$value" =~ ^https?:// ]]; then
+            echo "Input '$label': endpoint $value"
+        else
+            # It should be a file path - validate it exists
+            if [[ ! -f "$value" ]]; then
+                echo "ERROR: Manifest file not found for input '$label': $value" >&2
+                exit 1
+            fi
+            echo "Input '$label': manifest $value"
+        fi
+    done
 
     if [[ ! "$ISL" =~ ^[0-9]+$ ]] || [[ "$ISL" -le 0 ]]; then
         echo "ERROR: ISL must be a positive integer, got: $ISL" >&2
@@ -216,14 +242,17 @@ print_config() {
     echo "Output Sequence Length: $OSL tokens"
     echo "Sequence Std Dev:       $STD tokens"
     echo "Output Directory:       $OUTPUT_DIR"
+    echo ""
+    echo "Benchmark Inputs:"
 
-    if [[ -n "$ENDPOINT" ]]; then
-        echo "Endpoint URL:           $ENDPOINT"
-    else
-        echo "Aggregated Config:      ${AGG_CONFIG:-"(not specified)"}"
-        echo "Disaggregated Config:   ${DISAGG_CONFIG:-"(not specified)"}"
-        echo "Vanilla Config:         ${VANILLA_CONFIG:-"(not specified)"}"
-    fi
+    for label in "${!INPUT_VALUES[@]}"; do
+        local value="${INPUT_VALUES[$label]}"
+        if [[ "$value" =~ ^https?:// ]]; then
+            echo "  $label: endpoint $value"
+        else
+            echo "  $label: manifest $value"
+        fi
+    done
 
     echo "==============================="
     echo
@@ -248,22 +277,11 @@ run_benchmark() {
         --output-dir "$OUTPUT_DIR"
     )
 
-    # Add optional deployment arguments only if they are specified
-    if [[ -n "$AGG_CONFIG" ]]; then
-        cmd+=(--agg "$AGG_CONFIG")
-    fi
-
-    if [[ -n "$DISAGG_CONFIG" ]]; then
-        cmd+=(--disagg "$DISAGG_CONFIG")
-    fi
-
-    if [[ -n "$VANILLA_CONFIG" ]]; then
-        cmd+=(--vanilla "$VANILLA_CONFIG")
-    fi
-
-    if [[ -n "$ENDPOINT" ]]; then
-        cmd+=(--endpoint "$ENDPOINT")
-    fi
+    # Add all input arguments
+    for label in "${!INPUT_VALUES[@]}"; do
+        local value="${INPUT_VALUES[$label]}"
+        cmd+=(--input "$label=$value")
+    done
 
     if [[ "$VERBOSE" == "true" ]]; then
         echo "Executing: ${cmd[*]}"
@@ -301,12 +319,6 @@ generate_plots() {
     echo "📈 Plots available at: $OUTPUT_DIR/plots"
 }
 
-cleanup() {
-    if [[ $? -ne 0 ]]; then
-        echo "❌ Script failed. Check logs above for details." >&2
-    fi
-}
-
 main() {
     trap cleanup EXIT
 
@@ -336,8 +348,7 @@ main() {
 }
 
 cleanup() {
-    local exit_code="$1"
-    if [[ "$exit_code" -ne 0 ]]; then
+    if [[ $? -ne 0 ]]; then
         echo "❌ Script failed. Check logs above for details." >&2
     fi
 }

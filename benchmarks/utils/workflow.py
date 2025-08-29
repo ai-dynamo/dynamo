@@ -3,11 +3,10 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Tuple
 
 from benchmarks.utils.genai import run_concurrency_sweep
 from benchmarks.utils.plot import generate_plots
-from benchmarks.utils.vanilla_client import VanillaBackendClient
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
 
 
@@ -28,26 +27,10 @@ def create_dynamo_client(namespace: str, manifest_path: str) -> DynamoDeployment
     return DynamoDeploymentClient(namespace=namespace, deployment_name=deployment_name)
 
 
-def create_vanilla_client(namespace: str, manifest_path: str) -> VanillaBackendClient:
-    """Factory function for VanillaBackendClient"""
-    name = Path(manifest_path).stem
-    return VanillaBackendClient(
-        namespace=namespace, deployment_name=name, service_name=name
-    )
-
-
 async def deploy_dynamo_client(
     client: DynamoDeploymentClient, manifest_path: str
 ) -> None:
     """Deploy a DynamoDeploymentClient"""
-    await client.create_deployment(manifest_path)
-    await client.wait_for_deployment_ready(timeout=1800)
-
-
-async def deploy_vanilla_client(
-    client: VanillaBackendClient, manifest_path: str
-) -> None:
-    """Deploy a VanillaBackendClient"""
     await client.create_deployment(manifest_path)
     await client.wait_for_deployment_ready(timeout=1800)
 
@@ -128,6 +111,7 @@ async def run_single_deployment_benchmark(
 
 
 async def run_endpoint_benchmark(
+    label: str,
     endpoint: str,
     model: str,
     isl: int,
@@ -135,10 +119,10 @@ async def run_endpoint_benchmark(
     std: int,
     output_dir: str,
 ) -> None:
-    """Run benchmark for an existing endpoint"""
-    print(f"🚀 Starting benchmark of existing endpoint: {endpoint}")
-    print(f"📁 Results will be saved to: {Path(output_dir) / 'benchmarking'}")
-    print_concurrency_start("endpoint", model, isl, osl, std)
+    """Run benchmark for an existing endpoint with custom label"""
+    print(f"🚀 Starting benchmark of endpoint '{label}': {endpoint}")
+    print(f"📁 Results will be saved to: {Path(output_dir) / label}")
+    print_concurrency_start(f"endpoint ({label})", model, isl, osl, std)
 
     run_concurrency_sweep(
         service_url=endpoint,
@@ -146,7 +130,7 @@ async def run_endpoint_benchmark(
         isl=isl,
         osl=osl,
         stddev=std,
-        output_dir=Path(output_dir) / "benchmarking",
+        output_dir=Path(output_dir) / label,
     )
     print("✅ Endpoint benchmark completed successfully!")
 
@@ -170,76 +154,92 @@ def print_final_summary(output_dir: str, deployed_types: List[str]) -> None:
     print(f"📊 View plots at: {Path(output_dir) / 'plots'}")
 
 
+def categorize_inputs(inputs: Dict[str, str]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Categorize inputs into endpoints and manifests"""
+    endpoints = {}
+    manifests = {}
+
+    for label, value in inputs.items():
+        # Validate reserved labels
+        if label.lower() == "plots":
+            raise ValueError(
+                "Label 'plots' is reserved and cannot be used. Please choose a different label."
+            )
+
+        if value.startswith(("http://", "https://")):
+            endpoints[label] = value
+        else:
+            # It should be a file path - validate it exists
+            if not Path(value).is_file():
+                raise FileNotFoundError(
+                    f"Manifest file not found for input '{label}': {value}"
+                )
+            manifests[label] = value
+
+    return endpoints, manifests
+
+
+def validate_dynamo_manifest(manifest_path: str) -> None:
+    """Validate that the manifest is a DynamoGraphDeployment"""
+    try:
+        with open(manifest_path, "r") as f:
+            content = f.read()
+
+        # Check for DynamoGraphDeployment
+        if "kind: DynamoGraphDeployment" not in content:
+            raise ValueError(
+                f"Manifest {manifest_path} is not a DynamoGraphDeployment. Only DynamoGraphDeployments are supported for deployment benchmarking."
+            )
+
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+    except Exception as e:
+        raise ValueError(f"Error reading manifest {manifest_path}: {e}")
+
+
 async def run_benchmark_workflow(
     namespace: str,
-    agg_manifest: Optional[str] = None,
-    disagg_manifest: Optional[str] = None,
-    vanilla_manifest: Optional[str] = None,
-    endpoint: Optional[str] = None,
+    inputs: Dict[str, str],
     isl: int = 200,
     std: int = 10,
     osl: int = 200,
     model: str = "nvidia/Llama-3.1-8B-Instruct-FP8",
     output_dir: str = "benchmarks/results",
 ) -> None:
-    """Main benchmark workflow orchestrator"""
+    """Main benchmark workflow orchestrator with dynamic inputs"""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Handle endpoint benchmarking
-    if endpoint:
-        await run_endpoint_benchmark(endpoint, model, isl, osl, std, output_dir)
-        print_final_summary(output_dir, [])
-        return
+    # Categorize inputs into endpoints and manifests
+    endpoints, manifests = categorize_inputs(inputs)
 
-    # Define deployment configurations
+    # Run endpoint benchmarks
+    for label, endpoint in endpoints.items():
+        await run_endpoint_benchmark(label, endpoint, model, isl, osl, std, output_dir)
+
+    # Create deployment configurations for manifests
     deployment_configs = []
 
-    if agg_manifest:
-        deployment_configs.append(
-            DeploymentConfig(
-                name="aggregated",
-                manifest_path=agg_manifest,
-                output_subdir="agg",
-                client_factory=create_dynamo_client,
-                deploy_func=deploy_dynamo_client,
-            )
-        )
-    else:
-        print_deployment_skip("aggregated")
+    for label, manifest_path in manifests.items():
+        # Validate that it's a DynamoGraphDeployment
+        validate_dynamo_manifest(manifest_path)
 
-    if disagg_manifest:
-        deployment_configs.append(
-            DeploymentConfig(
-                name="disaggregated",
-                manifest_path=disagg_manifest,
-                output_subdir="disagg",
-                client_factory=create_dynamo_client,
-                deploy_func=deploy_dynamo_client,
-            )
+        config = DeploymentConfig(
+            name=label,
+            manifest_path=manifest_path,
+            output_subdir=label,
+            client_factory=create_dynamo_client,
+            deploy_func=deploy_dynamo_client,
         )
-    else:
-        print_deployment_skip("disaggregated")
 
-    if vanilla_manifest:
-        deployment_configs.append(
-            DeploymentConfig(
-                name="vanilla backend",
-                manifest_path=vanilla_manifest,
-                output_subdir="vanilla",
-                client_factory=create_vanilla_client,
-                deploy_func=deploy_vanilla_client,
-            )
-        )
-    else:
-        print_deployment_skip("vanilla backend")
+        deployment_configs.append(config)
 
     # Run benchmarks for each deployment type
-    deployed_types = []
+    deployed_labels = list(endpoints.keys())
     for config in deployment_configs:
         await run_single_deployment_benchmark(
             config, namespace, output_dir, model, isl, osl, std
         )
-        deployed_types.append(config.name)
+        deployed_labels.append(config.name)
 
     # Generate final summary
-    print_final_summary(output_dir, deployed_types)
+    print_final_summary(output_dir, deployed_labels)

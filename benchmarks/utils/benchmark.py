@@ -6,22 +6,52 @@
 import argparse
 import asyncio
 import sys
-from pathlib import Path
+from typing import Tuple
 
-from benchmarks.utils.workflow import run_benchmark_workflow
+from benchmarks.utils.workflow import categorize_inputs, run_benchmark_workflow
+
+
+def parse_input(input_str: str) -> Tuple[str, str]:
+    """Parse input string in format key=value with additional validation"""
+    if "=" not in input_str:
+        raise ValueError(
+            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
+        )
+
+    parts = input_str.split("=", 1)  # Split on first '=' only
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
+        )
+
+    label, value = parts
+
+    if not label.strip():
+        raise ValueError("Label cannot be empty")
+    if not value.strip():
+        raise ValueError("Value cannot be empty")
+
+    label = label.strip()
+    value = value.strip()
+
+    # Validate label characters
+    import re
+
+    if not re.match(r"^[a-zA-Z0-9_-]+$", label):
+        raise ValueError(
+            f"Label must contain only letters, numbers, hyphens, and underscores. Invalid label: {label}"
+        )
+
+    return label, value
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark Orchestrator")
-    parser.add_argument("--agg", help="Path to aggregated DGD manifest")
-    parser.add_argument("--disagg", help="Path to disaggregated DGD manifest")
     parser.add_argument(
-        "--vanilla",
-        help="Path to vanilla backend manifest",
-    )
-    parser.add_argument(
-        "--endpoint",
-        help="Existing endpoint URL to benchmark (mutually exclusive with --agg/--disagg/--vanilla)",
+        "--input",
+        action="append",
+        dest="inputs",
+        help="Input in format <label>=<manifest_path_or_endpoint>. Can be specified multiple times for comparisons.",
     )
     parser.add_argument("--namespace", required=True, help="Kubernetes namespace")
     parser.add_argument("--isl", type=int, default=200, help="Input sequence length")
@@ -34,7 +64,7 @@ def main() -> int:
     parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
     parser.add_argument(
         "--model",
-        default="nvidia/Llama-3.1-8B-Instruct-FP8",
+        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         help="Model name",
     )
     parser.add_argument(
@@ -42,36 +72,47 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Check mutual exclusivity between endpoint and deployment manifests
-    deployment_types = [args.agg, args.disagg, args.vanilla]
-    has_deployment_manifests = any(deployment_types)
-    has_endpoint = args.endpoint is not None
-
-    if has_endpoint and has_deployment_manifests:
-        print(
-            "ERROR: --endpoint cannot be used together with --agg, --disagg, or --vanilla"
-        )
+    # Validate inputs
+    if not args.inputs:
+        print("ERROR: At least one --input must be specified")
         return 1
 
-    if not has_endpoint and not has_deployment_manifests:
-        print(
-            "ERROR: Must specify either --endpoint OR at least one deployment type (--agg, --disagg, or --vanilla)"
-        )
+    # Parse inputs
+    try:
+        parsed_inputs = {}
+        for input_str in args.inputs:
+            label, value = parse_input(input_str)
+            if label in parsed_inputs:
+                print(
+                    f"ERROR: Duplicate label '{label}' found. Each label must be unique."
+                )
+                return 1
+            parsed_inputs[label] = value
+
+        # Check for plotting limitations
+        if len(parsed_inputs) > 12:
+            print(
+                f"WARNING: You provided {len(parsed_inputs)} inputs, but the plotting system supports up to 12 inputs."
+            )
+            print(
+                "Consider running separate benchmark sessions or grouping related comparisons together."
+            )
+            print(
+                "Continuing with benchmark, but some inputs may not appear in plots..."
+            )
+            print()
+
+        endpoints, manifests = categorize_inputs(parsed_inputs)
+
+    except (ValueError, FileNotFoundError) as e:
+        print(f"ERROR: {e}")
         return 1
 
-    # Validate that specified manifest files exist
-    for manifest_path in deployment_types:
-        if manifest_path and not Path(manifest_path).is_file():
-            print(f"ERROR: Manifest not found: {manifest_path}")
-            return 1
-
+    # Run the benchmark workflow with the parsed inputs
     asyncio.run(
         run_benchmark_workflow(
             namespace=args.namespace,
-            agg_manifest=args.agg,
-            disagg_manifest=args.disagg,
-            vanilla_manifest=args.vanilla,
-            endpoint=args.endpoint,
+            inputs=parsed_inputs,
             isl=args.isl,
             std=args.std,
             osl=args.osl,

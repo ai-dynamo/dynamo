@@ -157,8 +157,22 @@ def create_efficiency_plot(
     """
     plt.figure(figsize=(12, 8))
 
-    colors = {"agg": "#1f77b4", "disagg": "#ff7f0e", "vanilla": "#2ca02c"}
-    markers = {"agg": "o", "disagg": "s", "vanilla": "^"}
+    # Support for up to 12 deployments in the plots
+    colors = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+        "#aec7e8",
+        "#ffbb78",
+    ]
+    markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h", "H", "+"]
 
     for deployment_type, results in deployment_results.items():
         tok_s_per_user = []
@@ -192,8 +206,9 @@ def create_efficiency_plot(
 
         if tok_s_per_user and tok_s_per_gpu:
             # Plot points
-            color = colors.get(deployment_type, "#888888")
-            marker = markers.get(deployment_type, "o")
+            color_idx = list(deployment_results.keys()).index(deployment_type)
+            color = colors[color_idx % len(colors)]
+            marker = markers[color_idx % len(markers)]
 
             plt.scatter(
                 tok_s_per_user,
@@ -261,17 +276,16 @@ def generate_plots(base_output_dir: Path, output_dir: Path) -> None:
     # Parse results for each deployment type
     deployment_results = {}
 
-    for deployment_type in ["agg", "disagg", "vanilla"]:
-        deployment_dir = base_output_dir / deployment_type
-        if deployment_dir.exists():
-            results = parse_benchmark_results(deployment_dir)
+    # Find all subdirectories that contain benchmark results
+    for item in base_output_dir.iterdir():
+        if item.is_dir() and item.name != "plots":
+            deployment_type = item.name
+            results = parse_benchmark_results(item)
             if results:
                 deployment_results[deployment_type] = results
                 print(f"Found {len(results)} concurrency levels for {deployment_type}")
             else:
                 print(f"No valid results found for {deployment_type}")
-        else:
-            print(f"No results directory found for {deployment_type}")
 
     if not deployment_results:
         print("No benchmark results found to plot!")

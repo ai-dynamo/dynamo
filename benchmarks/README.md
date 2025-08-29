@@ -15,31 +15,37 @@
 
 # Benchmarks
 
-This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments.
+This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments. The benchmarking framework is a wrapper around genai-perf that makes it easy to benchmark DynamoGraphDeployments and compare them with external endpoints.
 
 ## Quick Start
 
 ### Benchmark an Existing Endpoint
 ```bash
-./benchmark.sh --namespace my-namespace --endpoint "http://your-endpoint:8000"
+./benchmark.sh --namespace my-namespace --input my-endpoint=http://your-endpoint:8000
 ```
 
 ### Benchmark Dynamo Deployments
 ```bash
-# Benchmark disaggregated vLLM
-./benchmark.sh --namespace my-namespace --disagg components/backends/vllm/deploy/disagg.yaml
+# Benchmark disaggregated vLLM with custom label
+./benchmark.sh --namespace my-namespace --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml
 
-# Benchmark TensorRT-LLM GPT-OSS
-./benchmark.sh --namespace my-namespace --disagg components/backends/trtllm/deploy/gpt-oss-disagg.yaml
+# Benchmark TensorRT-LLM disaggregated deployment
+./benchmark.sh --namespace my-namespace --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
 
-# Benchmark all deployment types
+# Compare multiple Dynamo deployments
 ./benchmark.sh --namespace my-namespace \
-  --agg components/backends/vllm/deploy/agg.yaml \
-  --disagg components/backends/vllm/deploy/disagg.yaml \
-  --vanilla benchmarks/utils/templates/vanilla-vllm.yaml
+  --input agg=components/backends/vllm/deploy/agg.yaml \
+  --input disagg=components/backends/vllm/deploy/disagg.yaml
+
+# Compare Dynamo vs external endpoint
+./benchmark.sh --namespace my-namespace \
+  --input dynamo=components/backends/vllm/deploy/disagg.yaml \
+  --input external=http://localhost:8000
 ```
 
-**Note**: The sample manifests may reference private registry images. Update the `image:` fields to use accessible images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) or your own registry before running.
+**Note**:
+- The sample manifests may reference private registry images. Update the `image:` fields to use accessible images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) or your own registry before running.
+- Only DynamoGraphDeployment manifests are supported for automatic deployment. To benchmark non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), deploy them manually using their Kubernetes guides and use the endpoint option.
 
 ## Features
 
@@ -47,18 +53,17 @@ The benchmarking framework supports:
 
 **Two Benchmarking Modes:**
 - **Endpoint Benchmarking**: Test existing HTTP endpoints without deployment overhead
-- **Deployment Benchmarking**: Deploy, test, and cleanup Dynamo configurations automatically
+- **Deployment Benchmarking**: Deploy, test, and cleanup DynamoGraphDeployments automatically
 
 **Flexible Configuration:**
-- Optional deployment types - specify any combination of `--agg`, `--disagg`, `--vanilla`
-- Engine-agnostic vanilla backend support (vLLM, TensorRT-LLM, etc.)
-- Customizable concurrency levels, sequence lengths, and models
-- Automated performance plot generation
+- User-defined labels for each input using `--input label=value` format
+- Support for multiple inputs to enable comparisons
+- Customizable concurrency levels (configurable via CONCURRENCIES env var), sequence lengths, and models
+- Automated performance plot generation with custom labels
 
 **Supported Backends:**
-- Dynamo Aggregated (vLLM)
-- Dynamo Disaggregated (vLLM, TensorRT-LLM)
-- Vanilla backends (vLLM, TensorRT-LLM, or any OpenAI-compatible API)
+- DynamoGraphDeployments
+- External HTTP endpoints (for comparison with non-Dynamo backends)
 
 ## Installation
 
