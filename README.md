@@ -31,21 +31,23 @@ High-throughput, low-latency inference framework designed for serving generative
 
 * [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
 
-## The Era of Multi-GPU, Multi-Node
+## Why Dynamo?
+
+LLMs are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what NVIDIA Dynamo is built to close.
 
 <p align="center">
   <img src="./docs/images/frontpage-gpu-vertical.png" alt="Multi Node Multi-GPU topology" width="600" />
 </p>
 
-Large language models are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what NVIDIA Dynamo is built to close.
-
-Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
+Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang, and others) and captures LLM-specific optimizations such as:
 
 - **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
 - **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
 - **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
-- **Accelerated data transfer** – Reduces inference response time using NIXL.
+- **Accelerated data transfer** – Reduces inference response time using NIXL
 - **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
+
+Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
 <p align="center">
   <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
@@ -62,100 +64,114 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 | [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | ✅ | 🚧 |
 | [**KVBM**](/docs/architecture/kvbm_architecture.md) | 🚧 | 🚧 | 🚧 |
 
-To learn more about each framework and their capabilities, check out each framework's README!
-- **[vLLM](components/backends/vllm/README.md)**
-- **[SGLang](components/backends/sglang/README.md)**
-- **[TensorRT-LLM](components/backends/trtllm/README.md)**
+## Local Deployment
 
-Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
+> [!NOTE]
+> **Requirements:** Ubuntu 24.04 with x86_64 CPU recommended. See [Support Matrix](docs/support_matrix.md) for details.
 
-# Installation
+### 1. Start control-plane services (etcd + NATS)
 
-The following examples require a few system level packages.
-Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](docs/support_matrix.md)
+Dynamo uses etcd and NATS to coordinate across your infrastructure. Start them with Docker:
 
-## 1. Initial setup
-
-The Dynamo team recommends the `uv` Python package manager, although any way works. Install uv:
-```
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Install etcd and NATS (required)
-
-To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynamo locally, these need to be available.
-
-- [etcd](https://etcd.io/) can be run directly as `./etcd`.
-- [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
-
-To quickly setup etcd & NATS, you can also run:
-```
-# At the root of the repository:
+```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-## 2. Select an engine
+### 2. Install Dynamo with your preferred engine. 
 
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, trtllm, and llama.cpp. The examples that follow use SGLang; continue reading for other engines.
-
-```
+We publish Python wheels specialized for each of our supported engines: vLLM, SGLang, TRT-LLM, and llama.cpp. The example that follows uses SGLang; continue reading for other engines.
+```bash
+# Create Python environment
 uv venv venv
 source venv/bin/activate
 uv pip install pip
 
-# Choose one
-uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
+# Choose your engine
+uv pip install "ai-dynamo[sglang]" # or "ai-dynamo[vllm]", "ai-dynamo[trtllm]"  
+ 
 ```
 
-## 3. Run Dynamo
+### 3. Start Dynamo services
 
-### Running an LLM API server
+Open two terminals:
 
-Dynamo provides a simple way to spin up a local set of inference components including:
-
-- **OpenAI Compatible Frontend** – High performance OpenAI compatible http api server written in Rust.
-- **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
-- **Workers** – Set of pre-configured LLM serving engines.
-
-```
-# Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router.
-# Pass the TLS certificate and key paths to use HTTPS instead of HTTP.
-python -m dynamo.frontend --http-port 8080 [--tls-cert-path cert.pem] [--tls-key-path key.pem]
-
-# Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
-# both for the same model and for multiple models. The frontend node will discover them.
-python -m dynamo.sglang.worker --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --skip-tokenizer-init
+**Terminal 1 - Start the frontend:**
+```bash
+python -m dynamo.frontend --http-port 8080
 ```
 
-#### Send a Request
+**Terminal 2 - Start an engine worker:**
+```bash
+# For SGLang
+python -m dynamo.sglang \
+  --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --skip-tokenizer-init
+```
+
+### 4. Send your first request!
 
 ```bash
-curl localhost:8080/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "Hello, how are you?"
-    }
-    ],
-    "stream":false,
-    "max_tokens": 300
-  }' | jq
+    "messages": [{"role": "user", "content": "Hello! What is Dynamo?"}],
+    "stream": false,
+    "max_tokens": 64
+  }'
 ```
 
-Rerun with `curl -N` and change `stream` in the request to `true` to get the responses as soon as the engine issues them.
+**Troubleshooting:** Run `python deploy/dynamo_check.py` to verify environment connectivity and configuration.
 
-### Deploying Dynamo
+## Kubernetes Deployment
 
-- Follow the [Quickstart Guide](docs/guides/dynamo_deploy/README.md) to deploy on Kubernetes.
-- Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
-- Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
+> [!NOTE]
+> **Prerequisites:**
+> - Kubernetes cluster (v1.24+)
+> - Helm (v3.0+)
+> - kubectl configured
 
-# Engines
+### 1. Install Dynamo Kubernetes Platform
 
-Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, NATS and etcd need to be installed, along with a Dynamo frontend (`python -m dynamo.frontend [--interactive]`).
+```bash
+# Set configuration
+export NAMESPACE=dynamo-kubernetes
+export RELEASE_VERSION=0.4.1
 
-## vLLM
+# Install CRDs
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
+helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
+
+# Install Platform
+kubectl create namespace ${NAMESPACE}
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
+```
+
+### 2. Deploy a model
+
+```bash
+# Deploy vLLM with Qwen model
+kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+```
+
+### 3. Access your deployment
+
+```bash
+# Port forward to access locally
+kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+
+# Test the deployment
+curl http://localhost:8000/v1/models
+```
+
+**Next steps:**
+- Explore [Kubernetes deployment guide](docs/guides/dynamo_deploy/README.md) for production configurations
+- Check out engine-specific examples: [vLLM](components/backends/vllm/), [SGLang](components/backends/sglang/), [TRT-LLM](components/backends/trtllm/)
+
+## Inference Engines
+
+### vLLM
 
 ```
 uv pip install ai-dynamo[vllm]
@@ -170,7 +186,7 @@ vLLM attempts to allocate enough KV cache for the full context length at startup
 
 To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 
-## SGLang
+### SGLang
 
 ```
 # Install libnuma
@@ -186,7 +202,7 @@ python -m dynamo.sglang.worker --help
 
 You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/advanced_features/server_arguments.html . See there to use multiple GPUs.
 
-## TensorRT-LLM
+### TensorRT-LLM
 
 It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for running the TensorRT-LLM engine.
 
@@ -224,9 +240,12 @@ python -m dynamo.trtllm --help
 
 To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 
-# Developing Locally
+## Developing Locally
 
-## 1. Install libraries
+<details>
+<summary><b>Expand local development setup instructions</b></summary>
+
+### 1. Install libraries
 
 **Ubuntu:**
 ```
@@ -244,20 +263,20 @@ sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang
 ```
 brew install cmake protobuf
 
-## Check that Metal is accessible
+### Check that Metal is accessible
 xcrun -sdk macosx metal
 ```
 If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
 
 
-## 2. Install Rust
+### 2. Install Rust
 
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-## 3. Create a Python virtual env:
+### 3. Create a Python virtual env:
 
 Follow the instructions in [uv installation](https://docs.astral.sh/uv/#installation) guide to install uv if you don't have `uv` installed. Once uv is installed, create a virtual environment and activate it.
 
@@ -272,7 +291,7 @@ uv venv dynamo
 source dynamo/bin/activate
 ```
 
-## 4. Install build tools
+### 4. Install build tools
 
 ```
 uv pip install pip maturin
@@ -287,7 +306,7 @@ cd lib/bindings/python
 maturin develop --uv
 ```
 
-## 6. Install the wheel
+### 6. Install the wheel
 
 ```
 cd $PROJECT_ROOT
@@ -305,4 +324,6 @@ Remember that nats and etcd must be running (see earlier).
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
-If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers).
+
+</details>

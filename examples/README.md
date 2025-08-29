@@ -35,7 +35,7 @@ Learn fundamental Dynamo concepts through these introductory examples:
 Platform-specific deployment guides for production environments:
 
 - **[Amazon EKS](deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
-- **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
+- **[Azure AKS](deployments/AKS/AKS-deployment.md)** - Deploy Dynamo on Azure Kubernetes Service
 - **[Router Standalone](deployments/router_standalone/)** - Standalone router deployment patterns
 - **Amazon ECS** - _Coming soon_
 - **Google GKE** - _Coming soon_
