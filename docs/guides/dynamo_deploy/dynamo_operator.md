@@ -23,50 +23,9 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 ## Custom Resource Definitions (CRDs)
 
-### CRD: `DynamoGraphDeployment`
+For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-
-| Field            | Type   | Description                                                                                                                                          | Required | Default |
-|------------------|--------|------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------|
-| `services`       | map    | Map of service names to runtime configurations. This allows the user to override the service configuration defined in the DynamoComponentDeployment. | Yes      |         |
-| `envs`           | list   | list of global environment variables.                                                                                                                | No       |         |
-
-
-**API Version:** `nvidia.com/v1alpha1`
-**Scope:** Namespaced
-
-#### Example
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: disagg
-spec:
-  envs:
-  - name: GLOBAL_ENV_VAR
-    value: some_global_value
-  services:
-    Frontend:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-    Processor:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-    VllmWorker:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-    PrefillWorker:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-```
+**📖 [Dynamo CRD API Reference](../../../deploy/cloud/operator/docs/api_reference.md)**
 
 ## Installation
 
@@ -150,25 +109,6 @@ export NAMESPACE=<namespace-with-the-dynamo-cloud-operator>
 # Check the DynamoGraphDeployment status
 kubectl get dynamographdeployment llm-agg -n $NAMESPACE
 ```
-
-
-## Reconciliation Logic
-
-### DynamoGraphDeployment
-
-- **Actions:**
-  - Create a DynamoComponent CR to build the docker image
-  - Create a DynamoComponentDeployment CR for each component defined in the Dynamo graph being deployed
-- **Status Management:**
-  - `.status.conditions`: Reflects readiness, failure, progress states
-  - `.status.state`: overall state of the deployment, based on the state of the DynamoComponentDeployments
-
-### DynamoComponentDeployment
-
-- **Actions:**
-  - Create a Deployment, Service, and Ingress for the service
-- **Status Management:**
-  - `.status.conditions`: Reflects readiness, failure, progress states
 
 ## Configuration
 

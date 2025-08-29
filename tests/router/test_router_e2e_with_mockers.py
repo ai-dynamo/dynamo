@@ -790,3 +790,198 @@ def test_kv_push_router_bindings(request, runtime_services):
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
+
+
+@pytest.mark.pre_merge
+def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
+    """
+    Test that the KV router correctly handles query_instance_id annotation.
+
+    When a request includes 'nvext.annotations': ['query_instance_id'], the router should:
+    1. NOT route the request to a worker immediately
+    2. Return worker_instance_id as an SSE event
+    3. Return token_data as an SSE event containing the request tokens
+    4. Terminate the stream with [DONE]
+
+    This tests the specific code block:
+        if query_instance_id {
+            let instance_id_str = instance_id.to_string();
+            let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+            let response_tokens = Annotated::from_annotation("token_data", &request.token_ids)?;
+            let stream = stream::iter(vec![response, response_tokens]);
+            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+        }
+    """
+
+    logger.info("Starting KV router query_instance_id annotation test")
+
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
+    os.makedirs(request.node.name, exist_ok=True)
+    with open(mocker_args_file, "w") as f:
+        json.dump(mocker_args, f)
+
+    mocker_processes = []
+
+    try:
+        # Start KV router (frontend)
+        frontend_port = PORT + 30  # Use unique port to avoid conflicts
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        kv_router = KVRouterProcess(request, frontend_port)
+        kv_router.__enter__()
+
+        # Start multiple mocker engines to ensure worker selection logic
+        endpoint = "dyn://test-namespace.mocker.generate"
+        for i in range(NUM_MOCKERS):
+            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
+            mocker = MockerProcess(request, endpoint, mocker_args_file)
+            mocker_processes.append(mocker)
+
+        for mocker in mocker_processes:
+            mocker.__enter__()
+
+        url = f"http://localhost:{frontend_port}/v1/chat/completions"
+
+        # Send a warming request first to ensure system is ready
+        logger.info("Sending warming request without annotations...")
+        asyncio.run(send_request_with_retry(url, TEST_PAYLOAD))
+
+        # Test payload with query_instance_id annotation
+        annotated_payload = {
+            **TEST_PAYLOAD,
+            "nvext": {"annotations": ["query_instance_id"]},
+        }
+
+        async def test_annotation_response():
+            """Send request with query_instance_id and validate response structure"""
+            async with aiohttp.ClientSession() as session:
+                logger.info("Sending request with query_instance_id annotation...")
+
+                async with session.post(url, json=annotated_payload) as response:
+                    assert (
+                        response.status == 200
+                    ), f"Expected 200 but got {response.status}"
+
+                    # Collect all response chunks
+                    response_chunks = []
+                    async for chunk in response.content:
+                        if chunk:
+                            chunk_str = chunk.decode("utf-8", errors="replace")
+                            response_chunks.append(chunk_str)
+
+                    full_response = "".join(response_chunks)
+                    logger.info(
+                        f"Full SSE response ({len(full_response)} bytes):\n{full_response}"
+                    )
+
+                    # Parse and validate the response structure
+                    events = []
+
+                    sse_parts = full_response.split("\n\n")
+
+                    for part in sse_parts:
+                        part = part.strip()
+                        if not part:
+                            continue
+
+                        if part.startswith("event:"):
+                            lines = part.split("\n")
+                            event_line = next(
+                                (line for line in lines if line.startswith("event:")),
+                                None,
+                            )
+                            data_line = next(
+                                (
+                                    line
+                                    for line in lines
+                                    if line.startswith("data:") or line.startswith(":")
+                                ),
+                                None,
+                            )
+
+                            if event_line and data_line:
+                                event_type = event_line.split(":", 1)[1].strip()
+                                if data_line.startswith("data:"):
+                                    data_value = data_line.split(":", 1)[1].strip()
+                                else:
+                                    data_value = data_line.split(":", 1)[1].strip()
+                                events.append((event_type, data_value))
+                        elif part.startswith("data:"):
+                            data_value = part.split(":", 1)[1].strip()
+
+                    logger.info(f"Parsed events: {events}")
+
+                    # Validate worker_instance_id event
+                    worker_event = next(
+                        (e for e in events if e[0] == "worker_instance_id"), None
+                    )
+                    assert (
+                        worker_event is not None
+                    ), f"Missing worker_instance_id event in: {events}"
+
+                    # Validate token_data event
+                    token_event = next(
+                        (e for e in events if e[0] == "token_data"), None
+                    )
+                    assert (
+                        token_event is not None
+                    ), f"Missing token_data event in: {events}"
+
+                    token_data_str = token_event[1].strip('"')
+                    try:
+                        token_list = json.loads(token_data_str)
+                    except json.JSONDecodeError as e:
+                        raise AssertionError(
+                            f"token_data is not valid JSON: {token_data_str}, error: {e}"
+                        )
+
+                    assert isinstance(
+                        token_list, list
+                    ), f"token_data should be a list, got: {type(token_list)}"
+                    assert (
+                        len(token_list) > 0
+                    ), f"token_data should not be empty: {token_list}"
+                    assert all(
+                        isinstance(token, int) for token in token_list
+                    ), f"All tokens should be integers: {token_list}"
+
+                    logger.info(
+                        f"Valid token_data with {len(token_list)} tokens: {token_list[:10]}{'...' if len(token_list) > 10 else ''}"
+                    )
+
+                    # Validate that no actual generation happened (should only be metadata)
+                    # This proves the early return worked correctly
+                    generation_indicators = [
+                        "choices",
+                        "content",
+                        "delta",
+                        "finish_reason",
+                    ]
+                    for indicator in generation_indicators:
+                        assert (
+                            indicator not in full_response.lower()
+                        ), f"Found generation indicator '{indicator}' - request should not have been routed to worker"
+
+                    logger.info(
+                        "No generation content found - early return worked correctly"
+                    )
+
+                    return {
+                        "worker_instance_id": worker_event[1].strip('"'),
+                        "token_count": len(token_list),
+                        "tokens": token_list,
+                    }
+
+        result = asyncio.run(test_annotation_response())
+
+        logger.info("Successfully validated query_instance_id annotation response:")
+        logger.info(f"Worker ID: {result['worker_instance_id']}")
+        logger.info(f"Token count: {result['token_count']}")
+
+    finally:
+        if "kv_router" in locals():
+            kv_router.__exit__(None, None, None)
+        for mocker in mocker_processes:
+            mocker.__exit__(None, None, None)
+        if os.path.exists(mocker_args_file):
+            os.unlink(mocker_args_file)

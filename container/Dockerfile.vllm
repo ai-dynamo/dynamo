@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
@@ -15,6 +15,11 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG VLLM_REF="1da94e673c257373280026f75ceb4effac80e892"  # from v0.10.1.1
 ARG TORCH_BACKEND="cu128"
+
+# sccache configuration - inherit from base build
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET=""
+ARG SCCACHE_REGION=""
 
 # Match 0.10.1.1 vLLM release
 # https://github.com/vllm-project/vllm/releases/tag/v0.10.1.1
@@ -37,187 +42,172 @@ ARG FLASHINF_REF="v0.2.11"
 # without adding if statements everywhere, so just define both as ARGs for now.
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
-
-##################################
-########## Base Image ############
-##################################
-
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
-
-# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
-ARG ARCH
-ARG ARCH_ALT
-ARG TORCH_BACKEND
-
-USER root
+# Python configuration
 ARG PYTHON_VERSION=3.12
 
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-    # NIXL build dependencies
-    cmake \
-    meson \
-    ninja-build \
-    pybind11-dev \
-    # These headers are missing with the hpcx installer, required
-    # by UCX to find RDMA devices
-    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
-    libnuma-dev librdmacm-dev ibverbs-providers \
-    # Rust build dependencies
-	clang \
-    libclang-dev \
-	git \
-    build-essential \
-    protobuf-compiler \
-    libssl-dev \
-    pkg-config \
-    # Install utilities
-    nvtop \
-    tmux \
-    vim \
-    autoconf \
-    automake \
-    libtool \
-    net-tools \
-    # For Prometheus
-    curl tar ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
+FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
-ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.4.1
+########################################################
+########## Framework Development Image ################
+########################################################
+#
+# PURPOSE: Framework development and vLLM compilation
+#
+# This stage builds and compiles framework dependencies including:
+# - vLLM inference engine with CUDA support
+# - DeepGEMM and FlashInfer optimizations
+# - All necessary build tools and compilation dependencies
+# - Framework-level Python packages and extensions
+#
+# Use this stage when you need to:
+# - Build vLLM from source with custom modifications
+# - Develop or debug framework-level components
+# - Create custom builds with specific optimization flags
+#
 
-ENV NIXL_SRC_DIR=/opt/nixl
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ARG ARCH_ALT
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
+# Use dynamo base image (see /container/Dockerfile for more details)
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
-WORKDIR /workspace
-
-### UCX EFA Setup ###
-RUN rm -rf /opt/hpcx/ucx && \
-    rm -rf /usr/local/ucx && \
-    echo "Building UCX with reference $NIXL_UCX_REF" && \
-    cd /usr/local/src &&                            \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                                       \
-    git checkout $NIXL_UCX_REF &&                   \
-    ./autogen.sh && ./configure                     \
-    --prefix=/usr/local/ucx                         \
-    --enable-shared                                 \
-    --disable-static                                \
-    --disable-doxygen-doc                           \
-    --enable-optimizations                          \
-    --enable-cma                                    \
-    --enable-devel-headers                          \
-    --with-cuda=/usr/local/cuda                     \
-    --with-verbs                                    \
-    --with-efa                                      \
-    --with-dm                                       \
-    --with-gdrcopy=/usr/local                       \
-    --enable-mt &&                                  \
-    make -j &&                                      \
-    make -j install-strip &&                        \
-    ldconfig
-
-ENV LD_LIBRARY_PATH=\
-/usr/lib:/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
-ENV CPATH=/usr/include
-ENV PATH=/usr/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig
-SHELL ["/bin/bash", "-c"]
-
-WORKDIR /workspace
-
-### NIXL SETUP ###
-# Clone nixl source
-# TEMP: disable gds backend for arm64
-RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
-    cd ${NIXL_SRC_DIR} && \
-    git checkout ${NIXL_REF} && \
-    if [ "$ARCH" = "arm64" ]; then \
-        nixl_build_args="-Ddisable_gds_backend=true"; \
-    else \
-        nixl_build_args=""; \
-    fi && \
-    mkdir build && \
-    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
-    cd build/ && \
-    ninja && \
-    ninja install;
-
-### NATS & ETCD SETUP ###
-ENV ETCD_VERSION="v3.5.21"
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb && \
-    wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
-ENV PATH=/usr/local/bin/etcd/:$PATH
-
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # vLLM build dependencies
+        cmake \
+        ibverbs-providers \
+        ibverbs-utils \
+        libibumad-dev \
+        libibverbs-dev \
+        libnuma-dev \
+        librdmacm-dev \
+        rdma-core \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
-# Install uv and create virtualenv
-ENV VIRTUAL_ENV=/opt/dynamo/venv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/dynamo && \
-    uv venv ${VIRTUAL_ENV} --python 3.12
+ARG PYTHON_VERSION
+# Create virtual environment
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
 # Activate virtual environment
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Install NIXL Python module
-# TODO: Move gds_path selection based on arch into NIXL build
-# TEMP: disable gds backend for arm64
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
-    else \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
-    fi && \
-    # Install the wheel
-    # TODO: Move NIXL wheel install to the wheel_builder stage
-    uv pip install /workspace/wheels/nixl/*.whl
-
+ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
 ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
+ARG TORCH_BACKEND
 
 ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
+# Install sccache if requested
+COPY container/use-sccache.sh /tmp/use-sccache.sh
+# Install sccache if requested
+ARG USE_SCCACHE
+ARG ARCH_ALT
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
+
+ENV ARCH_ALT=${ARCH_ALT}
+RUN if [ "$USE_SCCACHE" = "true" ]; then \
+        /tmp/use-sccache.sh install; \
+    fi
+
+# Set environment variables - they'll be empty strings if USE_SCCACHE=false
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
+    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
+    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
+    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# Install VLLM and related dependencies
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
         # TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
         # Should be able to select how you want your build to go
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
         chmod +x /tmp/install_vllm.sh && \
-        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND;
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND && \
+        /tmp/use-sccache.sh show-stats "vLLM";
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
 
-# Common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
 
-### MISC UTILITY SETUP ###
+##################################################
+########## Runtime Image ########################
+##################################################
+#
+# PURPOSE: Production runtime environment
+#
+# This stage creates a lightweight production-ready image containing:
+# - Pre-compiled vLLM and framework dependencies
+# - Dynamo runtime libraries and Python packages
+# - Essential runtime dependencies and configurations
+# - Optimized for inference workloads and deployment
+#
+# Use this stage when you need:
+# - Production deployment of Dynamo with vLLM
+# - Minimal runtime footprint without build tools
+# - Ready-to-run inference server environment
+# - Base for custom application containers
+#
 
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt && \
-    pyright --help > /dev/null 2>&1 && \
-    printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+
+WORKDIR /workspace
+ENV DYNAMO_HOME=/opt/dynamo
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Install Python, build-essential and python3-dev as apt dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python runtime - CRITICAL for virtual environment to work
+        python3-dev \
+        build-essential \
+        # jq and curl for polling various endpoints and health checks
+        jq \
+        curl \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
+        # JIT Kernel Compilation, flashinfer
+        ninja-build \
+        g++ \
+        # prometheus dependencies
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
+COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=framework /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=framework /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=framework /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=framework /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=framework /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+
+### COPY NATS & ETCD ###
+# Copy nats and etcd from dev image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 
 # Install prometheus
 ARG PROM_VERSION=3.4.1
@@ -227,41 +217,122 @@ RUN ARCH=$(dpkg --print-architecture) && \
         arm64) PLATFORM=linux-arm64 ;; \
         *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
-    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
     | tar -xz -C /tmp && \
-    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
     chmod +x /usr/local/bin/prometheus && \
-    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
+    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
 
-### BUILDS ###
+# Copy UCX from dev image as plugin for NIXL
+# Copy NIXL source from devr image
+# Copy dynamo wheels for gitlab artifacts
+COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
+# Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
+COPY --from=framework /opt/vllm /opt/vllm
+
+ENV LD_LIBRARY_PATH=\
+/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
+
+### VIRTUAL ENVIRONMENT SETUP ###
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ARG PYTHON_VERSION
+RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION
+
+# Copy virtual environment from framework image to avoid re-installing framework + vllm dependencies
+COPY --from=framework \
+    /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages \
+    /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages
+
+# Install dynamo, NIXL, and dynamo-specific dependencies
+COPY benchmarks/ /opt/dynamo/benchmarks/
+COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    /opt/dynamo/benchmarks && \
+    rm -rf /opt/dynamo/benchmarks
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+
+# Copy benchmarks, examples, and tests for CI
+COPY . /workspace/
+
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+#######################################
+########## Local Development #######
+#######################################
+#
+# PURPOSE: Local development
+#
+# This stage adds development tools, utilities, and dependencies specifically
+# needed for:
+# - Local development and debugging
+# - vscode/cursor development
+#
+# Use this stage when you need a full development environment with additional
+# tooling beyond the base runtime image.
+
+FROM runtime AS local-dev
+
+# Install utilities
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    autoconf \
+    automake \
+    libtool \
+    net-tools \
+    git \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    git \
+    libtool \
+    meson \
+    net-tools \
+    ninja-build \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust environment setup
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.89.0
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    PATH=/usr/local/cargo/bin:$PATH
 
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust using RUSTARCH derived from ARCH_ALT
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    # TODO: Add SHA check back based on RUSTARCH
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile default --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-ARG CARGO_BUILD_JOBS
-# Set CARGO_BUILD_JOBS to 16 if not provided
-# This is to prevent cargo from building $(nproc) jobs in parallel,
-# which might exceed the number of opened files limit.
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-
-#######################################
-########## Local Development ##########
-#######################################
-
-FROM base AS local-dev
+COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Will use the default ubuntu user, but give sudo access
@@ -282,9 +353,9 @@ RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
 
 # This is a slow operation (~40s on my cpu)
 # Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
-COPY --from=base --chown=$USER_UID:$USER_GID ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --from=runtime --chown=$USER_UID:$USER_GID ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 RUN chown $USERNAME:$USERNAME ${VIRTUAL_ENV}
-COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
+COPY --from=runtime --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 # so we can use maturin develop
 RUN uv pip install maturin[patchelf]
@@ -302,209 +373,6 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
 RUN mkdir -p /home/$USERNAME/.cache/
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-
-##################################
-##### Wheel Build Image ##########
-##################################
-
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
-
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
-
-ARG CARGO_BUILD_JOBS
-# Set CARGO_BUILD_JOBS to 16 if not provided
-# This is to prevent cargo from building $(nproc) jobs in parallel,
-# which might exceed the number of opened files limit.
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-# Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
-ARG RELEASE_BUILD
-# Use arg ENABLE_KVBM = true to turn on the block-manager feature
-ARG ENABLE_KVBM
-
-# Keep in sync with the base image.
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-
-WORKDIR /workspace
-
-RUN yum update -y \
-    && yum install -y llvm-toolset \
-    && yum install -y python3.12-devel \
-    && yum install -y protobuf-compiler \
-    && yum clean all \
-    && rm -rf /var/cache/yum
-
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv
-
-COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
-COPY --from=base $CARGO_HOME $CARGO_HOME
-COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
-COPY --from=base /workspace /workspace
-COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
-ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
-
-# Copy configuration files
-COPY pyproject.toml /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
-COPY Cargo.toml /workspace/
-COPY Cargo.lock /workspace/
-COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
-
-# Copy source code
-COPY lib/ /workspace/lib/
-COPY components /workspace/components
-COPY launch /workspace/launch
-
-RUN cargo build \
-	--release \
-	--locked \
-	--features dynamo-llm/block-manager \
-	--workspace
-
-# Build dynamo wheel
-RUN uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace/lib/bindings/python && \
-    uv pip install maturin[patchelf] && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        maturin build --release --features block-manager --out /workspace/dist; \
-    else \
-        maturin build --release --out /workspace/dist; \
-    fi && \
-    if [ "$RELEASE_BUILD" = "true" ]; then \
-        # do not enable KVBM feature, ensure compatibility with lower glibc
-        uv run --python 3.11 maturin build --release --out /workspace/dist && \
-        uv run --python 3.10 maturin build --release --out /workspace/dist; \
-    fi
-
-#######################################
-########## CI Minimum Image ###########
-#######################################
-FROM base AS ci_minimum
-
-ENV DYNAMO_HOME=/workspace
-ENV CARGO_TARGET_DIR=/workspace/target
-
-WORKDIR /workspace
-
-COPY --from=wheel_builder /workspace /workspace
-COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-
-# Copy Cargo cache to avoid re-downloading dependencies
-COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
-
-# Copy rest of the code
-COPY . /workspace
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/metrics /usr/local/bin
-
-RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
-
-RUN uv pip install /workspace/benchmarks
-
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
-
-########################################
-########## Development Image ###########
-########################################
-FROM ci_minimum AS dev
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-
-CMD []
-
-####################################
-########## Runtime Image ###########
-####################################
-
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
-
-WORKDIR /workspace
-ENV DYNAMO_HOME=/workspace
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-
-ARG ARCH_ALT
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-# Install build-essential and python3-dev as apt dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential \
-        python3-dev \
-        # jq and curl for polling various endpoints and health checks
-        jq \
-        curl \
-        # For debugging
-        vim \
-        # Libraries required by UCX to find RDMA devices
-        libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
-        # JIT Kernel Compilation, flashinfer
-        ninja-build \
-        g++ \
-        cuda-toolkit-12-8 && \
-    rm -rf /var/lib/apt/lists/*
-
-### COPY NATS & ETCD & PROMETHEUS ###
-# Copy nats and etcd from base image
-COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-ENV PATH=/usr/local/bin/etcd/:$PATH
-
-# Copy prometheus from base image
-COPY --from=base /usr/local/bin/prometheus /usr/local/bin/prometheus
-
-# Copy UCX from base image as plugin for NIXL
-# Copy NIXL source from wheel_builder image
-# Copy dynamo wheels for gitlab artifacts
-COPY --from=base /usr/local/ucx /usr/local/ucx
-COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-
-# Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
-COPY --from=base /opt/vllm /opt/vllm
-
-ENV LD_LIBRARY_PATH=\
-/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
-
-# Copy entire venv
-# Theres a lot of stuff we'd have to re-compile (for arm64)
-# TODO: use pip ai-dynamo[vllm] in venv to replicate end user environment
-# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
-COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
-COPY --from=ci_minimum ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Keep everything from ci_minimum for mypy and other pre-merge tests
-# TODO: Remove this once we have a functional CI image built on top of the runtime image
-COPY --from=ci_minimum /workspace/ /workspace/
-
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
