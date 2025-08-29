@@ -55,8 +55,12 @@ spec:
             --artifact-dir $ARTIFACT_DIR \
             --num-dataset-entries=3000 -- \
             --max-threads 64
+          echo "----------------json----------------"
           PERF_JSON=$(find $ARTIFACT_DIR -name profile_export_genai_perf.json)
           cat $PERF_JSON | jq .
+          echo "----------------csv-----------------"
+          PERF_CSV=$(find $ARTIFACT_DIR -name profile_export_genai_perf.csv)
+          cat $PERF_CSV
           echo "Benchmark completed successfully!"
         resources:
           limits:
