@@ -837,7 +837,8 @@ def test_indexers_sync(request, runtime_services):
             # Create first KV router
             from dynamo._core import KvPushRouter, KvRouterConfig
 
-            kv_router_config = KvRouterConfig()
+            # First router with default reset_states=True
+            kv_router_config = KvRouterConfig(snapshot_threshold=20, reset_states=True)
 
             async def send_requests_to_router(router, num_requests, router_name):
                 # First, send a test request with retry to ensure router is ready
@@ -921,12 +922,19 @@ def test_indexers_sync(request, runtime_services):
                 successful1 == 25
             ), f"Expected 25 successful requests to router 1, got {successful1}"
 
-            # Launch second router
-            logger.info("Creating second KV router")
+            # Wait for a second before creating the second router
+            logger.info("Waiting for 1 second before creating second router")
+            await asyncio.sleep(1)
+
+            # Launch second router with reset_states=False
+            logger.info("Creating second KV router with reset_states=False")
+            kv_router_config2 = KvRouterConfig(
+                snapshot_threshold=20, reset_states=False
+            )
             kv_push_router2 = KvPushRouter(
                 endpoint=endpoint,
                 block_size=BLOCK_SIZE,
-                kv_router_config=kv_router_config,
+                kv_router_config=kv_router_config2,
             )
 
             # Send 25 requests to second router with initial retry loop
@@ -937,7 +945,7 @@ def test_indexers_sync(request, runtime_services):
             ), f"Expected 25 successful requests to router 2, got {successful2}"
 
             # Wait for all requests to complete (they should already be complete from gather)
-            # Wait another 0.5 seconds for internal synchronization
+            # Wait another 1 second for internal synchronization
             logger.info("Waiting for final synchronization")
             await asyncio.sleep(1)
 

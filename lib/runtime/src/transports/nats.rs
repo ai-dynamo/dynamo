@@ -512,11 +512,35 @@ impl NatsQueue {
 
     /// Connect to the NATS server and set up the stream and consumer
     pub async fn connect(&mut self) -> Result<()> {
+        self.connect_with_reset(false).await
+    }
+
+    /// Connect to the NATS server and set up the stream and consumer, optionally resetting the stream
+    pub async fn connect_with_reset(&mut self, reset_stream: bool) -> Result<()> {
         if self.client.is_none() {
             // Create a new client
             let client_options = Client::builder().server(self.nats_server.clone()).build()?;
 
             let client = client_options.connect().await?;
+
+            // If reset_stream is true, delete the stream first
+            if reset_stream {
+                match client.jetstream().delete_stream(&self.stream_name).await {
+                    Ok(_) => {
+                        log::debug!(
+                            "Successfully deleted NATS stream {} for reset",
+                            self.stream_name
+                        );
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "Failed to delete NATS stream '{}' (may not exist): {}",
+                            self.stream_name,
+                            e
+                        );
+                    }
+                }
+            }
 
             // Always try to create the stream (removes the race condition)
             let stream_config = jetstream::stream::Config {
@@ -588,7 +612,7 @@ impl NatsQueue {
                 self.stream_name
             );
         } else {
-            log::warn!(
+            log::debug!(
                 "Cannot shutdown consumer: client or consumer_name is None (client: {:?}, consumer_name: {:?})",
                 self.client.is_some(),
                 self.consumer_name.is_some()
@@ -769,7 +793,7 @@ impl NatsQueue {
 
             self.purge_up_to_sequence(purge_sequence).await?;
 
-            log::info!(
+            log::debug!(
                 "Purged stream {} up to acknowledged sequence {} (purged up to sequence {})",
                 self.stream_name,
                 min_ack_sequence,

@@ -423,8 +423,10 @@ impl KvIndexer {
                 component.inner.clone(),
                 consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 inner.event_sender(),
-                None, // No snapshot handling for Python bindings
+                None,
                 cancellation_token,
+                None,
+                true,
             )
             .await
             .map_err(to_pyerr)?;

@@ -24,6 +24,8 @@ pub async fn start_kv_router_background(
     kv_events_tx: mpsc::Sender<RouterEvent>,
     snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
     cancellation_token: CancellationToken,
+    snapshot_threshold: Option<u32>,
+    reset_states: bool,
 ) -> Result<()> {
     // Set up NATS connections
     let stream_name =
@@ -38,20 +40,59 @@ pub async fn start_kv_router_background(
         std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
         consumer_uuid,
     );
-    nats_queue.connect().await?;
+    nats_queue.connect_with_reset(reset_states).await?;
 
-    // Only set up snapshot-related resources if snapshot_tx is provided
-    let snapshot_resources = if snapshot_tx.is_some() {
-        // Create NATS client for snapshot uploads
-        let client_options = dynamo_runtime::transports::nats::Client::builder()
-            .server(&nats_server)
-            .build()?;
-        let nats_client = client_options.connect().await?;
+    // Always create NATS client (needed for both reset and snapshots)
+    let client_options = dynamo_runtime::transports::nats::Client::builder()
+        .server(&nats_server)
+        .build()?;
+    let nats_client = client_options.connect().await?;
 
-        // Create bucket name for snapshots
-        let bucket_name = format!("{}-{RADIX_STATE_BUCKET}", component.name())
-            .replace(['/', '\\', '.', '_'], "-");
+    // Create bucket name for snapshots/state
+    let bucket_name =
+        format!("{}-{RADIX_STATE_BUCKET}", component.name()).replace(['/', '\\', '.', '_'], "-");
 
+    // Handle initial state based on reset_states flag
+    if reset_states {
+        // Delete the bucket to reset state
+        tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
+        if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
+            tracing::warn!("Failed to delete bucket (may not exist): {e:?}");
+        }
+    } else {
+        // Try to download initial state from object store
+        let url = url::Url::parse(&format!(
+            "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
+            nats_client.addr()
+        ))?;
+
+        match nats_client
+            .object_store_download_data::<Vec<RouterEvent>>(url)
+            .await
+        {
+            Ok(events) => {
+                tracing::info!(
+                    "Successfully downloaded {} events from object store",
+                    events.len()
+                );
+                // Send all events to the indexer
+                for event in events {
+                    if let Err(e) = kv_events_tx.send(event).await {
+                        tracing::warn!("Failed to send initial event to indexer: {e:?}");
+                    }
+                }
+                tracing::info!("Successfully sent all initial events to indexer");
+            }
+            Err(e) => {
+                tracing::info!(
+                    "Did not initialize radix state from NATs object store (likely no snapshots yet): {e:?}"
+                );
+            }
+        }
+    }
+
+    // Only set up snapshot-related resources if snapshot_tx is provided and threshold is set
+    let snapshot_resources = if snapshot_tx.is_some() && snapshot_threshold.is_some() {
         // Get etcd client for distributed locking
         let etcd_client = component
             .drt()
@@ -61,24 +102,33 @@ pub async fn start_kv_router_background(
         // Lock key for snapshot uploads
         let lock_key = format!("/{}/{}", ROUTER_SNAPSHOT_LOCK, component.name());
 
-        Some((nats_client, bucket_name, etcd_client, lock_key))
+        Some((
+            nats_client.clone(),
+            bucket_name.clone(),
+            etcd_client,
+            lock_key,
+        ))
     } else {
         None
     };
 
     tokio::spawn(async move {
-        let mut check_interval = tokio::time::interval(Duration::from_secs(2));
+        let mut check_interval = tokio::time::interval(Duration::from_secs(1));
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    tracing::info!("KV Router background task received cancellation signal");
+                    tracing::debug!("KV Router background task received cancellation signal");
+                    // Clean up the queue and remove the durable consumer
+                    if let Err(e) = nats_queue.shutdown().await {
+                        tracing::warn!("Failed to shutdown NatsQueue: {e}");
+                    }
                     break;
                 }
 
                 // Handle event consumption
-                result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(300))) => {
+                result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(0))) => {
                     match result {
                         Ok(Some(bytes)) => {
                             let event: RouterEvent = match serde_json::from_slice(&bytes) {
@@ -122,7 +172,8 @@ pub async fn start_kv_router_background(
                     };
 
                     // Guard clause: skip if message count is too low
-                    if message_count <= 1000 {
+                    let threshold = snapshot_threshold.unwrap_or(u32::MAX) as u64;
+                    if message_count <= threshold {
                         continue;
                     }
 
@@ -135,7 +186,7 @@ pub async fn start_kv_router_background(
                         Some(etcd_client.lease_id())
                     ).await {
                         Ok(_) => {
-                            tracing::info!("Successfully acquired snapshot lock");
+                            tracing::debug!("Successfully acquired snapshot lock");
                             true
                         }
                         Err(_) => {
