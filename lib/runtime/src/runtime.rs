@@ -161,7 +161,8 @@ impl Runtime {
                 // Schedule infrastructure shutdown after all requests complete
                 let token = self.cancellation_token.clone();
                 let tracker = self.request_tracker.clone();
-                tokio::spawn(async move {
+                let handle = self.primary();  // Get the runtime handle
+                handle.spawn(async move {
                     tracing::info!(
                         "Endpoints shutdown initiated, waiting for {} in-flight requests to complete",
                         tracker.inflight_count()
