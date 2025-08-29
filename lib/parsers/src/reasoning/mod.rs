@@ -61,6 +61,7 @@ pub enum ReasoningParserType {
     Qwen,
     NemotronDeci,
     Kimi,
+    Mistral,
 }
 
 #[derive(std::fmt::Debug)]
@@ -113,6 +114,14 @@ impl ReasoningParserType {
                     true,
                 )),
             },
+            ReasoningParserType::Mistral => ReasoningParserWrapper {
+                parser: Box::new(BasicReasoningParser::new(
+                    "[THINK]".into(),
+                    "[/THINK]".into(),
+                    true,
+                    true,
+                )),
+            },
             ReasoningParserType::GptOss => match GptOssReasoningParser::new() {
                 Ok(parser) => ReasoningParserWrapper {
                     parser: Box::new(parser),
@@ -144,6 +153,7 @@ impl ReasoningParserType {
             "nemotron_deci" => Self::NemotronDeci.get_reasoning_parser(),
             "kimi" => Self::Kimi.get_reasoning_parser(),
             "step3" => Self::Step3.get_reasoning_parser(),
+            "mistral" => Self::Mistral.get_reasoning_parser(),
             _ => {
                 tracing::warn!(
                     "Unknown reasoning parser type '{}', falling back to Basic Reasoning Parser",
