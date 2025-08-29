@@ -307,21 +307,17 @@ RUN apt-get update -y && \
     git \
     openssh-client \
     iproute2 \
-    curl \
     rsync \
     zip \
     unzip \
     htop \
-    sudo \
     # Build Dependencies
-    build-essential \
     autoconf \
     automake \
     cmake \
     libtool \
     meson \
     net-tools \
-    ninja-build \
     pybind11-dev \
     # Rust build dependencies
     clang \
