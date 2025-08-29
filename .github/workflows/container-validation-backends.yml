@@ -47,8 +47,6 @@ jobs:
           docker system prune -af
       - name: Debug
         run: |
-          lsmod | grep nvidia
-          sudo dmesg | grep -i nvrm || true
           nvidia-smi
       - name: Build image
         env:
