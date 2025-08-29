@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: gpu-l40-runners
+    runs-on: gpu-l40-amd64
     strategy:
       matrix:
         framework: [vllm]
@@ -47,8 +47,6 @@ jobs:
           docker system prune -af
       - name: Debug
         run: |
-          lsmod | grep nvidia
-          sudo dmesg | grep -i nvrm || true
           nvidia-smi
       - name: Build image
         env:
@@ -59,9 +57,9 @@ jobs:
           ./container/build.sh --tag ${{ matrix.framework }}:latest \
             --target ${{ matrix.target }} \
             --framework ${{ matrix.framework }} \
-            --use-sccache \
-            --sccache-bucket "$SCCACHE_S3_BUCKET" \
-            --sccache-region "$AWS_DEFAULT_REGION"
+            # --use-sccache \
+            # --sccache-bucket "$SCCACHE_S3_BUCKET" \
+            # --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
         run: |
           docker run --rm --gpus all -w /workspace \
