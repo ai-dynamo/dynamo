@@ -35,7 +35,7 @@ testing-nixl  = ["dep:nixl-sys"]
 testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 cuda          = ["dep:cudarc"]
-integration = []
+integration   = ["dynamo-runtime/integration"]
 # NOTE: This feature will be enabled once ModelExpress packages are published
 # model-express = ["dep:model_express_client", "dep:model_express_common"]
 
