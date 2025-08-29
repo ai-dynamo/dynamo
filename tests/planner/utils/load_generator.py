@@ -89,19 +89,11 @@ class LoadGenerator:
 
         os.makedirs(artifact_dir, exist_ok=True)
 
-        # Calculate request count that's safely above request rate to avoid perf_analyzer constraint
-        # Use very conservative counts for real services that may already be under load
-        # Start with minimal tests to establish baseline
-        if params["request_rate"] > 20:
-            target_test_duration = 30  # Very short test for high load
-        elif params["request_rate"] > 15:
-            target_test_duration = 45  # Short test for medium load
-        else:
-            target_test_duration = 60  # Standard test for baseline load
-        request_count = max(100, int(params["request_rate"] * target_test_duration))
+        # Drive test length by caller-provided duration
+        request_count = max(1, int(params["request_rate"] * duration_sec))
 
         logger.info(
-            f"Adjusted parameters: target_duration={target_test_duration}s, request_count={request_count}"
+            f"Adjusted parameters: duration={duration_sec}s, request_count={request_count}"
         )
 
         # Build genai-perf command based on coworker's successful approach
@@ -144,46 +136,56 @@ class LoadGenerator:
 
         logger.info(f"Running command: {' '.join(cmd)}")
 
-        # Run genai-perf
+        # Run genai-perf (async)
         start_time = time.time()
+        timeout = max(duration_sec + 60, int(duration_sec * 1.5))
         try:
-            timeout = max(target_test_duration * 2, target_test_duration + 60)
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                logger.error("genai-perf timed out")
+                raise RuntimeError("Load generation timed out")
 
             end_time = time.time()
             actual_duration = end_time - start_time
 
-            if result.returncode == 0:
+            # Persist logs for debugging
+            try:
+                with open(os.path.join(artifact_dir, "genai_perf.stdout.log"), "wb") as f:
+                    f.write(stdout or b"")
+                with open(os.path.join(artifact_dir, "genai_perf.stderr.log"), "wb") as f:
+                    f.write(stderr or b"")
+            except Exception:
+                pass
+
+            if proc.returncode == 0:
                 logger.info("Load generation completed successfully")
                 logger.info(f"Actual duration: {actual_duration:.2f}s")
-
-                # Parse results
                 results = self._parse_genai_perf_results(artifact_dir)
-                results.update(
-                    {
-                        "requested_req_per_sec": req_per_sec,
-                        "actual_duration": actual_duration,
-                        "target_duration": duration_sec,
-                        "genai_perf_params": params,
-                    }
-                )
-
+                results.update({
+                    "requested_req_per_sec": req_per_sec,
+                    "actual_duration": actual_duration,
+                    "target_duration": duration_sec,
+                    "genai_perf_params": params,
+                    "artifact_dir": artifact_dir,
+                    "success": True,
+                })
                 return results
             else:
-                logger.error(f"genai-perf failed with return code {result.returncode}")
-                logger.error(f"stdout: {result.stdout}")
-                logger.error(f"stderr: {result.stderr}")
-                raise RuntimeError(f"genai-perf failed: {result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            logger.error("genai-perf timed out")
-            raise RuntimeError("Load generation timed out")
+                logger.error(f"genai-perf failed with return code {proc.returncode}")
+                raise RuntimeError("genai-perf failed; see logs in artifact dir")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"genai-perf execution error: {e}")
+            raise
 
     def _parse_genai_perf_results(self, artifact_dir: str) -> Dict[str, Any]:
         """Parse genai-perf results from artifact directory."""
@@ -329,6 +331,9 @@ class LoadGenerator:
             json.dump(results, f, indent=2)
 
         logger.info(f"Test results saved to: {results_file}")
+        # Compatibility aliases for consumers expecting phase1/phase2
+        results["phase1"] = phase_results.get("phase1_baseline", {})
+        results["phase2"] = phase_results.get("phase2_moderate", {})
         return results
 
 
@@ -390,9 +395,13 @@ async def main():
     # Print results summary
     phase_results = results.get("phase_results", {})
     for phase_name, phase_data in phase_results.items():
-        if isinstance(phase_data, dict) and phase_data.get("success"):
-            duration = phase_data.get("actual_duration", "N/A")
-            print(f"{phase_name}: {duration:.1f}s duration - SUCCESS")
+        ok = isinstance(phase_data, dict) and phase_data.get("success", bool(phase_data))
+        if ok:
+            duration = phase_data.get("actual_duration")
+            if isinstance(duration, (int, float)):
+                print(f"{phase_name}: {duration:.1f}s duration - SUCCESS")
+            else:
+                print(f"{phase_name}: SUCCESS")
         else:
             print(f"{phase_name}: FAILED")
     print("\nResults saved to scaling test directory")

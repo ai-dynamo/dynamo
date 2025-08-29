@@ -323,9 +323,15 @@ class ScalingE2ETest:
         test_results = {
             "test_duration": time.time() - test_start_time,
             "config": {
-                "phase1_rps": 12.0,
-                "phase2_rps": 24.0,
-                "phase_duration": 180,
+                # Document actual test configuration
+                "baseline_rps": 8.0,
+                "moderate_rps": 15.0, 
+                "trigger_rps": 25.0,
+                "phase_durations": {
+                    "baseline": 90,
+                    "moderate": 120,
+                    "trigger": 180
+                },
                 "transition_delay": 30,
             },
             "initial_pod_counts": initial_counts.__dict__ if initial_counts else None,
