@@ -95,6 +95,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
         let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
+        let top_k = CommonExtProvider::get_top_k(self);
+        let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -130,10 +132,10 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             best_of: None,
             frequency_penalty,
             presence_penalty,
-            repetition_penalty: None,
+            repetition_penalty,
             temperature,
             top_p,
-            top_k: None,
+            top_k,
             min_p: None,
             seed: None,
             use_beam_search: None,

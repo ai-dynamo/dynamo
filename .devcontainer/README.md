@@ -92,10 +92,10 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 ### Step 1: Build the Development Container Image
 
 Build `dynamo:latest-vllm-local-dev` from scratch from the source:
-- Note that currently, `local-dev` is only implemented.
+- Note that currently, `local-dev` is only implemented for `--framework VLLM`.
 
 ```bash
-./container/build.sh --target local-dev
+./container/build.sh --target local-dev --framework VLLM
 ```
 
 The container will be built and give certain file permissions to your local uid and gid.
@@ -195,13 +195,6 @@ File Structure:
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
-## Customization
-Edit `.devcontainer/devcontainer.json` to modify:
-- VS Code settings and extensions
-- Environment variables
-- Container configuration
-- Custom Mounts
-
 ## Documentation
 
 To look at the docs run:
@@ -242,6 +235,31 @@ cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 ```
 
 Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
+
+### SGLANG Custom devcontainer.json Configuration (EXPERIMENTAL)
+
+This is experimental. Please update/fix if you encounter problems. For sglang Dev Container, you first need to build `dynamo:latest-sglang-local-dev` image like this (wait about half an hour):
+
+```bash
+./container/build.sh --framework SGLANG --target local-dev
+```
+
+Then, make a copy of the `devcontainer.json file` to a directory of your choice. For this example, we'll just call it `sglang`:
+
+```bash
+mkdir .devcontainer/sglang/
+cp -a .devcontainer/devcontainer.json .devcontainer/sglang/
+```
+
+Afterwards, edit your `.devcontainer/sglang/devcontainer.json` so that the name and image correspond to SGLANG. Example:
+```json
+    "name": "[sglang] This is my amazing custom Dev Container Development",
+    ...
+    "image": "dynamo:latest-sglang-local-dev",
+```
+
+Now, go to **Dev Containers: Open Folder in Container** and select `[sglang] This is my amazing custom Dev Container Development`. The post-create.sh script should be running.
+
 
 ### SSH Keys for Git Operations
 
