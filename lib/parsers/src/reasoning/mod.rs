@@ -2,12 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod base_parser;
-mod deepseek_r1_parser;
 mod gpt_oss_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
-pub use deepseek_r1_parser::DeepseekR1ReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
 
 #[derive(Debug, Clone, Default)]
@@ -57,8 +55,13 @@ pub trait ReasoningParser: Send + std::fmt::Debug {
 #[non_exhaustive]
 pub enum ReasoningParserType {
     DeepseekR1,
+    Step3,
     Basic,
     GptOss,
+    Qwen,
+    NemotronDeci,
+    Kimi,
+    Mistral,
 }
 
 #[derive(std::fmt::Debug)]
@@ -83,15 +86,39 @@ impl ReasoningParser for ReasoningParserWrapper {
 
 impl ReasoningParserType {
     pub fn get_reasoning_parser(self) -> ReasoningParserWrapper {
+        let basic_parser =
+            BasicReasoningParser::new("<think>".into(), "</think>".into(), false, true);
+        let force_reasoning_basic_parser =
+            BasicReasoningParser::new("<think>".into(), "</think>".into(), true, true);
         match self {
             ReasoningParserType::DeepseekR1 => ReasoningParserWrapper {
-                parser: Box::new(DeepseekR1ReasoningParser::new()),
+                parser: Box::new(force_reasoning_basic_parser),
+            },
+            ReasoningParserType::Step3 => ReasoningParserWrapper {
+                parser: Box::new(force_reasoning_basic_parser),
             },
             ReasoningParserType::Basic => ReasoningParserWrapper {
+                parser: Box::new(basic_parser),
+            },
+            ReasoningParserType::Qwen => ReasoningParserWrapper {
+                parser: Box::new(basic_parser),
+            },
+            ReasoningParserType::NemotronDeci => ReasoningParserWrapper {
+                parser: Box::new(basic_parser),
+            },
+            ReasoningParserType::Kimi => ReasoningParserWrapper {
                 parser: Box::new(BasicReasoningParser::new(
-                    "<think>".into(),
-                    "</think>".into(),
+                    "◁think▷".into(),
+                    "◁/think▷".into(),
                     false,
+                    true,
+                )),
+            },
+            ReasoningParserType::Mistral => ReasoningParserWrapper {
+                parser: Box::new(BasicReasoningParser::new(
+                    "[THINK]".into(),
+                    "[/THINK]".into(),
+                    true,
                     true,
                 )),
             },
@@ -122,6 +149,11 @@ impl ReasoningParserType {
             "deepseek_r1" => Self::DeepseekR1.get_reasoning_parser(),
             "basic" => Self::Basic.get_reasoning_parser(),
             "gpt_oss" => Self::GptOss.get_reasoning_parser(),
+            "qwen3" => Self::Qwen.get_reasoning_parser(),
+            "nemotron_deci" => Self::NemotronDeci.get_reasoning_parser(),
+            "kimi" => Self::Kimi.get_reasoning_parser(),
+            "step3" => Self::Step3.get_reasoning_parser(),
+            "mistral" => Self::Mistral.get_reasoning_parser(),
             _ => {
                 tracing::warn!(
                     "Unknown reasoning parser type '{}', falling back to Basic Reasoning Parser",

@@ -274,13 +274,13 @@ def cmd_line_args():
         "--dyn-tool-call-parser",
         type=str,
         default=None,
-        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4'.",
+        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic'.",
     )
     parser.add_argument(
         "--dyn-reasoning-parser",
         type=str,
         default=None,
-        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss'.",
+        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss', 'kimi', 'step3', 'qwen3', 'nemotron_deci', 'mistral'.",
     )
 
     args = parser.parse_args()
