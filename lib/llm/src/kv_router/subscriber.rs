@@ -99,14 +99,14 @@ pub async fn start_kv_router_background(
             .etcd_client()
             .ok_or_else(|| anyhow::anyhow!("etcd client not available for distributed locking"))?;
 
-        // Lock key for snapshot uploads
-        let lock_key = format!("/{}/{}", ROUTER_SNAPSHOT_LOCK, component.name());
+        // Lock name for snapshot uploads (etcd's lock mechanism uses a different namespace)
+        let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.name());
 
         Some((
             nats_client.clone(),
             bucket_name.clone(),
             etcd_client,
-            lock_key,
+            lock_name,
         ))
     } else {
         None
@@ -163,7 +163,7 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let (nats_client, bucket_name, etcd_client, lock_key) = resources;
+                    let (nats_client, bucket_name, etcd_client, lock_name) = resources;
 
                     // Check total messages in the stream
                     let Ok(message_count) = nats_queue.get_stream_messages().await else {
@@ -179,26 +179,25 @@ pub async fn start_kv_router_background(
 
                     tracing::info!("Stream has {message_count} messages, attempting to acquire lock for purge and snapshot");
 
-                    // Try to acquire distributed lock
-                    let lock_acquired = match etcd_client.kv_create(
-                        lock_key,
-                        b"locked".to_vec(),
+                    // Try to acquire distributed lock using etcd's native lock mechanism
+                    let lock_response = match etcd_client.lock(
+                        lock_name.clone(),
                         Some(etcd_client.lease_id())
                     ).await {
-                        Ok(_) => {
-                            tracing::debug!("Successfully acquired snapshot lock");
-                            true
+                        Ok(response) => {
+                            tracing::debug!("Successfully acquired snapshot lock with key: {:?}", response.key());
+                            Some(response)
                         }
-                        Err(_) => {
-                            tracing::debug!("Another instance already holds the snapshot lock");
-                            false
+                        Err(e) => {
+                            tracing::debug!("Another instance already holds the snapshot lock: {e:?}");
+                            None
                         }
                     };
 
                     // Guard clause: skip if lock not acquired
-                    if !lock_acquired {
+                    let Some(lock_response) = lock_response else {
                         continue;
-                    }
+                    };
 
                     // Perform snapshot upload and purge
                     match perform_snapshot_and_purge(
@@ -211,8 +210,8 @@ pub async fn start_kv_router_background(
                         Err(e) => tracing::error!("Failed to perform purge and snapshot: {e:?}"),
                     }
 
-                    // Release the lock
-                    if let Err(e) = etcd_client.kv_delete(lock_key.clone(), None).await {
+                    // Release the lock using the lock key from the response
+                    if let Err(e) = etcd_client.unlock(lock_response.key()).await {
                         tracing::warn!("Failed to release snapshot lock: {e:?}");
                     }
                 }
