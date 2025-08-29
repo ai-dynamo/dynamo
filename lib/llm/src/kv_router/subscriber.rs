@@ -17,6 +17,46 @@ use crate::kv_router::{
     indexer::{DumpRequest, RouterEvent},
 };
 
+/// Resources required for snapshot operations
+#[derive(Clone)]
+struct SnapshotResources {
+    nats_client: dynamo_runtime::transports::nats::Client,
+    bucket_name: String,
+    etcd_client: dynamo_runtime::transports::etcd::Client,
+    lock_name: String,
+}
+
+impl SnapshotResources {
+    /// Try to acquire distributed lock for snapshot operations
+    /// Returns Some(lock_response) if lock acquired, None if another instance holds it
+    async fn lock(&self) -> Option<etcd_client::LockResponse> {
+        match self
+            .etcd_client
+            .lock(self.lock_name.clone(), Some(self.etcd_client.lease_id()))
+            .await
+        {
+            Ok(response) => {
+                tracing::debug!(
+                    "Successfully acquired snapshot lock with key: {:?}",
+                    response.key()
+                );
+                Some(response)
+            }
+            Err(e) => {
+                tracing::debug!("Another instance already holds the snapshot lock: {e:?}");
+                None
+            }
+        }
+    }
+
+    /// Release the distributed lock
+    async fn unlock(&self, lock_response: etcd_client::LockResponse) {
+        if let Err(e) = self.etcd_client.unlock(lock_response.key()).await {
+            tracing::warn!("Failed to release snapshot lock: {e:?}");
+        }
+    }
+}
+
 /// Start a unified background task for event consumption and optional snapshot management
 pub async fn start_kv_router_background(
     component: Component,
@@ -102,12 +142,12 @@ pub async fn start_kv_router_background(
         // Lock name for snapshot uploads (etcd's lock mechanism uses a different namespace)
         let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.name());
 
-        Some((
-            nats_client.clone(),
-            bucket_name.clone(),
+        Some(SnapshotResources {
+            nats_client,
+            bucket_name,
             etcd_client,
             lock_name,
-        ))
+        })
     } else {
         None
     };
@@ -163,8 +203,6 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let (nats_client, bucket_name, etcd_client, lock_name) = resources;
-
                     // Check total messages in the stream
                     let Ok(message_count) = nats_queue.get_stream_messages().await else {
                         tracing::warn!("Failed to get stream message count");
@@ -179,41 +217,23 @@ pub async fn start_kv_router_background(
 
                     tracing::info!("Stream has {message_count} messages, attempting to acquire lock for purge and snapshot");
 
-                    // Try to acquire distributed lock using etcd's native lock mechanism
-                    let lock_response = match etcd_client.lock(
-                        lock_name.clone(),
-                        Some(etcd_client.lease_id())
-                    ).await {
-                        Ok(response) => {
-                            tracing::debug!("Successfully acquired snapshot lock with key: {:?}", response.key());
-                            Some(response)
-                        }
-                        Err(e) => {
-                            tracing::debug!("Another instance already holds the snapshot lock: {e:?}");
-                            None
-                        }
-                    };
-
-                    // Guard clause: skip if lock not acquired
-                    let Some(lock_response) = lock_response else {
+                    // Try to acquire distributed lock
+                    let Some(lock_response) = resources.lock().await else {
                         continue;
                     };
 
                     // Perform snapshot upload and purge
                     match perform_snapshot_and_purge(
                         &mut nats_queue,
-                        nats_client,
                         snapshot_tx,
-                        bucket_name
+                        resources
                     ).await {
                         Ok(_) => tracing::info!("Successfully performed purge and snapshot"),
                         Err(e) => tracing::error!("Failed to perform purge and snapshot: {e:?}"),
                     }
 
-                    // Release the lock using the lock key from the response
-                    if let Err(e) = etcd_client.unlock(lock_response.key()).await {
-                        tracing::warn!("Failed to release snapshot lock: {e:?}");
-                    }
+                    // Release the lock
+                    resources.unlock(lock_response).await;
                 }
             }
         }
@@ -230,9 +250,8 @@ pub async fn start_kv_router_background(
 /// Perform snapshot upload and purge operations
 async fn perform_snapshot_and_purge(
     nats_queue: &mut NatsQueue,
-    nats_client: &dynamo_runtime::transports::nats::Client,
     snapshot_tx: &mpsc::Sender<DumpRequest>,
-    bucket_name: &str,
+    resources: &SnapshotResources,
 ) -> anyhow::Result<()> {
     // Snapshot before purge ensures we capture the current state before removing any messages.
     // This guarantees the snapshot matches what has been acknowledged up to this point.
@@ -253,18 +272,21 @@ async fn perform_snapshot_and_purge(
 
     // Upload the snapshot to NATS object store
     let url = url::Url::parse(&format!(
-        "nats://{}/{bucket_name}/{RADIX_STATE_FILE}",
-        nats_client.addr()
+        "nats://{}/{}/{RADIX_STATE_FILE}",
+        resources.nats_client.addr(),
+        resources.bucket_name
     ))?;
 
-    nats_client
+    resources
+        .nats_client
         .object_store_upload_data(&events, url)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
 
     tracing::info!(
-        "Successfully uploaded radix tree snapshot with {} events to bucket {bucket_name}",
-        events.len()
+        "Successfully uploaded radix tree snapshot with {} events to bucket {}",
+        events.len(),
+        resources.bucket_name
     );
 
     // Now purge acknowledged messages from the stream
