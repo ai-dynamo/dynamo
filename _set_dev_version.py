@@ -93,6 +93,7 @@ def align_versions(projects, version, dependencies):
                     dep.startswith(f"{proj}==")
                     or dep.startswith(f"{proj}>=")
                     or dep.startswith(f"{proj}<=")
+                    or dep.startswith(f"{proj}")
                 ):
                     new_group.append(f"{proj}=={version}")
                     matched = True
