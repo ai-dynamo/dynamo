@@ -67,13 +67,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Labels to add to generated Kubernetes resources for this component.
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// contains the name of the component
+	// The name of the component
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ComponentType indicates the role of this component (for example, "main").
 	ComponentType string `json:"componentType,omitempty"`
 
-	// dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive)
+	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
@@ -99,8 +99,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ExtraPodMetadata adds labels/annotations to the created Pods.
 	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
 	// +optional
-	// ExtraPodSpec merges additional fields into the generated PodSpec for advanced
-	// customization (tolerations, node selectors, affinity, etc.).
+	// ExtraPodSpec allows to override the main pod spec configuration.
+	// It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field
+	// that allows overriding the main container configuration.
 	ExtraPodSpec *dynamoCommon.ExtraPodSpec `json:"extraPodSpec,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
@@ -202,17 +203,18 @@ func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
 }
 
-func (s *DynamoComponentDeployment) IsReady() bool {
-	return s.Status.IsReady()
+func (s *DynamoComponentDeployment) IsReady() (bool, string) {
+	ready, reason := s.Status.IsReady()
+	return ready, reason
 }
 
-func (s *DynamoComponentDeploymentStatus) IsReady() bool {
+func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {
 	for _, condition := range s.Conditions {
 		if condition.Type == DynamoGraphDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
-			return true
+			return true, ""
 		}
 	}
-	return false
+	return false, "Component deployment not ready - Available condition not true"
 }
 
 func (s *DynamoComponentDeployment) GetSpec() any {

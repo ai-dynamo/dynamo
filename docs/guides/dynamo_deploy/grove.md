@@ -87,10 +87,14 @@ Grove represents a significant advancement in Kubernetes-based orchestration for
 
 ## Getting Started
 
-> **Note**: Grove is currently in development and aligning with NVIDIA Dynamo's release schedule.
+Grove relies on KAI Scheduler for resource allocation and scheduling.
+
+For KAI Scheduler, see the [KAI Scheduler Deployment Guide](https://github.com/NVIDIA/KAI-Scheduler).
 
 For installation instructions, see the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md).
 
 For practical examples of Grove-based multinode deployments in action, see the [Multinode Deployment Guide](multinode-deployment.md), which demonstrates multi-node disaggregated serving scenarios.
 
 For the latest updates on Grove, refer to the [official project on GitHub](https://github.com/NVIDIA/grove).
+
+Dynamo Cloud also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Cloud Deployment Guide](dynamo_cloud.md) for more details.

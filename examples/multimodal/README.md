@@ -326,3 +326,179 @@ You should see a response similar to this:
 ```json
 {"id": "6cc99123ad6948d685b8695428238d4b", "object": "chat.completion", "created": 1752708043, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": "The image depicts a street scene with a trolley bus as the central focus. The trolley bus is positioned on the left side of the road, facing the camera, and features a white and yellow color scheme. A prominent sign on the front of the bus reads \"OUT OF SERVICE\" in orange letters.\n\n**Key Elements:**\n\n* **Trolley Bus:** The bus is the main subject of the image, showcasing its distinctive design and color.\n* **Sign:** The \"OUT OF SERVICE\" sign is clearly visible on the front of the bus, indicating its current status.\n* **Street Scene:** The surrounding environment includes trees, buildings, and power lines, creating a sense of context and atmosphere.\n* **Lighting:** The image is characterized by a misty or foggy quality, with soft lighting that adds to the overall mood.\n\n**Overall Impression:**\n\nThe image presents a serene and somewhat melancholic scene, with the out-of-service trolley bus serving as a focal point. The misty atmosphere and soft lighting contribute to a contemplative ambiance, inviting the viewer to reflect on the situation."}, "finish_reason": "stop"}]}
 ```
+
+## Multimodal Aggregated Video Serving
+
+This example demonstrates deploying an aggregated multimodal model that can process video inputs.
+
+### Components
+
+- workers: For video serving, we use the [VideoEncodeWorker](components/video_encode_worker.py) for decoding video into frames, and send the frames to [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have two workers, [VideoEncodeWorker](components/video_encode_worker.py) and [VllmPDWorker](components/worker.py).
+The VideoEncodeWorker is responsible for decoding the video into a series of frames. Unlike the image pipeline which generates embeddings,
+this pipeline passes the raw frames directly to the VllmPDWorker via a combination of NATS and RDMA.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
+By separating the video processing from the prefill and decode stages, we can have a more flexible deployment and scale the
+VideoEncodeWorker independently from the prefill and decode workers if needed.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --video_url--> video_encode_worker
+  video_encode_worker --> processor
+  video_encode_worker --frames--> pd_worker
+  pd_worker --> video_encode_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/video_agg.sh
+```
+
+### Client
+
+In another terminal:
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Describe the video in detail"
+            },
+            {
+              "type": "video_url",
+              "video_url": {
+                "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "stream": false
+    }' | jq
+```
+
+You should see a response describing the video's content similar to
+```json
+{
+  "id": "7587e7d152014bae8e5c4e25f9fda0ed",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": " The video takes us away to a lively world of wildlife and natural beauty, featuring a white rabbit in a vibrant forest setting. At the beginning of the clip, the white rabbit is seen standing on a rock, facing towards the right side of the frame, with bushes and trees in the backdrop. The rabbit appears to be alert, given its ears are up and its ears perked in the air. As the clip progresses, the movement of the rabbit brings it around a tree, where its legs are partially hidden by the dense vegetation. It then sits down and grooms its fur, a behavior that suggests it is comfortable in its surroundings. \n\nThe scene then switches to a close-up shot of the rabbit, giving us a better view of its features and expressions. In this camera angle, the rabbit appears more dynamic and alert, with its breathing more visible, signaling its health and well-being. The camera pans out, and we see the rabbit heading towards the left side of the screen, possibly curious or hunting for food, with its ears perked up again. The lush greenery of the forest unfolds in the background, adding to the feeling of a wild and thriving environment.\n\n\nThe rabbit, upturned slightly while walking, finds a pile of dirt and rocks and sits there, fully clothed, perhaps taking a break from its exploration. There's a mention of a blue bird that appears to perch atop a log, adding a touch of whimsy to the scene. Lastly, the rabbit is observed relaxing on the rocks, resting comfortably, and looking off to the right side—a moment of tranquility in a bustling ecosystem. Throughout the clip, the rabbit's outfit remains the same, allowing for a clear focus on its behavior and characteristics while fitting in its habitat.",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1756251832,
+  "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+  "object": "chat.completion",
+  "usage": null
+}
+```
+
+## Multimodal Disaggregated Video Serving
+
+This example demonstrates deploying a disaggregated multimodal model that can process video inputs.
+
+### Components
+
+- workers: For disaggregated video serving, we have three workers, [VideoEncodeWorker](components/video_encode_worker.py) for decoding video into frames,
+[VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for prefilling.
+- processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have three workers, [VideoEncodeWorker](components/video_encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. As such, the VideoEncodeWorker is connected directly to the prefill worker.
+The VideoEncodeWorker is responsible for decoding the video into a series of frames and passing them to the prefill worker via RDMA.
+The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --video_url--> video_encode_worker
+  video_encode_worker --> processor
+  video_encode_worker --frames--> prefill_worker
+  prefill_worker --> video_encode_worker
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
+bash launch/video_disagg.sh
+```
+
+### Client
+
+In another terminal:
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Describe the video in detail"
+            },
+            {
+              "type": "video_url",
+              "video_url": {
+                "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "stream": false
+    }' | jq
+```
+
+You should see a response describing the video's content similar to
+```json
+{
+  "id": "7587e7d152014bae8e5c4e25f9fda0ed",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": " The video takes us away to a lively world of wildlife and natural beauty, featuring a white rabbit in a vibrant forest setting. At the beginning of the clip, the white rabbit is seen standing on a rock, facing towards the right side of the frame, with bushes and trees in the backdrop. The rabbit appears to be alert, given its ears are up and its ears perked in the air. As the clip progresses, the movement of the rabbit brings it around a tree, where its legs are partially hidden by the dense vegetation. It then sits down and grooms its fur, a behavior that suggests it is comfortable in its surroundings. \n\nThe scene then switches to a close-up shot of the rabbit, giving us a better view of its features and expressions. In this camera angle, the rabbit appears more dynamic and alert, with its breathing more visible, signaling its health and well-being. The camera pans out, and we see the rabbit heading towards the left side of the screen, possibly curious or hunting for food, with its ears perked up again. The lush greenery of the forest unfolds in the background, adding to the feeling of a wild and thriving environment.\n\n\nThe rabbit, upturned slightly while walking, finds a pile of dirt and rocks and sits there, fully clothed, perhaps taking a break from its exploration. There's a mention of a blue bird that appears to perch atop a log, adding a touch of whimsy to the scene. Lastly, the rabbit is observed relaxing on the rocks, resting comfortably, and looking off to the right side—a moment of tranquility in a bustling ecosystem. Throughout the clip, the rabbit's outfit remains the same, allowing for a clear focus on its behavior and characteristics while fitting in its habitat.",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1756251832,
+  "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+  "object": "chat.completion",
+  "usage": null
+}
+```

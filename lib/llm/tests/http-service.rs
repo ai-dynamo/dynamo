@@ -11,7 +11,7 @@ use dynamo_llm::http::{
     service::{
         Metrics,
         error::HttpError,
-        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        metrics::{Endpoint, RequestType, Status},
         service_v2::HttpService,
     },
 };
@@ -24,6 +24,7 @@ use dynamo_llm::protocols::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
     engine::AsyncEngineContext,
@@ -350,7 +351,14 @@ async fn test_http_service() {
     let families = registry.gather();
     let histogram_metric_family = families
         .into_iter()
-        .find(|m| m.get_name() == format!("{}_request_duration_seconds", FRONTEND_METRIC_PREFIX))
+        .find(|m| {
+            m.get_name()
+                == format!(
+                    "{}_{}",
+                    name_prefix::FRONTEND,
+                    frontend_service::REQUEST_DURATION_SECONDS
+                )
+        })
         .expect("Histogram metric not found");
 
     assert_eq!(

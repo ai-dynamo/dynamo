@@ -52,7 +52,8 @@ Quickstart
 
    Quickstart (K8s) <../guides/dynamo_deploy/dynamo_cloud.md>
    Dynamo Operator <../guides/dynamo_deploy/dynamo_operator.md>
-   Metrics <../guides/dynamo_deploy/k8s_metrics.md>
+   Metrics <../guides/dynamo_deploy/metrics.md>
+   Logging <../guides/dynamo_deploy/logging.md>
    Multinode <../guides/dynamo_deploy/multinode-deployment.md>
    Minikube Setup <../guides/dynamo_deploy/minikube.md>
 

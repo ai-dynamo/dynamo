@@ -882,6 +882,17 @@ func GenerateGrovePodGangSet(
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
+
+	// Validate kai-scheduler queue once if kai-scheduler is enabled
+	var validatedQueueName string
+	if controllerConfig.Grove.Enabled && controllerConfig.KaiScheduler.Enabled {
+		var err error
+		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+		}
+	}
+
 	dynamoNamespace, err := getDynamoNamespace(dynamoDeployment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
@@ -935,6 +946,10 @@ func GenerateGrovePodGangSet(
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
 			clique.Annotations = annotations
+
+			// Inject kai-scheduler settings if enabled
+			injectKaiSchedulerIfEnabled(clique, controllerConfig, validatedQueueName)
+
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}

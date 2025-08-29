@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -245,3 +246,40 @@ async def test_wait_for_graph_deployment_ready_on_second_attempt(
         await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment", max_attempts=2, delay_seconds=0.1
         )
+
+
+@pytest.mark.asyncio
+async def test_get_parent_graph_deployment_with_env_var(k8s_api, mock_custom_api):
+    """Test get_parent_graph_deployment with environment variable set"""
+    mock_deployment = {"metadata": {"name": "parent-dgd"}}
+
+    with patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "parent-dgd"}):
+        with patch.object(
+            k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+        ) as mock_get:
+            result = await k8s_api.get_parent_graph_deployment()
+
+            assert result == mock_deployment
+            mock_get.assert_called_once_with("parent-dgd")
+
+
+@pytest.mark.asyncio
+async def test_get_parent_graph_deployment_without_env_var(k8s_api, mock_custom_api):
+    """Test get_parent_graph_deployment without environment variable"""
+    with patch.dict(os.environ, {}, clear=True):
+        result = await k8s_api.get_parent_graph_deployment()
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_graph_deployment_delegates_to_parent(k8s_api, mock_custom_api):
+    """Test get_graph_deployment delegates to get_parent_graph_deployment"""
+    mock_deployment = {"metadata": {"name": "parent-dgd"}}
+
+    with patch.object(
+        k8s_api, "get_parent_graph_deployment", return_value=mock_deployment
+    ) as mock_parent:
+        result = await k8s_api.get_graph_deployment()
+
+        assert result == mock_deployment
+        mock_parent.assert_called_once()

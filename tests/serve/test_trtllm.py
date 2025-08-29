@@ -22,8 +22,6 @@ logger = logging.getLogger(__name__)
 class TRTLLMConfig(EngineConfig):
     """Configuration for trtllm test scenarios"""
 
-    timeout: int = 60
-
 
 class TRTLLMProcess(EngineProcess):
     """Simple process manager for trtllm shell scripts"""
@@ -71,9 +69,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
     "disaggregated": TRTLLMConfig(
         name="disaggregated",
@@ -85,9 +81,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
     # TODO: These are sanity tests that the kv router examples launch
     # and inference without error, but do not do detailed checks on the
@@ -102,9 +96,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
@@ -116,9 +108,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=0,
-        timeout=360,
+        model="Qwen/Qwen3-0.6B",
     ),
 }
 
@@ -185,13 +175,10 @@ def test_metrics_labels(request, runtime_services):
     Test that the trtllm backend correctly exports model labels in its metrics.
 
     This test uses the --extra-engine-args flag with agg.yaml configuration
-    to start the backend without needing a pre-built TensorRT-LLM engine.
+    to start the backend.
 
-    Prerequisites:
-    - etcd and NATS must be running (docker compose -f deploy/docker-compose.yml up -d)
-    - The test runs from the trtllm directory to access engine_configs/agg.yaml
+    The test runs from the trtllm directory to access engine_configs/agg.yaml
     """
-    import os
     import re
     import subprocess
     import threading
@@ -208,9 +195,18 @@ def test_metrics_labels(request, runtime_services):
     metrics_port = 8081
     timeout = 60
 
-    # Change to the trtllm directory where engine_configs/agg.yaml exists
+    # Calculate the path to the trtllm directory from the test file location
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    # Go up two levels from tests/serve/
+    project_root = os.path.dirname(os.path.dirname(test_dir))
+    working_directory = os.path.join(project_root, "components", "backends", "trtllm")
 
-    working_directory = os.path.abspath("components/backends/trtllm")
+    # Verify the engine config file exists
+    engine_config_path = os.path.join(working_directory, agg_engine_args)
+    if not os.path.exists(engine_config_path):
+        pytest.fail(f"Engine config file not found at: {engine_config_path}")
+
+    logger.info(f"Using engine config from: {engine_config_path}")
 
     # Build command using the user's working command
     command = [

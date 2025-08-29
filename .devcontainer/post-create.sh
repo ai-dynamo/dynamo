@@ -42,11 +42,6 @@ retry() {
 
 set -x
 
-# Changing permission to match local user since volume mounts default to root ownership
-# Note: sudo is used here because the volume mount may have root ownership
-mkdir -p $HOME/.cache
-sudo chown -R ubuntu:ubuntu $HOME/.cache $HOME/dynamo
-
 # Pre-commit hooks
 cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks
 pre-commit run --all-files || true # don't fail the build if pre-commit hooks fail
@@ -61,6 +56,17 @@ uv pip uninstall --yes ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 cargo build --locked --profile dev --features mistralrs
 
 # install the python bindings
+
+# Install maturin if not already installed.
+# TODO: Uncomment for SGLANG. Right now, the CI team is making a refactor
+#       to the Dockerfile, so this is a temporary fix.
+# if ! command -v maturin &> /dev/null; then
+#     echo "Installing maturin..."
+#     retry uv pip install maturin[patchelf]
+# else
+#     echo "maturin is already installed"
+# fi
+
 (cd $HOME/dynamo/lib/bindings/python && retry maturin develop)
 
 # installs overall python packages, grabs binaries from .build/target/debug

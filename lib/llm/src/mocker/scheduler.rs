@@ -787,7 +787,7 @@ mod tests {
                 // Manual debug ticker that prints forward pass metrics
                 _ = debug_interval.tick() => {
                     let _metrics = metrics_rx.borrow().clone();
-                    println!("Forward Pass Metrics: {_metrics:#?}");
+                    tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
                 }
 
                 Some(_) = output_rx.recv() => {
@@ -891,7 +891,7 @@ mod tests {
                 // Manual debug ticker that prints forward pass metrics
                 _ = debug_interval.tick() => {
                     let _metrics = metrics_rx.borrow().clone();
-                    println!("Forward Pass Metrics: {_metrics:#?}");
+                    tracing::debug!("Forward Pass Metrics: {_metrics:#?}");
                 }
 
                 Some(_signal) = output_rx.recv() => {

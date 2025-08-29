@@ -1,6 +1,10 @@
 package consts
 
-import "time"
+import (
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
 
 const (
 	HPACPUDefaultAverageUtilization = 80
@@ -55,6 +59,12 @@ const (
 	DefaultSharedMemoryMountPath = "/dev/shm"
 	DefaultSharedMemorySize      = "8Gi"
 
+	// Kai-scheduler related constants
+	KubeAnnotationKaiSchedulerQueue = "nvidia.com/kai-scheduler-queue" // User-provided annotation to specify queue name
+	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
+	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
+	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
+
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
@@ -67,4 +77,26 @@ type MultinodeDeploymentType string
 const (
 	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
 	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
+)
+
+// GroupVersionResources for external APIs
+var (
+	// Grove GroupVersionResources for scaling operations
+	PodCliqueGVR = schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliques",
+	}
+	PodCliqueScalingGroupGVR = schema.GroupVersionResource{
+		Group:    "grove.io",
+		Version:  "v1alpha1",
+		Resource: "podcliquescalinggroups",
+	}
+
+	// KAI-Scheduler GroupVersionResource for queue validation
+	QueueGVR = schema.GroupVersionResource{
+		Group:    "scheduling.run.ai",
+		Version:  "v2",
+		Resource: "queues",
+	}
 )

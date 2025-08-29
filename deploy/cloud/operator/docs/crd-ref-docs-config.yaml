@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Configuration file for crd-ref-docs
+# https://github.com/elastic/crd-ref-docs
+
+processor:
+  # Ignore common metadata fields that are not user-configurable
+  ignoreFields:
+    - "metadata.creationTimestamp"
+    - "metadata.generation"
+    - "metadata.resourceVersion"
+    - "metadata.selfLink"
+    - "metadata.uid"
+    - "status.conditions[*].lastTransitionTime"
+    - "status.observedGeneration"
+    - "TypeMeta$"
+  ignoreTypes:
+    - "List$"
+    - "ParseError$"
+    # Ignore only the override wrapper type to reduce repetition
+    # Keep SharedSpec so embedded fields are documented once
+    - "DynamoComponentDeploymentOverridesSpec$"
+    - "DynamoComponentDeploymentStatus$"
+    - "BaseStatus$"
+
+render:
+  # Output format - use markdown instead of default asciidoc
+  format: markdown
+
+  # Kubernetes version for API compatibility info
+  kubernetesVersion: "1.28"
+
+  # Group related resources together
+  groupByKind: true
+
+  # Include resource descriptions
+  includeDescription: true
+
+  # Reduce repetition in links and references
+  allowDangerousTypes: false
+
+  # Sort types alphabetically for better organization
+  sortByName: true
