@@ -1,0 +1,70 @@
+{
+    "family": "Dynamo-backend",
+    "containerDefinitions": [
+        {
+            "name": "dynamo-prefill",
+            "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0",
+            "repositoryCredentials": {
+                "credentialsParameter": "arn:aws:secretsmanager:us-east-2:AWS_ID:secret:ngc_access"
+            },
+            "cpu": 0,
+            "portMappings": [],
+            "essential": true,
+            "entryPoint": [
+                "sh",
+                "-c"
+            ],
+            "command": [
+                "cd components/backends/vllm && python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker"
+            ],
+            "environment": [
+                {
+                    "name": "ETCD_ENDPOINTS",
+                    "value": "http://IP_ADDRESS:2379"
+                },
+                {
+                    "name": "NATS_SERVER",
+                    "value": "nats://IP_ADDRESS:4222"
+                }
+            ],
+            "environmentFiles": [],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "ulimits": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/Dynamo-backend",
+                    "mode": "non-blocking",
+                    "awslogs-create-group": "true",
+                    "max-buffer-size": "25m",
+                    "awslogs-region": "us-east-2",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": [],
+            "resourceRequirements": [
+                {
+                    "value": "1",
+                    "type": "GPU"
+                }
+            ]
+        }
+    ],
+    "taskRoleArn": "arn:aws:iam::AWS_ID:role/ecsTaskExecutionRole",
+    "executionRoleArn": "arn:aws:iam::AWS_ID:role/ecsTaskExecutionRole",
+    "networkMode": "bridge",
+    "volumes": [],
+    "placementConstraints": [],
+    "requiresCompatibilities": [
+        "EC2"
+    ],
+    "cpu": "2048",
+    "memory": "40960",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "enableFaultInjection": false
+}
