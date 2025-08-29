@@ -146,7 +146,8 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 Test the replica calculation logic without requiring Kubernetes:
 
 ```bash
-python -m pytest test_replica_calculation.py -v
+# Set PYTHONPATH to include planner components
+PYTHONPATH=components/planner/src python -m pytest tests/planner/test_replica_calculation.py -v
 ```
 
 #### Run Full End-to-End Test
@@ -183,9 +184,15 @@ The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D con
 - **Total test duration**: ~7 minutes + scaling observation
 - **Smart cleanup**: Only removes deployment if test created it (preserves existing deployments)
 
-### Prerequisites for E2E Tests
+### Prerequisites
 
+**For Unit Tests:**
+- Python dependencies installed
+- PYTHONPATH set to include `components/planner/src` (see unit test examples above)
+
+**For E2E Tests:**
 - Kubernetes cluster with GPU nodes
 - kubectl configured and accessible
 - genai-perf available in PATH
 - Python dependencies installed
+- PYTHONPATH properly configured for planner imports

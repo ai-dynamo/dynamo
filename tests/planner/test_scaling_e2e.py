@@ -7,7 +7,7 @@ End-to-end test for SLA planner scaling behavior.
 This test assumes a disaggregated planner deployment is already running
 and accessible at localhost:8000. It monitors pod scaling and validates
 that the planner correctly scales from 1P1D to 2P1D when load increases
-from 10req/s to 20req/s.
+through graduated phases: 8 req/s (baseline) → 15 req/s (moderate) → 25 req/s (prefill scaling trigger).
 """
 
 import asyncio
@@ -215,6 +215,7 @@ class KubernetesMonitor:
             self.namespace,
         ]
 
+        proc = None
         try:
             # Start port forwarding in background
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -233,15 +234,19 @@ class KubernetesMonitor:
                 logger.warning(f"Health check failed: {e}")
                 healthy = False
 
-            # Terminate port forwarding
-            proc.terminate()
-            proc.wait(timeout=5)
-
             return healthy
 
         except Exception as e:
             logger.error(f"Failed to check service health: {e}")
             return False
+        finally:
+            # Ensure port forwarding is terminated
+            if proc is not None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
 
 class ScalingE2ETest:
@@ -281,12 +286,19 @@ class ScalingE2ETest:
         logger.info(f"Test starting with: {initial_counts}")
 
         # Start background monitoring
-        total_test_duration = 480  # 180 + 30 + 180 + 90 buffer
+        # Calculate based on actual phases from load generator
+        # Phase durations: baseline(90s) + transition(30s) + moderate(120s) + transition(30s) + trigger(180s) + buffer
+        total_test_duration = 90 + 30 + 120 + 30 + 180 + BUFFER_DURATION
         monitoring_task = asyncio.create_task(
             self.k8s_monitor.monitor_scaling(
                 total_test_duration, interval=MONITORING_INTERVAL
             )
         )
+
+        # Initialize results in case of exception
+        baseline_results = {}
+        moderate_results = {}
+        trigger_results = {}
 
         try:
             # Use the load generator's built-in scaling test

@@ -13,17 +13,14 @@ import math
 import os
 
 # We'll import the actual Planner class to test its calculation logic
-import sys
 from unittest.mock import Mock, patch
 
 import pytest
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../../components/planner/src"))
-
 from dynamo.planner.utils.planner_core import Metrics, Planner
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def planner():
     """Set up test environment with mocked dependencies."""
     # Create mock arguments
@@ -42,7 +39,7 @@ def planner():
     args.load_prediction_window_size = 10
     args.profile_results_dir = os.path.join(
         os.path.dirname(__file__),
-        "profiling_results/H200_TP1P_TP1D/profiling_results",
+        "profiling_results/H200_TP1P_TP1D",
     )
     args.environment = "kubernetes"
 
@@ -468,55 +465,66 @@ class TestReplicaCalculation:
 
     def test_decode_correction_factor_zero_handling(self, planner):
         """Test handling of d_correction_factor <= 0."""
-        # Set correction factor to 0 (edge case)
-        planner.p_correction_factor = 1.0
-        planner.d_correction_factor = 0.0
+        # Test both 0 and negative values
+        for correction_factor in [0.0, -1.0]:
+            with patch.object(planner, "connector") as mock_connector:
+                planner.p_correction_factor = 1.0
+                planner.d_correction_factor = correction_factor
 
-        # Mock predictor outputs
-        planner.num_req_predictor.predict_next.return_value = 10
-        planner.isl_predictor.predict_next.return_value = 3000
-        planner.osl_predictor.predict_next.return_value = 150
+                # Mock predictor outputs
+                planner.num_req_predictor.predict_next.return_value = 10
+                planner.isl_predictor.predict_next.return_value = 3000
+                planner.osl_predictor.predict_next.return_value = 150
 
-        # Mock interpolator outputs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            10000,
-            0.01,
-            0.5,
-        )
+                # Mock interpolator outputs
+                planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = (
+                    40000
+                )
+                planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
+                    10000,
+                    0.01,
+                    0.5,
+                )
 
-        # Set up metrics
-        planner.last_metrics = Metrics(
-            num_req=10, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
-        )
+                # Set up metrics
+                planner.last_metrics = Metrics(
+                    num_req=10,
+                    isl=3000,
+                    osl=150,
+                    ttft=80.0,
+                    itl=10.0,
+                    request_duration=100.0,
+                )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+                # Mock workers info
+                async def mock_get_workers_info():
+                    return (["prefill1"], ["decode1"])
 
-        planner.get_workers_info = mock_get_workers_info
+                planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
+                # Mock interpolation calls
+                planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
+                planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
-        # Run calculation
-        import asyncio
+                # Run calculation
+                import asyncio
 
-        asyncio.run(planner.make_adjustments())
+                asyncio.run(planner.make_adjustments())
 
-        # Should handle gracefully without crashing
-        # The code should use args.itl directly instead of dividing by 0
-        if planner.connector.set_component_replicas.called:
-            call_args = planner.connector.set_component_replicas.call_args[0][0]
-            decode_replicas = call_args.get("VllmDecodeWorker", 1)
+                # Should handle gracefully without crashing
+                # The code should use args.itl directly instead of dividing by 0
+                if mock_connector.set_component_replicas.called:
+                    call_args = mock_connector.set_component_replicas.call_args[0][0]
+                    decode_replicas = call_args.get("VllmDecodeWorker", 1)
 
-            print(f"Zero correction factor test: Decode replicas={decode_replicas}")
+                    print(
+                        f"Correction factor {correction_factor} test: Decode replicas={decode_replicas}"
+                    )
 
-            # Should get a valid result (not crash)
-            assert (
-                decode_replicas >= 1
-            ), "Should handle zero correction factor gracefully"
+                    # Should get a valid result (not crash)
+                    assert (
+                        decode_replicas >= 1
+                    ), f"Should handle correction factor {correction_factor} gracefully"
 
     def test_multi_gpu_engines(self, planner):
         """Test replica calculation with multi-GPU engines."""

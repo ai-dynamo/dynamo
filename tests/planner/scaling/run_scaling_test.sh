@@ -99,7 +99,8 @@ check_existing_deployment() {
         log_info "DynamoGraphDeployment $DEPLOYMENT_NAME already exists - skipping redeployment"
 
         # Check if the DynamoGraphDeployment is ready
-        local status=$(kubectl get dynamographdeployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.state}')
+        local status
+        status=$(kubectl get dynamographdeployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.state}')
         if [ "$status" = "successful" ]; then
             # Check if frontend pod is running
             if kubectl get pods -n "$NAMESPACE" -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=vllm-disagg-planner" --field-selector=status.phase=Running | grep -q .; then
@@ -164,7 +165,7 @@ setup_port_forward() {
     # Kill any existing port forward on the same port
     if lsof -ti:$LOCAL_PORT &> /dev/null; then
         log_warning "Port $LOCAL_PORT is already in use, attempting to free it..."
-        kill $(lsof -ti:$LOCAL_PORT) 2>/dev/null || true
+        kill "$(lsof -ti:$LOCAL_PORT)" 2>/dev/null || true
         sleep 2
     fi
 
