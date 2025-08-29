@@ -89,7 +89,7 @@ Grove represents a significant advancement in Kubernetes-based orchestration for
 
 Grove relies on KAI Scheduler for resource allocation and scheduling.
 
-For KAI Scheduler, see the [KAI Scheduler Deployment Guide](kai_scheduler.md).
+For KAI Scheduler, see the [KAI Scheduler Deployment Guide](https://github.com/NVIDIA/KAI-Scheduler).
 
 For installation instructions, see the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md).
 
