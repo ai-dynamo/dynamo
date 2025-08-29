@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -178,7 +179,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
         "backend": "pytorch",
-        "skip_tokenizer_init": False,
+        "skip_tokenizer_init": True,
         "build_config": build_config,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
@@ -224,6 +225,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params.stop = None
     modelType = ModelType.Backend
     multimodal_processor = None
+
+    if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        # We need to initialize the tokenizer for the test logits processor
+        # But detokenizing still happens in the rust engine, so we do _not_ want
+        # to set default_sampling_params.detokenize to True.
+        engine_args["skip_tokenizer_init"] = False
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
