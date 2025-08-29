@@ -51,8 +51,6 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
-
-        
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
