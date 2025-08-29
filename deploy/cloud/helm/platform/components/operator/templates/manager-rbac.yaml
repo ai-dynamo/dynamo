@@ -491,7 +491,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-queue-reader
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-queue-reader
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -510,7 +510,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-queue-reader-binding
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-queue-reader-binding
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -519,7 +519,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-queue-reader
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-queue-reader
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'

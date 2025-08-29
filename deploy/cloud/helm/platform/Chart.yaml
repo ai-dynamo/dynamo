@@ -34,3 +34,12 @@ dependencies:
     version: 11.1.0
     repository: "https://charts.bitnami.com/bitnami"
     condition: etcd.enabled
+  - name: kai-scheduler
+    version: v0.8.1
+    repository: oci://ghcr.io/nvidia/kai-scheduler
+    condition: kai-scheduler.enabled
+  - name: grove-charts
+    alias: grove
+    version: v0.0.0-6e30275
+    repository: oci://ghcr.io/nvidia/grove
+    condition: grove.enabled

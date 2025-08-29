@@ -14,170 +14,290 @@
 # limitations under the License.
 # Used to generate top-level secrets (overridden by custom-values.yaml)
 
-# Subcharts
+# Subcharts configuration
+
+# Dynamo operator configuration
 dynamo-operator:
+  # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
+
+  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
+
+  # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
+
+  # Namespace access controls for the operator
   namespaceRestriction:
+    # -- Whether to restrict operator to specific namespaces
     enabled: true
+    # -- Target namespace for operator deployment (leave empty for current namespace)
     targetNamespace:
+
+  # Controller manager configuration
   controllerManager:
+    # -- Node tolerations for controller manager pods
     tolerations: []
+
     manager:
+      # Container image configuration for the operator manager
       image:
+        # -- Official NVIDIA Dynamo operator image repository
         repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
+        # -- Image tag (leave empty to use chart default)
         tag: ""
+        # -- Image pull policy - when to pull the image
         pullPolicy: IfNotPresent
+
+      # Command line arguments for the operator manager
       args:
+        # -- Health probe endpoint for Kubernetes health checks
         - --health-probe-bind-address=:8081
+        # -- Metrics endpoint for Prometheus scraping (localhost only for security)
         - --metrics-bind-address=127.0.0.1:8080
+
+  # -- Secrets for pulling private container images
   imagePullSecrets: []
+
+  # Core Dynamo platform configuration
   dynamo:
+    # -- How long to wait before forcefully terminating Grove instances
     groveTerminationDelay: 15m
+
+    # Internal utility images used by the platform
     internalImages:
+      # -- Debugger image for troubleshooting deployments
       debugger: python:3.12-slim
+
+    # -- Whether to enable restricted security contexts for enhanced security
     enableRestrictedSecurityContext: false
+
+    # Docker registry configuration for private repositories
     dockerRegistry:
+      # -- Whether to use Kubernetes secrets for registry authentication
       useKubernetesSecret: false
+      # -- Docker registry server URL
       server:
+      # -- Registry username
       username:
+      # -- Registry password (consider using existingSecretName instead)
       password:
+      # -- Name of existing Kubernetes secret containing registry credentials
       existingSecretName:
+      # -- Whether the registry uses HTTPS
       secure: true
+
+    # Ingress configuration for external access
     ingress:
+      # -- Whether to create ingress resources
       enabled: false
+      # -- Ingress class name (e.g., "nginx", "traefik")
       className:
+      # -- Secret name containing TLS certificates
       tlsSecretName: my-tls-secret
+
+    # Istio service mesh configuration
     istio:
+      # -- Whether to enable Istio integration
       enabled: false
+      # -- Istio gateway name for routing
       gateway:
+
+    # -- Host suffix for generated ingress hostnames
     ingressHostSuffix: ""
+
+    # -- Whether VirtualServices should support HTTPS routing
     virtualServiceSupportsHTTPS: false
 
+
+# Grove component - distributed inference orchestration
+grove:
+  # -- Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide
+  enabled: false
+
+# Kai Scheduler component - advanced workload scheduling
+kai-scheduler:
+  # -- Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide
+  enabled: false
+
+# etcd configuration - distributed key-value store for operator state
+# For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd
 etcd:
+  # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance
   enabled: true
+
+  # Persistent storage configuration for etcd data
   persistence:
+    # Whether to enable persistent storage (recommended for production)
     enabled: true
     # Use the cluster default storage-class or override with a named class
     storageClass: null
+    # Size of persistent volume for etcd data
     size: 1Gi
+
+  # Pre-upgrade job configuration
   preUpgrade:
+    # Whether to run pre-upgrade validation jobs
     enabled: false
+
+  # Number of etcd replicas (1 for single-node, 3+ for HA)
   replicaCount: 1
-  # Explicitly remove authentication
+
+  # Authentication and authorization settings
+  # Explicitly remove authentication for simplified internal communication
   auth:
     rbac:
+      # Whether to create RBAC authentication (disabled for internal use)
       create: false
 
+  # Health check configuration
   readinessProbe:
+    # Whether to enable readiness probes (disabled to reduce startup complexity)
     enabled: false
 
   livenessProbe:
+    # Whether to enable liveness probes (disabled to reduce startup complexity)
     enabled: false
 
+  # Node tolerations for etcd pods (allows scheduling on specific nodes)
   tolerations: []
 
+# NATS configuration - messaging system for operator communication
+# For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats
 nats:
+  # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance
   enabled: true
-  # reference a common CA Certificate or Bundle in all nats config `tls` blocks and nats-box contexts
-  # note: `tls.verify` still must be set in the appropriate nats config `tls` blocks to require mTLS
+
+  # TLS Certificate Authority configuration for secure communication
+  # Reference a common CA Certificate or Bundle in all nats config `tls` blocks and nats-box contexts
+  # Note: `tls.verify` still must be set in the appropriate nats config `tls` blocks to require mTLS
   tlsCA:
+    # Whether to enable TLS CA configuration
     enabled: false
 
+  # Core NATS server configuration
   config:
+    # NATS clustering for high availability (multiple NATS servers)
     cluster:
+      # Whether to enable NATS clustering (disabled for single-node setups)
       enabled: false
 
-
+    # JetStream - persistent messaging and streaming capabilities
     jetstream:
+      # Whether to enable JetStream (recommended for persistent messaging)
       enabled: true
 
+      # File-based storage for JetStream streams and consumers
       fileStore:
+        # Whether to enable file storage (persistent across restarts)
         enabled: true
+        # Directory path for JetStream file storage
         dir: /data
 
         ############################################################
-        # stateful set -> volume claim templates -> jetstream pvc
+        # Persistent Volume Claim for JetStream file storage
         ############################################################
         pvc:
+          # Whether to create a PVC for JetStream storage
           enabled: true
+          # Size of the persistent volume for JetStream data
           size: 10Gi
+          # Storage class name (leave empty for default)
           storageClassName:
 
-          # merge or patch the jetstream pvc
+          # Advanced PVC configuration (merge additional fields)
           # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#persistentvolumeclaim-v1-core
           merge: {}
           patch: []
-          # defaults to "{{ include "nats.fullname" $ }}-js"
+          # PVC name (defaults to "{{ include "nats.fullname" $ }}-js")
           name:
 
-        # defaults to the PVC size
+        # Maximum size for JetStream file storage (defaults to PVC size)
         maxSize:
 
+      # Memory-based storage for JetStream (non-persistent)
       memoryStore:
+        # Whether to enable memory storage (faster but not persistent)
         enabled: false
 
-      # merge or patch the jetstream config
-      # https://docs.nats.io/running-a-nats-service/configuration#jetstream
+      # Advanced JetStream configuration
+      # For options see: https://docs.nats.io/running-a-nats-service/configuration#jetstream
       merge: {}
       patch: []
 
+    # Core NATS server settings
     nats:
+      # Port for NATS client connections
       port: 4222
+
+      # TLS configuration for encrypted connections
       tls:
+        # Whether to enable TLS encryption
         enabled: false
-        # merge or patch the tls config
-        # https://docs.nats.io/running-a-nats-service/configuration/securing_nats/tls
+        # Advanced TLS configuration
+        # For options see: https://docs.nats.io/running-a-nats-service/configuration/securing_nats/tls
         merge: {}
         patch: []
 
+    # Leaf nodes for creating NATS topologies and remote connections
     leafnodes:
+      # Whether to enable leaf node connections
       enabled: false
 
-
+    # WebSocket support for browser-based NATS clients
     websocket:
+      # Whether to enable WebSocket protocol support
       enabled: false
 
-
+    # MQTT protocol bridge for IoT device connectivity
     mqtt:
+      # Whether to enable MQTT protocol support
       enabled: false
 
-
+    # Gateway connections for multi-cluster NATS deployments
     gateway:
+      # Whether to enable gateway connections
       enabled: false
 
-
+    # HTTP monitoring endpoint for NATS server metrics
     monitor:
+      # Whether to enable HTTP monitoring interface
       enabled: true
+      # Port for monitoring HTTP endpoint
       port: 8222
+
+      # TLS configuration for monitoring endpoint
       tls:
-        # config.nats.tls must be enabled also
-        # when enabled, monitoring port will use HTTPS with the options from config.nats.tls
+        # Whether to enable HTTPS for monitoring (requires config.nats.tls enabled)
+        # When enabled, monitoring port will use HTTPS with the options from config.nats.tls
         enabled: false
 
+    # Go pprof profiling endpoint for performance debugging
     profiling:
+      # Whether to enable profiling endpoint (for debugging only)
       enabled: false
+      # Port for profiling endpoint
       port: 65432
 
+    # Account resolver for multi-tenant NATS deployments
     resolver:
+      # Whether to enable account resolution (for advanced multi-tenancy)
       enabled: false
 
-
-    # adds a prefix to the server name, which defaults to the pod name
-    # helpful for ensuring server name is unique in a super cluster
+    # Server naming configuration
+    # Adds a prefix to the server name, which defaults to the pod name
+    # Helpful for ensuring server name is unique in a super cluster
     serverNamePrefix: ""
 
-    # merge or patch the nats config
-    # https://docs.nats.io/running-a-nats-service/configuration
-    # following special rules apply
+    # Advanced NATS configuration merging and patching
+    # For complete options see: https://docs.nats.io/running-a-nats-service/configuration
+    # Special rules apply:
     #  1. strings that start with << and end with >> will be unquoted
     #     use this for variables and numbers with units
     #  2. keys ending in $include will be switched to include directives
     #     keys are sorted alphabetically, use prefix before $includes to control includes ordering
     #     paths should be relative to /etc/nats-config/nats.conf
-    # example:
-    #
+    # Example:
     #   merge:
     #     $include: ./my-config.conf
     #     zzz$include: ./my-config-last.conf
@@ -186,48 +306,48 @@ nats:
     #       token: << $TOKEN >>
     #     jetstream:
     #       max_memory_store: << 1GB >>
-    #
-    # will yield the config:
-    # {
-    #   include ./my-config.conf;
-    #   "authorization": {
-    #     "token": $TOKEN
-    #   },
-    #   "jetstream": {
-    #     "max_memory_store": 1GB
-    #   },
-    #   "server_name": "nats",
-    #   include ./my-config-last.conf;
-    # }
     merge: {}
     patch: []
 
   ############################################################
-  # stateful set -> pod template -> nats container
+  # NATS container configuration in StatefulSet
   ############################################################
   container:
+    # NATS server container image configuration
     image:
+      # Official NATS server repository
       repository: nats
+      # NATS server version (Alpine-based for smaller size)
       tag: 2.10.21-alpine
+      # Image pull policy (leave empty for chart default)
       pullPolicy:
+      # Custom registry URL (leave empty for Docker Hub)
       registry:
 
-    # container port options
-    # must be enabled in the config section also
+    # Container port configuration
+    # Note: Ports must also be enabled in the config section above
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#containerport-v1-core
     ports:
+      # Main NATS client connection port
       nats: {}
+      # Leaf node connection port
       leafnodes: {}
+      # WebSocket connection port
       websocket: {}
+      # MQTT protocol port
       mqtt: {}
+      # Cluster communication port
       cluster: {}
+      # Gateway connection port
       gateway: {}
+      # HTTP monitoring port
       monitor: {}
+      # Go profiling port
       profiling: {}
 
-    # map with key as env var name, value can be string or map
-    # example:
-    #
+    # Environment variables for the NATS container
+    # Map with key as env var name, value can be string or map
+    # Example:
     #   env:
     #     GOMEMLIMIT: 7GiB
     #     TOKEN:
@@ -237,211 +357,245 @@ nats:
     #           key: token
     env: {}
 
-    # merge or patch the container
+    # Advanced container configuration merging and patching
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#container-v1-core
     merge: {}
     patch: []
 
   ############################################################
-  # stateful set -> pod template -> reloader container
+  # Configuration reloader container for hot config updates
   ############################################################
   reloader:
+    # Whether to enable the config reloader sidecar container
     enabled: true
+
+    # Config reloader container image
     image:
+      # Official NATS config reloader repository
       repository: natsio/nats-server-config-reloader
+      # Config reloader version
       tag: 0.16.0
+      # Image pull policy (leave empty for chart default)
       pullPolicy:
+      # Custom registry URL (leave empty for Docker Hub)
       registry:
 
-    # env var map, see nats.env for an example
+    # Environment variables for the reloader container
     env: {}
 
-    # all nats container volume mounts with the following prefixes
-    # will be mounted into the reloader container
+    # Volume mount prefixes from NATS container to share with reloader
+    # All NATS container volume mounts with these prefixes will be mounted into the reloader
     natsVolumeMountPrefixes:
     - /etc/
 
-    # merge or patch the container
+    # Advanced reloader container configuration
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#container-v1-core
     merge: {}
     patch: []
 
   ############################################################
-  # stateful set -> pod template -> prom-exporter container
+  # Prometheus metrics exporter container (optional)
   ############################################################
-  # config.monitor must be enabled
+  # Note: config.monitor must be enabled for this to work
   promExporter:
+    # Whether to enable Prometheus metrics exporter sidecar
     enabled: false
 
-
   ############################################################
-  # service
+  # Kubernetes Service for NATS access
   ############################################################
   service:
+    # Whether to create a Kubernetes Service for NATS
     enabled: true
 
-    # service port options
-    # additional boolean field enable to control whether port is exposed in the service
-    # must be enabled in the config section also
+    # Service port configuration
+    # Additional boolean field 'enabled' controls whether port is exposed in the service
+    # Note: Ports must also be enabled in the config section above
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#serviceport-v1-core
     ports:
+      # Main NATS client connection port
       nats:
         enabled: true
+      # Leaf node connection port
       leafnodes:
         enabled: true
+      # WebSocket connection port
       websocket:
         enabled: true
+      # MQTT protocol port
       mqtt:
         enabled: true
+      # Cluster communication port (typically internal only)
       cluster:
         enabled: false
+      # Gateway connection port (typically internal only)
       gateway:
         enabled: false
+      # HTTP monitoring port (typically internal only)
       monitor:
         enabled: false
+      # Go profiling port (typically internal only)
       profiling:
         enabled: false
 
-    # merge or patch the service
+    # Advanced service configuration
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#service-v1-core
     merge: {}
     patch: []
-    # defaults to "{{ include "nats.fullname" $ }}"
+    # Service name (defaults to "{{ include "nats.fullname" $ }}")
     name:
 
   ############################################################
-  # other nats extension points
+  # Advanced NATS Kubernetes resource configuration
   ############################################################
 
-  # stateful set
+  # StatefulSet configuration for NATS server persistence
   statefulSet:
-    # merge or patch the stateful set
+    # Advanced StatefulSet configuration merging and patching
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#statefulset-v1-apps
     merge: {}
     patch: []
-    # defaults to "{{ include "nats.fullname" $ }}"
+    # StatefulSet name (defaults to "{{ include "nats.fullname" $ }}")
     name:
 
-  # stateful set -> pod template
+  # Pod template configuration for NATS StatefulSet
   podTemplate:
-    # adds a hash of the ConfigMap as a pod annotation
-    # this will cause the StatefulSet to roll when the ConfigMap is updated
+    # Whether to add a hash of the ConfigMap as a pod annotation
+    # This will cause the StatefulSet to roll when the ConfigMap is updated
     configChecksumAnnotation: true
 
-    # map of topologyKey: topologySpreadConstraint
-    # labelSelector will be added to match StatefulSet pods
-    #
-    # topologySpreadConstraints:
-    #   kubernetes.io/hostname:
-    #     maxSkew: 1
-    #
+    # Pod topology spread constraints for better distribution across nodes
+    # Map of topologyKey: topologySpreadConstraint
+    # labelSelector will be added automatically to match StatefulSet pods
+    # Example:
+    #   topologySpreadConstraints:
+    #     kubernetes.io/hostname:
+    #       maxSkew: 1
     topologySpreadConstraints: {}
 
-    # merge or patch the pod template
+    # Advanced pod template configuration
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#pod-v1-core
     merge:
       spec:
+        # Node tolerations for NATS pods (allows scheduling on specific nodes)
         tolerations: []
     patch: []
 
-  # headless service
+  # Headless service for StatefulSet pod discovery
   headlessService:
-    # merge or patch the headless service
+    # Advanced headless service configuration
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#service-v1-core
     merge: {}
     patch: []
-    # defaults to "{{ include "nats.fullname" $ }}-headless"
+    # Headless service name (defaults to "{{ include "nats.fullname" $ }}-headless")
     name:
 
-  # config map
+  # ConfigMap for NATS server configuration
   configMap:
-    # merge or patch the config map
+    # Advanced ConfigMap configuration
     # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#configmap-v1-core
     merge: {}
     patch: []
-    # defaults to "{{ include "nats.fullname" $ }}-config"
+    # ConfigMap name (defaults to "{{ include "nats.fullname" $ }}-config")
     name:
 
-  # pod disruption budget
+  # Pod Disruption Budget for controlled rolling updates
   podDisruptionBudget:
+    # Whether to create a PodDisruptionBudget (recommended for production)
     enabled: true
 
-
-  # service account
+  # Service Account for NATS server pods
   serviceAccount:
+    # Whether to create and use a dedicated service account
     enabled: false
 
-
-
   ############################################################
-  # natsBox
-  #
-  # NATS Box Deployment and associated resources
+  # NATS Box - CLI tools and debugging container
+  # NATS Box provides CLI tools for interacting with NATS server
   ############################################################
   natsBox:
+    # Whether to deploy NATS Box for CLI access and debugging
     enabled: true
 
     ############################################################
-    # NATS contexts
+    # NATS client contexts for authentication and connection
     ############################################################
     contexts:
+      # Default context configuration
       default:
+        # Credentials-based authentication
         creds:
-          # set contents in order to create a secret with the creds file contents
+          # Inline credentials file contents (base64 encoded)
           contents:
-          # set secretName in order to mount an existing secret to dir
+          # Name of existing secret containing credentials file
           secretName:
-          # defaults to /etc/nats-creds/<context-name>
+          # Directory to mount credentials (defaults to /etc/nats-creds/<context-name>)
           dir:
+          # Key name in secret for credentials file
           key: nats.creds
+
+        # NKey-based authentication (public/private key pairs)
         nkey:
-          # set contents in order to create a secret with the nkey file contents
+          # Inline NKey file contents (base64 encoded)
           contents:
-          # set secretName in order to mount an existing secret to dir
+          # Name of existing secret containing NKey file
           secretName:
-          # defaults to /etc/nats-nkeys/<context-name>
+          # Directory to mount NKey (defaults to /etc/nats-nkeys/<context-name>)
           dir:
+          # Key name in secret for NKey file
           key: nats.nk
-        # used to connect with client certificates
+
+        # TLS client certificate authentication
         tls:
-          # set secretName in order to mount an existing secret to dir
+          # Name of existing secret containing TLS client certificates
           secretName:
-          # defaults to /etc/nats-certs/<context-name>
+          # Directory to mount certificates (defaults to /etc/nats-certs/<context-name>)
           dir:
+          # Certificate file name in secret
           cert: tls.crt
+          # Private key file name in secret
           key: tls.key
 
-        # merge or patch the context
-        # https://docs.nats.io/using-nats/nats-tools/nats_cli#nats-contexts
+        # Advanced context configuration
+        # For options see: https://docs.nats.io/using-nats/nats-tools/nats_cli#nats-contexts
         merge: {}
         patch: []
 
-    # name of context to select by default
+    # Name of context to select by default for NATS CLI operations
     defaultContextName: default
 
     ############################################################
-    # deployment -> pod template -> nats-box container
+    # NATS Box container configuration
     ############################################################
     container:
+      # NATS Box container image
       image:
+        # Official NATS Box repository with CLI tools
         repository: natsio/nats-box
+        # NATS Box version
         tag: 0.14.5
+        # Image pull policy (leave empty for chart default)
         pullPolicy:
+        # Custom registry URL (leave empty for Docker Hub)
         registry:
 
-      # env var map, see nats.env for an example
+      # Environment variables for NATS Box container
       env: {}
 
-      # merge or patch the container
+      # Advanced container configuration
       # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#container-v1-core
       merge: {}
       patch: []
-    # service account
+
+    # Service Account for NATS Box deployment
     serviceAccount:
+      # Whether to create and use a dedicated service account for NATS Box
       enabled: false
 
+    # Pod template configuration for NATS Box deployment
     podTemplate:
       merge:
         spec:
+          # Node tolerations for NATS Box pods
           tolerations: []
       patch: []
