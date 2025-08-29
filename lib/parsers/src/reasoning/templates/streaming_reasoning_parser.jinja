@@ -1,0 +1,56 @@
+{#
+SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+#}
+
+import os
+import sys
+# get absolute path
+PATH = "{{ path }}"
+PATH = os.path.abspath(PATH)
+
+
+#extract parent directory
+parent_dir = os.path.dirname(PATH)
+
+#extract filename without extension
+module_name, _ = os.path.splitext(os.path.basename(PATH))
+
+sys.path.append(parent_dir)
+
+#import the module
+reasoning_module = __import__(module_name)
+
+# find class with BaseReasoningParser in its bases
+
+cls_name = ""
+
+import inspect
+
+for name, obj in vars(reasoning_module).items():
+    if inspect.isclass(obj) and hasattr(obj, "__bases__"):
+        # Check if BaseReasoningParser is anywhere in the MRO
+        if any("BaseReasoningParser" in base.__name__ for base in inspect.getmro(obj)[1:]):
+            cls_name = name
+            break
+
+if cls_name == "":
+    raise ValueError("No class with BaseReasoningParser in its bases found in the module")
+
+ReasoningParserClass = getattr(reasoning_module, cls_name)
+
+parser_instance = ReasoningParserClass()
+
+# read text and token_ids from sys.stdin in a loop
+for line in sys.stdin:
+    if not line:
+        break
+
+    text, token_ids = line.rsplit("],[", 1)
+
+    token_ids = list(map(int, token_ids.strip().split(","))) if token_ids.strip() else []
+    normal_text, reasoning_text = parser_instance.parse_reasoning_streaming_incremental(text, token_ids)
+
+    print(f"{normal_text}")
+    print(f"{reasoning_text}")
+    sys.stdout.flush()

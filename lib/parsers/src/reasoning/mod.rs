@@ -4,11 +4,13 @@
 mod base_parser;
 mod deepseek_r1_parser;
 mod gpt_oss_parser;
+mod python_process_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
 pub use deepseek_r1_parser::DeepseekR1ReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
+pub use python_process_parser::PythonProcessParser;
 
 #[derive(Debug, Clone, Default)]
 pub struct ParserResult {
@@ -116,16 +118,27 @@ impl ReasoningParserType {
         }
     }
 
-    pub fn get_reasoning_parser_from_name(name: &str) -> ReasoningParserWrapper {
-        tracing::debug!("Selected reasoning parser: {}", name);
-        match name.to_lowercase().as_str() {
+    pub fn get_reasoning_parser_from_name(name_or_path: &str) -> ReasoningParserWrapper {
+        tracing::debug!("Selected reasoning parser: {}", name_or_path);
+        // Prefer Python parser only if this looks like a concrete .py file
+        let path = std::path::Path::new(name_or_path);
+        if path.is_file()
+            && let Some(ext) = path.extension().and_then(|s| s.to_str())
+            && ext.eq_ignore_ascii_case("py")
+        {
+            let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            return ReasoningParserWrapper {
+                parser: Box::new(PythonProcessParser::new(abs.to_string_lossy().as_ref())),
+            };
+        }
+        match name_or_path.to_lowercase().as_str() {
             "deepseek_r1" => Self::DeepseekR1.get_reasoning_parser(),
             "basic" => Self::Basic.get_reasoning_parser(),
             "gpt_oss" => Self::GptOss.get_reasoning_parser(),
             _ => {
                 tracing::warn!(
-                    "Unknown reasoning parser type '{}', falling back to Basic Reasoning Parser",
-                    name
+                    "Unknown reasoning parser type '{}' or file provided incorrect, falling back to Basic Reasoning Parser",
+                    name_or_path
                 );
                 Self::Basic.get_reasoning_parser()
             }
