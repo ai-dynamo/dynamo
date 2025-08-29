@@ -17,6 +17,8 @@ from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
     PrefillInterpolator,
+    create_decode_interpolator,
+    create_prefill_interpolator,
 )
 from dynamo.planner.utils.prometheus import PrometheusAPIClient
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
@@ -86,8 +88,9 @@ class Planner:
             window_size=args.load_prediction_window_size,
         )
 
-        self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
-        self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+        # Initialize interpolators - will be set up in async_init
+        self.prefill_interpolator = None
+        self.decode_interpolator = None
 
         if not self.dryrun:
             self.prefill_client = None
@@ -125,6 +128,52 @@ class Planner:
             self.no_correction = True
         else:
             self.no_correction = args.no_correction
+
+    async def async_init(self):
+        """Initialize interpolators asynchronously."""
+        import os
+        
+        # Check if profile_results_dir is provided and exists
+        if (hasattr(self.args, 'profile_results_dir') and 
+            self.args.profile_results_dir and 
+            os.path.exists(self.args.profile_results_dir)):
+            # Use file-based profile results
+            self.prefill_interpolator = PrefillInterpolator(profile_results_dir=self.args.profile_results_dir)
+            self.decode_interpolator = DecodeInterpolator(profile_results_dir=self.args.profile_results_dir)
+        elif (not self.dryrun and self.runtime and 
+              hasattr(self.args, 'model_name') and self.args.model_name and
+              hasattr(self.args, 'prefill_tp_size') and self.args.prefill_tp_size and
+              hasattr(self.args, 'decode_tp_size') and self.args.decode_tp_size):
+            # Use database-based profile results
+            self.prefill_interpolator = await create_prefill_interpolator(
+                runtime=self.runtime,
+                model_name=self.args.model_name,
+                tp_size=self.args.prefill_tp_size,
+                backend=getattr(self.args, 'backend', None),
+                gpu_count=getattr(self.args, 'gpu_count', None),
+                node_count=getattr(self.args, 'node_count', None),
+                dp_size=getattr(self.args, 'dp_size', None),
+                pp_size=getattr(self.args, 'pp_size', None),
+                gpu_type=getattr(self.args, 'gpu_type', None),
+                max_context_length=getattr(self.args, 'max_context_length', None)
+            )
+            self.decode_interpolator = await create_decode_interpolator(
+                runtime=self.runtime,
+                model_name=self.args.model_name,
+                tp_size=self.args.decode_tp_size,
+                backend=getattr(self.args, 'backend', None),
+                gpu_count=getattr(self.args, 'gpu_count', None),
+                node_count=getattr(self.args, 'node_count', None),
+                dp_size=getattr(self.args, 'dp_size', None),
+                pp_size=getattr(self.args, 'pp_size', None),
+                gpu_type=getattr(self.args, 'gpu_type', None),
+                max_context_length=getattr(self.args, 'max_context_length', None)
+            )
+        else:
+            raise ValueError(
+                "Either profile_results_dir must be provided and exist, or "
+                "runtime, model_name, prefill_tp_size, and decode_tp_size must be provided for database lookup"
+            )
 
     async def get_workers_info(self):
         if self.runtime is None:
@@ -265,6 +314,9 @@ class Planner:
             / self.args.adjustment_interval
             * min(1, self.p_correction_factor)
         )
+        if self.prefill_interpolator is None:
+            raise RuntimeError("PrefillInterpolator not initialized. Call async_init() first.")
+        
         next_num_p = math.ceil(
             pred_prefill_load_per_gpu
             / self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
@@ -282,6 +334,9 @@ class Planner:
         else:
             corrected_itl = self.args.itl / self.d_correction_factor
         # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
+        if self.decode_interpolator is None:
+            raise RuntimeError("DecodeInterpolator not initialized. Call async_init() first.")
+            
         (
             pred_decode_thpt_per_gpu,
             _,
@@ -345,11 +400,17 @@ class Planner:
 
                 # first correct the prediction correction factor
                 # for TTFT, we expect the correction factor to be << 1 due to queuing delay
+                if self.prefill_interpolator is None:
+                    raise RuntimeError("PrefillInterpolator not initialized. Call async_init() first.")
+                    
                 expect_ttft = self.prefill_interpolator.interpolate_ttft(
                     self.last_metrics.isl
                 )
                 self.p_correction_factor = self.last_metrics.ttft / expect_ttft
                 # for ITL, we expect the correction factor to be close to 1
+                if self.decode_interpolator is None:
+                    raise RuntimeError("DecodeInterpolator not initialized. Call async_init() first.")
+                    
                 expect_itl = self.decode_interpolator.interpolate_itl(
                     concurrency=self.last_metrics.num_req  # type: ignore
                     / len(self.d_endpoints)
@@ -415,6 +476,9 @@ class Planner:
 
         def compute_safe_p_thpt(num_p: int, isl: float, ttft: float):
             """safe throughput is maximum throughput that the engine can handle given the TTFT SLA"""
+            if self.prefill_interpolator is None:
+                raise RuntimeError("PrefillInterpolator not initialized. Call async_init() first.")
+                
             actual_ttft = self.prefill_interpolator.interpolate_ttft(isl)
             if actual_ttft > ttft:
                 return 0
@@ -423,6 +487,9 @@ class Planner:
 
         def compute_safe_d_thpt(num_d: int, isl: float, osl: float, itl: float):
             """safe throughput is maximum throughput that the engine can handle given the ITL SLA"""
+            if self.decode_interpolator is None:
+                raise RuntimeError("DecodeInterpolator not initialized. Call async_init() first.")
+                
             (
                 pred_decode_thpt_per_gpu,
                 actual_itl,
@@ -527,4 +594,5 @@ class Planner:
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
+    await planner.async_init()
     await planner.run()
