@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import logging
 
+from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
@@ -10,12 +13,15 @@ from dynamo.trtllm.request_handlers.handler_base import (
     RequestHandlerConfig,
 )
 
+configure_dynamo_logging()
+
 
 class RequestHandlerFactory:
     def __init__(self):
         self.handlers = {
             "prefill": PrefillHandler,
             "decode": DecodeHandler,
+            "encode": EncodeHandler,
             "prefill_and_decode": AggregatedHandler,
         }
 
@@ -66,6 +72,33 @@ class AggregatedHandler(HandlerBase):
             yield res
 
 
+class EncodeHandler(HandlerBase):
+    """
+    Handler for the encode mode.
+    """
+
+    def __init__(self, config: RequestHandlerConfig):
+        super().__init__(config)
+
+    async def generate(self, request: dict):
+        if self.connector:
+            # Use helper method to process embedding request
+            async for response in EncodeHelper.process_embedding_request(
+                request, self.multimodal_processor, self.connector
+            ):
+                yield response
+            return
+        else:
+            logging.error("encode handler: no Dynamo NIXL connector found")
+            raise RuntimeError("encode handler: no Dynamo NIXL connector found")
+
+        if not request.get("streaming", False):
+            yield request
+            return
+
+        yield request
+
+
 class PrefillHandler(HandlerBase):
     """
     Handler for the prefill mode.
@@ -74,16 +107,45 @@ class PrefillHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    async def remote_encode_with_nixl(self, request: dict):
+        # 2. Get response with shape info and readable metadata
+        encode_response = None
+        async for res in await self.encode_client.round_robin(request):
+            encode_response = res.data()
+            break
+
+        if not encode_response:
+            raise RuntimeError("Did not receive a response from the encode worker.")
+
+        # Use utility function to handle NIXL reading and reconstruction
+        return await EncodeHelper.read_embeddings_from_encode_response(
+            encode_response, self.connector
+        )
+
     async def remote_decode(self, request: dict):
         async for res in await self.next_client.round_robin(request):
             yield res.data()
 
     async def generate(self, request: dict):
+        logging.debug(f"PrefillHandler.generate received request: {request}")
+        embeddings_tensor = None
+
+        if self.multimodal_processor:
+            _, _, embedding_paths = self.multimodal_processor.extract_prompt_and_media(
+                request.get("messages", [])
+            )
+            # This check will be removed once TRTLLM Encoder is integrated.
+            if embedding_paths:
+                if self.encode_client and self.connector:
+                    logging.debug(
+                        "PrefillHandler calling Encode Worker via remote_encode_with_nixl"
+                    )
+                    embeddings_tensor = await self.remote_encode_with_nixl(request)
         # Generate the prefill response locally
         prefill_request = copy.deepcopy(request)
         prefill_response = None
         response_count = 0
-        async for res in self.generate_locally(prefill_request):
+        async for res in self.generate_locally(prefill_request, embeddings_tensor):
             prefill_response = res
             response_count += 1
             if response_count > 1:
