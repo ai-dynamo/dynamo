@@ -29,6 +29,18 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": 0,
         "help": "Maximum number of times a request may be migrated to a different engine worker",
     },
+    "tool-call-parser": {
+        "flags": ["--dyn-tool-call-parser"],
+        "type": str,
+        "default": None,
+        "help": "Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic'.",
+    },
+    "reasoning-parser": {
+        "flags": ["--dyn-reasoning-parser"],
+        "type": str,
+        "default": None,
+        "help": "Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss', 'kimi', 'step3', 'qwen3', 'nemotron_deci', 'mistral'.",
+    },
 }
 
 
@@ -73,20 +85,6 @@ def parse_args(args: list[str]) -> Config:
 
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Backend SGLang {__version__}"
-    )
-
-    # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
-    parser.add_argument(
-        "--dyn-tool-call-parser",
-        type=str,
-        default=None,
-        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4'.",
-    )
-    parser.add_argument(
-        "--dyn-reasoning-parser",
-        type=str,
-        default=None,
-        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss'.",
     )
 
     # Dynamo args
