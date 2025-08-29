@@ -240,7 +240,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         await register_llm(
             ModelInput.Tokens,
-            ModelType.Chat,
+            ModelType.Chat | ModelType.Completions,
             generate_endpoint,
             config.model,
             config.served_model_name,

@@ -27,7 +27,7 @@ async def register_llm_with_runtime_config(
     try:
         await register_llm(
             ModelInput.Tokens,
-            ModelType.Chat,
+            ModelType.Chat | ModelType.Completions,
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
