@@ -248,8 +248,9 @@ impl Flags {
                 self.use_kv_events,
                 self.router_replica_sync,
                 self.max_num_batched_tokens,
-                None, // deprecated
-                None, // deprecated
+                // defaulting below args (no longer maintaining new flags for dynamo-run)
+                None,
+                None,
             ),
         )
     }
