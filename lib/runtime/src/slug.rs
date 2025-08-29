@@ -43,11 +43,7 @@ impl Slug {
             .chars()
             .map(|c| {
                 let is_valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
-                if is_valid {
-                    c
-                } else {
-                    REPLACEMENT_CHAR
-                }
+                if is_valid { c } else { REPLACEMENT_CHAR }
             })
             .collect::<String>();
         Slug::new(out)
@@ -61,11 +57,7 @@ impl Slug {
             .chars()
             .map(|c| {
                 let is_valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_';
-                if is_valid {
-                    c
-                } else {
-                    REPLACEMENT_CHAR
-                }
+                if is_valid { c } else { REPLACEMENT_CHAR }
             })
             .collect::<String>();
         let hash = blake3::hash(s.as_bytes()).to_string();

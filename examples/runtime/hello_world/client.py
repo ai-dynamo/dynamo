@@ -40,7 +40,7 @@ async def worker(runtime: DistributedRuntime):
         try:
             # Issue request and process the stream
             idx += 1
-            stream = await client.generate(f"Query[{idx}] Hello world")
+            stream = await client.generate("world,sun,moon,star")
             async for response in stream:
                 print(response.data())
             # Reset backoff on successful iteration

@@ -283,7 +283,7 @@ impl<T: Returnable> Clone for Pool<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     // Implement Returnable for u32 just for testing
     impl Returnable for u32 {

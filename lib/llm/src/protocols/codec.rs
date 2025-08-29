@@ -98,14 +98,14 @@ where
 
     fn try_from(value: Message) -> Result<Annotated<T>, Self::Error> {
         // determine if the message had an error
-        if let Some(event) = value.event.as_ref() {
-            if event == "error" {
-                let message = match &value.comments {
-                    Some(comments) => comments.join("\n"),
-                    None => "`event: error` detected, but no error message found".to_string(),
-                };
-                return Err(message);
-            }
+        if let Some(event) = value.event.as_ref()
+            && event == "error"
+        {
+            let message = match &value.comments {
+                Some(comments) => comments.join("\n"),
+                None => "`event: error` detected, but no error message found".to_string(),
+            };
+            return Err(message);
         }
 
         // try to deserialize the data to T

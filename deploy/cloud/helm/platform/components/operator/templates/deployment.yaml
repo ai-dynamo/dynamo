@@ -101,9 +101,6 @@ spec:
         {{- if .Values.dynamo.virtualServiceSupportsHTTPS }}
           - --virtual-service-supports-https={{ .Values.dynamo.virtualServiceSupportsHTTPS }}
         {{- end }}
-        {{- if .Values.dynamo.enableLWS }}
-          - --enable-lws
-        {{- end }}
         {{- if .Values.dynamo.groveTerminationDelay }}
           - --grove-termination-delay={{ .Values.dynamo.groveTerminationDelay }}
         {{- end }}

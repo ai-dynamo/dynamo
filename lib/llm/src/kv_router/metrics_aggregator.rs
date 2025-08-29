@@ -15,13 +15,13 @@
 
 use std::sync::Once;
 
-pub use crate::kv_router::protocols::{ForwardPassMetrics, LoadMetrics, PredictiveLoadMetrics};
 use crate::kv_router::KV_METRICS_ENDPOINT;
+pub use crate::kv_router::protocols::{ForwardPassMetrics, LoadMetrics, PredictiveLoadMetrics};
 
-use crate::kv_router::scoring::Endpoint;
 use crate::kv_router::ProcessedEndpoints;
+use crate::kv_router::scoring::Endpoint;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
+use dynamo_runtime::{Result, service::EndpointInfo, utils::Duration};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

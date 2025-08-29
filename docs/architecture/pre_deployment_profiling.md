@@ -96,7 +96,7 @@ Use the default pre-built image and inject custom configurations via PVC:
 
 1. **Set the container image:**
    ```bash
-   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0 # or any existing image tag
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag
    ```
 
 2. **Inject your custom disagg configuration:**

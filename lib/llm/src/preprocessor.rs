@@ -28,21 +28,21 @@ use crate::tokenizers::Encoding;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    async_trait, AsyncEngineContext, Error, ManyOut, Operator, SingleIn,
+    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
     common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
+        DeltaGeneratorExt,
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         nvext::NvExtProvider,
-        DeltaGeneratorExt,
     },
 };
-use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
+use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -101,7 +101,6 @@ impl OpenAIPreprocessor {
         let mdcsum = mdc.mdcsum();
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
         let PromptFormatter::OAI(formatter) = formatter;
-
         let tokenizer = match &mdc.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
             Some(TokenizerKind::GGUF(tokenizer)) => {
@@ -195,7 +194,35 @@ impl OpenAIPreprocessor {
                                 self.formatter.render(request)?
                             };
 
-                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                            // Check if backend_instance_id is present and token_data is provided
+                            let has_backend_instance_id = request
+                                .nvext()
+                                .and_then(|ext| ext.backend_instance_id)
+                                .is_some();
+
+                            let token_data =
+                                request.nvext().and_then(|ext| ext.token_data.as_ref());
+
+                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
+                                if let Some(tokens) = token_data {
+                                    tracing::trace!(
+                                        "Using provided tokens from EPP: {} ids",
+                                        tokens.len()
+                                    );
+                                    // need ownership for the builder, so clone.
+                                    (tokens.clone(), true)
+                                } else {
+                                    tracing::warn!(
+                                        "backend_instance_id provided but no token_data; tokenizing prompt"
+                                    );
+                                    let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                    (encoding.token_ids().to_vec(), false)
+                                }
+                            } else {
+                                // No backend_instance_id provided, continue the normal flow.
+                                let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                (encoding.token_ids().to_vec(), false)
+                            };
 
                             if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
                                 annotations.insert(
@@ -204,14 +231,16 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
-                            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                            if request.has_annotation(ANNOTATION_TOKEN_IDS)
+                                && !skip_token_annotation
+                            {
                                 annotations.insert(
                                     ANNOTATION_TOKEN_IDS.to_string(),
-                                    serde_json::to_string(encoding.token_ids())?,
+                                    serde_json::to_string(&tokens_vec)?,
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids().to_vec());
+                            builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
                             let token_batches: Vec<Vec<u32>> = texts
@@ -488,18 +517,14 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
         // convert the chat completion request to a common completion request
@@ -546,18 +571,14 @@ impl
         &self,
         request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
@@ -604,10 +625,10 @@ impl
         request: SingleIn<NvCreateEmbeddingRequest>,
         next: Arc<
             dyn AsyncEngine<
-                SingleIn<PreprocessedEmbeddingRequest>,
-                ManyOut<Annotated<EmbeddingsEngineOutput>>,
-                Error,
-            >,
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
         // Unpack request

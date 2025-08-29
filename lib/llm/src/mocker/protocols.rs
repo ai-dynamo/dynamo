@@ -160,58 +160,58 @@ impl MockEngineArgs {
         }
 
         // Apply each extra argument to the builder
-        if let Some(value) = extra_args.get("num_gpu_blocks") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.num_gpu_blocks(num as usize);
-            }
+        if let Some(value) = extra_args.get("num_gpu_blocks")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.num_gpu_blocks(num as usize);
         }
 
-        if let Some(value) = extra_args.get("block_size") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.block_size(num as usize);
-            }
+        if let Some(value) = extra_args.get("block_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.block_size(num as usize);
         }
 
-        if let Some(value) = extra_args.get("max_num_seqs") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.max_num_seqs(Some(num as usize));
-            }
+        if let Some(value) = extra_args.get("max_num_seqs")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.max_num_seqs(Some(num as usize));
         }
 
-        if let Some(value) = extra_args.get("max_num_batched_tokens") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.max_num_batched_tokens(Some(num as usize));
-            }
+        if let Some(value) = extra_args.get("max_num_batched_tokens")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.max_num_batched_tokens(Some(num as usize));
         }
 
-        if let Some(value) = extra_args.get("enable_prefix_caching") {
-            if let Some(enabled) = value.as_bool() {
-                builder = builder.enable_prefix_caching(enabled);
-            }
+        if let Some(value) = extra_args.get("enable_prefix_caching")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.enable_prefix_caching(enabled);
         }
 
-        if let Some(value) = extra_args.get("enable_chunked_prefill") {
-            if let Some(enabled) = value.as_bool() {
-                builder = builder.enable_chunked_prefill(enabled);
-            }
+        if let Some(value) = extra_args.get("enable_chunked_prefill")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.enable_chunked_prefill(enabled);
         }
 
-        if let Some(value) = extra_args.get("watermark") {
-            if let Some(num) = value.as_f64() {
-                builder = builder.watermark(num);
-            }
+        if let Some(value) = extra_args.get("watermark")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.watermark(num);
         }
 
-        if let Some(value) = extra_args.get("speedup_ratio") {
-            if let Some(num) = value.as_f64() {
-                builder = builder.speedup_ratio(num);
-            }
+        if let Some(value) = extra_args.get("speedup_ratio")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.speedup_ratio(num);
         }
 
-        if let Some(value) = extra_args.get("dp_size") {
-            if let Some(num) = value.as_u64() {
-                builder = builder.dp_size(num as u32);
-            }
+        if let Some(value) = extra_args.get("dp_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.dp_size(num as u32);
         }
 
         // Build the MockEngineArgs with either defaults or overridden values

@@ -34,6 +34,16 @@ impl ModelRuntimeConfig {
         self.inner.max_num_batched_tokens = Some(max_num_batched_tokens);
     }
 
+    #[setter]
+    fn set_tool_call_parser(&mut self, tool_call_parser: Option<String>) {
+        self.inner.tool_call_parser = tool_call_parser;
+    }
+
+    #[setter]
+    fn set_reasoning_parser(&mut self, reasoning_parser: Option<String>) {
+        self.inner.reasoning_parser = reasoning_parser;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
@@ -55,6 +65,16 @@ impl ModelRuntimeConfig {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+
+    #[getter]
+    fn tool_call_parser(&self) -> Option<String> {
+        self.inner.tool_call_parser.clone()
+    }
+
+    #[getter]
+    fn reasoning_parser(&self) -> Option<String> {
+        self.inner.reasoning_parser.clone()
     }
 
     #[getter]

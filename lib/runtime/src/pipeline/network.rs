@@ -33,8 +33,8 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    context, AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO,
-    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source,
+    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
+    ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use ingress::push_handler::WorkHandlerMetrics;
 

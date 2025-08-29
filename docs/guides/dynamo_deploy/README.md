@@ -59,6 +59,14 @@ It's a Kubernetes Custom Resource that defines your inference pipeline:
 
 The scripts in the `components/<backend>/launch` folder like `agg.sh` demonstrate how you can serve your models locally. The corresponding YAML files like `agg.yaml` show you how you could create a kubernetes deployment for your inference graph.
 
+## 📖 API Reference & Documentation
+
+For detailed technical specifications of Dynamo's Kubernetes resources:
+
+- **[API Reference](api-reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
+- **[Operator Guide](dynamo_operator.md)** - Dynamo operator configuration and management
+- **[Create Deployment](create_deployment.md)** - Step-by-step deployment creation examples
+
 ### Choosing Your Architecture Pattern
 
 When creating a deployment, select the architecture pattern that best fits your use case:

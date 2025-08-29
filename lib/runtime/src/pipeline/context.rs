@@ -316,7 +316,7 @@ impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
 
 // TODO - refactor here - this came from the dynamo.llm-async-engine crate
 
-use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::sync::watch::{Receiver, Sender, channel};
 
 #[derive(Debug, Eq, PartialEq)]
 enum State {

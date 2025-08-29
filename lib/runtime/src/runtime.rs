@@ -25,7 +25,7 @@
 //! Notes: We will need to do an evaluation on what is fully public, what is pub(crate) and what is
 //! private; however, for now we are exposing most objects as fully public while the API is maturing.
 
-use super::{error, Result, Runtime, RuntimeType};
+use super::{Result, Runtime, RuntimeType, error};
 use crate::config::{self, RuntimeConfig};
 
 use futures::Future;

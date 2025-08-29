@@ -199,7 +199,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// Create the appropriate workload resource based on deployment type
 	var leaderWorkerSets []*leaderworkersetv1.LeaderWorkerSet
 	var deployment *appsv1.Deployment
-	if r.Config.EnableLWS && dynamoComponentDeployment.IsMultinode() {
+	if r.Config.LWS.Enabled && dynamoComponentDeployment.IsMultinode() {
 		desiredReplicas := int32(1)
 		if dynamoComponentDeployment.Spec.Replicas != nil {
 			desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
@@ -1146,6 +1146,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
+	// Add label for the dynamo graph deployment on the pods themselves
+	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = opt.dynamoComponentDeployment.Spec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
+
 	// Add component type label if specified
 	if opt.dynamoComponentDeployment.Spec.ComponentType != "" {
 		podLabels[commonconsts.KubeLabelDynamoComponentType] = opt.dynamoComponentDeployment.Spec.ComponentType
@@ -1353,7 +1356,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(controller_common.EphemeralDeploymentEventFilter(r.Config))
 
-	if r.Config.EnableLWS {
+	if r.Config.LWS.Enabled {
 		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },

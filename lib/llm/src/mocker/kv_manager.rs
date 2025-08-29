@@ -102,18 +102,18 @@ impl KvManager {
         store: bool,
         parent_hash: Option<u64>,
     ) {
-        if let Some(ref tx) = self.move_block_response_tx {
-            if !blocks.is_empty() {
-                if reverse {
-                    blocks.reverse();
-                }
-                let response = if store {
-                    MoveBlockResponse::Store(blocks, parent_hash)
-                } else {
-                    MoveBlockResponse::Remove(blocks)
-                };
-                tx.send(response).unwrap();
+        if let Some(ref tx) = self.move_block_response_tx
+            && !blocks.is_empty()
+        {
+            if reverse {
+                blocks.reverse();
             }
+            let response = if store {
+                MoveBlockResponse::Store(blocks, parent_hash)
+            } else {
+                MoveBlockResponse::Remove(blocks)
+            };
+            tx.send(response).unwrap();
         }
     }
 
@@ -159,10 +159,10 @@ impl KvManager {
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
                     self.all_blocks.insert(hash.clone());
-                    if self.move_block_response_tx.is_some() {
-                        if let UniqueBlock::FullBlock(stored_full_block) = hash {
-                            blocks_stored.push(*stored_full_block);
-                        }
+                    if self.move_block_response_tx.is_some()
+                        && let UniqueBlock::FullBlock(stored_full_block) = hash
+                    {
+                        blocks_stored.push(*stored_full_block);
                     }
                 }
 
@@ -184,10 +184,10 @@ impl KvManager {
                     assert!(self.all_blocks.remove(hash));
 
                     // Track blocks for batch sending
-                    if self.move_block_response_tx.is_some() {
-                        if let UniqueBlock::FullBlock(destroyed_full_block) = hash {
-                            blocks_destroyed.push(*destroyed_full_block);
-                        }
+                    if self.move_block_response_tx.is_some()
+                        && let UniqueBlock::FullBlock(destroyed_full_block) = hash
+                    {
+                        blocks_destroyed.push(*destroyed_full_block);
                     }
                 }
 

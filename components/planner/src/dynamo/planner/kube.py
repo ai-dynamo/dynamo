@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 from typing import Optional
 
 from kubernetes import client, config
@@ -53,76 +54,36 @@ class KubernetesAPI:
             name=graph_deployment_name,
         )
 
-    async def get_graph_deployment(
-        self, component_name: str, dynamo_namespace: str
-    ) -> Optional[dict]:
+    async def get_parent_graph_deployment(self) -> Optional[dict]:
         """
-        Get DynamoGraphDeployment by first finding the associated DynamoComponentDeployment
-        and then retrieving its owner reference.
+        Get the parent DynamoGraphDeployment using environment variable.
 
-        Args:
-            component_name: The name of the component
-            dynamo_namespace: The dynamo namespace
+        Uses DYN_PARENT_DGD_K8S_NAME environment variable and assumes the DGD
+        is in the same namespace as this component (self.current_namespace).
 
         Returns:
-            The DynamoGraphDeployment object or None if not found
+            The DynamoGraphDeployment object or None if env var is not set
         """
+        dgd_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
+
+        if not dgd_name:
+            return None
+
         try:
-            # First, find the DynamoComponentDeployment using the component name and namespace labels
-            label_selector = f"nvidia.com/dynamo-component={component_name},nvidia.com/dynamo-namespace={dynamo_namespace}"
-
-            component_deployments = self.custom_api.list_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.current_namespace,
-                plural="dynamocomponentdeployments",
-                label_selector=label_selector,
-            )
-
-            items = component_deployments.get("items", [])
-            if not items:
-                return None
-
-            if len(items) > 1:
-                raise ValueError(
-                    f"Multiple component deployments found for component {component_name} in dynamo namespace {dynamo_namespace}. "
-                    "Expected exactly one deployment."
-                )
-
-            # Get the component deployment and extract the owner reference
-            component_deployment = items[0]
-            owner_refs = component_deployment.get("metadata", {}).get(
-                "ownerReferences", []
-            )
-
-            # Find the DynamoGraphDeployment in the owner references
-            graph_deployment_ref = None
-            for ref in owner_refs:
-                if (
-                    ref.get("apiVersion") == "nvidia.com/v1alpha1"
-                    and ref.get("kind") == "DynamoGraphDeployment"
-                ):
-                    graph_deployment_ref = ref
-                    break
-
-            if not graph_deployment_ref:
-                return None
-
-            # Get the actual DynamoGraphDeployment using the name from the owner reference
-            graph_deployment_name = graph_deployment_ref.get("name")
-            if not graph_deployment_name:
-                return None
-
-            graph_deployment = self._get_graph_deployment_from_name(
-                graph_deployment_name
-            )
-
-            return graph_deployment
-
+            return self._get_graph_deployment_from_name(dgd_name)
         except client.ApiException as e:
             if e.status == 404:
                 return None
             raise
+
+    async def get_graph_deployment(self) -> Optional[dict]:
+        """
+        Get the parent DynamoGraphDeployment using environment variable.
+
+        Returns:
+            The DynamoGraphDeployment object or None if env var is not set
+        """
+        return await self.get_parent_graph_deployment()
 
     async def update_graph_replicas(
         self, graph_deployment_name: str, component_name: str, replicas: int

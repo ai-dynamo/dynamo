@@ -110,3 +110,13 @@ func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	// If no matching condition found, append the new one
 	s.Status.Conditions = append(s.Status.Conditions, condition)
 }
+
+// HasAnyMultinodeService reports whether any service in the graph is configured with more than one node.
+func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
+	for _, svc := range s.Spec.Services {
+		if svc != nil && svc.GetNumberOfNodes() > 1 {
+			return true
+		}
+	}
+	return false
+}

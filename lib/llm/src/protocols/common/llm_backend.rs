@@ -15,8 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use super::preprocessor::PreprocessedRequest;
 pub use super::FinishReason;
+pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
@@ -157,9 +157,9 @@ impl MaybeError for LLMEngineOutput {
         LLMEngineOutput::error(format!("{:?}", err))
     }
 
-    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+    fn err(&self) -> Option<anyhow::Error> {
         if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
-            Some(anyhow::Error::msg(err_msg.clone()).into())
+            Some(anyhow::Error::msg(err_msg.clone()))
         } else {
             None
         }

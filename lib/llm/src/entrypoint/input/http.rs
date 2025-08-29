@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{ModelManager, ModelUpdate, ModelWatcher, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{self, input::common, EngineConfig},
+    entrypoint::{self, EngineConfig, input::common},
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
     model_type::ModelType,
@@ -17,8 +17,8 @@ use crate::{
     },
 };
 use dynamo_runtime::transports::etcd;
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
