@@ -19,4 +19,4 @@ limitations under the License.
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](../../../deploy/cloud/operator/docs/api-reference.md)**
+**📖 [Dynamo CRD API Reference](../../../deploy/cloud/operator/docs/api_reference.md)**

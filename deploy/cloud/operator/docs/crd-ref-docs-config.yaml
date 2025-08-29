@@ -30,6 +30,11 @@ processor:
   ignoreTypes:
     - "List$"
     - "ParseError$"
+    # Ignore only the override wrapper type to reduce repetition
+    # Keep SharedSpec so embedded fields are documented once
+    - "DynamoComponentDeploymentOverridesSpec$"
+    - "DynamoComponentDeploymentStatus$"
+    - "BaseStatus$"
 
 render:
   # Output format - use markdown instead of default asciidoc
@@ -43,3 +48,9 @@ render:
 
   # Include resource descriptions
   includeDescription: true
+
+  # Reduce repetition in links and references
+  allowDangerousTypes: false
+
+  # Sort types alphabetically for better organization
+  sortByName: true

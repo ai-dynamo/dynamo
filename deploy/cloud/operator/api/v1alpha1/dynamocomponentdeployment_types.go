@@ -67,13 +67,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// Labels to add to generated Kubernetes resources for this component.
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// contains the name of the component
+	// The name of the component
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ComponentType indicates the role of this component (for example, "main").
 	ComponentType string `json:"componentType,omitempty"`
 
-	// dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive)
+	// Dynamo namespace of the service (allows to override the Dynamo namespace of the service defined in annotations inside the Dynamo archive)
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
