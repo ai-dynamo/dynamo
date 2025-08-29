@@ -25,6 +25,20 @@ fn test_chat_completions_ignore_eos_from_common() {
 
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(100));
+    assert_eq!(request.common.include_stop_str_in_output, Some(false));
+}
+
+#[test]
+fn test_chat_completions_include_stop_str_in_output_from_common() {
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "include_stop_str_in_output": true
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(request.common.include_stop_str_in_output, Some(true));
 }
 
 #[test]
