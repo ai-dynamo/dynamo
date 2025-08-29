@@ -22,7 +22,7 @@ jobs:
     # Do not cancel main branch runs
     concurrency:
       group: ${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
-      cancel-in-progress: ${{ github.ref_name != 'main' }}
+      cancel-in-progress: ${{ !contains(github.ref, 'main')}}
 
     name: Build and Test - ${{ matrix.framework }}
     env:
