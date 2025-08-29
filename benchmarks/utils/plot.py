@@ -11,10 +11,10 @@ import matplotlib.pyplot as plt
 
 def parse_benchmark_results(result_dir: Path) -> List[Tuple[int, Dict]]:
     """
-    Parse benchmark results from a deployment directory (agg, disagg, or vanilla).
+    Parse benchmark results from a deployment directory.
 
     Args:
-        result_dir: Path to the result directory (e.g., benchmarks/results/vanilla)
+        result_dir: Path to the result directory
 
     Returns:
         List of (concurrency_level, metrics_dict) tuples sorted by concurrency

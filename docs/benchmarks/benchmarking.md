@@ -110,31 +110,48 @@ Ensure container images in your DynamoGraphDeployment manifests are accessible:
 - **Public images**: Use [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) public releases
 - **Custom registries**: Configure proper credentials in your Kubernetes namespace
 
-## Configuration Output
+## Configuration and Usage
 
-You'll see output like this confirming your configuration:
-```text
-=== Benchmark Configuration ===
-Namespace:              benchmarking
-Model:                  deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-Input Sequence Length:  2000 tokens      # Auto-configured default
-Output Sequence Length: 256 tokens       # Auto-configured default
-Sequence Std Dev:       10 tokens        # Auto-configured default
-Output Directory:       ./benchmarks/results
+### Command Line Options
 
-Benchmark Inputs:
-  agg: manifest components/backends/vllm/deploy/agg.yaml
-  disagg: manifest components/backends/vllm/deploy/disagg.yaml
-===============================
+```bash
+./benchmarks/benchmark.sh --namespace NAMESPACE --input <label>=<manifest_path_or_endpoint> [--input <label>=<manifest_path_or_endpoint>]... [OPTIONS]
+
+REQUIRED:
+  -n, --namespace NAMESPACE           Kubernetes namespace
+  --input <label>=<manifest_path_or_endpoint>  Benchmark input with custom label
+                                        - <label>: becomes the name/label in plots
+                                        - <manifest_path_or_endpoint>: either a DynamoGraphDeployment manifest or HTTP endpoint URL
+                                        Can be specified multiple times for comparisons
+
+OPTIONS:
+  -h, --help                    Show help message and examples
+  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+                                NOTE: This must match the model configured in your deployment manifests and endpoints
+  -i, --isl LENGTH              Input sequence length (default: 2000)
+  -s, --std STDDEV              Input sequence standard deviation (default: 10)
+  -o, --osl LENGTH              Output sequence length (default: 256)
+  -d, --output-dir DIR          Output directory (default: ./benchmarks/results)
+  --verbose                     Enable verbose output
 ```
 
-The script will then:
-1. Deploy each DynamoGraphDeployment configuration
-2. Run GenAI-Perf benchmarks at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
-3. Generate comparison plots using your custom labels in `./benchmarks/results/plots/`
-4. Clean up deployments when complete
+### Important Notes
 
-**Note**: The script auto-configures reasonable defaults for ISL/OSL (2000/256 tokens respectively). You can override these with `--isl` and `--osl` flags if needed for your specific workload.
+- **Custom Labels**: Each input must have a unique label that becomes the name in plots and results
+- **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
+- **Input Types**: Supports DynamoGraphDeployment manifests for automatic deployment, or HTTP endpoints for existing services
+- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, not deployment (deployment model is determined by the manifest files)
+- **Standalone Deployments**: For non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), you must deploy them manually following their respective Kubernetes deployment guides. The benchmarking framework only supports automatic deployment of DynamoGraphDeployments.
+- **Single Model Requirement**: Only one model can be benchmarked at a time across all inputs to ensure fair comparison.
+
+### What Happens During Benchmarking
+
+The script automatically:
+1. **Deploys** each DynamoGraphDeployment configuration to Kubernetes if manifests are passed in
+2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
+3. **Measures** key metrics: latency, throughput, time-to-first-token
+4. **Generates** comparison plots using your custom labels in `./benchmarks/results/plots/`
+5. **Cleans up** deployments when complete
 
 ### Results Clearing Behavior
 
@@ -147,18 +164,12 @@ If you want to preserve results from previous runs, use different output directo
 
 ### Using Your Own Models and Configuration
 
-The benchmarking framework supports any HuggingFace-compatible LLM model. Additionally, you can customize the Dynamo and inference framework configuration.
+The benchmarking framework supports any HuggingFace-compatible LLM model. To benchmark your own custom deployment:
 
-To benchmark your own custom deployment:
+1. **Edit your deployment YAML files** to specify your model in the `--model` argument of the container command
+2. **Use the corresponding model name** in the benchmark script's `--model` parameter
 
-1. **Edit your deployment YAML files** to specify your model in the `--model` argument of the container command. You can also edit any other configuration options.
-3. **Use the corresponding model name** in the benchmark script's `--model` parameter
-
-**Important**:
-- The model specified in your deployment manifests must match the `--model` flag used for benchmarking. The `--model` flag configures GenAI-Perf for testing and logging, while the deployment manifest determines what model is actually loaded.
-- Only DynamoGraphDeployment manifests are supported for automatic deployment.
-- **To benchmark non-Dynamo backends**: To compare against vanilla backends like vLLM, TensorRT-LLM, SGLang, etc., deploy them manually following their respective Kubernetes deployment guides, expose a port (typically via port-forwarding), and use the endpoint option with `--input label=http://your-endpoint:port`.
-- **Only one model can be benchmarked at a time** across all inputs to ensure fair comparison.
+**Note**: You can override the default sequence lengths (2000/256 tokens) with `--isl` and `--osl` flags if needed for your specific workload.
 
 ### Direct Python Execution
 
@@ -200,60 +211,11 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 ```bash
 # Custom concurrency levels
 CONCURRENCIES="1,5,20,50" ./benchmarks/benchmark.sh --namespace $NAMESPACE --input my-test=components/backends/vllm/deploy/disagg.yaml
+
+# Or set permanently
+export CONCURRENCIES="1,2,5,10,25,50,100"
+./benchmarks/benchmark.sh --namespace $NAMESPACE --input test=disagg.yaml
 ```
-
-## Configuration Options
-
-The benchmarking script supports flexible configuration options:
-
-```bash
-./benchmarks/benchmark.sh --namespace NAMESPACE --input <label>=<manifest_path_or_endpoint> [--input <label>=<manifest_path_or_endpoint>]... [OPTIONS]
-
-REQUIRED:
-  -n, --namespace NAMESPACE           Kubernetes namespace
-  --input <label>=<manifest_path_or_endpoint>  Benchmark input with custom label
-                                        - <label>: becomes the name/label in plots
-                                        - <manifest_path_or_endpoint>: either a DynamoGraphDeployment manifest or HTTP endpoint URL
-                                        Can be specified multiple times for comparisons
-
-OPTIONS:
-  -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
-                                NOTE: This must match the model configured in your deployment manifests
-  -i, --isl LENGTH              Input sequence length (default: 2000)
-  -s, --std STDDEV              Input sequence standard deviation (default: 10)
-  -o, --osl LENGTH              Output sequence length (default: 256)
-  -d, --output-dir DIR          Output directory (default: ./benchmarks/results)
-  --verbose                     Enable verbose output
-
-EXAMPLES:
-  # Benchmark existing endpoint
-  ./benchmarks/benchmark.sh --namespace my-ns --input my-endpoint=http://localhost:8000
-
-  # Benchmark single DynamoGraphDeployment
-  ./benchmarks/benchmark.sh --namespace my-ns --input disagg=components/backends/vllm/deploy/disagg.yaml
-
-  # Compare multiple deployments
-  ./benchmarks/benchmark.sh --namespace my-ns --input agg=agg.yaml --input disagg=disagg.yaml
-
-  # Compare deployment vs endpoint
-  ./benchmarks/benchmark.sh --namespace my-ns --input dynamo=disagg.yaml --input external=http://my-api:8000
-
-  # Compare three different configurations
-  ./benchmarks/benchmark.sh --namespace my-ns --input dynamo-agg=agg.yaml --input dynamo-disagg=disagg.yaml --input external-vllm=http://my-api:8000
-
-  # Custom parameters
-  ./benchmarks/benchmark.sh --namespace my-ns --input test=disagg.yaml --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 512
-```
-
-### Important Notes
-
-- **Custom Labels**: Each input must have a unique label that becomes the name in plots and results
-- **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
-- **Input Types**: Supports DynamoGraphDeployment manifests for automatic deployment, or HTTP endpoints for existing services
-- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, not deployment (deployment model is determined by the manifest files)
-- **Standalone Deployments**: For non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), you must deploy them manually following their respective Kubernetes deployment guides. The benchmarking framework only supports automatic deployment of DynamoGraphDeployments.
-- **Single Model Requirement**: Only one model can be benchmarked at a time across all inputs to ensure fair comparison.
 
 ## Understanding Your Results
 
