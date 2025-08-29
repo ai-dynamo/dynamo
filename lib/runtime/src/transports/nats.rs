@@ -677,6 +677,19 @@ impl NatsQueue {
         }
     }
 
+    /// Get the total number of messages currently in the stream
+    pub async fn get_stream_messages(&mut self) -> Result<u64> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            let mut stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let info = stream.info().await?;
+            Ok(info.state.messages)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
     /// Purge messages from the stream up to (but not including) the specified sequence number
     /// This permanently removes messages and affects all consumers of the stream
     pub async fn purge_up_to_sequence(&self, sequence: u64) -> Result<()> {

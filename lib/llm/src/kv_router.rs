@@ -35,10 +35,10 @@ use crate::{
     discovery::{MODEL_ROOT_PATH, ModelEntry},
     kv_router::{
         approx::ApproxKvIndexer,
-        background::{start_event_consumer, start_radix_uploader},
+        background::start_kv_router_background,
         indexer::{
-            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RadixUploader,
-            RouterEvent, compute_block_hash_for_seq, compute_seq_hash_for_block,
+            KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
@@ -63,6 +63,11 @@ pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 // for inter-router comms
 pub const PREFILL_SUBJECT: &str = "prefill_events";
 pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
+
+// for radix tree snapshot storage
+pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
+pub const RADIX_STATE_FILE: &str = "radix-state";
+pub const ROUTER_SNAPSHOT_LOCK: &str = "router-snapshot-lock";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
@@ -169,9 +174,6 @@ pub struct KvRouter {
     scheduler: KvScheduler,
 
     block_size: u32,
-
-    /// Optional radix tree uploader for snapshot persistence
-    radix_uploader: Option<RadixUploader>,
 }
 
 impl KvRouter {
@@ -241,35 +243,23 @@ impl KvRouter {
         )
         .await?;
 
-        // Start event consumer and radix uploader if using KvIndexer
-        let radix_uploader = if let Indexer::KvIndexer(ref kv_indexer) = indexer {
-            start_event_consumer(
+        // Start unified background process if using KvIndexer
+        if let Indexer::KvIndexer(ref kv_indexer) = indexer {
+            start_kv_router_background(
                 component.clone(),
                 consumer_uuid,
                 kv_indexer.event_sender(),
+                Some(kv_indexer.snapshot_event_sender()),
                 cancellation_token.clone(),
             )
             .await?;
-
-            // Start radix uploader for snapshot persistence
-            let uploader = start_radix_uploader(
-                component.clone(),
-                kv_indexer.snapshot_event_sender(),
-                Duration::from_secs(30),
-                cancellation_token.clone(),
-            )
-            .await?;
-            Some(uploader)
-        } else {
-            None
-        };
+        }
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
             indexer,
             scheduler,
             block_size,
-            radix_uploader,
         })
     }
 
@@ -325,17 +315,6 @@ impl KvRouter {
 
     pub fn block_size(&self) -> u32 {
         self.block_size
-    }
-
-    /// Upload a snapshot of the radix tree to NATS object store
-    pub async fn upload_snapshot(&self) -> Result<(), KvRouterError> {
-        match &self.radix_uploader {
-            Some(uploader) => uploader.upload_snapshot().await,
-            None => {
-                tracing::warn!("Radix uploader not available (likely using ApproxKvIndexer)");
-                Ok(())
-            }
-        }
     }
 
     /// Dump all events from the indexer
