@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::nvext::validate_top_k;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -20,6 +21,19 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub min_tokens: Option<u32>,
+
+    /// Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    #[validate(custom(function = "validate_top_k"))]
+    pub top_k: Option<i32>,
+
+    /// How much to penalize tokens based on how frequently they occur in the text.
+    /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    #[validate(range(exclusive_min = 0.0, max = 2.0))]
+    pub repetition_penalty: Option<f32>,
 
     /// Guided Decoding Options
     /// If specified, the output will be a JSON object. Can be a string, an object, or null.
@@ -65,6 +79,10 @@ pub trait CommonExtProvider {
     fn get_guided_grammar(&self) -> Option<String>;
     fn get_guided_choice(&self) -> Option<Vec<String>>;
     fn get_guided_decoding_backend(&self) -> Option<String>;
+
+    /// Other sampling Options
+    fn get_top_k(&self) -> Option<i32>;
+    fn get_repetition_penalty(&self) -> Option<f32>;
 }
 
 /// Helper function to emit deprecation warnings for nvext parameters
@@ -107,6 +125,8 @@ mod tests {
         let common_ext = CommonExt::builder().build().unwrap();
         assert_eq!(common_ext.ignore_eos, None);
         assert_eq!(common_ext.min_tokens, None);
+        assert_eq!(common_ext.top_k, None);
+        assert_eq!(common_ext.repetition_penalty, None);
         assert_eq!(common_ext.guided_json, None);
         assert_eq!(common_ext.guided_regex, None);
         assert_eq!(common_ext.guided_grammar, None);
@@ -119,6 +139,8 @@ mod tests {
         let common_ext = CommonExt::builder()
             .ignore_eos(true)
             .min_tokens(10)
+            .top_k(50)
+            .repetition_penalty(1.2)
             .guided_json(serde_json::json!({"key": "value"}))
             .guided_regex("regex".to_string())
             .guided_grammar("grammar".to_string())
@@ -129,6 +151,8 @@ mod tests {
 
         assert_eq!(common_ext.ignore_eos, Some(true));
         assert_eq!(common_ext.min_tokens, Some(10));
+        assert_eq!(common_ext.top_k, Some(50));
+        assert_eq!(common_ext.repetition_penalty, Some(1.2));
         assert_eq!(
             common_ext.guided_json.as_ref(),
             Some(&serde_json::json!({"key": "value"}))
@@ -164,6 +188,8 @@ mod tests {
         let common_ext = CommonExt {
             ignore_eos: None,
             min_tokens: Some(0), // Should be valid (min = 0)
+            top_k: None,
+            repetition_penalty: None,
             guided_json: None,
             guided_regex: None,
             guided_grammar: None,
@@ -180,6 +206,8 @@ mod tests {
 
         assert_eq!(common_ext.ignore_eos, None);
         assert_eq!(common_ext.min_tokens, None);
+        assert_eq!(common_ext.top_k, None);
+        assert_eq!(common_ext.repetition_penalty, None);
         assert!(common_ext.validate().is_ok());
     }
 
@@ -190,6 +218,8 @@ mod tests {
 
         assert_eq!(common_ext.ignore_eos, None);
         assert_eq!(common_ext.min_tokens, None);
+        assert_eq!(common_ext.top_k, None);
+        assert_eq!(common_ext.repetition_penalty, None);
         assert!(common_ext.validate().is_ok());
     }
 
