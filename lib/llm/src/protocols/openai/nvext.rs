@@ -34,13 +34,13 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))] // NIM LLM might default to -1
     #[validate(custom(function = "validate_top_k"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<i64>,
+    pub top_k: Option<i32>,
 
     /// How much to penalize tokens based on how frequently they occur in the text.
     /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
     #[builder(default, setter(strip_option))]
     #[validate(range(exclusive_min = 0.0, max = 2.0))]
-    pub repetition_penalty: Option<f64>,
+    pub repetition_penalty: Option<f32>,
 
     /// If true, sampling will be forced to be greedy.
     /// The backend is responsible for selecting the correct backend-specific options to
@@ -118,7 +118,7 @@ fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_top_k(top_k: i64) -> Result<(), ValidationError> {
+pub fn validate_top_k(top_k: i32) -> Result<(), ValidationError> {
     if top_k == -1 || (top_k >= 1) {
         return Ok(());
     }
@@ -200,7 +200,7 @@ mod tests {
     // Test invalid `top_k` validation using proptest
     proptest! {
         #[test]
-        fn test_invalid_top_k_value(top_k in any::<i64>().prop_filter("Invalid top_k", |&k| k < -1 || (k > 0 && k < 1))) {
+        fn test_invalid_top_k_value(top_k in any::<i32>().prop_filter("Invalid top_k", |&k| k < -1 || (k > 0 && k < 1))) {
             let nv_ext = NvExt::builder()
                 .top_k(top_k)
                 .build()
@@ -227,7 +227,7 @@ mod tests {
     // Test valid repetition_penalty values
     proptest! {
         #[test]
-        fn test_valid_repetition_penalty_values(repetition_penalty in 0.01f64..=2.0f64) {
+        fn test_valid_repetition_penalty_values(repetition_penalty in 0.01f32..=2.0f32) {
             let nv_ext = NvExt::builder()
                 .repetition_penalty(repetition_penalty)
                 .build()
@@ -241,7 +241,7 @@ mod tests {
     // Test invalid repetition_penalty values
     proptest! {
         #[test]
-        fn test_invalid_repetition_penalty_values(repetition_penalty in -10.0f64..0.0f64) {
+        fn test_invalid_repetition_penalty_values(repetition_penalty in -10.0f32..0.0f32) {
             let nv_ext = NvExt::builder()
                 .repetition_penalty(repetition_penalty)
                 .build()
