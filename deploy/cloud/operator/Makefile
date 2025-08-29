@@ -57,7 +57,7 @@ ensure-yq:
 	fi
 
 .PHONY: manifests
-manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen ensure-yq generate-api-docs ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
@@ -266,6 +266,27 @@ $(HELMIFY): $(LOCALBIN)
 helm: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
+######################### CRD Reference Docs
+CRD_REF_DOCS_VERSION ?= v0.0.12
+CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
+
+.PHONY: crd-ref-docs
+crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
+$(CRD_REF_DOCS): $(LOCALBIN)
+	@echo "Installing crd-ref-docs $(CRD_REF_DOCS_VERSION)"
+	@GOBIN=$(LOCALBIN) go install github.com/elastic/crd-ref-docs@$(CRD_REF_DOCS_VERSION)
+	@echo "✅ crd-ref-docs $(CRD_REF_DOCS_VERSION) installed successfully"
+
+.PHONY: generate-api-docs
+generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRDs
+	@echo "📚 Generating CRD API reference documentation..."
+	@mkdir -p docs
+	@$(CRD_REF_DOCS) \
+		--source-path=api \
+		--config=docs/crd-ref-docs-config.yaml \
+		--renderer=markdown \
+		--output-path=docs/api_reference.md
+	@echo "✅ Generated API reference at docs/api_reference.md"
 
 .PHONY: coverage
 coverage: test

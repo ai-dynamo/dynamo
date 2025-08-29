@@ -85,6 +85,11 @@ impl WorkerMetricsPublisher {
                     None
                 };
 
+            // Register Prometheus metrics first
+            rs_publisher
+                .register_prometheus_metrics(&rs_component)
+                .map_err(to_pyerr)?;
+
             rs_publisher
                 .create_endpoint(rs_component, metrics_labels_ref.as_deref())
                 .await

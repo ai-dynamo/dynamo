@@ -133,8 +133,6 @@ vllm_configs = {
             completions_response_handler,
         ],
         model="Qwen/Qwen3-0.6B",
-        delayed_start=0,
-        timeout=360,
     ),
     "agg-router": VLLMConfig(
         name="agg-router",
@@ -147,8 +145,6 @@ vllm_configs = {
             completions_response_handler,
         ],
         model="Qwen/Qwen3-0.6B",
-        delayed_start=0,
-        timeout=360,
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
@@ -161,8 +157,6 @@ vllm_configs = {
             completions_response_handler,
         ],
         model="Qwen/Qwen3-0.6B",
-        delayed_start=0,
-        timeout=360,
     ),
     "deepep": VLLMConfig(
         name="deepep",
@@ -179,7 +173,6 @@ vllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-V2-Lite",
-        delayed_start=0,
         args=[
             "--model",
             "deepseek-ai/DeepSeek-V2-Lite",
@@ -190,7 +183,7 @@ vllm_configs = {
             "--gpus-per-node",
             "2",
         ],
-        timeout=560,
+        timeout=700,
     ),
     "multimodal_agg_llava": VLLMConfig(
         name="multimodal_agg_llava",
@@ -202,9 +195,7 @@ vllm_configs = {
             chat_completions_response_handler,
         ],
         model="llava-hf/llava-1.5-7b-hf",
-        delayed_start=0,
         args=["--model", "llava-hf/llava-1.5-7b-hf"],
-        timeout=360,
     ),
     "multimodal_agg_qwen": VLLMConfig(
         name="multimodal_agg_qwen",

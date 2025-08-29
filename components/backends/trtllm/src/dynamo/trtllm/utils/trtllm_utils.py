@@ -16,6 +16,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
+DEFAULT_ENCODE_ENDPOINT = "dyn://dynamo.tensorrt_llm_encode.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
@@ -47,8 +48,10 @@ class Config:
             DEFAULT_DISAGGREGATION_STRATEGY
         )
         self.next_endpoint: str = ""
+        self.encode_endpoint: str = ""
         self.modality: str = "text"
-
+        self.allowed_local_media_path: str = ""
+        self.max_file_size_mb: int = 50
         self.reasoning_parser: Optional[str] = None
         self.tool_call_parser: Optional[str] = None
 
@@ -75,9 +78,12 @@ class Config:
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"disaggregation_strategy={self.disaggregation_strategy}, "
             f"next_endpoint={self.next_endpoint}, "
-            f"modality={self.modality})"
-            f"reasoning_parser={self.reasoning_parser})"
-            f"tool_call_parser={self.tool_call_parser})"
+            f"encode_endpoint={self.encode_endpoint}, "
+            f"modality={self.modality}, "
+            f"allowed_local_media_path={self.allowed_local_media_path}, "
+            f"max_file_size_mb={self.max_file_size_mb}, "
+            f"reasoning_parser={self.reasoning_parser}, "
+            f"tool_call_parser={self.tool_call_parser}"
         )
 
 
@@ -220,6 +226,12 @@ def cmd_line_args():
         help=f"Mode to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_MODE}",
     )
     parser.add_argument(
+        "--use-nixl-connect",
+        type=bool,
+        default=False,
+        help="Use NIXL Connect for communication between workers.",
+    )
+    parser.add_argument(
         "--disaggregation-strategy",
         type=str,
         default=DEFAULT_DISAGGREGATION_STRATEGY,
@@ -239,7 +251,24 @@ def cmd_line_args():
         default="",
         help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) to send requests to when running in disaggregation mode. Default: {DEFAULT_NEXT_ENDPOINT} if first worker, empty if next worker",
     )
-
+    parser.add_argument(
+        "--encode-endpoint",
+        type=str,
+        default="",
+        help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) for the encode worker. Default: {DEFAULT_ENCODE_ENDPOINT}",
+    )
+    parser.add_argument(
+        "--allowed-local-media-path",
+        type=str,
+        default="",
+        help="Path to a directory that is allowed to be accessed by the model. Default: empty",
+    )
+    parser.add_argument(
+        "--max-file-size-mb",
+        type=int,
+        default=50,
+        help="Maximum size of downloadable embedding files/Image URLs. Default: 50MB",
+    )
     # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
     parser.add_argument(
         "--dyn-tool-call-parser",
@@ -280,6 +309,9 @@ def cmd_line_args():
             and config.disaggregation_mode != DisaggregationMode.AGGREGATED
         ):
             args.next_endpoint = DEFAULT_NEXT_ENDPOINT
+    elif config.disaggregation_mode == DisaggregationMode.ENCODE:
+        if args.endpoint == "":
+            args.endpoint = DEFAULT_ENCODE_ENDPOINT
     else:
         if args.endpoint == "":
             args.endpoint = DEFAULT_NEXT_ENDPOINT
@@ -294,6 +326,9 @@ def cmd_line_args():
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
     config.next_endpoint = args.next_endpoint
+    config.encode_endpoint = args.encode_endpoint
+    config.allowed_local_media_path = args.allowed_local_media_path
+    config.max_file_size_mb = args.max_file_size_mb
 
     config.tensor_parallel_size = args.tensor_parallel_size
     if args.pipeline_parallel_size is not None:

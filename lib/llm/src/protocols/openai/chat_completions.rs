@@ -198,6 +198,24 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
                 .and_then(|nv| nv.guided_decoding_backend.as_ref()),
         )
     }
+
+    fn get_top_k(&self) -> Option<i32> {
+        choose_with_deprecation(
+            "top_k",
+            self.common.top_k.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
+        )
+    }
+
+    fn get_repetition_penalty(&self) -> Option<f32> {
+        choose_with_deprecation(
+            "repetition_penalty",
+            self.common.repetition_penalty.as_ref(),
+            self.nvext
+                .as_ref()
+                .and_then(|nv| nv.repetition_penalty.as_ref()),
+        )
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,

@@ -246,6 +246,39 @@ pub mod kvbm_connector {
     pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
 }
 
+/// KvStats metrics from LLM workers
+pub mod kvstats {
+    /// Macro to generate KvStats metric names with the prefix
+    macro_rules! kvstats_name {
+        ($name:expr) => {
+            concat!("kvstats_", $name)
+        };
+    }
+
+    /// Prefix for all KvStats metrics
+    pub const PREFIX: &str = kvstats_name!("");
+
+    /// Number of active KV cache blocks currently in use
+    pub const ACTIVE_BLOCKS: &str = kvstats_name!("active_blocks");
+
+    /// Total number of KV cache blocks available
+    pub const TOTAL_BLOCKS: &str = kvstats_name!("total_blocks");
+
+    /// GPU cache usage as a percentage (0.0-1.0)
+    pub const GPU_CACHE_USAGE_PERCENT: &str = kvstats_name!("gpu_cache_usage_percent");
+
+    /// GPU prefix cache hit rate as a percentage (0.0-1.0)
+    pub const GPU_PREFIX_CACHE_HIT_RATE: &str = kvstats_name!("gpu_prefix_cache_hit_rate");
+}
+
+/// All KvStats Prometheus metric names as an array for iteration/validation
+pub const KVSTATS_METRICS: &[&str] = &[
+    kvstats::ACTIVE_BLOCKS,
+    kvstats::TOTAL_BLOCKS,
+    kvstats::GPU_CACHE_USAGE_PERCENT,
+    kvstats::GPU_PREFIX_CACHE_HIT_RATE,
+];
+
 // Shared regex patterns for Prometheus sanitization
 static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());

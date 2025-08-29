@@ -20,6 +20,7 @@ from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
 from transformers import AutoConfig
 
+import dynamo.nixl_connect as nixl_connect
 from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -115,6 +116,21 @@ async def init(runtime: DistributedRuntime, config: Config):
             config.next_endpoint
         )
         next_client = (
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
+            .client()
+        )
+
+    encode_client = None
+    if config.encode_endpoint:
+        logging.info(
+            f"Initializing encode worker client for endpoint: {config.encode_endpoint}"
+        )
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            config.encode_endpoint
+        )
+        encode_client = (
             await runtime.namespace(parsed_namespace)
             .component(parsed_component_name)
             .endpoint(parsed_endpoint_name)
@@ -218,12 +234,19 @@ async def init(runtime: DistributedRuntime, config: Config):
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model_path,
+            max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
+            allowed_local_media_path=config.allowed_local_media_path,
         )
 
     else:
         # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
         default_sampling_params.detokenize = False
+
+    connector = None
+    logging.info("Initializing NIXL Connect.")
+    connector = nixl_connect.Connector()
+    await connector.initialize()
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
@@ -239,17 +262,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
 
-        if is_first_worker(config):
-            # Register the model with runtime config
-            await register_llm(
-                modelType,
-                endpoint,
-                config.model_path,
-                config.served_model_name,
-                kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
-                runtime_config=runtime_config,
-            )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -259,8 +271,27 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            encode_client=encode_client,
             multimodal_processor=multimodal_processor,
+            connector=connector,
         )
+
+        if next_client:
+            logging.info(
+                f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
+            )
+            await next_client.wait_for_instances()
+
+        if is_first_worker(config):
+            # Register the model with runtime config
+            await register_llm(
+                modelType,
+                endpoint,
+                config.model_path,
+                config.served_model_name,
+                kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
+            )
 
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
