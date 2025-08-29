@@ -182,7 +182,7 @@ impl PushEndpoint {
                 }
                 
                 // Then wait for the runtime to fully shutdown
-                // This ensures Python doesn't clean up resources prematurely
+                // This ensures Python engines do not clean up resources prematurely 
                 if let Some(runtime_token) = &self.runtime_token {
                     tracing::info!("Waiting for runtime infrastructure shutdown");
                     runtime_token.cancelled().await;
