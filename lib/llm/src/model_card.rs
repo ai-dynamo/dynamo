@@ -453,11 +453,6 @@ impl ModelDeploymentCard {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
 
-        tracing::info!(
-            "from_local_path_with_custom_template: repo_id={}, model_name={}, custom_template={:?}",
-            repo_id, model_name, custom_template_path
-        );
-
         Self::from_repo_with_custom_template(&repo_id, model_name, custom_template_path).await
     }
 
