@@ -403,58 +403,41 @@ impl LocalModel {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
+        let slug_key = self.card.slug();
 
-        let slug_key = self.card.slug().clone();
-        match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, &slug_key).await {
-            Ok(Some(existing_mdc)) => {
-                // Compare the existing MDC with our new one (ignoring revision and last_published)
-                let mut existing_for_comparison = existing_mdc.clone();
-                existing_for_comparison.revision = 0;
-                existing_for_comparison.last_published = None;
-
-                let mut new_for_comparison = self.card.clone();
-                new_for_comparison.revision = 0;
-                new_for_comparison.last_published = None;
-
-                if existing_for_comparison != new_for_comparison {
-                    tracing::debug!("Updating existing MDC with revision {}", existing_mdc.revision);
-
-                    // Handle the revision 0 edge case
-                    // If revision is 0, etcd's insert() will call create() instead of update()
-                    // We need to force the update path by using a non-zero revision
-                    if existing_mdc.revision == 0 {
-                        tracing::warn!(
-                            "Existing MDC has revision 0 (shouldn't happen). Forcing update with revision 1."
-                        );
-                        // Use revision 1 to force the update path in etcd
-                        // The etcd update function will handle the version mismatch and update anyway
-                        self.card.revision = 1;
+        // Try to load existing MDC to determine if update is needed
+        match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, slug_key).await {
+            Ok(Some(existing)) => {
+                // Check if content has changed (ignoring metadata fields)
+                if !self.card.content_equals(&existing) {
+                    // Content changed, need to update
+                    // CRITICAL: Handle revision 0 edge case
+                    // When revision=0, insert() calls create() which won't update existing keys
+                    self.card.revision = if existing.revision == 0 {
+                        tracing::warn!("Existing MDC has revision 0, using revision 1 to force update");
+                        1  // Force update path in etcd
                     } else {
-                        // Normal update path for revision > 0
-                        self.card.revision = existing_mdc.revision;
-                    }
+                        existing.revision
+                    };
 
-                    // Update the existing entry
                     card_store
                         .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                         .await?;
                 } else {
-                    tracing::debug!("Existing MDC is identical, skipping update");
-                    // Use the existing MDC's revision
-                    self.card.revision = existing_mdc.revision;
-                    self.card.last_published = existing_mdc.last_published;
+                    // Content identical, preserve existing metadata
+                    self.card.revision = existing.revision;
+                    self.card.last_published = existing.last_published;
                 }
             }
             Ok(None) => {
-                tracing::debug!("Creating new MDC entry");
-                // No existing MDC, create a new one
+                // New MDC, create it
                 card_store
                     .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                     .await?;
             }
             Err(e) => {
-                tracing::warn!("Error checking for existing MDC: {}. Attempting to publish anyway.", e);
-                // Error loading, try to publish anyway
+                // Error loading - attempt to publish anyway for resilience
+                tracing::warn!("Error loading existing MDC: {}. Attempting to publish anyway.", e);
                 card_store
                     .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                     .await?;
