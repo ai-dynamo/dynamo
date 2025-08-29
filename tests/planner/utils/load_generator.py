@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import tempfile
 import time
 from typing import Any, Dict, Optional
@@ -146,7 +145,9 @@ class LoadGenerator:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
@@ -158,9 +159,13 @@ class LoadGenerator:
 
             # Persist logs for debugging
             try:
-                with open(os.path.join(artifact_dir, "genai_perf.stdout.log"), "wb") as f:
+                with open(
+                    os.path.join(artifact_dir, "genai_perf.stdout.log"), "wb"
+                ) as f:
                     f.write(stdout or b"")
-                with open(os.path.join(artifact_dir, "genai_perf.stderr.log"), "wb") as f:
+                with open(
+                    os.path.join(artifact_dir, "genai_perf.stderr.log"), "wb"
+                ) as f:
                     f.write(stderr or b"")
             except Exception:
                 pass
@@ -169,14 +174,16 @@ class LoadGenerator:
                 logger.info("Load generation completed successfully")
                 logger.info(f"Actual duration: {actual_duration:.2f}s")
                 results = self._parse_genai_perf_results(artifact_dir)
-                results.update({
-                    "requested_req_per_sec": req_per_sec,
-                    "actual_duration": actual_duration,
-                    "target_duration": duration_sec,
-                    "genai_perf_params": params,
-                    "artifact_dir": artifact_dir,
-                    "success": True,
-                })
+                results.update(
+                    {
+                        "requested_req_per_sec": req_per_sec,
+                        "actual_duration": actual_duration,
+                        "target_duration": duration_sec,
+                        "genai_perf_params": params,
+                        "artifact_dir": artifact_dir,
+                        "success": True,
+                    }
+                )
                 return results
             else:
                 logger.error(f"genai-perf failed with return code {proc.returncode}")
@@ -395,7 +402,9 @@ async def main():
     # Print results summary
     phase_results = results.get("phase_results", {})
     for phase_name, phase_data in phase_results.items():
-        ok = isinstance(phase_data, dict) and phase_data.get("success", bool(phase_data))
+        ok = isinstance(phase_data, dict) and phase_data.get(
+            "success", bool(phase_data)
+        )
         if ok:
             duration = phase_data.get("actual_duration")
             if isinstance(duration, (int, float)):
