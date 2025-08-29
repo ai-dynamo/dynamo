@@ -218,7 +218,7 @@ def gen_config_file(
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "default",
+            "backend": "DEFAULT",
         },
     }
 
@@ -245,7 +245,7 @@ def gen_config_file(
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "default",
+            "backend": "DEFAULT",
         },
         "stream_interval": 20,
     }

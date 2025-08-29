@@ -7,6 +7,21 @@ set -e
 set -u
 trap 'echo "Error occurred at line $LINENO"; exit 1' ERR
 
+# Check if SCRIPTS_DIR is set, if not try to infer it or exit
+if [ -z "${SCRIPTS_DIR:-}" ]; then
+    # Try to infer SCRIPTS_DIR from the current script location
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SCRIPTS_DIR="$(dirname "$SCRIPT_DIR")"
+    echo "SCRIPTS_DIR not set, inferred as: ${SCRIPTS_DIR}"
+fi
+
+# Verify SCRIPTS_DIR exists and contains expected structure
+if [ ! -d "${SCRIPTS_DIR}/scripts/bench" ]; then
+    echo "Error: SCRIPTS_DIR (${SCRIPTS_DIR}) does not contain expected structure"
+    echo "Expected: ${SCRIPTS_DIR}/scripts/bench to exist"
+    exit 1
+fi
+
 WAIT_TIME=300
 
 model=$1
@@ -53,16 +68,12 @@ fi
 set -x
 config_file=${log_path}/config.yaml
 
-
-# install genai-perf
-pip install genai-perf
-
 # Create artifacts root directory if it doesn't exist
 if [ ! -d "${artifacts_dir}" ]; then
     mkdir -p "${artifacts_dir}"
 fi
 
-hostname=$HEAD_NODE_IP
+hostname=$HEAD_NODE
 port=8000
 
 echo "Hostname: ${hostname}, Port: ${port}"
@@ -98,32 +109,21 @@ if [ -f "${artifacts_dir}/deployment_config.json" ]; then
 fi
 echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
 
-# Wait for server to become healthy (up to 50 attempts)
+# Wait for server to load (up to 50 attempts)
 failed=true
 for ((i=1; i<=50; i++)); do
     sleep $((i == 1 ? WAIT_TIME : 20))
-    response=$(curl -s -w "\n%{http_code}" "${hostname}:${port}/health")
+    response=$(curl -s -w "\n%{http_code}" "${hostname}:${port}/v1/models")
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
 
-    if [[ "$http_code" == "200" ]] && echo "$body" | grep -q '"status":"healthy"' && echo "$body" | grep -q '"endpoints":\[[^]]*"dyn://dynamo.tensorrt_llm.generate"'; then
-        if [[ "$kind" == *disagg* ]]; then
-            if echo "$body" | grep -q '"tensorrt_llm_next"'; then
-                echo "Health check succeeded on attempt $i"
-                echo "$body"
-                failed=false
-                break
-            else
-                echo "Attempt $i: tensorrt_llm_next key not found in etcd."
-            fi
-        else
-            echo "Health check succeeded on attempt $i"
-            echo "$body"
-            failed=false
-            break
-        fi
+    if [[ "$http_code" == "200" ]]; then
+        echo "Model check succeeded on attempt $i"
+        echo "$body"
+        failed=false
+        break
     else
-        echo "Attempt $i failed: /health not ready (HTTP $http_code)."
+        echo "Attempt $i failed: /v1/models not ready (HTTP $http_code)."
     fi
 done
 
@@ -147,38 +147,46 @@ curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
 }'
 
 cp ${log_path}/output_workers.log ${log_path}/workers_start.log
+
+python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
+        --served-model-name ${model} \
+        --model ${model_path} \
+        --dataset-name random \
+        --num-prompts "${multi_round}" \
+        --random-input-len ${isl} \
+        --random-output-len ${osl} \
+        --random-range-ratio 0.8 \
+        --ignore-eos \
+        --backend "dynamo" \
+        --endpoint "/v1/chat/completions" \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --max-concurrency "1" \
+        --host ${hostname} \
+        --port ${port}
+
 echo "Starting benchmark..."
 for concurrency in ${concurrency_list}; do
     concurrency=$((concurrency * num_gen_servers))
     num_prompts=$((concurrency * multi_round))
     echo "Benchmarking with concurrency ${concurrency} ... ${num_prompts} prompts"
     mkdir -p ${log_path}/concurrency_${concurrency}
-    genai-perf profile \
-    	--model ${model} \
-    	--tokenizer ${model_path} \
-    	--endpoint-type chat \
-    	--endpoint /v1/chat/completions \
-    	--streaming \
-    	--url ${hostname}:${port} \
-    	--synthetic-input-tokens-mean ${isl} \
-    	--synthetic-input-tokens-stddev 0 \
-    	--output-tokens-mean ${osl} \
-    	--output-tokens-stddev 0 \
-    	--extra-inputs max_tokens:${osl} \
-    	--extra-inputs min_tokens:${osl} \
-    	--extra-inputs ignore_eos:true \
-	    --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
-    	--concurrency ${concurrency} \
-    	--request-count $(($concurrency*10)) \
-    	--warmup-request-count $(($concurrency*2)) \
-	    --num-dataset-entries ${num_prompts} \
-    	--random-seed 100 \
-    	--artifact-dir ${artifacts_dir} \
-    	-- \
-    	-v \
-    	--max-threads ${concurrency} \
-    	-H 'Authorization: Bearer NOT USED' \
-    	-H 'Accept: text/event-stream'
+
+    python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
+        --served-model-name ${model} \
+        --model ${model_path} \
+        --dataset-name random \
+        --num-prompts "$num_prompts" \
+        --random-input-len ${isl} \
+        --random-output-len ${osl} \
+        --random-range-ratio 0.8 \
+        --ignore-eos \
+        --backend "dynamo" \
+        --endpoint "/v1/chat/completions" \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --max-concurrency "$concurrency" \
+        --host ${hostname} \
+        --port ${port}
+
     echo "Benchmark with concurrency ${concurrency} done"
     do_get_logs ${log_path}/output_workers.log ${log_path}/concurrency_${concurrency}
     echo -n "" > ${log_path}/output_workers.log

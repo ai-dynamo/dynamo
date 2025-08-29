@@ -66,7 +66,7 @@ mkdir -p ${artifacts_dir}
 
 
 # Set clock
-srun ${set_clock_cmd}
+#srun ${set_clock_cmd}
 
 container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${model_path}:${model_path}
 
@@ -81,7 +81,7 @@ srun -l --container-image=${image} \
 srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix --overlap \
-	-n 1 -N 1 \
+	    -n 1 -N 1 \
         python3 ${SCRIPTS_DIR}/scripts/gen_yaml.py --config ${full_logdir}/config.yaml \
             --model ${model_path} \
             --num_ctx_servers ${num_ctx_servers} \
@@ -111,8 +111,11 @@ nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 
 export HEAD_NODE="${nodes[0]}"
 export HEAD_NODE_IP="$(hostname -i)"
-export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="http://${HEAD_NODE}:2379"
+export NATS_SERVER="nats://${HEAD_NODE}:4222"
+
+echo "HEAD_NODE: ${HEAD_NODE}"
+echo "HEAD_NODE_ID: ${HEAD_NODE_ID}"
 
 # Create a temporary file to store PIDs
 PID_FILE=$(mktemp)
@@ -140,9 +143,9 @@ cleanup_and_exit() {
 srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix --overlap -N 1 -n 1 \
-	--oversubscribe \
-	--overlap \
-	--container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
+        --oversubscribe \
+        --overlap \
+        --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
         -w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/start_frontend.sh &> ${full_logdir}/output_server.log &
 SERVER_PID=$!
@@ -165,13 +168,13 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
   node_idx=$((i-1))
   echo "Running Prefill Nodes: ${nodes[node_idx]}"
   srun -l --container-name=${CONTAINER_NAME} \
-      --container-mounts=${container_mounts} \
-      --mpi=pmix --overlap -w ${nodes[node_idx]} \
-      --oversubscribe \
-      --overlap \
-      --ntasks 4 \
-      --nodes 1 \
-      bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_workers.log &
+        --container-mounts=${container_mounts} \
+        --mpi=pmix --overlap -w ${nodes[node_idx]} \
+        --oversubscribe \
+        --overlap \
+        --ntasks 4 \
+        --nodes 1 \
+        bash ${SCRIPTS_DIR}/scripts/start_disagg_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_workers.log &
   prefill_pids+=($!)
   echo "$!" >> "$PID_FILE"
 done
@@ -211,8 +214,9 @@ total_gpus=$((ctx_gpus + gen_gpus))
 # start the loadgen
 srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts},${artifacts_dir}:${artifacts_dir} \
+        --container-env HEAD_NODE_IP,HEAD_NODE,SCRIPTS_DIR \
         --mpi=pmix --overlap -N 1 -n 1 \
-	-w ${nodes[0]} \
+	    -w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1
 
 

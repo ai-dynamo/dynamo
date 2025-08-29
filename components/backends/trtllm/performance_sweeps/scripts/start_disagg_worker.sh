@@ -46,6 +46,9 @@ if [ "${enable_pdl}" = "true" ]; then
     export TRTLLM_ENABLE_PDL=1
 fi
 
+export TRTLLM_UCX_INTERFACE=enP6p9s0np0
+export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
+
 trtllm-llmapi-launch python3 -m dynamo.trtllm \
     --model-path ${model_path} \
     --served-model-name ${model_name} \
