@@ -252,7 +252,7 @@ COPY --from=framework \
     /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages \
     /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=framework /opt/dynamo/venv/bin/ /opt/dynamo/venv/bin/
-
+RUN ln -sf /usr/bin/python3.12 /opt/dynamo/venv/bin/python
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 COPY benchmarks/ /opt/dynamo/benchmarks/
