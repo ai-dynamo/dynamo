@@ -143,6 +143,7 @@ impl ReasoningParserType {
             "qwen3" => Self::Qwen.get_reasoning_parser(),
             "nemotron_deci" => Self::NemotronDeci.get_reasoning_parser(),
             "kimi" => Self::Kimi.get_reasoning_parser(),
+            "step3" => Self::Step3.get_reasoning_parser(),
             _ => {
                 tracing::warn!(
                     "Unknown reasoning parser type '{}', falling back to Basic Reasoning Parser",
