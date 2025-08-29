@@ -60,6 +60,8 @@ pub use futures::stream;
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
+use crate::metrics::prometheus_names::distributed_runtime;
+
 use component::{Endpoint, InstanceSource};
 
 use config::HealthStatus;
@@ -157,7 +159,7 @@ impl SystemHealth {
         registry: &T,
     ) -> anyhow::Result<()> {
         let gauge = registry.create_gauge(
-            "uptime_seconds",
+            distributed_runtime::UPTIME_SECONDS,
             "Total uptime of the DistributedRuntime in seconds",
             &[],
         )?;
