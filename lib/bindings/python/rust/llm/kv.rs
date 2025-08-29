@@ -419,7 +419,7 @@ impl KvIndexer {
 
             // Use the shared start_kv_router_background function for event consumption
             // Pass None for snapshot_tx to skip snapshot handling in Python bindings
-            llm_rs::kv_router::background::start_kv_router_background(
+            llm_rs::kv_router::subscriber::start_kv_router_background(
                 component.inner.clone(),
                 consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 inner.event_sender(),
