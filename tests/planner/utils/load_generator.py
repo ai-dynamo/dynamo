@@ -116,9 +116,6 @@ class LoadGenerator:
             str(params["request_rate"]),
             "--request-count",
             str(request_count),  # Use request count to limit test duration
-            "--goodput",
-            "time_to_first_token:200",
-            "inter_token_latency:10",  # Add SLA targets
             "--stability-percentage",
             "50",
             "--num-dataset-entries",
