@@ -837,8 +837,10 @@ def test_indexers_sync(request, runtime_services):
             # Create first KV router
             from dynamo._core import KvPushRouter, KvRouterConfig
 
-            # First router with default reset_states=True
-            kv_router_config = KvRouterConfig(snapshot_threshold=20, reset_states=True)
+            # First router with default router_reset_states=True
+            kv_router_config = KvRouterConfig(
+                router_snapshot_threshold=20, router_reset_states=True
+            )
 
             async def send_requests_to_router(router, num_requests, router_name):
                 # First, send a test request with retry to ensure router is ready
@@ -926,10 +928,10 @@ def test_indexers_sync(request, runtime_services):
             logger.info("Waiting for 1 second before creating second router")
             await asyncio.sleep(1)
 
-            # Launch second router with reset_states=False
-            logger.info("Creating second KV router with reset_states=False")
+            # Launch second router with router_reset_states=False
+            logger.info("Creating second KV router with router_reset_states=False")
             kv_router_config2 = KvRouterConfig(
-                snapshot_threshold=20, reset_states=False
+                router_snapshot_threshold=20, router_reset_states=False
             )
             kv_push_router2 = KvPushRouter(
                 endpoint=endpoint,

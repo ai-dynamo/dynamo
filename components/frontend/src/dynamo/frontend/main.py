@@ -150,24 +150,24 @@ def parse_args():
         help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
     )
     parser.add_argument(
-        "--snapshot-threshold",
+        "--router-snapshot-threshold",
         type=int,
         default=None,
         help="KV Router: Number of messages in stream before triggering a snapshot. If not set, snapshots are disabled.",
     )
     parser.add_argument(
-        "--reset-states",
+        "--router-reset-states",
         action="store_true",
-        dest="reset_states",
+        dest="router_reset_states",
         help="KV Router: Reset router state on startup (default: true). This will clear the stream and object store.",
     )
     parser.add_argument(
-        "--persist-states",
+        "--router-persist-states",
         action="store_false",
-        dest="reset_states",
+        dest="router_reset_states",
         help="KV Router: Do not reset router state on startup. Keep existing state from stream and object store.",
     )
-    parser.set_defaults(reset_states=True)
+    parser.set_defaults(router_reset_states=True)
     parser.add_argument(
         "--busy-threshold",
         type=float,
@@ -231,8 +231,8 @@ async def async_main():
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
             router_replica_sync=flags.router_replica_sync,
-            snapshot_threshold=flags.snapshot_threshold,
-            reset_states=flags.reset_states,
+            router_snapshot_threshold=flags.router_snapshot_threshold,
+            router_reset_states=flags.router_reset_states,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

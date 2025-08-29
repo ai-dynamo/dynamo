@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::Component, prelude::*, traits::events::EventPublisher, transports::nats::NatsQueue,
+    component::Component,
+    prelude::*,
+    traits::events::EventPublisher,
+    transports::nats::{NatsQueue, Slug},
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -64,12 +67,13 @@ pub async fn start_kv_router_background(
     kv_events_tx: mpsc::Sender<RouterEvent>,
     snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
     cancellation_token: CancellationToken,
-    snapshot_threshold: Option<u32>,
-    reset_states: bool,
+    router_snapshot_threshold: Option<u32>,
+    router_reset_states: bool,
 ) -> Result<()> {
     // Set up NATS connections
-    let stream_name =
-        format!("{}.{}", component.subject(), KV_EVENT_SUBJECT).replace(['/', '\\', '.', '_'], "-");
+    let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+        .to_string()
+        .replace("_", "-");
     let nats_server =
         std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
 
@@ -80,7 +84,7 @@ pub async fn start_kv_router_background(
         std::time::Duration::from_secs(300), // Very long timeout (5 minutes)
         consumer_uuid,
     );
-    nats_queue.connect_with_reset(reset_states).await?;
+    nats_queue.connect_with_reset(router_reset_states).await?;
 
     // Always create NATS client (needed for both reset and snapshots)
     let client_options = dynamo_runtime::transports::nats::Client::builder()
@@ -89,11 +93,12 @@ pub async fn start_kv_router_background(
     let nats_client = client_options.connect().await?;
 
     // Create bucket name for snapshots/state
-    let bucket_name =
-        format!("{}-{RADIX_STATE_BUCKET}", component.name()).replace(['/', '\\', '.', '_'], "-");
+    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.name()))
+        .to_string()
+        .replace("_", "-");
 
-    // Handle initial state based on reset_states flag
-    if reset_states {
+    // Handle initial state based on router_reset_states flag
+    if router_reset_states {
         // Delete the bucket to reset state
         tracing::info!("Resetting router state, deleting bucket: {bucket_name}");
         if let Err(e) = nats_client.object_store_delete_bucket(&bucket_name).await {
@@ -132,7 +137,7 @@ pub async fn start_kv_router_background(
     }
 
     // Only set up snapshot-related resources if snapshot_tx is provided and threshold is set
-    let snapshot_resources = if snapshot_tx.is_some() && snapshot_threshold.is_some() {
+    let snapshot_resources = if snapshot_tx.is_some() && router_snapshot_threshold.is_some() {
         // Get etcd client for distributed locking
         let etcd_client = component
             .drt()
@@ -210,7 +215,7 @@ pub async fn start_kv_router_background(
                     };
 
                     // Guard clause: skip if message count is too low
-                    let threshold = snapshot_threshold.unwrap_or(u32::MAX) as u64;
+                    let threshold = router_snapshot_threshold.unwrap_or(u32::MAX) as u64;
                     if message_count <= threshold {
                         continue;
                     }

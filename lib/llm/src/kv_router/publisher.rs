@@ -30,7 +30,7 @@ use dynamo_runtime::{
         network::Ingress,
     },
     protocols::annotated::Annotated,
-    transports::nats::{NatsQueue, QUEUE_NAME},
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
 };
 use futures::stream;
 use std::sync::{Arc, OnceLock};
@@ -134,8 +134,9 @@ impl KvEventPublisher {
             )?);
         }
 
-        let stream_name = format!("{}.{}", component.subject(), KV_EVENT_SUBJECT)
-            .replace(['/', '\\', '.', '_'], "-");
+        let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+            .to_string()
+            .replace("_", "-");
         let nats_server =
             std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
         // Create NatsQueue without consumer since we're only publishing

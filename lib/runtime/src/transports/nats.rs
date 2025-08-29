@@ -457,7 +457,7 @@ impl NatsQueue {
     pub fn new(stream_name: String, nats_server: String, dequeue_timeout: time::Duration) -> Self {
         // Sanitize stream name to remove path separators (like in Python version)
         // rupei: are we sure NATs stream name accepts '_'?
-        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
         let subject = format!("{sanitized_stream_name}.*");
 
         Self {
@@ -477,7 +477,7 @@ impl NatsQueue {
         nats_server: String,
         dequeue_timeout: time::Duration,
     ) -> Self {
-        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
         let subject = format!("{sanitized_stream_name}.*");
 
         Self {
@@ -499,7 +499,7 @@ impl NatsQueue {
         dequeue_timeout: time::Duration,
         consumer_name: String,
     ) -> Self {
-        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
         let subject = format!("{sanitized_stream_name}.*");
 
         Self {

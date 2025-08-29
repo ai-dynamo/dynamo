@@ -106,10 +106,10 @@ pub struct KvRouterConfig {
     pub max_num_batched_tokens: u32,
 
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
-    pub snapshot_threshold: Option<u32>,
+    pub router_snapshot_threshold: Option<u32>,
 
     /// Whether to reset the router state on startup (default: true)
-    pub reset_states: bool,
+    pub router_reset_states: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -120,8 +120,8 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             max_num_batched_tokens: 8192,
-            snapshot_threshold: None,
-            reset_states: true,
+            router_snapshot_threshold: None,
+            router_reset_states: true,
         }
     }
 }
@@ -135,8 +135,8 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         max_num_batched_tokens: Option<u32>,
-        snapshot_threshold: Option<Option<u32>>,
-        reset_states: Option<bool>,
+        router_snapshot_threshold: Option<Option<u32>>,
+        router_reset_states: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -146,8 +146,9 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
-            snapshot_threshold: snapshot_threshold.unwrap_or(default.snapshot_threshold),
-            reset_states: reset_states.unwrap_or(default.reset_states),
+            router_snapshot_threshold: router_snapshot_threshold
+                .unwrap_or(default.router_snapshot_threshold),
+            router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
         }
     }
 }
@@ -260,11 +261,11 @@ impl KvRouter {
                 consumer_uuid,
                 kv_indexer.event_sender(),
                 kv_router_config
-                    .snapshot_threshold
+                    .router_snapshot_threshold
                     .map(|_| kv_indexer.snapshot_event_sender()),
                 cancellation_token.clone(),
-                kv_router_config.snapshot_threshold,
-                kv_router_config.reset_states,
+                kv_router_config.router_snapshot_threshold,
+                kv_router_config.router_reset_states,
             )
             .await?;
         }
