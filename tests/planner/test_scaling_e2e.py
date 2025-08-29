@@ -17,7 +17,7 @@ import subprocess
 import time
 import urllib.request
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils.load_generator import LoadGenerator
 
@@ -200,7 +200,9 @@ class KubernetesMonitor:
 
         return success
 
-    def check_service_health(self, service_name: str = None, port: int = 8000) -> bool:
+    def check_service_health(
+        self, service_name: str | None = None, port: int = 8000
+    ) -> bool:
         """Check if the frontend service is healthy."""
         if service_name is None:
             service_name = f"{self.deployment_name}-frontend"
@@ -267,7 +269,7 @@ class ScalingE2ETest:
             base_url=base_url, save_results=save_results
         )
 
-        self.test_results = {}
+        self.test_results: Dict[str, Any] = {}
 
     async def run_scaling_test(self) -> Dict:
         """
@@ -335,7 +337,7 @@ class ScalingE2ETest:
                 pass
 
         # Compile results
-        test_results = {
+        test_results: Dict[str, Any] = {
             "test_duration": time.time() - test_start_time,
             "config": {
                 # Document actual test configuration
@@ -414,7 +416,7 @@ class ScalingE2ETest:
 
     def validate_test_results(self, results: Dict) -> Dict:
         """Validate that the test achieved expected scaling behavior."""
-        validation = {"test_passed": False, "issues": [], "summary": ""}
+        validation: Dict[str, Any] = {"test_passed": False, "issues": [], "summary": ""}
 
         # Check if we have the expected data
         if not results.get("scaling_analysis"):

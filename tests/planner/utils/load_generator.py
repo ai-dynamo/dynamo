@@ -15,7 +15,7 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -267,7 +267,7 @@ class LoadGenerator:
         logger.info("Using conservative graduated approach with metric generation")
 
         # Graduated test parameters (optimized for prefill scaling)
-        phases = [
+        phases: List[Dict[str, Any]] = [
             {"rate": 8.0, "duration": 90, "name": "baseline"},
             {"rate": 15.0, "duration": 120, "name": "moderate"},
             {"rate": 25.0, "duration": 180, "name": "prefill_scaling_trigger"},
