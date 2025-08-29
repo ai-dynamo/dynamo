@@ -36,11 +36,8 @@ pub struct CommonExt {
     pub repetition_penalty: Option<f32>,
 
     /// include_stop_str_in_output
-    #[serde(
-        default = "default_include_stop_str_in_output",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[builder(default = "Some(false)", setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
     pub include_stop_str_in_output: Option<bool>,
 
     /// Guided Decoding Options
@@ -68,10 +65,6 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guided_decoding_backend: Option<String>,
-}
-
-fn default_include_stop_str_in_output() -> Option<bool> {
-    Some(false)
 }
 
 impl CommonExt {
@@ -145,7 +138,7 @@ mod tests {
         assert_eq!(common_ext.guided_grammar, None);
         assert_eq!(common_ext.guided_choice, None);
         assert_eq!(common_ext.guided_decoding_backend, None);
-        assert_eq!(common_ext.include_stop_str_in_output, Some(false));
+        assert_eq!(common_ext.include_stop_str_in_output, None);
     }
 
     #[test]
@@ -227,7 +220,7 @@ mod tests {
         assert_eq!(common_ext.min_tokens, None);
         assert_eq!(common_ext.top_k, None);
         assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.include_stop_str_in_output, Some(false));
+        assert_eq!(common_ext.include_stop_str_in_output, None);
         assert!(common_ext.validate().is_ok());
     }
 
@@ -240,7 +233,7 @@ mod tests {
         assert_eq!(common_ext.min_tokens, None);
         assert_eq!(common_ext.top_k, None);
         assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.include_stop_str_in_output, Some(false));
+        assert_eq!(common_ext.include_stop_str_in_output, None);
         assert!(common_ext.validate().is_ok());
     }
 
