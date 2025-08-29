@@ -33,8 +33,8 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    COMPONENT_NATS_METRICS, DRT_NATS_METRICS, build_metric_name, labels, name_prefix, nats_client,
-    nats_service, work_handler,
+    COMPONENT_NATS_METRICS, DRT_NATS_METRICS, build_component_metric_name, labels, name_prefix,
+    nats_client, nats_service, sanitize_prometheus_label, sanitize_prometheus_name, work_handler,
 };
 
 // Pipeline imports for endpoint creation
@@ -52,35 +52,6 @@ pub const USE_AUTO_LABELS: bool = true;
 
 // Prometheus imports
 use prometheus::Encoder;
-
-/// Lints a metric name component by stripping off invalid characters and validating Prometheus naming pattern
-/// Prometheus doesn't provide a built-in function to validate metric names, but the specification requires
-/// names to follow the pattern [a-zA-Z_:][a-zA-Z0-9_:]*. This function implements that validation.
-/// Returns error if sanitized name doesn't follow the required pattern.
-fn lint_prometheus_name(name: &str) -> anyhow::Result<String> {
-    if name.is_empty() {
-        return Ok("".to_string());
-    }
-
-    static INVALID_CHARS_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
-
-    static PROMETHEUS_NAME_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$").unwrap());
-
-    // Remove all invalid characters (everything except alphanumeric, colons, and underscores)
-    let sanitized = INVALID_CHARS_PATTERN.replace_all(name, "").to_string();
-
-    // Check if the sanitized name follows Prometheus naming pattern
-    if !sanitized.is_empty() && !PROMETHEUS_NAME_PATTERN.is_match(&sanitized) {
-        return Err(anyhow::anyhow!(
-            "Sanitized name '{}' does not follow Prometheus naming pattern [a-zA-Z_:][a-zA-Z0-9_:]*",
-            sanitized
-        ));
-    }
-
-    Ok(sanitized)
-}
 
 /// Validate that a label slice has no duplicate keys.
 /// Returns Ok(()) when all keys are unique; otherwise returns an error naming the duplicate key.
@@ -237,7 +208,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     // Build hierarchy: parent_hierarchy + [basename]
     let hierarchy = [parent_hierarchy.clone(), vec![basename.clone()]].concat();
 
-    let metric_name = build_metric_name(metric_name);
+    let metric_name = build_component_metric_name(metric_name);
 
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
@@ -257,7 +228,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         if hierarchy.len() > 1 {
             let namespace = &hierarchy[1];
             if !namespace.is_empty() {
-                let valid_namespace = lint_prometheus_name(namespace)?;
+                let valid_namespace = sanitize_prometheus_label(namespace)?;
                 if !valid_namespace.is_empty() {
                     updated_labels.push((labels::NAMESPACE.to_string(), valid_namespace));
                 }
@@ -266,7 +237,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         if hierarchy.len() > 2 {
             let component = &hierarchy[2];
             if !component.is_empty() {
-                let valid_component = lint_prometheus_name(component)?;
+                let valid_component = sanitize_prometheus_label(component)?;
                 if !valid_component.is_empty() {
                     updated_labels.push((labels::COMPONENT.to_string(), valid_component));
                 }
@@ -275,7 +246,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         if hierarchy.len() > 3 {
             let endpoint = &hierarchy[3];
             if !endpoint.is_empty() {
-                let valid_endpoint = lint_prometheus_name(endpoint)?;
+                let valid_endpoint = sanitize_prometheus_label(endpoint)?;
                 if !valid_endpoint.is_empty() {
                     updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
                 }
@@ -595,11 +566,11 @@ mod test_helpers {
     pub fn remove_nats_lines(input: &str) -> Vec<String> {
         filter_prometheus_lines(input, |line| {
             !line.contains(&format!(
-                "{}{}",
+                "{}_{}",
                 name_prefix::COMPONENT,
                 nats_client::PREFIX
             )) && !line.contains(&format!(
-                "{}{}",
+                "{}_{}",
                 name_prefix::COMPONENT,
                 nats_service::PREFIX
             )) && !line.trim().is_empty()
@@ -610,11 +581,11 @@ mod test_helpers {
     pub fn extract_nats_lines(input: &str) -> Vec<String> {
         filter_prometheus_lines(input, |line| {
             line.contains(&format!(
-                "{}{}",
+                "{}_{}",
                 name_prefix::COMPONENT,
                 nats_client::PREFIX
             )) || line.contains(&format!(
-                "{}{}",
+                "{}_{}",
                 name_prefix::COMPONENT,
                 nats_service::PREFIX
             ))
@@ -625,7 +596,7 @@ mod test_helpers {
     /// Returns only the actual metric lines with values.
     pub fn extract_metrics(input: &str) -> Vec<String> {
         filter_prometheus_lines(input, |line| {
-            line.starts_with(name_prefix::COMPONENT)
+            line.starts_with(&format!("{}_", name_prefix::COMPONENT))
                 && !line.starts_with("#")
                 && !line.trim().is_empty()
         })
@@ -684,80 +655,13 @@ mod test_metricsregistry_units {
     use super::*;
 
     #[test]
-    fn test_build_metric_name_with_prefix() {
-        // Test that build_metric_name correctly prepends the dynamo_component prefix
-        let result = build_metric_name("requests");
+    fn test_build_component_metric_name_with_prefix() {
+        // Test that build_component_metric_name correctly prepends the dynamo_component prefix
+        let result = build_component_metric_name("requests");
         assert_eq!(result, "dynamo_component_requests");
 
-        let result = build_metric_name("counter");
+        let result = build_component_metric_name("counter");
         assert_eq!(result, "dynamo_component_counter");
-    }
-
-    #[test]
-    fn test_lint_prometheus_name() {
-        // Test that valid components remain unchanged
-        assert_eq!(
-            lint_prometheus_name("testnamespace").unwrap(),
-            "testnamespace"
-        );
-        assert_eq!(
-            lint_prometheus_name("test_namespace").unwrap(),
-            "test_namespace"
-        );
-        assert_eq!(lint_prometheus_name("test123").unwrap(), "test123");
-        assert_eq!(
-            lint_prometheus_name("test:namespace").unwrap(),
-            "test:namespace"
-        );
-        assert_eq!(
-            lint_prometheus_name("_testnamespace").unwrap(),
-            "_testnamespace"
-        );
-        assert_eq!(
-            lint_prometheus_name("testnamespace_123").unwrap(),
-            "testnamespace_123"
-        );
-
-        // Test that invalid characters are stripped
-        assert_eq!(lint_prometheus_name("").unwrap(), ""); // Empty
-        assert_eq!(
-            lint_prometheus_name("test namespace").unwrap(),
-            "testnamespace"
-        ); // Space removed
-        assert_eq!(
-            lint_prometheus_name("test.namespace").unwrap(),
-            "testnamespace"
-        ); // Dot removed
-        assert_eq!(
-            lint_prometheus_name("test@namespace").unwrap(),
-            "testnamespace"
-        ); // @ removed
-        assert_eq!(
-            lint_prometheus_name("test#namespace").unwrap(),
-            "testnamespace"
-        ); // # removed
-        assert_eq!(
-            lint_prometheus_name("test$namespace").unwrap(),
-            "testnamespace"
-        ); // $ removed
-        assert_eq!(
-            lint_prometheus_name("test!@#$%^&*()namespace").unwrap(),
-            "testnamespace"
-        ); // Multiple special chars removed
-        assert_eq!(
-            lint_prometheus_name("testnamespace_123!").unwrap(),
-            "testnamespace_123"
-        ); // Trailing special char removed
-
-        // Test that hyphens are stripped (not allowed in Prometheus names)
-        assert_eq!(
-            lint_prometheus_name("test-namespace").unwrap(),
-            "testnamespace"
-        ); // Hyphen removed
-        assert_eq!(
-            lint_prometheus_name("test-namespace-123").unwrap(),
-            "testnamespace123"
-        ); // Multiple hyphens removed
     }
 
     #[test]
@@ -1347,7 +1251,7 @@ mod test_metricsregistry_nats {
         let expect_drt_nats_metrics_sorted = {
             let mut temp = DRT_NATS_METRICS
                 .iter()
-                .map(|metric| build_metric_name(metric))
+                .map(|metric| build_component_metric_name(metric))
                 .collect::<Vec<_>>();
             temp.sort();
             temp
@@ -1417,7 +1321,7 @@ mod test_metricsregistry_nats {
         let expect_component_nats_metrics_sorted = {
             let mut temp = COMPONENT_NATS_METRICS
                 .iter()
-                .map(|metric| build_metric_name(metric))
+                .map(|metric| build_component_metric_name(metric))
                 .collect::<Vec<_>>();
             temp.sort();
             temp
@@ -1515,31 +1419,63 @@ mod test_metricsregistry_nats {
 
         let initial_expected_metric_values = [
             // DRT NATS metrics (ordered to match DRT_NATS_METRICS)
-            (build_metric_name(nats_client::CONNECTION_STATE), 1.0, 1.0), // Should be connected
-            (build_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
             (
-                build_metric_name(nats_client::IN_TOTAL_BYTES),
+                build_component_metric_name(nats_client::CONNECTION_STATE),
+                1.0,
+                1.0,
+            ), // Should be connected
+            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // Should have 1 connection
+            (
+                build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 800.0,
                 4000.0,
             ), // Wide range around observed value of 1888
-            (build_metric_name(nats_client::IN_MESSAGES), 0.0, 5.0), // Wide range around 2
             (
-                build_metric_name(nats_client::OUT_OVERHEAD_BYTES),
+                build_component_metric_name(nats_client::IN_MESSAGES),
+                0.0,
+                5.0,
+            ), // Wide range around 2
+            (
+                build_component_metric_name(nats_client::OUT_OVERHEAD_BYTES),
                 1500.0,
                 5000.0,
             ), // Wide range around observed value of 2752
-            (build_metric_name(nats_client::OUT_MESSAGES), 0.0, 5.0), // Wide range around 2
-            // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
-            (build_metric_name(nats_service::AVG_PROCESSING_MS), 0.0, 0.0), // No processing yet
-            (build_metric_name(nats_service::TOTAL_ERRORS), 0.0, 0.0),      // No errors yet
-            (build_metric_name(nats_service::TOTAL_REQUESTS), 0.0, 0.0),    // No requests yet
             (
-                build_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_client::OUT_MESSAGES),
+                0.0,
+                5.0,
+            ), // Wide range around 2
+            // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
+            (
+                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
                 0.0,
                 0.0,
             ), // No processing yet
-            (build_metric_name(nats_service::ACTIVE_SERVICES), 0.0, 2.0), // Service may not be fully active yet
-            (build_metric_name(nats_service::ACTIVE_ENDPOINTS), 0.0, 2.0), // Endpoint may not be fully active yet
+            (
+                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                0.0,
+                0.0,
+            ), // No errors yet
+            (
+                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                0.0,
+                0.0,
+            ), // No requests yet
+            (
+                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                0.0,
+                0.0,
+            ), // No processing yet
+            (
+                build_component_metric_name(nats_service::ACTIVE_SERVICES),
+                0.0,
+                2.0,
+            ), // Service may not be fully active yet
+            (
+                build_component_metric_name(nats_service::ACTIVE_ENDPOINTS),
+                0.0,
+                2.0,
+            ), // Endpoint may not be fully active yet
         ];
 
         for (metric_name, min_value, max_value) in &initial_expected_metric_values {
@@ -1612,49 +1548,89 @@ mod test_metricsregistry_nats {
 
         let post_expected_metric_values = [
             // DRT NATS metrics
-            (build_metric_name(nats_client::CONNECTION_STATE), 1.0, 1.0), // Connected
-            (build_metric_name(nats_client::CONNECTS), 1.0, 1.0),         // 1 connection
             (
-                build_metric_name(nats_client::IN_TOTAL_BYTES),
+                build_component_metric_name(nats_client::CONNECTION_STATE),
+                1.0,
+                1.0,
+            ), // Connected
+            (build_component_metric_name(nats_client::CONNECTS), 1.0, 1.0), // 1 connection
+            (
+                build_component_metric_name(nats_client::IN_TOTAL_BYTES),
                 20000.0,
                 32000.0,
             ), // Wide range around 26117
-            (build_metric_name(nats_client::IN_MESSAGES), 8.0, 20.0),     // Wide range around 16
             (
-                build_metric_name(nats_client::OUT_OVERHEAD_BYTES),
+                build_component_metric_name(nats_client::IN_MESSAGES),
+                8.0,
+                20.0,
+            ), // Wide range around 16
+            (
+                build_component_metric_name(nats_client::OUT_OVERHEAD_BYTES),
                 2500.0,
                 8000.0,
             ), // Wide range around 5524
-            (build_metric_name(nats_client::OUT_MESSAGES), 8.0, 20.0),    // Wide range around 16
-            // Component NATS metrics
-            (build_metric_name(nats_service::AVG_PROCESSING_MS), 0.0, 1.0), // Low processing time
-            (build_metric_name(nats_service::TOTAL_ERRORS), 0.0, 0.0),      // No errors
-            (build_metric_name(nats_service::TOTAL_REQUESTS), 0.0, 0.0), // No work handler requests
             (
-                build_metric_name(nats_service::TOTAL_PROCESSING_MS),
+                build_component_metric_name(nats_client::OUT_MESSAGES),
+                8.0,
+                20.0,
+            ), // Wide range around 16
+            // Component NATS metrics
+            (
+                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                0.0,
+                1.0,
+            ), // Low processing time
+            (
+                build_component_metric_name(nats_service::TOTAL_ERRORS),
+                0.0,
+                0.0,
+            ), // No errors
+            (
+                build_component_metric_name(nats_service::TOTAL_REQUESTS),
+                0.0,
+                0.0,
+            ), // No work handler requests
+            (
+                build_component_metric_name(nats_service::TOTAL_PROCESSING_MS),
                 0.0,
                 5.0,
             ), // Low total processing time
-            (build_metric_name(nats_service::ACTIVE_SERVICES), 0.0, 2.0), // Service may not be fully active
-            (build_metric_name(nats_service::ACTIVE_ENDPOINTS), 0.0, 2.0), // Endpoint may not be fully active
-            // Work handler metrics
-            (build_metric_name(work_handler::REQUESTS_TOTAL), 10.0, 10.0), // 10 messages
             (
-                build_metric_name(work_handler::REQUEST_BYTES_TOTAL),
+                build_component_metric_name(nats_service::ACTIVE_SERVICES),
+                0.0,
+                2.0,
+            ), // Service may not be fully active
+            (
+                build_component_metric_name(nats_service::ACTIVE_ENDPOINTS),
+                0.0,
+                2.0,
+            ), // Endpoint may not be fully active
+            // Work handler metrics
+            (
+                build_component_metric_name(work_handler::REQUESTS_TOTAL),
+                10.0,
+                10.0,
+            ), // 10 messages
+            (
+                build_component_metric_name(work_handler::REQUEST_BYTES_TOTAL),
                 21000.0,
                 26000.0,
             ), // ~75-125% of 23520
             (
-                build_metric_name(work_handler::RESPONSE_BYTES_TOTAL),
+                build_component_metric_name(work_handler::RESPONSE_BYTES_TOTAL),
                 18000.0,
                 23000.0,
             ), // ~75-125% of 20660
-            (build_metric_name(work_handler::INFLIGHT_REQUESTS), 0.0, 1.0), // 0 or very low
+            (
+                build_component_metric_name(work_handler::INFLIGHT_REQUESTS),
+                0.0,
+                1.0,
+            ), // 0 or very low
             // Histograms have _{count,sum} suffixes
             (
                 format!(
                     "{}_count",
-                    build_metric_name(work_handler::REQUEST_DURATION_SECONDS)
+                    build_component_metric_name(work_handler::REQUEST_DURATION_SECONDS)
                 ),
                 10.0,
                 10.0,
@@ -1662,7 +1638,7 @@ mod test_metricsregistry_nats {
             (
                 format!(
                     "{}_sum",
-                    build_metric_name(work_handler::REQUEST_DURATION_SECONDS)
+                    build_component_metric_name(work_handler::REQUEST_DURATION_SECONDS)
                 ),
                 0.0001,
                 1.0,

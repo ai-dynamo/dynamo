@@ -239,17 +239,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
 
-        if is_first_worker(config):
-            # Register the model with runtime config
-            await register_llm(
-                modelType,
-                endpoint,
-                config.model_path,
-                config.served_model_name,
-                kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
-                runtime_config=runtime_config,
-            )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -262,22 +251,43 @@ async def init(runtime: DistributedRuntime, config: Config):
             multimodal_processor=multimodal_processor,
         )
 
+        if next_client:
+            logging.info(
+                f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
+            )
+            await next_client.wait_for_instances()
+
+        if is_first_worker(config):
+            # Register the model with runtime config
+            await register_llm(
+                modelType,
+                endpoint,
+                config.model_path,
+                config.served_model_name,
+                kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
+            )
+
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
+            metrics_labels = [("model", config.served_model_name)]
             async with get_publisher(
                 component,
                 engine,
                 kv_listener,
                 int(endpoint.lease_id()),
                 config.kv_block_size,
+                metrics_labels,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                await endpoint.serve_endpoint(handler.generate)
+                await endpoint.serve_endpoint(
+                    handler.generate, metrics_labels=metrics_labels
+                )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(handler.generate)

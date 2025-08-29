@@ -473,16 +473,20 @@ func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequiremen
 
 type Resource struct {
 	client.Object
-	isReady func() bool
+	isReady func() (bool, string)
 }
 
-func WrapResource[T client.Object](resource T, isReady func() bool) *Resource {
+func WrapResource[T client.Object](resource T, isReady func() (bool, string)) *Resource {
 	return &Resource{
 		Object:  resource,
 		isReady: isReady,
 	}
 }
 
-func (r *Resource) IsReady() bool {
+func (r *Resource) IsReady() (bool, string) {
 	return r.isReady()
+}
+
+func (r *Resource) GetName() string {
+	return r.Object.GetName()
 }

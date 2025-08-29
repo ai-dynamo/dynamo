@@ -384,6 +384,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::metrics::MetricsRegistry;
+use crate::metrics::prometheus_names::task_tracker;
 use anyhow::Result;
 use async_trait::async_trait;
 use derive_builder::Builder;
@@ -1577,37 +1578,37 @@ impl PrometheusTaskMetrics {
         component_name: &str,
     ) -> anyhow::Result<Self> {
         let issued_counter = registry.create_intcounter(
-            &format!("{}_tasks_issued_total", component_name),
+            &format!("{}_{}", component_name, task_tracker::TASKS_ISSUED_TOTAL),
             "Total number of tasks issued/submitted",
             &[],
         )?;
 
         let started_counter = registry.create_intcounter(
-            &format!("{}_tasks_started_total", component_name),
+            &format!("{}_{}", component_name, task_tracker::TASKS_STARTED_TOTAL),
             "Total number of tasks started",
             &[],
         )?;
 
         let success_counter = registry.create_intcounter(
-            &format!("{}_tasks_success_total", component_name),
+            &format!("{}_{}", component_name, task_tracker::TASKS_SUCCESS_TOTAL),
             "Total number of successfully completed tasks",
             &[],
         )?;
 
         let cancelled_counter = registry.create_intcounter(
-            &format!("{}_tasks_cancelled_total", component_name),
+            &format!("{}_{}", component_name, task_tracker::TASKS_CANCELLED_TOTAL),
             "Total number of cancelled tasks",
             &[],
         )?;
 
         let failed_counter = registry.create_intcounter(
-            &format!("{}_tasks_failed_total", component_name),
+            &format!("{}_{}", component_name, task_tracker::TASKS_FAILED_TOTAL),
             "Total number of failed tasks",
             &[],
         )?;
 
         let rejected_counter = registry.create_intcounter(
-            &format!("{}_tasks_rejected_total", component_name),
+            &format!("{}_{}", component_name, task_tracker::TASKS_REJECTED_TOTAL),
             "Total number of rejected tasks",
             &[],
         )?;

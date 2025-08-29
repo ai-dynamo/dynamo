@@ -30,7 +30,7 @@ mypy
 numpy==1.26.4 # pmdarima is not compatible with numpy 2
 opentelemetry-api
 opentelemetry-sdk
-pip==25.0.1
+pip
 pmdarima
 pre-commit
 prometheus-api-client

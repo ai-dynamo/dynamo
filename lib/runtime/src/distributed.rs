@@ -345,12 +345,11 @@ impl DistributedConfig {
     }
 }
 
-#[cfg(test)]
 pub mod distributed_test_utils {
     //! Common test helper functions for DistributedRuntime tests
     // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
 
-    /// Helper function to create a DRT instance for tests
+    /// Helper function to create a DRT instance for integration-only tests.
     /// Uses from_current to leverage existing tokio runtime
     /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
     #[cfg(feature = "integration")]
@@ -362,8 +361,7 @@ pub mod distributed_test_utils {
     }
 }
 
-#[cfg(feature = "integration")]
-#[cfg(test)]
+#[cfg(all(test, feature = "integration"))]
 mod tests {
     use super::distributed_test_utils::create_test_drt_async;
 
