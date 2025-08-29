@@ -12,9 +12,9 @@ DYNAMO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Configuration - all set via command line arguments
 NAMESPACE=""
 MODEL="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-ISL=200
+ISL=2000
 STD=10
-OSL=200
+OSL=256
 OUTPUT_DIR="./benchmarks/results"
 
 # Input configurations stored as associative arrays
@@ -46,7 +46,8 @@ REQUIRED:
 
 OPTIONS:
     -h, --help                    Show this help message
-    -m, --model MODEL             Model name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+    -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+                                  NOTE: This must match the model configured in your deployment manifests and the model deployed in any endpoints.
     -i, --isl LENGTH              Input sequence length (default: $ISL)
     -s, --std STDDEV              Input sequence standard deviation (default: $STD)
     -o, --osl LENGTH              Output sequence length (default: $OSL)
@@ -63,6 +64,12 @@ EXAMPLES:
     $0 --namespace \$NAMESPACE \\
        --input dynamo=components/backends/vllm/deploy/disagg.yaml \\
        --input external=http://localhost:8000
+
+    # Compare three different configurations
+    $0 --namespace \$NAMESPACE \\
+       --input dynamo-agg=components/backends/vllm/deploy/agg.yaml \\
+       --input dynamo-disagg=components/backends/vllm/deploy/disagg.yaml \\
+       --input external-vllm=http://localhost:8000
 
     # Benchmark a single Dynamo deployment
     $0 --namespace \$NAMESPACE \\
@@ -88,7 +95,8 @@ NOTE:
       and use the endpoint option.
     - For Dynamo deployment setup, setup_k8s_namespace.sh provides fully encapsulated
       deployment setup including namespace creation, CRDs, and operator installation.
-    - The --model flag should match what's configured in your deployment manifests.
+    - The --model flag configures GenAI-Perf and should match what's configured in your deployment manifests and endpoints.
+    - Only one model can be benchmarked at a time across all inputs.
 
 EOF
 }
@@ -258,11 +266,20 @@ print_config() {
     echo
 }
 
+clear_output_directory() {
+    if [[ -d "$OUTPUT_DIR" ]]; then
+        echo "🧹 Clearing existing output directory: $OUTPUT_DIR"
+        rm -rf "$OUTPUT_DIR"
+    fi
+    mkdir -p "$OUTPUT_DIR"
+    echo "✅ Output directory prepared: $OUTPUT_DIR"
+}
+
 run_benchmark() {
     echo "🚀 Starting benchmark workflow..."
 
-    # Create output directory
-    mkdir -p "$OUTPUT_DIR"
+    # Clear and recreate output directory
+    clear_output_directory
 
     # Change to dynamo root directory
     cd "$DYNAMO_ROOT"

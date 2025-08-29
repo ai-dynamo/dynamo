@@ -54,14 +54,16 @@ flowchart TD
 ## What This Tool Does
 
 The framework is a wrapper around `genai-perf` that:
-- Deploys DynamoGraphDeployments automatically (with cleanup)
+- Deploys user-specified `DynamoGraphDeployments` automatically
 - Benchmarks any HTTP endpoints (no deployment needed)
 - Runs concurrency sweeps across configurable load levels
 - Generates comparison plots with your custom labels
 - Works with any HuggingFace-compatible model on NVIDIA GPUs (H200, H100, A100, etc.)
 - Runs locally and connects to your Kubernetes deployments/endpoints
 
-**Default model**: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` (configurable with `--model`)
+**Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
+
+**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The actual model loaded is determined by your deployment manifests. Only one model can be benchmarked at a time across all inputs to ensure fair comparison. The default `--model` value in the benchmarking script is `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, but it must match the model in the manifest(s) and the model deployed at the endpoint(s).
 
 ## Prerequisites
 
@@ -83,6 +85,12 @@ export NAMESPACE=benchmarking
 ./benchmarks/benchmark.sh --namespace $NAMESPACE \
    --input dynamo=components/backends/vllm/deploy/disagg.yaml \
    --input vllm-baseline=http://localhost:8000
+
+# Compare three different configurations
+./benchmarks/benchmark.sh --namespace $NAMESPACE \
+   --input dynamo-agg=components/backends/vllm/deploy/agg.yaml \
+   --input dynamo-disagg=components/backends/vllm/deploy/disagg.yaml \
+   --input external-vllm=http://localhost:8000
 
 # Benchmark single external endpoint
 ./benchmarks/benchmark.sh --namespace $NAMESPACE \
@@ -109,9 +117,9 @@ You'll see output like this confirming your configuration:
 === Benchmark Configuration ===
 Namespace:              benchmarking
 Model:                  deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-Input Sequence Length:  200 tokens      # Auto-configured default
-Output Sequence Length: 200 tokens      # Auto-configured default
-Sequence Std Dev:       10 tokens       # Auto-configured default
+Input Sequence Length:  2000 tokens      # Auto-configured default
+Output Sequence Length: 256 tokens       # Auto-configured default
+Sequence Std Dev:       10 tokens        # Auto-configured default
 Output Directory:       ./benchmarks/results
 
 Benchmark Inputs:
@@ -126,40 +134,31 @@ The script will then:
 3. Generate comparison plots using your custom labels in `./benchmarks/results/plots/`
 4. Clean up deployments when complete
 
-**Note**: The script auto-configures reasonable defaults for ISL/OSL (200 tokens each). You can override these with `--isl` and `--osl` flags if needed for your specific workload.
+**Note**: The script auto-configures reasonable defaults for ISL/OSL (2000/256 tokens respectively). You can override these with `--isl` and `--osl` flags if needed for your specific workload.
 
-### What Happens During Benchmarking
+### Results Clearing Behavior
 
-The script automatically:
-- Tests concurrency levels
-- Measures key metrics: latency, throughput, time-to-first-token
-- Runs each test for sufficient duration to get stable results
-- Handles all deployment lifecycle (create, wait, benchmark, cleanup)
+**Important**: The benchmark script automatically clears the output directory before each run to ensure clean, reproducible results. This means:
+- Previous benchmark results in the same output directory will be completely removed
+- Each benchmark run starts with a clean slate
+- Results from different runs are not mixed or accumulated
 
-### Using Your Own Models
+If you want to preserve results from previous runs, use different output directories with the `--output-dir` flag.
 
-The benchmarking framework supports any HuggingFace-compatible LLM model. To benchmark your specific model:
+### Using Your Own Models and Configuration
 
-1. **Edit your deployment YAML files** to specify your model in the `--model` argument of the container command
-2. **Use the corresponding model name** in the benchmark script's `--model` parameter
+The benchmarking framework supports any HuggingFace-compatible LLM model. Additionally, you can customize the Dynamo and inference framework configuration.
 
-```bash
-# With custom manifests and parameters
-./benchmarks/benchmark.sh \
-   --namespace $NAMESPACE \
-   --agg my-custom-agg.yaml \
-   --disagg my-custom-disagg.yaml \
-   --vanilla my-custom-vanilla.yaml \
-   --model "meta-llama/Meta-Llama-3-8B" \
-   --isl 512 \                    # input sequence length
-   --osl 512 \                    # output sequence length
-   --output-dir my_benchmark_results
-```
+To benchmark your own custom deployment:
+
+1. **Edit your deployment YAML files** to specify your model in the `--model` argument of the container command. You can also edit any other configuration options.
+3. **Use the corresponding model name** in the benchmark script's `--model` parameter
 
 **Important**:
-- The model specified in your deployment manifests must match the `--model` flag used for benchmarking. The `--model` flag configures GenAI-Perf for testing, while the deployment manifest determines what model is actually loaded.
+- The model specified in your deployment manifests must match the `--model` flag used for benchmarking. The `--model` flag configures GenAI-Perf for testing and logging, while the deployment manifest determines what model is actually loaded.
 - Only DynamoGraphDeployment manifests are supported for automatic deployment.
 - **To benchmark non-Dynamo backends**: To compare against vanilla backends like vLLM, TensorRT-LLM, SGLang, etc., deploy them manually following their respective Kubernetes deployment guides, expose a port (typically via port-forwarding), and use the endpoint option with `--input label=http://your-endpoint:port`.
+- **Only one model can be benchmarked at a time** across all inputs to ensure fair comparison.
 
 ### Direct Python Execution
 
@@ -170,9 +169,9 @@ For direct control over the benchmark workflow:
 python3 -u -m benchmarks.utils.benchmark \
    --endpoint "http://your-endpoint:8000" \
    --namespace $NAMESPACE \
-   --isl 200 \
+   --isl 2000 \
    --std 10 \
-   --osl 200 \
+   --osl 256 \
    --output-dir $OUTPUT_DIR
 
 # Deployment benchmarking (any combination)
@@ -181,9 +180,9 @@ python3 -u -m benchmarks.utils.benchmark \
    --disagg $DISAGG_CONFIG \
    --vanilla $VANILLA_CONFIG \
    --namespace $NAMESPACE \
-   --isl 200 \
+   --isl 2000 \
    --std 10 \
-   --osl 200 \
+   --osl 256 \
    --output-dir $OUTPUT_DIR
 
 # Generate plots separately
@@ -219,10 +218,11 @@ REQUIRED:
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
-  -i, --isl LENGTH              Input sequence length (default: 200)
+  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+                                NOTE: This must match the model configured in your deployment manifests
+  -i, --isl LENGTH              Input sequence length (default: 2000)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
-  -o, --osl LENGTH              Output sequence length (default: 200)
+  -o, --osl LENGTH              Output sequence length (default: 256)
   -d, --output-dir DIR          Output directory (default: ./benchmarks/results)
   --verbose                     Enable verbose output
 
@@ -239,6 +239,9 @@ EXAMPLES:
   # Compare deployment vs endpoint
   ./benchmarks/benchmark.sh --namespace my-ns --input dynamo=disagg.yaml --input external=http://my-api:8000
 
+  # Compare three different configurations
+  ./benchmarks/benchmark.sh --namespace my-ns --input dynamo-agg=agg.yaml --input dynamo-disagg=disagg.yaml --input external-vllm=http://my-api:8000
+
   # Custom parameters
   ./benchmarks/benchmark.sh --namespace my-ns --input test=disagg.yaml --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 512
 ```
@@ -248,7 +251,9 @@ EXAMPLES:
 - **Custom Labels**: Each input must have a unique label that becomes the name in plots and results
 - **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
 - **Input Types**: Supports DynamoGraphDeployment manifests for automatic deployment, or HTTP endpoints for existing services
-- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing, not deployment (deployment model is determined by the manifest files)
+- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, not deployment (deployment model is determined by the manifest files)
+- **Standalone Deployments**: For non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), you must deploy them manually following their respective Kubernetes deployment guides. The benchmarking framework only supports automatic deployment of DynamoGraphDeployments.
+- **Single Model Requirement**: Only one model can be benchmarked at a time across all inputs to ensure fair comparison.
 
 ## Understanding Your Results
 
@@ -321,14 +326,6 @@ CONCURRENCIES="1,5,20,50" ./benchmarks/benchmark.sh --namespace $NAMESPACE --inp
 export CONCURRENCIES="1,2,5,10,25,50,100"
 ./benchmarks/benchmark.sh --namespace $NAMESPACE --input test=disagg.yaml
 ```
-
-### Multi-Node Testing (TODO)
-
-For multi-node Dynamo deployments:
-
-1. Ensure your DGD configuration spans multiple nodes
-2. Use appropriate tensor parallelism settings (`SCALE > 1`)
-3. Monitor resource utilization across nodes
 
 ## Customize Benchmarking Behavior
 
