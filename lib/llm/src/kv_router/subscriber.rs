@@ -112,7 +112,7 @@ pub async fn start_kv_router_background(
         None
     };
 
-    tokio::spawn(async move {
+    component.drt().runtime().secondary().spawn(async move {
         let mut check_interval = tokio::time::interval(Duration::from_secs(1));
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -128,7 +128,7 @@ pub async fn start_kv_router_background(
                 }
 
                 // Handle event consumption
-                result = nats_queue.dequeue_task(Some(std::time::Duration::from_secs(0))) => {
+                result = nats_queue.dequeue_task(None) => {
                     match result {
                         Ok(Some(bytes)) => {
                             let event: RouterEvent = match serde_json::from_slice(&bytes) {
