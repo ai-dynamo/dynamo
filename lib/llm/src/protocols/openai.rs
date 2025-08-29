@@ -97,6 +97,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
         let top_k = CommonExtProvider::get_top_k(self);
         let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
+        let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(self);
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -141,6 +142,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             use_beam_search: None,
             length_penalty: None,
             guided_decoding,
+            include_stop_str_in_output,
         })
     }
 }
