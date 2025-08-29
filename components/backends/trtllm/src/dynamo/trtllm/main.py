@@ -20,6 +20,7 @@ from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
 from transformers import AutoConfig
 
+import dynamo.nixl_connect as nixl_connect
 from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -115,6 +116,21 @@ async def init(runtime: DistributedRuntime, config: Config):
             config.next_endpoint
         )
         next_client = (
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
+            .client()
+        )
+
+    encode_client = None
+    if config.encode_endpoint:
+        logging.info(
+            f"Initializing encode worker client for endpoint: {config.encode_endpoint}"
+        )
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            config.encode_endpoint
+        )
+        encode_client = (
             await runtime.namespace(parsed_namespace)
             .component(parsed_component_name)
             .endpoint(parsed_endpoint_name)
@@ -218,12 +234,19 @@ async def init(runtime: DistributedRuntime, config: Config):
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model_path,
+            max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
+            allowed_local_media_path=config.allowed_local_media_path,
         )
 
     else:
         # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
         default_sampling_params.detokenize = False
+
+    connector = None
+    logging.info("Initializing NIXL Connect.")
+    connector = nixl_connect.Connector()
+    await connector.initialize()
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
@@ -248,7 +271,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            encode_client=encode_client,
             multimodal_processor=multimodal_processor,
+            connector=connector,
         )
 
         if next_client:
