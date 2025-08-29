@@ -293,8 +293,11 @@ class ScalingE2ETest:
             logger.info("Running scaling scenario (8 req/s -> 15 req/s -> 25 req/s)")
             load_results = await self.load_generator.run_scaling_test()
 
-            phase1_results = load_results.get("phase1", {})
-            phase2_results = load_results.get("phase2", {})
+            # Extract load results for analysis (3-phase structure)
+            phase_results = load_results.get("phase_results", {})
+            baseline_results = phase_results.get("phase1_baseline", {})
+            moderate_results = phase_results.get("phase2_moderate", {})
+            trigger_results = phase_results.get("phase3_prefill_scaling_trigger", {})
 
             # Check final pod counts
             final_counts = self.k8s_monitor.get_pod_counts()
@@ -331,8 +334,9 @@ class ScalingE2ETest:
                 "transition_delay": 30,
             },
             "initial_pod_counts": initial_counts.__dict__ if initial_counts else None,
-            "phase1_results": phase1_results,
-            "phase2_results": phase2_results,
+            "baseline_results": baseline_results,
+            "moderate_results": moderate_results,
+            "trigger_results": trigger_results,
             "final_pod_counts": final_counts.__dict__ if final_counts else None,
             "final_final_pod_counts": final_final_counts.__dict__
             if final_final_counts
@@ -433,13 +437,17 @@ class ScalingE2ETest:
                 "summary"
             ] = "❌ Test FAILED: Did not achieve expected 1P1D -> 2P1D scaling"
 
-        # Add performance validation
-        phase1 = results.get("phase1_results", {})
-        phase2 = results.get("phase2_results", {})
+        # Add performance validation across all phases
+        baseline = results.get("baseline_results", {})
+        moderate = results.get("moderate_results", {})
+        trigger = results.get("trigger_results", {})
 
-        if phase1.get("throughput", 0) > 0 and phase2.get("throughput", 0) > 0:
-            validation["phase1_throughput"] = f"{phase1['throughput']:.2f} req/s"
-            validation["phase2_throughput"] = f"{phase2['throughput']:.2f} req/s"
+        if baseline.get("throughput", 0) > 0:
+            validation["baseline_throughput"] = f"{baseline['throughput']:.2f} req/s"
+        if moderate.get("throughput", 0) > 0:
+            validation["moderate_throughput"] = f"{moderate['throughput']:.2f} req/s"
+        if trigger.get("throughput", 0) > 0:
+            validation["trigger_throughput"] = f"{trigger['throughput']:.2f} req/s"
 
         return validation
 
@@ -494,10 +502,18 @@ async def main():
             for issue in validation["issues"]:
                 logger.info(f"  - {issue}")
 
-        if "phase1_throughput" in validation:
+        if any(k.endswith("_throughput") for k in validation.keys()):
             logger.info("\nPerformance:")
-            logger.info(f"  Phase 1: {validation['phase1_throughput']}")
-            logger.info(f"  Phase 2: {validation['phase2_throughput']}")
+            if "baseline_throughput" in validation:
+                logger.info(
+                    f"  Baseline (8 req/s): {validation['baseline_throughput']}"
+                )
+            if "moderate_throughput" in validation:
+                logger.info(
+                    f"  Moderate (15 req/s): {validation['moderate_throughput']}"
+                )
+            if "trigger_throughput" in validation:
+                logger.info(f"  Trigger (25 req/s): {validation['trigger_throughput']}")
 
         logger.info(f"\nDetailed results saved to: {results_file}")
         logger.info("=" * 60)

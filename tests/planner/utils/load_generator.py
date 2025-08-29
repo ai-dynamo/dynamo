@@ -335,9 +335,6 @@ class LoadGenerator:
             json.dump(results, f, indent=2)
 
         logger.info(f"Test results saved to: {results_file}")
-        # Compatibility aliases for consumers expecting phase1/phase2
-        results["phase1"] = phase_results.get("phase1_baseline", {})
-        results["phase2"] = phase_results.get("phase2_moderate", {})
         return results
 
 
