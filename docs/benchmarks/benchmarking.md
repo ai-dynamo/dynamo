@@ -21,36 +21,6 @@ This benchmarking framework lets you compare performance across any combination 
 
 You can mix and match these in a single benchmark run using custom labels. Configure your DynamoGraphDeployment manifests for your specific models, hardware, and parallelization needs.
 
-## How It Works
-
-```mermaid
-flowchart TD
-    A["User Inputs<br/>--input label=manifest.yaml<br/>--input label=http://endpoint"] --> B{Input Processing}
-    B --> C["DynamoGraphDeployment<br/>Manifests"]
-    B --> D["HTTP Endpoints<br/>(existing services)"]
-
-    C --> E["Deploy to K8s<br/>🚀 Create pods<br/>⏳ Wait for ready<br/>🔌 Port forward"]
-    D --> F["Connect directly<br/>🌐 No deployment needed"]
-
-    E --> G["GenAI-Perf Benchmarking<br/>📊 Concurrency sweep<br/>📈 Metrics collection"]
-    F --> G
-
-    G --> H["Performance Data<br/>• Latency<br/>• Throughput<br/>• TTFT"]
-
-    H --> I["Plot Generation<br/>📊 Custom labels<br/>📈 Comparison charts<br/>🎯 Efficiency plots"]
-
-    I --> J["Results<br/>📁 ./benchmarks/results/<br/>├── your-label-1/<br/>├── your-label-2/<br/>└── plots/"]
-
-    style J text-align:left
-
-    E --> K["Cleanup<br/>🧹 Delete deployments"]
-
-    style A fill:#e1f5fe
-    style G fill:#f3e5f5
-    style I fill:#e8f5e8
-    style J fill:#fff3e0
-```
-
 ## What This Tool Does
 
 The framework is a wrapper around `genai-perf` that:
@@ -187,9 +157,8 @@ python3 -u -m benchmarks.utils.benchmark \
 
 # Deployment benchmarking (any combination)
 python3 -u -m benchmarks.utils.benchmark \
-   --agg $AGG_CONFIG \
-   --disagg $DISAGG_CONFIG \
-   --vanilla $VANILLA_CONFIG \
+   --input agg=$AGG_CONFIG \
+   --input disagg=$DISAGG_CONFIG \
    --namespace $NAMESPACE \
    --isl 2000 \
    --std 10 \
