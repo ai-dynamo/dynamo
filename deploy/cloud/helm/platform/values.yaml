@@ -20,25 +20,25 @@
 dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
-  
+
   # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
   natsAddr: ""
-  
+
   # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
-  
+
   # Namespace access controls for the operator
   namespaceRestriction:
     # -- Whether to restrict operator to specific namespaces
     enabled: true
     # -- Target namespace for operator deployment (leave empty for current namespace)
     targetNamespace:
-  
+
   # Controller manager configuration
   controllerManager:
     # -- Node tolerations for controller manager pods
     tolerations: []
-    
+
     manager:
       # Container image configuration for the operator manager
       image:
@@ -48,30 +48,30 @@ dynamo-operator:
         tag: ""
         # -- Image pull policy - when to pull the image
         pullPolicy: IfNotPresent
-      
+
       # Command line arguments for the operator manager
       args:
         # -- Health probe endpoint for Kubernetes health checks
         - --health-probe-bind-address=:8081
         # -- Metrics endpoint for Prometheus scraping (localhost only for security)
         - --metrics-bind-address=127.0.0.1:8080
-  
+
   # -- Secrets for pulling private container images
   imagePullSecrets: []
-  
+
   # Core Dynamo platform configuration
   dynamo:
     # -- How long to wait before forcefully terminating Grove instances
     groveTerminationDelay: 15m
-    
+
     # Internal utility images used by the platform
     internalImages:
       # -- Debugger image for troubleshooting deployments
       debugger: python:3.12-slim
-    
+
     # -- Whether to enable restricted security contexts for enhanced security
     enableRestrictedSecurityContext: false
-    
+
     # Docker registry configuration for private repositories
     dockerRegistry:
       # -- Whether to use Kubernetes secrets for registry authentication
@@ -86,7 +86,7 @@ dynamo-operator:
       existingSecretName:
       # -- Whether the registry uses HTTPS
       secure: true
-    
+
     # Ingress configuration for external access
     ingress:
       # -- Whether to create ingress resources
@@ -95,37 +95,37 @@ dynamo-operator:
       className:
       # -- Secret name containing TLS certificates
       tlsSecretName: my-tls-secret
-    
+
     # Istio service mesh configuration
     istio:
       # -- Whether to enable Istio integration
       enabled: false
       # -- Istio gateway name for routing
       gateway:
-    
+
     # -- Host suffix for generated ingress hostnames
     ingressHostSuffix: ""
-    
+
     # -- Whether VirtualServices should support HTTPS routing
     virtualServiceSupportsHTTPS: false
 
 
 # Grove component - distributed inference orchestration
 grove:
-  # -- Whether to enable Grove for multi-node inference coordination
+  # -- Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide
   enabled: false
 
 # Kai Scheduler component - advanced workload scheduling
 kai-scheduler:
-  # -- Whether to enable Kai Scheduler for intelligent resource allocation
+  # -- Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide
   enabled: false
 
 # etcd configuration - distributed key-value store for operator state
 # For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd
 etcd:
-  # -- Whether to enable etcd deployment (required for operator state storage)
+  # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance
   enabled: true
-  
+
   # Persistent storage configuration for etcd data
   persistence:
     # Whether to enable persistent storage (recommended for production)
@@ -134,15 +134,15 @@ etcd:
     storageClass: null
     # Size of persistent volume for etcd data
     size: 1Gi
-  
+
   # Pre-upgrade job configuration
   preUpgrade:
     # Whether to run pre-upgrade validation jobs
     enabled: false
-  
+
   # Number of etcd replicas (1 for single-node, 3+ for HA)
   replicaCount: 1
-  
+
   # Authentication and authorization settings
   # Explicitly remove authentication for simplified internal communication
   auth:
@@ -165,9 +165,9 @@ etcd:
 # NATS configuration - messaging system for operator communication
 # For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats
 nats:
-  # -- Whether to enable NATS deployment (required for operator messaging)
+  # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance
   enabled: true
-  
+
   # TLS Certificate Authority configuration for secure communication
   # Reference a common CA Certificate or Bundle in all nats config `tls` blocks and nats-box contexts
   # Note: `tls.verify` still must be set in the appropriate nats config `tls` blocks to require mTLS
@@ -229,7 +229,7 @@ nats:
     nats:
       # Port for NATS client connections
       port: 4222
-      
+
       # TLS configuration for encrypted connections
       tls:
         # Whether to enable TLS encryption
@@ -265,7 +265,7 @@ nats:
       enabled: true
       # Port for monitoring HTTP endpoint
       port: 8222
-      
+
       # TLS configuration for monitoring endpoint
       tls:
         # Whether to enable HTTPS for monitoring (requires config.nats.tls enabled)
@@ -368,7 +368,7 @@ nats:
   reloader:
     # Whether to enable the config reloader sidecar container
     enabled: true
-    
+
     # Config reloader container image
     image:
       # Official NATS config reloader repository
@@ -533,7 +533,7 @@ nats:
           dir:
           # Key name in secret for credentials file
           key: nats.creds
-        
+
         # NKey-based authentication (public/private key pairs)
         nkey:
           # Inline NKey file contents (base64 encoded)
@@ -544,7 +544,7 @@ nats:
           dir:
           # Key name in secret for NKey file
           key: nats.nk
-        
+
         # TLS client certificate authentication
         tls:
           # Name of existing secret containing TLS client certificates
@@ -586,7 +586,7 @@ nats:
       # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#container-v1-core
       merge: {}
       patch: []
-    
+
     # Service Account for NATS Box deployment
     serviceAccount:
       # Whether to create and use a dedicated service account for NATS Box
