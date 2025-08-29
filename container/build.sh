@@ -615,6 +615,9 @@ fi
 if [[ $FRAMEWORK == "VLLM" ]]; then
     # Define base image tag before using it
     DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+    # Enable KVBM in vllm runtime image
+    echo "Enabling KVBM in vllm runtime image"
+    BUILD_ARGS+=" --build-arg ENABLE_KVBM=true"
     # Start base image build
     echo "======================================"
     echo "Starting Build 1: Base Image"
