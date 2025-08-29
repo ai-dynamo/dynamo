@@ -88,7 +88,6 @@ def align_versions(projects, version, dependencies):
         for dep in dep_group:
             matched = False
             for proj in projects:
-                # Matches both ==version and >=... style constraints
                 if (
                     dep.startswith(f"{proj}==")
                     or dep.startswith(f"{proj}>=")
