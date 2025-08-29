@@ -566,6 +566,22 @@ impl ModelDeploymentCard {
     }
 }
 
+impl ModelDeploymentCard {
+    /// Compare content of two MDCs, ignoring metadata fields (revision, last_published)
+    pub fn content_equals(&self, other: &Self) -> bool {
+        let mut self_cmp = self.clone();
+        let mut other_cmp = other.clone();
+
+        // Clear metadata fields for comparison
+        self_cmp.revision = 0;
+        self_cmp.last_published = None;
+        other_cmp.revision = 0;
+        other_cmp.last_published = None;
+
+        self_cmp == other_cmp
+    }
+}
+
 impl Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
         self.revision
