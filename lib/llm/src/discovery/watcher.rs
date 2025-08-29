@@ -177,7 +177,7 @@ impl ModelWatcher {
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
             let mut update_tx = true;
-            let mut model_type: ModelType = model_entry.model_type;
+            let model_type: ModelType = model_entry.model_type;
             if model_entry.model_type.contains(ModelType::Chat)
                 && self.manager.list_chat_completions_models().is_empty()
             {
