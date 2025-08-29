@@ -30,7 +30,7 @@ use dynamo_runtime::{
         network::Ingress,
     },
     protocols::annotated::Annotated,
-    transports::nats::NatsQueue,
+    transports::nats::{NatsQueue, QUEUE_NAME},
 };
 use futures::stream;
 use std::sync::{Arc, OnceLock};
@@ -209,7 +209,7 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 // Encapsulate in a router event and publish.
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
                 let router_event = RouterEvent::new(worker_id, event);
-                if let Err(e) = publisher.publish("queue", &router_event).await {
+                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
                     tracing::error!("Failed to publish event: {}", e);
                 }
             }
@@ -940,7 +940,7 @@ mod tests_startup_helpers {
         let published = published.lock().unwrap();
         assert_eq!(published.len(), 1);
         let (subject, _) = &published[0];
-        assert_eq!(subject, "queue");
+        assert_eq!(subject, QUEUE_NAME);
     }
 
     //--------------------------------------------------------------------
