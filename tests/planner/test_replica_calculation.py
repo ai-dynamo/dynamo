@@ -12,12 +12,29 @@ import argparse
 import math
 import os
 
+# Mock dependencies before importing planner modules
+import sys
+
 # We'll import the actual Planner class to test its calculation logic
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from dynamo.planner.utils.planner_core import Metrics, Planner
+
+# Create mock modules for dependencies that might not be available in test environment
+mock_prometheus = MagicMock()
+mock_prometheus.Gauge = MagicMock()
+mock_prometheus.start_http_server = MagicMock()
+
+mock_runtime = MagicMock()
+mock_runtime.logging = MagicMock()
+mock_runtime.logging.configure_dynamo_logging = MagicMock()
+
+# Patch them into sys.modules before importing
+sys.modules["prometheus_client"] = mock_prometheus
+sys.modules["dynamo.runtime"] = mock_runtime
+sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
 
 
 @pytest.fixture
