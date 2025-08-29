@@ -1,136 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::config::{ToolCallConfig, ToolCallParserType};
 use super::json_parser::try_tool_call_parse_json;
+use super::pythonic_parser::try_tool_call_parse_pythonic;
 use super::response::ToolCallResponse;
-
-/// Represents the format type for tool calls
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum ToolCallParserType {
-    /// JSON format: `{"name": "function", "arguments": {...}}`
-    Json,
-    Pythonic,
-    Harmony,
-    /// <function_call>```typescript
-    /// functions.get_current_weather({"location": "Shanghai"})
-    /// ```
-    Typescript,
-    Xml,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct JsonParserConfig {
-    /// Start token for list of parallel tool calls (e.g., "<TOOLCALLS>")
-    pub parallel_tool_calls_start_tokens: Vec<String>,
-    /// End token for list of parallel tool calls (e.g., "</TOOLCALLS>")
-    pub parallel_tool_calls_end_tokens: Vec<String>,
-    /// Start token for individual tool calls (e.g., "<TOOLCALL>")
-    pub tool_call_start_tokens: Vec<String>,
-    /// End token for individual tool calls (e.g., "</TOOLCALL>")
-    pub tool_call_end_tokens: Vec<String>,
-    /// The key for the function name in the tool call
-    /// i.e. `{"name": "function", "arguments": {...}}` it would be
-    /// "name"
-    pub function_name_keys: Vec<String>,
-    /// The key for the arguments in the tool call
-    /// i.e. `{"name": "function", "arguments": {...}}` it would be
-    /// "arguments"
-    pub arguments_keys: Vec<String>,
-}
-
-impl Default for JsonParserConfig {
-    fn default() -> Self {
-        Self {
-            parallel_tool_calls_start_tokens: vec![],
-            parallel_tool_calls_end_tokens: vec![],
-            tool_call_start_tokens: vec!["<TOOLCALL>".to_string(), "<|python_tag|>".to_string()],
-            tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
-            function_name_keys: vec!["name".to_string()],
-            arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
-        }
-    }
-}
-
-impl Default for ToolCallConfig {
-    fn default() -> Self {
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig::default(),
-        }
-    }
-}
-
-impl ToolCallConfig {
-    /// Default configuration for hermes tool calls
-    /// <tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}\n</tool_call>
-    pub fn hermes() -> Self {
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<tool_call>".to_string()],
-                tool_call_end_tokens: vec!["\n</tool_call>".to_string()],
-                ..Default::default()
-            },
-        }
-    }
-
-    /// Default configuration for nemotron tool calls
-    /// <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>
-    pub fn nemotron_deci() -> Self {
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
-                tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
-                ..Default::default()
-            },
-        }
-    }
-
-    pub fn llama3_json() -> Self {
-        // <|python_tag|>{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"} }
-        // or { "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"} }
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["<|python_tag|>".to_string()],
-                tool_call_end_tokens: vec!["".to_string()],
-                ..Default::default()
-            },
-        }
-    }
-
-    pub fn mistral() -> Self {
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["[TOOL_CALLS]".to_string()],
-                tool_call_end_tokens: vec!["".to_string()],
-                ..Default::default()
-            },
-        }
-    }
-
-    pub fn phi4() -> Self {
-        Self {
-            format: ToolCallParserType::Json,
-            json: JsonParserConfig {
-                tool_call_start_tokens: vec!["functools".to_string()],
-                tool_call_end_tokens: vec!["".to_string()],
-                ..Default::default()
-            },
-        }
-    }
-}
-
-/// Configuration for parsing tool calls with different formats
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ToolCallConfig {
-    /// The format type for tool calls
-    pub format: ToolCallParserType,
-    /// The config for the JSON parser
-    pub json: JsonParserConfig,
-}
 
 pub fn try_tool_call_parse(
     message: &str,
@@ -146,7 +20,8 @@ pub fn try_tool_call_parse(
             anyhow::bail!("Harmony parser not implemented");
         }
         ToolCallParserType::Pythonic => {
-            anyhow::bail!("Pythonic parser not implemented");
+            let (results, normal_content) = try_tool_call_parse_pythonic(message)?;
+            Ok((results, normal_content))
         }
         ToolCallParserType::Typescript => {
             anyhow::bail!("Typescript parser not implemented");
@@ -169,6 +44,7 @@ pub fn detect_and_parse_tool_call(
     parser_map.insert("llama3_json", ToolCallConfig::llama3_json());
     parser_map.insert("mistral", ToolCallConfig::mistral());
     parser_map.insert("phi4", ToolCallConfig::phi4());
+    parser_map.insert("pythonic", ToolCallConfig::pythonic());
     parser_map.insert("default", ToolCallConfig::default()); // Add default key
 
     // Handle None or empty string by defaulting to "default"
@@ -190,6 +66,7 @@ pub fn detect_and_parse_tool_call(
 // cargo test postprocessor::tool_calling::parsers
 #[cfg(test)]
 mod tests {
+    use super::super::config::JsonParserConfig;
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
@@ -1196,5 +1073,39 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "calculate_distance");
         assert_eq!(args["from"], "New York");
         assert_eq!(args["to"], "Los Angeles");
+    }
+
+    #[test]
+    fn test_pythonic_parser_basic_with_constants() {
+        let input = r#"[get_weather(location="San Francisco", unit="fahrenheit"), get_weather(location="New York", unit="fahrenheit")]"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("pythonic")).unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_pythonic_parser_with_constants_and_normal_text() {
+        let input = r#"Hey How are you? [get_weather(location="San Francisco", unit="fahrenheit"), get_weather(location="New York", unit="fahrenheit")]"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("pythonic")).unwrap();
+        assert_eq!(content, Some("Hey How are you?".to_string()));
+        assert_eq!(result.len(), 2);
+
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "fahrenheit");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York");
+        assert_eq!(args["unit"], "fahrenheit");
     }
 }

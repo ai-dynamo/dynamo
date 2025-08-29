@@ -7,7 +7,7 @@ use regex::RegexBuilder;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::parsers::JsonParserConfig;
+use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
 // Same as CalledFunction with named parameters
