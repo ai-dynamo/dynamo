@@ -16,6 +16,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .engine_monitor import VllmEngineMonitor
 from .protocol import MyRequestOutput
 
 configure_dynamo_logging()
@@ -33,6 +34,7 @@ class BaseWorkerHandler(ABC):
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publisher = None
+        self.engine_monitor = VllmEngineMonitor(runtime, engine)
 
     @abstractmethod
     async def generate(self, request) -> AsyncGenerator[dict, None]:

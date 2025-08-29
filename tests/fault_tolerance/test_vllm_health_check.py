@@ -326,7 +326,7 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_vllm_health_check(request, runtime_services):
+def test_vllm_health_check_active(request, runtime_services):
     """
     End-to-end test for worker fault tolerance with migration support.
 
@@ -366,13 +366,66 @@ def test_vllm_health_check(request, runtime_services):
                     child.kill()
                     break
 
-            time.sleep(3)  # Give some time for the worker to stabilize
+            time.sleep(2)  # Give some time for the worker to stabilize
 
             # Step 5: Send a request triggering the handler to shutdown everything.
             test_response = send_completion_request("How old are you?", 100, timeout=60)
             logger.error(f"Test request failed: {test_response}")
 
             # Step 6: Ensure the worker process has been stopped as a result of the EngineDeadError condition.
+            if worker.is_running():
+                pytest.fail(
+                    "Worker should not be running after killing vLLM engine process."
+                )
+
+
+@pytest.mark.vllm
+@pytest.mark.gpu_1
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_vllm_health_check_passive(request, runtime_services):
+    """
+    End-to-end test for worker fault tolerance with migration support.
+
+    This test verifies that when a worker is killed during request processing,
+    the system can handle the failure gracefully and migrate the request to
+    another worker.
+    """
+    # Step 0: Download the model from HuggingFace if not already cached
+    download_model()
+
+    # Step 1: Start the frontend
+    logger.info("Starting frontend...")
+    with DynamoFrontendProcess(request):
+        logger.info("Frontend started.")
+
+        # Step 2: Start a worker
+        logger.info("Starting worker...")
+        with DynamoWorkerProcess(request, "decode") as worker:
+            logger.info(f"Worker PID: {worker.get_pid()}")
+
+            time.sleep(12)  # Give the model some time to get started.
+
+            # Step 3: Send a test request to prove the worker is live.
+            test_response = send_completion_request("Who are you?", 100, timeout=60)
+            validate_openai_response(test_response)
+            logger.info("Test request completed successfully")
+
+            # Step 4: Find and kill vLLM engine processes to force the EngineDeadError condition.
+            children = worker.subprocesses()
+            logger.info(f"Worker children: {[child.pid for child in children]}")
+            for child in children:
+                cmdline = child.cmdline()
+                if len(cmdline) > 0 and cmdline[0] == "VLLM::EngineCore":
+                    logger.warning(
+                        f"Killing vLLM engine process {{ pid: {child.pid}, cmdline: '{' '.join(cmdline)}' }}"
+                    )
+                    child.kill()
+                    break
+
+            time.sleep(6)  # Give some time for the worker to stabilize
+
+            # Step 5: Ensure the worker process has been stopped as a result of the EngineDeadError condition.
             if worker.is_running():
                 pytest.fail(
                     "Worker should not be running after killing vLLM engine process."
