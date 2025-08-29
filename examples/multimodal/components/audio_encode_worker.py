@@ -158,10 +158,6 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            # FIXME: the current API does not support audio, so we need to use the image URL as a placeholder
-            request.multimodal_input.audio_url = request.multimodal_input.image_url
-            request.multimodal_input.image_url = None
-
             audio, sr = await self.audio_loader.load_audio(
                 request.multimodal_input.audio_url
             )

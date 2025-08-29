@@ -532,6 +532,7 @@ flowchart LR
 ```
 
 ```bash
+pip install vllm["audio"] # multimodal audio models need vllm[audio] dependency
 cd $DYNAMO_HOME/examples/multimodal
 bash launch/audio_agg.sh
 ```
@@ -553,8 +554,8 @@ curl http://localhost:8000/v1/chat/completions \
               "text": "What is recited in the audio?"
             },
             {
-              "type": "image_url",
-              "image_url": {
+              "type": "audio_url",
+              "audio_url": {
                 "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
               }
             }
@@ -609,7 +610,7 @@ This example demonstrates deploying a disaggregated multimodal model that can pr
 ### Graph
 
 In this graph, we have three workers, [AudioEncodeWorker](components/audio_encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
-For the LLaVA-NeXT-audio-7B model, frames are only required during the prefill stage. As such, the AudioEncodeWorker is connected directly to the prefill worker.
+For the Qwen/Qwen2-Audio-7B-Instruct model, frames are only required during the prefill stage. As such, the AudioEncodeWorker is connected directly to the prefill worker.
 The AudioEncodeWorker is responsible for decoding the audio into a series of frames and passing them to the prefill worker via RDMA.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
 For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
@@ -628,6 +629,7 @@ flowchart LR
 ```
 
 ```bash
+pip install vllm["audio"] # multimodal audio models need vllm[audio] dependency
 cd $DYNAMO_HOME/examples/multimodal
 bash launch/audio_disagg.sh
 ```
