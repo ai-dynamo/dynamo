@@ -859,7 +859,7 @@ class KvRouterConfig:
     """Values for KV router"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None, migration_limit: int = 0, runtime_config: Optional[ModelRuntimeConfig] = None, user_data: Optional[dict] = None, custom_template_path: Optional[str] = None) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 

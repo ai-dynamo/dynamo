@@ -59,6 +59,7 @@ pub struct LocalModelBuilder {
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
+    custom_template_path: Option<PathBuf>,
 }
 
 impl Default for LocalModelBuilder {
@@ -81,6 +82,7 @@ impl Default for LocalModelBuilder {
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
             user_data: Default::default(),
+            custom_template_path: Default::default(),
         }
     }
 }
@@ -144,6 +146,11 @@ impl LocalModelBuilder {
 
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
+        self
+    }
+
+    pub fn custom_template_path(&mut self, custom_template_path: Option<PathBuf>) -> &mut Self {
+        self.custom_template_path = custom_template_path;
         self
     }
 
@@ -236,7 +243,11 @@ impl LocalModelBuilder {
         // --model-config takes precedence over --model-path
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
-        let mut card = ModelDeploymentCard::load(&model_config_path).await?;
+        let mut card = if self.custom_template_path.is_some() {
+            ModelDeploymentCard::load_with_custom_template(&model_config_path, self.custom_template_path.as_deref()).await?
+        } else {
+            ModelDeploymentCard::load(&model_config_path).await?
+        };
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {
@@ -392,11 +403,40 @@ impl LocalModel {
         // Publish the Model Deployment Card to etcd
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let key = self.card.slug().to_string();
+        let slug_key = self.card.slug();
+        let key = slug_key.to_string();
 
-        card_store
-            .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
-            .await?;
+        // Try to load existing MDC to determine if update is needed
+        match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, slug_key).await {
+            Ok(Some(existing)) => {
+                if !self.card.content_equals(&existing) {
+                    // Content changed, update with appropriate revision
+                    // Note: If revision is 0, we use 1 to ensure update path is triggered
+                    // (revision 0 would call create() which doesn't update existing keys)
+                    self.card.revision = existing.revision.max(1);
+                    card_store
+                        .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
+                        .await?;
+                } else {
+                    // Content identical, preserve existing metadata
+                    self.card.revision = existing.revision;
+                    self.card.last_published = existing.last_published;
+                }
+            }
+            Ok(None) => {
+                // New MDC, create it
+                card_store
+                    .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
+                    .await?;
+            }
+            Err(e) => {
+                // Error loading - attempt to publish anyway for resilience
+                tracing::debug!("Could not load existing MDC: {}. Publishing new entry.", e);
+                card_store
+                    .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
+                    .await?;
+            }
+        }
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
         // (Why don't we put the model card directly under this key?)
