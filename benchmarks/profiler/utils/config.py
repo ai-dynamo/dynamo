@@ -15,7 +15,6 @@
 
 import logging
 import re
-from copy import deepcopy
 from typing import Literal, Optional
 
 from pydantic import BaseModel
@@ -38,27 +37,34 @@ logger.addHandler(console_handler)
 class Container(BaseModel):
     args: list[str] = []
 
+
 class PodSpec(BaseModel):
     mainContainer: Container
+
 
 class ServiceResources(BaseModel):
     requests: dict[str, str]
     limits: Optional[dict[str, str]] = None
+
 
 class Service(BaseModel):
     replicas: int
     resources: ServiceResources
     extraPodSpec: PodSpec
 
+
 class Services(BaseModel):
     Frontend: Service
     __root__: dict[str, Service]
 
+
 class Spec(BaseModel):
     services: dict[str, Service]
 
+
 class Metadata(BaseModel):
     name: str
+
 
 class Config(BaseModel):
     metadata: Metadata
@@ -131,11 +137,11 @@ class VllmV1ConfigModifier:
 
         if target == "prefill":
             # convert prefill worker into decode worker
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ] = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
-            ]
+            cfg.spec.services[WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name] = (
+                cfg.spec.services[
+                    WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
+                ]
+            )
             del cfg.spec.services[
                 WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
             ]
