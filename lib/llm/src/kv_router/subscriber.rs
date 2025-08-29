@@ -235,8 +235,9 @@ async fn perform_purge_and_snapshot(
     snapshot_tx: &mpsc::Sender<DumpRequest>,
     bucket_name: &str,
 ) -> anyhow::Result<()> {
-    // TODO: This is incorrect because the radix tree snapshot at this time may not correspond to the ack floor
-    // We need to ensure consistency between the purged messages and the snapshot state
+    // TODO: Radix tree snapshot may not match ack floor unless this replica has min ack'ed seq.
+    // Could add sleep to increase likelihood. However, radix tree can only be ahead of purge point
+    // (not behind), and KV events are idempotent, so replaying already-applied events is safe.
 
     // First, perform the purge of acknowledged messages
     nats_queue.purge_acknowledged().await?;
