@@ -790,3 +790,239 @@ def test_kv_push_router_bindings(request, runtime_services):
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
+
+
+@pytest.mark.pre_merge
+def test_indexers_sync(request, runtime_services):
+    """
+    Test that two KV routers have synchronized indexer states after processing requests.
+    This test verifies that both routers converge to the same internal state.
+    """
+
+    # runtime_services starts etcd and nats
+    logger.info("Starting indexers sync test")
+
+    # Create mocker args file
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+
+    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
+    with open(mocker_args_file, "w") as f:
+        json.dump(mocker_args, f)
+
+    # Start mocker instances
+    mocker_processes = []
+
+    try:
+        # Start mockers first
+        for i in range(NUM_MOCKERS):
+            # Use unique endpoints for each mocker
+            endpoint = "dyn://test-namespace.mocker.generate"
+            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
+
+            mocker = MockerProcess(request, endpoint, mocker_args_file)
+            mocker_processes.append(mocker)
+
+        # Start all mockers
+        for mocker in mocker_processes:
+            mocker.__enter__()
+
+        # Run the async test
+        async def test_sync():
+            # Get runtime and create endpoint
+            runtime = get_runtime()
+            namespace = runtime.namespace("test-namespace")
+            component = namespace.component("mocker")
+            endpoint = component.endpoint("generate")
+
+            # Create first KV router
+            from dynamo._core import KvPushRouter, KvRouterConfig
+
+            kv_router_config = KvRouterConfig()
+
+            async def send_requests_to_router(router, num_requests, router_name):
+                # First, send a test request with retry to ensure router is ready
+                max_retries = 8
+                wait_time = 1
+
+                for attempt in range(max_retries + 1):
+                    try:
+                        logger.info(
+                            f"Testing {router_name} readiness (attempt {attempt + 1})"
+                        )
+                        # Generate small test token IDs
+                        test_token_ids = [random.randint(1, 10000) for _ in range(10)]
+                        stream = await router.generate(
+                            token_ids=test_token_ids,  # Small test
+                            model=MODEL_NAME,
+                            stop_conditions={"max_tokens": 1},
+                        )
+                        # Just consume the stream to verify it works
+                        async for _ in stream:
+                            pass
+                        logger.info(f"{router_name} is ready!")
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            f"{router_name} attempt {attempt + 1} failed: {e}"
+                        )
+                        if attempt < max_retries:
+                            await asyncio.sleep(wait_time)
+                            wait_time *= 2
+                        else:
+                            raise RuntimeError(
+                                f"Failed to connect to {router_name} after retries"
+                            )
+
+                # Now send the actual requests
+                tasks = []
+                for i in range(num_requests):
+                    # Generate random token IDs for each request
+                    request_tokens = [random.randint(1, 10000) for _ in range(30)]
+
+                    async def single_request(req_id, tokens):
+                        try:
+                            stream = await router.generate(
+                                token_ids=tokens,
+                                model=MODEL_NAME,
+                                stop_conditions={"max_tokens": 10},
+                            )
+                            # Consume the stream
+                            async for _ in stream:
+                                pass
+                            return True
+                        except Exception as e:
+                            logger.error(
+                                f"Request {req_id} to {router_name} failed: {e}"
+                            )
+                            return False
+
+                    tasks.append(asyncio.create_task(single_request(i, request_tokens)))
+
+                results = await asyncio.gather(*tasks)
+                successful = sum(1 for r in results if r)
+                logger.info(
+                    f"Completed {successful}/{num_requests} requests for {router_name}"
+                )
+                return successful
+
+            logger.info("Creating first KV router")
+            kv_push_router1 = KvPushRouter(
+                endpoint=endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            # Send 25 requests to first router with initial retry loop
+            logger.info("Sending 25 requests to first router")
+
+            # Send requests to first router
+            successful1 = await send_requests_to_router(kv_push_router1, 25, "Router 1")
+            assert (
+                successful1 == 25
+            ), f"Expected 25 successful requests to router 1, got {successful1}"
+
+            # Launch second router
+            logger.info("Creating second KV router")
+            kv_push_router2 = KvPushRouter(
+                endpoint=endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            # Send 25 requests to second router with initial retry loop
+            logger.info("Sending 25 requests to second router")
+            successful2 = await send_requests_to_router(kv_push_router2, 25, "Router 2")
+            assert (
+                successful2 == 25
+            ), f"Expected 25 successful requests to router 2, got {successful2}"
+
+            # Wait for all requests to complete (they should already be complete from gather)
+            # Wait another 0.5 seconds for internal synchronization
+            logger.info("Waiting for final synchronization")
+            await asyncio.sleep(1)
+
+            # Dump states from both routers
+            logger.info("Dumping states from both routers")
+            state1_json = await kv_push_router1.dump_events()
+            state2_json = await kv_push_router2.dump_events()
+
+            # Parse JSON strings for comparison
+            state1 = json.loads(state1_json)
+            state2 = json.loads(state2_json)
+
+            # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
+            def sort_key(event):
+                data = event["event"]["data"]["stored"]
+                blocks = data["blocks"]
+                first_block = blocks[0]
+                return (
+                    event["worker_id"],
+                    first_block["tokens_hash"],
+                    data["parent_hash"],
+                )
+
+            sorted_state1 = sorted(state1, key=sort_key)
+            sorted_state2 = sorted(state2, key=sort_key)
+
+            # Verify they are equal
+            logger.info(f"Router 1 has {len(sorted_state1)} events")
+            logger.info(f"Router 2 has {len(sorted_state2)} events")
+
+            # Compare states one by one and only show differences
+            if len(sorted_state1) != len(sorted_state2):
+                logger.error(
+                    f"Router 1 has {len(sorted_state1)} events, Router 2 has {len(sorted_state2)} events"
+                )
+                assert False, "Router states have different numbers of events"
+
+            differences = []
+            for i, (state1_item, state2_item) in enumerate(
+                zip(sorted_state1, sorted_state2)
+            ):
+                # Create copies without event_id for comparison
+                item1_compare = state1_item.copy()
+                item2_compare = state2_item.copy()
+
+                # Remove event_id from the nested event structure
+                if "event" in item1_compare and "event_id" in item1_compare["event"]:
+                    del item1_compare["event"]["event_id"]
+                if "event" in item2_compare and "event_id" in item2_compare["event"]:
+                    del item2_compare["event"]["event_id"]
+
+                if item1_compare != item2_compare:
+                    differences.append(
+                        {
+                            "index": i,
+                            "router1_state": state1_item,
+                            "router2_state": state2_item,
+                        }
+                    )
+
+            if differences:
+                error_msg = f"Router states are not equal. Found {len(differences)} differences:\n"
+                for diff in differences:
+                    error_msg += f"\nDifference at index {diff['index']}:\n"
+                    error_msg += (
+                        f"Router 1: {json.dumps(diff['router1_state'], indent=2)}\n"
+                    )
+                    error_msg += (
+                        f"Router 2: {json.dumps(diff['router2_state'], indent=2)}\n"
+                    )
+                    error_msg += "-" * 80 + "\n"
+
+                assert False, error_msg
+
+            logger.info("Successfully verified that both router states are equal")
+
+        # Run the async test
+        asyncio.run(test_sync())
+
+        logger.info("Indexers sync test completed successfully")
+
+    finally:
+        # Clean up mockers
+        for mocker in mocker_processes:
+            mocker.__exit__(None, None, None)
+
+        if os.path.exists(mocker_args_file):
+            os.unlink(mocker_args_file)

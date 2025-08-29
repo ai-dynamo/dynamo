@@ -518,17 +518,25 @@ impl NatsQueue {
 
             let client = client_options.connect().await?;
 
-            // Check if stream exists, if not create it
-            let streams = client.list_streams().await?;
-            if !streams.contains(&self.stream_name) {
-                log::debug!("Creating NATS stream {}", self.stream_name);
-                let stream_config = jetstream::stream::Config {
-                    name: self.stream_name.clone(),
-                    subjects: vec![self.subject.clone()],
-                    max_age: time::Duration::from_secs(60 * 10), // 10 min
-                    ..Default::default()
-                };
-                client.jetstream().create_stream(stream_config).await?;
+            // Always try to create the stream (removes the race condition)
+            let stream_config = jetstream::stream::Config {
+                name: self.stream_name.clone(),
+                subjects: vec![self.subject.clone()],
+                max_age: time::Duration::from_secs(60 * 10), // 10 min
+                ..Default::default()
+            };
+
+            match client.jetstream().create_stream(stream_config).await {
+                Ok(_) => {
+                    log::debug!("Successfully created NATS stream {}", self.stream_name);
+                }
+                Err(e) => {
+                    // Log warning but continue - stream likely already exists
+                    log::warn!(
+                        "Failed to create NATS stream '{}': {}. Stream likely already exists, continuing...",
+                        self.stream_name, e
+                    );
+                }
             }
 
             // Create persistent subscriber only if consumer_name is set

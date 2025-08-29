@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicU32;
 use tokio_stream::StreamExt;
 
 use super::*;
+use crate::Component;
 use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
@@ -984,6 +985,18 @@ impl KvPushRouter {
             Ok(KvPushRouterStream {
                 rx: Arc::new(tokio::sync::Mutex::new(rx)),
             })
+        })
+    }
+
+    /// Dump all events from the KV router's indexer as a JSON string
+    fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let events = inner.dump_events().await.map_err(to_pyerr)?;
+            // Serialize to JSON string
+            let json_str = serde_json::to_string(&events).map_err(to_pyerr)?;
+            Ok(json_str)
         })
     }
 }

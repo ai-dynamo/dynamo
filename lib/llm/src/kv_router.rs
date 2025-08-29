@@ -38,7 +38,7 @@ use crate::{
         background::{start_event_consumer, start_radix_uploader},
         indexer::{
             KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RadixUploader,
-            compute_block_hash_for_seq, compute_seq_hash_for_block,
+            RouterEvent, compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
@@ -149,6 +149,13 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Indexer::ApproxKvIndexer(indexer) => indexer.find_matches(sequence).await,
+        }
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        match self {
+            Indexer::KvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::ApproxKvIndexer(indexer) => indexer.dump_events().await,
         }
     }
 }
@@ -330,6 +337,11 @@ impl KvRouter {
             }
         }
     }
+
+    /// Dump all events from the indexer
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.indexer.dump_events().await
+    }
 }
 
 // NOTE: this would not be usable for now, should deprecate
@@ -362,6 +374,11 @@ impl KvPushRouter {
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
+    }
+
+    /// Dump all events from the KV router's indexer
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.chooser.dump_events().await
     }
 }
 
