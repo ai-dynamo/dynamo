@@ -53,17 +53,13 @@ def setup_lmcache_environment():
 
 async def graceful_shutdown(runtime):
     """
-    Shutdown dynamo distributed runtime using graceful mode.
-    - Endpoints will be immediately disabled so no new requests will be accepted
-    - NATS/etcd infrastructure remains active until all in-flight requests complete
-    - Once all requests are done, the full infrastructure shuts down
-    - Requests are tracked via RAII guards that automatically decrement when done
+    Shutdown dynamo distributed runtime.
+    The runtime will wait for all in-flight requests to complete before
+    shutting down infrastructure (NATS/etcd).
     """
-    logging.info("Received shutdown signal, initiating graceful shutdown")
-    runtime.shutdown_graceful()
-    logging.info(
-        "Graceful shutdown initiated - endpoints disabled, infrastructure will shutdown when all requests complete"
-    )
+    logging.info("Received shutdown signal, initiating shutdown")
+    runtime.shutdown()
+    logging.info("Shutdown initiated - runtime will wait for all in-flight requests to complete")
 
 
 @dynamo_worker(static=False)
@@ -254,7 +250,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         # for decode, we want to transfer the in-flight requests to other decode engines,
         # because waiting them to finish can take a long time for long OSLs
         # however, if migration_limit is 0, we will still gracefully shutdown the engine
-        graceful_shutdown = config.migration_limit > 0
+        graceful_shutdown = config.migration_limit <= 0
+        logger.info(f"Starting endpoints with graceful_shutdown={graceful_shutdown}")
+        
+        logger.info("Waiting for endpoints to complete...")
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -265,6 +264,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
             ),
         )
+        logger.info("All endpoints completed serving")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
         raise

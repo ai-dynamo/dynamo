@@ -134,7 +134,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
 async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown_graceful()
+    runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
 
 

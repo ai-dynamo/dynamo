@@ -51,14 +51,7 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
-    def shutdown_graceful(self) -> None:
-        """
-        Gracefully shutdown the runtime:
-        - First disables endpoints (no new requests)
-        - Waits for all in-flight requests to complete
-        - Then shuts down infrastructure (NATS/etcd)
-        """
-        ...
+
         
 class EtcdClient:
     """

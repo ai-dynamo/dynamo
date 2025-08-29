@@ -116,7 +116,7 @@ impl EndpointConfigBuilder {
 
         let cancel_token = lease
             .map(|l| l.child_token())
-            .unwrap_or_else(|| endpoint.drt().runtime().endpoint_child_token());
+            .unwrap_or_else(|| endpoint.drt().runtime().child_token());
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)

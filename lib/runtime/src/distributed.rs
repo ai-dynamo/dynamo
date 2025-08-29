@@ -201,11 +201,7 @@ impl DistributedRuntime {
         self.runtime.shutdown();
     }
 
-    /// Shutdown with graceful mode - endpoints first, then wait for requests, then infrastructure
-    pub fn shutdown_graceful(&self) {
-        self.runtime
-            .shutdown_with_mode(crate::runtime::ShutdownMode::Graceful);
-    }
+
 
     /// Access the request tracker for tracking in-flight requests
     pub fn request_tracker(&self) -> crate::RequestTracker {

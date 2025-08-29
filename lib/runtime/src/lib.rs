@@ -137,9 +137,7 @@ pub struct Runtime {
     secondary: RuntimeType,
     /// Primary cancellation token for complete runtime shutdown
     cancellation_token: CancellationToken,
-    /// Endpoint cancellation token - cancelled first during graceful shutdown
-    endpoint_cancellation_token: CancellationToken,
-    /// Tracks in-flight requests for graceful shutdown
+    /// Tracks in-flight requests
     request_tracker: RequestTracker,
 }
 
