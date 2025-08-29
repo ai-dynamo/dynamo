@@ -243,7 +243,7 @@ $LD_LIBRARY_PATH
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 # Copy uv and entire virtual environment from framework container
-COPY --from=framework /uv /uvx /bin/
+COPY --from=framework /bin/uv /bin/uvx /bin/
 COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
