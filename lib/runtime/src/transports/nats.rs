@@ -534,7 +534,8 @@ impl NatsQueue {
                     // Log warning but continue - stream likely already exists
                     log::warn!(
                         "Failed to create NATS stream '{}': {}. Stream likely already exists, continuing...",
-                        self.stream_name, e
+                        self.stream_name,
+                        e
                     );
                 }
             }
