@@ -243,21 +243,6 @@ Each concurrency directory contains:
 - **`profile_export.json`** - Raw GenAI-Perf results
 - **`inputs.json`** - Generated test inputs
 
-## Advanced Usage
-
-### Custom Concurrency Levels
-
-Customize concurrency levels using the CONCURRENCIES environment variable:
-
-```bash
-# Custom concurrency levels
-CONCURRENCIES="1,5,20,50" ./benchmarks/benchmark.sh --namespace $NAMESPACE --input my-test=disagg.yaml
-
-# Or set permanently
-export CONCURRENCIES="1,2,5,10,25,50,100"
-./benchmarks/benchmark.sh --namespace $NAMESPACE --input test=disagg.yaml
-```
-
 ## Customize Benchmarking Behavior
 
 The built-in workflow handles DynamoGraphDeployment deployment, benchmarking with genai-perf, and plot generation automatically. If you want to modify the behavior:
