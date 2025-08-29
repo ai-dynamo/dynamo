@@ -43,15 +43,22 @@ The framework is a wrapper around `genai-perf` that:
 
 ## Quick Start Examples
 
+The tool can be used to deploy, benchmark and compare Dynamo deployments (DynamoGraphDeployments) on a Kubernetes cluster as well as benchmark and compare servers deployed separately given a URL. In the examples below, Dynamo deployments are specified with a yaml and servers deployed separately by URL.
+
 ```bash
 export NAMESPACE=benchmarking
 
-# Compare multiple DynamoGraphDeployments
+# Compare multiple DynamoGraphDeployments of a single backend
 ./benchmarks/benchmark.sh --namespace $NAMESPACE \
    --input agg=components/backends/vllm/deploy/agg.yaml \
    --input disagg=components/backends/vllm/deploy/disagg.yaml
 
-# Compare Dynamo vs external endpoint
+# Compare different backend types (vLLM vs TensorRT-LLM)
+./benchmarks/benchmark.sh --namespace $NAMESPACE \
+   --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml \
+   --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
+
+# Compare Dynamo deployment vs existing deployment (external endpoint)
 ./benchmarks/benchmark.sh --namespace $NAMESPACE \
    --input dynamo=components/backends/vllm/deploy/disagg.yaml \
    --input vllm-baseline=http://localhost:8000
