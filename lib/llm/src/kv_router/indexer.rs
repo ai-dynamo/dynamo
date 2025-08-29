@@ -46,7 +46,6 @@
 use bytes::Bytes;
 // use prometheus::{IntCounter, IntGauge};
 use async_trait::async_trait;
-use dynamo_runtime::transports::nats;
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
@@ -59,7 +58,6 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use url::Url;
 use xxhash_rust::xxh3;
 
 pub const XXH3_SEED: u64 = 1337;
