@@ -143,7 +143,7 @@ where
                             }
 
                             if watch_tx.send(state.clone()).is_err() {
-                                tracing::debug!("Failed to send update; receiver dropped");
+                                tracing::error!("Failed to send update; receiver dropped");
                                 break;
                             }
                         }
@@ -153,7 +153,7 @@ where
                                 tracing::trace!("Removed entry for deleted key {:?}", key);
 
                                 if watch_tx.send(state.clone()).is_err() {
-                                    tracing::debug!("Failed to send update; receiver dropped");
+                                    tracing::error!("Failed to send update; receiver dropped");
                                     break;
                                 }
                             }

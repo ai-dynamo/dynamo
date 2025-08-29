@@ -15,6 +15,7 @@ use dynamo_runtime::{
     },
     prelude::*,
     protocols::annotated::Annotated,
+    utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction},
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -221,9 +222,6 @@ impl KvRouter {
             .etcd_client()
             .expect("Cannot KV route without etcd client");
 
-        use dynamo_runtime::utils::typed_prefix_watcher::{
-            key_extractors, watch_prefix_with_extraction,
-        };
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
             MODEL_ROOT_PATH,
