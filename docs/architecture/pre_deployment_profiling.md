@@ -23,8 +23,8 @@ The script will first detect the number of available GPUs on the current nodes (
 
 After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
 
-![Prefill Performance](../images/h100_prefill_performance.png)
-![Decode Performance](../images/h100_decode_performance.png)
+![Prefill Performance](../../docs/images/h100_prefill_performance.png)
+![Decode Performance](../../docs/images/h100_decode_performance.png)
 
 For the prefill performance, the script will plot the TTFT for different TP sizes and select the best TP size that meet the target TTFT SLA and delivers the best throughput per GPU. Based on how close the TTFT of the selected TP size is to the SLA, the script will also recommend the upper and lower bounds of the prefill queue size to be used in planner.
 
