@@ -407,12 +407,6 @@ impl LocalModel {
         let slug_key = self.card.slug().clone();
         match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, &slug_key).await {
             Ok(Some(existing_mdc)) => {
-                tracing::info!(
-                    "Found existing MDC in etcd. Has custom_chat_template: {}, revision: {}",
-                    existing_mdc.custom_chat_template.is_some(),
-                    existing_mdc.revision
-                );
-
                 // Compare the existing MDC with our new one (ignoring revision and last_published)
                 let mut existing_for_comparison = existing_mdc.clone();
                 existing_for_comparison.revision = 0;
@@ -423,10 +417,7 @@ impl LocalModel {
                 new_for_comparison.last_published = None;
 
                 if existing_for_comparison != new_for_comparison {
-                    tracing::info!(
-                        "Existing MDC differs from new MDC. Updating with revision {}",
-                        existing_mdc.revision
-                    );
+                    tracing::debug!("Updating existing MDC with revision {}", existing_mdc.revision);
 
                     // Handle the revision 0 edge case
                     // If revision is 0, etcd's insert() will call create() instead of update()
@@ -447,22 +438,19 @@ impl LocalModel {
                     card_store
                         .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                         .await?;
-
-                    tracing::info!("MDC updated successfully");
                 } else {
-                    tracing::info!("Existing MDC is identical to new MDC. No update needed.");
+                    tracing::debug!("Existing MDC is identical, skipping update");
                     // Use the existing MDC's revision
                     self.card.revision = existing_mdc.revision;
                     self.card.last_published = existing_mdc.last_published;
                 }
             }
             Ok(None) => {
-                tracing::info!("No existing MDC found. Creating new entry.");
+                tracing::debug!("Creating new MDC entry");
                 // No existing MDC, create a new one
                 card_store
                     .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                     .await?;
-                tracing::info!("New MDC created successfully");
             }
             Err(e) => {
                 tracing::warn!("Error checking for existing MDC: {}. Attempting to publish anyway.", e);
@@ -472,29 +460,6 @@ impl LocalModel {
                     .await?;
             }
         }
-
-        // Debug: Verify it was stored correctly
-        match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, &slug_key).await {
-            Ok(Some(loaded_mdc)) => {
-                tracing::info!(
-                    "MDC verification after operation - Has custom_chat_template: {}, display_name: {}",
-                    loaded_mdc.custom_chat_template.is_some(),
-                    loaded_mdc.display_name
-                );
-                if loaded_mdc.custom_chat_template.is_some() != self.card.custom_chat_template.is_some() {
-                    tracing::error!(
-                        "CRITICAL: MDC mismatch after operation! Expected custom_chat_template: {}, Got: {}",
-                        self.card.custom_chat_template.is_some(),
-                        loaded_mdc.custom_chat_template.is_some()
-                    );
-                }
-            }
-            _ => {
-                tracing::warn!("Could not verify MDC after operation");
-            }
-        }
-
-        tracing::info!("MDC published to etcd successfully");
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
         // (Why don't we put the model card directly under this key?)
