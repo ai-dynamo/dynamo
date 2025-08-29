@@ -402,24 +402,17 @@ impl LocalModel {
         // Publish the Model Deployment Card to etcd
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-        let key = self.card.slug().to_string();
         let slug_key = self.card.slug();
+        let key = slug_key.to_string();
 
         // Try to load existing MDC to determine if update is needed
         match card_store.load::<ModelDeploymentCard>(model_card::ROOT_PATH, slug_key).await {
             Ok(Some(existing)) => {
-                // Check if content has changed (ignoring metadata fields)
                 if !self.card.content_equals(&existing) {
-                    // Content changed, need to update
-                    // CRITICAL: Handle revision 0 edge case
-                    // When revision=0, insert() calls create() which won't update existing keys
-                    self.card.revision = if existing.revision == 0 {
-                        tracing::warn!("Existing MDC has revision 0, using revision 1 to force update");
-                        1  // Force update path in etcd
-                    } else {
-                        existing.revision
-                    };
-
+                    // Content changed, update with appropriate revision
+                    // Note: If revision is 0, we use 1 to ensure update path is triggered
+                    // (revision 0 would call create() which doesn't update existing keys)
+                    self.card.revision = existing.revision.max(1);
                     card_store
                         .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                         .await?;
@@ -437,7 +430,7 @@ impl LocalModel {
             }
             Err(e) => {
                 // Error loading - attempt to publish anyway for resilience
-                tracing::warn!("Error loading existing MDC: {}. Attempting to publish anyway.", e);
+                tracing::debug!("Could not load existing MDC: {}. Publishing new entry.", e);
                 card_store
                     .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
                     .await?;
