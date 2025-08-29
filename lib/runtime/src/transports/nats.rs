@@ -455,7 +455,7 @@ impl NatsQueue {
         // Sanitize stream name to remove path separators (like in Python version)
         // rupei: are we sure NATs stream name accepts '_'?
         let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
-        let subject = format!("{}.*", sanitized_stream_name);
+        let subject = format!("{sanitized_stream_name}.*");
 
         Self {
             stream_name: sanitized_stream_name,
@@ -475,7 +475,7 @@ impl NatsQueue {
         dequeue_timeout: time::Duration,
     ) -> Self {
         let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
-        let subject = format!("{}.*", sanitized_stream_name);
+        let subject = format!("{sanitized_stream_name}.*");
 
         Self {
             stream_name: sanitized_stream_name,
@@ -497,7 +497,7 @@ impl NatsQueue {
         consumer_name: String,
     ) -> Self {
         let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
-        let subject = format!("{}.*", sanitized_stream_name);
+        let subject = format!("{sanitized_stream_name}.*");
 
         Self {
             stream_name: sanitized_stream_name,
@@ -546,7 +546,8 @@ impl NatsQueue {
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
-                max_age: time::Duration::from_secs(60 * 10), // 10 min
+                // messages older than 10 mins in the stream will be automatically purged
+                max_age: time::Duration::from_secs(60 * 10),
                 ..Default::default()
             };
 
