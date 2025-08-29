@@ -19,7 +19,7 @@
 //! An [`ArenaAllocator`] can be create by taking ownership of a [`Storage`] instance.
 //!
 //! The [`ArenaAllocator`] allocates memory contiguous regions using the [`offset_allocator`] crate,
-//! which builds on  [Sebastian Aaltonen's ArenaAllocator](https://github.com/sebbbi/ArenaAllocator)
+//! which builds on  [Sebastian Aaltonen's ArenaAllocator](https://github.com/sebbbi/OffsetAllocator)
 //!
 //! ## Usage
 //!
