@@ -253,7 +253,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=False,
+                graceful_shutdown=config.migration_limit <= 0,
                 metrics_labels=[("model", config.model)],
             ),
             clear_endpoint.serve_endpoint(
