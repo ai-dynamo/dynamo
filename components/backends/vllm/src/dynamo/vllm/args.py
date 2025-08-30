@@ -111,7 +111,7 @@ def parse_args() -> Config:
         "--dyn-tool-call-parser",
         type=str,
         default=None,
-        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic'.",
+        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic', 'harmony'.",
     )
     parser.add_argument(
         "--dyn-reasoning-parser",

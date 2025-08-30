@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
+use super::harmony_parser::parse_tool_calls_harmony;
 use super::json_parser::try_tool_call_parse_json;
 use super::pythonic_parser::try_tool_call_parse_pythonic;
 use super::response::ToolCallResponse;
@@ -17,7 +18,8 @@ pub fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ToolCallParserType::Harmony => {
-            anyhow::bail!("Harmony parser not implemented");
+            let (results, normal_content) = parse_tool_calls_harmony(message, &config.json)?;
+            Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
             let (results, normal_content) = try_tool_call_parse_pythonic(message)?;
@@ -45,6 +47,7 @@ pub fn detect_and_parse_tool_call(
     parser_map.insert("mistral", ToolCallConfig::mistral());
     parser_map.insert("phi4", ToolCallConfig::phi4());
     parser_map.insert("pythonic", ToolCallConfig::pythonic());
+    parser_map.insert("harmony", ToolCallConfig::harmony());
     parser_map.insert("default", ToolCallConfig::default()); // Add default key
 
     // Handle None or empty string by defaulting to "default"
@@ -1106,6 +1109,25 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "New York");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_harmony_parser_basic() {
+        let input = r#"
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
+        <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
+        <|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>
+        "#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("harmony")).unwrap();
+        assert_eq!(
+            content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "San Francisco");
         assert_eq!(args["unit"], "fahrenheit");
     }
 }
