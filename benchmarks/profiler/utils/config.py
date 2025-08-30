@@ -90,8 +90,9 @@ class VllmV1ConfigModifier:
     def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
         config = deepcopy(config)
 
-        # set metadata name
-        config["metadata"]["name"] = "vllm-agg"
+        # hardcoding metadata name causes planner job to wait indefinitely if job
+        # is run with different config not matching "vllm-agg" name 
+        # config["metadata"]["name"] = "vllm-agg"
 
         # disable planner
         if "Planner" in config["spec"]["services"]:
