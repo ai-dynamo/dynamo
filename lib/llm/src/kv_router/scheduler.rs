@@ -55,6 +55,8 @@ pub struct SchedulingRequest {
     pub prefill_tokens: HashMap<i64, usize>,
     // Router config overrides for this specific request
     pub router_config_override: Option<RouterConfigOverride>,
+    // Whether to update scheduler states (false for query_instance_id requests)
+    pub update_states: bool,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -204,15 +206,18 @@ impl KvScheduler {
                         };
                         request.respond(response);
 
-                        let _ = slots_clone
-                            .add_request(
-                                request.request_id,
-                                request.token_seq,
-                                request.isl_tokens,
-                                selection.overlap_blocks,
-                                selection.worker_id,
-                            )
-                            .await;
+                        // Only update the state if update_states is true
+                        if request.update_states {
+                            let _ = slots_clone
+                                .add_request(
+                                    request.request_id,
+                                    request.token_seq,
+                                    request.isl_tokens,
+                                    selection.overlap_blocks,
+                                    selection.worker_id,
+                                )
+                                .await;
+                        }
 
                         continue;
                     }
@@ -247,6 +252,7 @@ impl KvScheduler {
         token_seq: Vec<SequenceHash>,
         overlaps: OverlapScores,
         router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
     ) -> Result<i64, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
@@ -257,6 +263,7 @@ impl KvScheduler {
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             router_config_override: router_config_override.cloned(),
+            update_states,
             resp_tx: Some(resp_tx), // Wrap in Some()
         };
 
