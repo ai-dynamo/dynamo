@@ -86,6 +86,7 @@ python benchmarks/sin_load_generator/sin_synth.py \
 
 The dataset starts at 12 requests/s, increases to 36 requests/s at t=300s, decreases back to 12 requests/s at t=600s, and repeats.
 The total duration is 30 minutes or 1800 seconds.
+
 ## Planner Dry Run
 
 Before testing SLA planner on real deployments, we provide a dry run feature to test the autoscaling behavior on a given dataset. Specifically, in dry run mode,
@@ -129,3 +130,75 @@ The second plot shows the actual ISL/OSL and the predicted ISL/OSL. The first tw
 The third plot shows the actual prefill throughput, number of prefill workers that planner scales, and the safe throughput limit with the number of prefill workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the TTFT SLA. Note that in the real deployment, due to other factors such as queueing, load balancing, KV cache transfer latency, and ISL variance, it is not guaranteed that the actual deployment can adhere the TTFT SLA.
 
 The fourth plot, similar to the third plot, shows the actual decode throughput, number of decode workers that planner scales, and the safe throughput limit with the number of decode workers. If the actual throughput is below the safe throughput limit, the deployment has the capacity to adhere the ITL SLA. Note that in the real deployment, due to other factors such as load balancing and OSL variance, it is not guaranteed that the actual deployment can adhere the ITL SLA.
+
+## Scaling Tests
+
+This directory contains comprehensive tests for validating the SLA planner's scaling behavior. The tests validate both the replica calculation logic and end-to-end scaling behavior. The scaling test uses a graduated load approach rather than dataset files, as it proved more reliable for metric generation and scaling triggers.
+
+### Test Types
+
+1. **Unit Tests** (`test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
+2. **End-to-End Tests** (`scaling/run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
+
+### Quick Start
+
+#### Run Unit Tests Only
+Test the replica calculation logic without requiring Kubernetes:
+
+```bash
+# Set PYTHONPATH to include planner components
+PYTHONPATH=components/planner/src python -m pytest tests/planner/test_replica_calculation.py -v
+
+# Or from the tests/planner directory:
+cd tests/planner
+PYTHONPATH=../../components/planner/src python -m pytest test_replica_calculation.py -v
+```
+
+**Note**: The unit tests automatically mock external dependencies (prometheus_client, runtime modules) to ensure they can run in isolation without requiring the full Dynamo environment.
+
+#### Run Full End-to-End Test
+Test complete scaling behavior including Kubernetes deployment and load generation:
+
+```bash
+./scaling/run_scaling_test.sh
+```
+
+With custom namespace:
+```bash
+./scaling/run_scaling_test.sh --namespace production
+```
+
+To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
+```bash
+./scaling/run_scaling_test.sh --save-results
+```
+
+**E2E Test Deployment Management:**
+- If no deployment exists: creates, tests, and cleans up deployment
+- If deployment exists: uses existing deployment and preserves it
+- Perfect for development workflows where you want to keep deployments running between tests
+
+**Test Scenario**
+
+The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D configuration:
+
+- **Phase 1**: 8 req/s for 90s (baseline - maintains 1P1D)
+- **Phase 2**: 15 req/s for 120s (moderate load - maintains 1P1D)
+- **Phase 3**: 25 req/s for 180s (scaling trigger - scales to 2P1D)
+- **ISL/OSL**: 4000/150 tokens (optimized for prefill bottleneck)
+- **Transition delay**: 30s between phases
+- **Total test duration**: ~7 minutes + scaling observation
+- **Smart cleanup**: Only removes deployment if test created it (preserves existing deployments)
+
+### Prerequisites
+
+**For Unit Tests:**
+- Python dependencies installed
+- PYTHONPATH set to include `components/planner/src` (see unit test examples above)
+
+**For E2E Tests:**
+- Kubernetes cluster with GPU nodes
+- kubectl configured and accessible
+- genai-perf available in PATH
+- Python dependencies installed
+- PYTHONPATH properly configured for planner imports

@@ -15,6 +15,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # For pull_request events, use the PR head (commit from the contributor's branch/repo)
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
       # Cache lychee results (e.g. to avoid hitting rate limits)
       # https://lychee.cli.rs/github_action_recipes/caching/

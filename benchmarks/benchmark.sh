@@ -55,7 +55,7 @@ OPTIONS:
     --verbose                     Enable verbose output
 
 EXAMPLES:
-    # Compare aggregated vs disaggregated Dynamo deployments (vLLM)
+    # Compare Dynamo deployments of a single backend
     $0 --namespace \$NAMESPACE \\
        --input agg=components/backends/vllm/deploy/agg.yaml \\
        --input disagg=components/backends/vllm/deploy/disagg.yaml

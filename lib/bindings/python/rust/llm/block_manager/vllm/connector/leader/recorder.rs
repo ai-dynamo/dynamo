@@ -88,50 +88,34 @@ impl KvConnectorLeaderRecorder {
     pub fn new(
         worker_id: String,
         drt: PyDistributedRuntime,
-        block_manager: PyBlockManager,
-        leader: PyKvbmLeader,
+        page_size: usize,
+        leader_py: PyKvbmLeader,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeaderRecorder initialized with worker_id: {}",
             worker_id
         );
 
-        // if drt is none, then we must construct a runtime and distributed runtime
-        let block_manager = block_manager.get_block_manager().clone();
-        let block_size = block_manager.block_size();
-
-        let leader = leader.get_inner();
-
-        // if we need a drt, get it from here
+        let leader = leader_py.get_inner().clone();
         let drt = drt.inner().clone();
+        let handle: Handle = drt.runtime().primary();
+
+        let ns = drt
+            .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
+            .unwrap();
+
+        let kvbm_metrics = KvbmMetrics::new(&ns);
+        let kvbm_metrics_clone = kvbm_metrics.clone();
 
         let token = CancellationToken::new();
         let output_path = "/tmp/records.jsonl";
         tracing::info!("recording events to {}", output_path);
-
-        let ns = drt.namespace("kvbm_connector_leader").unwrap();
-
-        let kvbm_metrics = KvbmMetrics::new(&ns);
 
         let recorder = drt
             .runtime()
             .primary()
             .block_on(async { Recorder::new(token, &output_path, None, None, None).await })
             .unwrap();
-
-        let connector_leader = KvConnectorLeader {
-            slot_manager: ConnectorSlotManager::new(
-                block_manager.clone(),
-                leader,
-                drt.clone(),
-                kvbm_metrics.clone(),
-            ),
-            block_size,
-            inflight_requests: HashSet::new(),
-            onboarding_slots: HashSet::new(),
-            iteration_counter: 0,
-            kvbm_metrics,
-        };
 
         let (unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
         let recorder_tx = recorder.event_sender();
@@ -140,6 +124,73 @@ impl KvConnectorLeaderRecorder {
         drt.runtime()
             .primary()
             .spawn(Self::forward_unbounded_to_sender(unbounded_rx, recorder_tx));
+
+        let slot_manager_cell = Arc::new(OnceLock::new());
+        let (leader_ready_tx, leader_ready_rx) = oneshot::channel::<String>();
+
+        {
+            let slot_manager_cell = slot_manager_cell.clone();
+
+            handle.spawn(async move {
+                let ready = leader.wait_worker_sync_ready().await;
+                if !ready {
+                    tracing::error!(
+                        "KvConnectorLeader init aborted: leader worker barrier not ready!",
+                    );
+                    return;
+                }
+
+                let block_manager = match BlockManagerBuilder::new()
+                    .worker_id(0)
+                    .leader(leader_py)
+                    .page_size(page_size)
+                    .disable_device_pool(false)
+                    .build()
+                    .await
+                {
+                    Ok(bm) => bm,
+                    Err(e) => {
+                        tracing::error!("Failed to build BlockManager: {}", e);
+                        return;
+                    }
+                };
+
+                // Create the slot manager now that everything is ready
+                let sm = ConnectorSlotManager::new(
+                    block_manager.get_block_manager().clone(),
+                    leader.clone(),
+                    drt.clone(),
+                    kvbm_metrics_clone.clone(),
+                );
+
+                let _ = slot_manager_cell.set(sm);
+
+                // another barrier sync to make sure worker init won't return before leader is ready
+                leader.spawn_leader_readiness_barrier(drt);
+
+                if leader_ready_tx.send("finished".to_string()).is_err() {
+                    tracing::error!("main routine receiver dropped before result was sent");
+                }
+            });
+        }
+
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                match leader_ready_rx.await {
+                    Ok(_) => tracing::info!("KvConnectorLeader init complete."),
+                    Err(_) => tracing::warn!("KvConnectorLeader init channel dropped"),
+                }
+            });
+        });
+
+        let connector_leader = KvConnectorLeader {
+            slot_manager: slot_manager_cell,
+            block_size: page_size,
+            inflight_requests: HashSet::new(),
+            onboarding_slots: HashSet::new(),
+            iteration_counter: 0,
+            kvbm_metrics,
+        };
 
         Self {
             _recorder: recorder,
@@ -161,6 +212,10 @@ impl KvConnectorLeaderRecorder {
 }
 
 impl Leader for KvConnectorLeaderRecorder {
+    #[inline]
+    fn slot_manager(&self) -> &ConnectorSlotManager<String> {
+        self.connector_leader.slot_manager()
+    }
     /// Match the tokens in the request with the available block pools.
     /// Note: the necessary details of the request are captured prior to this call. For vllm,
     /// we make a create slot call prior to this call, so a slot is guaranteed to exist.

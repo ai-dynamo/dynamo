@@ -13,6 +13,7 @@ before validation) to avoid server initialization effects that could
 impact determinism measurements.
 """
 
+import importlib.util
 import logging
 import os
 import signal
@@ -21,8 +22,9 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 import pytest
 import requests
@@ -38,8 +40,13 @@ pytestmark = [
 ]
 
 
-class VLLMServerManager:
-    """Manages vLLM server lifecycle for determinism testing."""
+class ServerType(str, Enum):
+    vllm = "vllm"
+    trtllm = "trtllm"
+
+
+class LLMServerManager:
+    """Manages LLM server lifecycle for determinism testing."""
 
     def __init__(
         self,
@@ -48,8 +55,10 @@ class VLLMServerManager:
         cpu_cache_blocks: Optional[int] = None,
         gpu_cache_blocks: Optional[int] = None,
         log_dir: Optional[Path] = None,
+        server_type: Optional[str] = ServerType.vllm,
     ):
-        self.port = port or int(os.environ.get("KVBM_VLLM_PORT", "8000"))
+        self.server_type = server_type
+        self.port = port or int(os.environ.get("KVBM_SERVER_PORT", "8000"))
         self.base_url = base_url or f"http://localhost:{self.port}"
         self.process: Optional[subprocess.Popen] = None
         self.cpu_cache_blocks = cpu_cache_blocks
@@ -63,10 +72,40 @@ class VLLMServerManager:
             f"cpu{cpu_cache_blocks or 'default'}_gpu{gpu_cache_blocks or 'default'}"
         )
         self.server_log_file = (
-            self.log_dir / f"vllm_server_{config_str}_{timestamp}.log"
+            self.log_dir / f"{self.server_type}_server_{config_str}_{timestamp}.log"
         )
         self.server_stdout_file: Optional[TextIO] = None
         self.server_stderr_file: Optional[TextIO] = None
+
+        # Environment for the process
+        self.env = os.environ.copy()
+        self.env.update(
+            {
+                "RUST_BACKTRACE": "1",
+                "DYN_LOG": os.environ.get(
+                    "DYN_LOG", "debug,dynamo_llm::block_manager::layout=error"
+                ),
+                # DynamoConnector connection settings
+                "NATS_SERVER": "nats://localhost:4222",
+                "ETCD_ENDPOINTS": "http://localhost:2379",
+            }
+        )
+
+        # CPU cache blocks override via env
+        if cpu_cache_blocks is not None:
+            self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+
+        if self.server_type == ServerType.vllm:
+            self._set_up_vllm_config(gpu_cache_blocks)
+        elif self.server_type == ServerType.trtllm:
+            self._set_up_trtllm_config(gpu_cache_blocks)
+        else:
+            raise ValueError(
+                f"{self.server_type} is not supported yet in the KVBM test suite"
+            )
+
+    def _set_up_vllm_config(self, gpu_cache_blocks):
+        self.env["VLLM_SERVER_DEV_MODE"] = "1"
 
         # Construct serve command
         self.server_cmd = [
@@ -85,27 +124,52 @@ class VLLMServerManager:
         if gpu_cache_blocks is not None:
             self.server_cmd.extend(["--num-gpu-blocks-override", str(gpu_cache_blocks)])
 
-        # Environment for the process
-        self.env = os.environ.copy()
-        self.env.update(
-            {
-                "RUST_BACKTRACE": "1",
-                "DYN_LOG": os.environ.get(
-                    "DYN_LOG", "debug,dynamo_llm::block_manager::layout=error"
-                ),
-                "VLLM_SERVER_DEV_MODE": "1",
-                # DynamoConnector connection settings
-                "NATS_SERVER": "nats://localhost:4222",
-                "ETCD_ENDPOINTS": "http://localhost:2379",
-            }
+    def _set_up_trtllm_config(self, gpu_cache_blocks):
+        config_path = os.environ.get(
+            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_llm_api_config.yaml"
         )
+        llm_api_config: dict[str, Any] = {}
+        llm_api_config[
+            "cuda_graph_config"
+        ] = None  # explicitly disable CUDA graph since Connector API doesn't support CUDA graph yet in TRTLLM
+        llm_api_config["kv_cache_config"] = {
+            "enable_partial_reuse": False,
+            "free_gpu_memory_fraction": 0.10,  # Set a small GPU fraction so that we can evict/reset the on-device kv cache faster
+        }
+        llm_api_config["kv_connector_config"] = {
+            "connector_module": "dynamo.llm.trtllm_integration.connector",
+            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
+            "connector_worker_class": "DynamoKVBMConnectorWorker",
+        }
 
-        # CPU cache blocks override via env
-        if cpu_cache_blocks is not None:
-            self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
+        # GPU blocks override
+        if gpu_cache_blocks is not None:
+            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
+            llm_api_config["kv_cache_config"]["max_tokens"] = (
+                int(gpu_cache_blocks) * 32
+            )  # TRTLLM defaults 32 tokens per block
+
+        # Construct serve command
+        self.server_cmd = [
+            "trtllm-serve",
+            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            "--host",
+            "localhost",
+            "--port",
+            str(self.port),
+            "--backend",
+            "pytorch",
+            "--extra_llm_api_options",
+            config_path,
+        ]
+
+        import yaml
+
+        with open(config_path, "w") as f:
+            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
 
     def start_server(self, timeout: int = 300) -> bool:
-        """Start vLLM server and wait for readiness."""
+        """Start LLM server and wait for readiness."""
         if self.is_server_running():
             self.stop_server()
             time.sleep(2)
@@ -119,7 +183,7 @@ class VLLMServerManager:
         )
         if self.server_stdout_file is not None:
             self.server_stdout_file.write(
-                f"=== vLLM Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
+                f"=== {self.server_type} Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
             )
             self.server_stdout_file.flush()
 
@@ -147,7 +211,7 @@ class VLLMServerManager:
         return False
 
     def stop_server(self):
-        """Stop vLLM server and close logs."""
+        """Stop LLM server and close logs."""
         if self.process:
             try:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
@@ -205,7 +269,12 @@ class VLLMServerManager:
 class DeterminismTester:
     """Test class for model determinism validation."""
 
-    def __init__(self, base_url: Optional[str] = None, model_id: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        model_id: Optional[str] = None,
+        server_type: Optional[str] = ServerType.vllm,
+    ):
         # Allow environment override for flexibility in CI/local runs
         self.base_url = (
             base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
@@ -215,6 +284,7 @@ class DeterminismTester:
             or os.environ.get("KVBM_MODEL_ID")
             or "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         )
+        self.server_type = server_type
 
         self.shakespeare_file = Path("t8.shakespeare.txt")
         self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "500"))
@@ -298,11 +368,28 @@ class DeterminismTester:
     def reset_prefix_cache(self):
         """Reset the prefix cache."""
         print("Resetting prefix cache...")
-        response = requests.post(
-            f"{self.base_url}/reset_prefix_cache",
-            timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
-        )
-        response.raise_for_status()
+        if self.server_type == ServerType.trtllm:
+            # TRTLLM doesn't support reset_prefix_cache endpoint API
+            # 300 shakespeare content could evict the 0.1 x 80G (~1700 blocks) on-device cache
+            shakespeare_count = 300
+            for seq_idx in range(1, shakespeare_count + 1):
+                start_word = (seq_idx - 1) * self.word_count
+                content = self.get_shakespeare_content(start_word)
+
+                if content:
+                    print(
+                        f"Resetting Shakespeare sequence {seq_idx} (words {start_word}-{start_word + self.word_count - 1})..."
+                    )
+                    try:
+                        self.make_request(content)
+                    except Exception as e:
+                        print(f"Resetting request failed: {e}")
+        else:
+            response = requests.post(
+                f"{self.base_url}/reset_prefix_cache",
+                timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
+            )
+            response.raise_for_status()
         print("Cache reset done")
 
     def warmup_server(self):
@@ -623,11 +710,11 @@ class DeterminismTester:
 
 
 @pytest.fixture(scope="function")
-def vllm_server(request, runtime_services):
-    """Start and stop vLLM server for each test with optional cache block overrides.
+def llm_server(request, runtime_services):
+    """Start and stop a LLM server for each test with optional cache block overrides.
 
     To parametrize, use:
-      @pytest.mark.parametrize("vllm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
+      @pytest.mark.parametrize("llm_server", [{"cpu_blocks": 10000, "gpu_blocks": 2048}], indirect=True)
     """
     logger = logging.getLogger("pytest")
     logger.setLevel(logging.INFO)
@@ -639,17 +726,27 @@ def vllm_server(request, runtime_services):
     # Put logs in the per-test directory set up by tests/conftest.py
     log_dir = Path(request.node.name)
 
-    server_manager = VLLMServerManager(
+    if importlib.util.find_spec("vllm") is not None:
+        server_type = ServerType.vllm
+    elif importlib.util.find_spec("tensorrt_llm") is not None:
+        server_type = ServerType.trtllm
+    else:
+        raise Exception(
+            "Neither the vllm nor the tensorrt_llm module is available in the current environment."
+        )
+
+    server_manager = LLMServerManager(
         port=port,
         cpu_cache_blocks=cpu_blocks,
         gpu_cache_blocks=gpu_blocks,
         log_dir=log_dir,
+        server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_VLLM_START_TIMEOUT", "300"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
-            f"Failed to start vLLM server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
+            f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
         )
 
     yield server_manager
@@ -658,9 +755,11 @@ def vllm_server(request, runtime_services):
 
 
 @pytest.fixture(scope="function")
-def tester(vllm_server):
+def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
-    t = DeterminismTester(base_url=vllm_server.base_url)
+    t = DeterminismTester(
+        base_url=llm_server.base_url, server_type=llm_server.server_type
+    )
     t.download_shakespeare_text()
     return t
 
@@ -669,13 +768,13 @@ class TestDeterminism:
     """Test class for determinism validation."""
 
     @pytest.mark.parametrize(
-        "vllm_server",
+        "llm_server",
         [
             {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
         ],
         indirect=True,
     )
-    def test_determinism_with_cache_reset(self, tester, vllm_server, runtime_services):
+    def test_determinism_with_cache_reset(self, tester, llm_server, runtime_services):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
         print("\n" + "=" * 70)
         print("STARTING DETERMINISM TEST (WITH CACHE RESET)")
@@ -797,7 +896,7 @@ class TestDeterminism:
         ), f"Model is not deterministic across cache reset: {total_failed} comparisons failed"
 
     @pytest.mark.parametrize(
-        "vllm_server",
+        "llm_server",
         [
             {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "20000"))},
         ],
@@ -818,7 +917,7 @@ class TestDeterminism:
     def test_concurrent_determinism_with_ifeval(
         self,
         tester,
-        vllm_server,
+        llm_server,
         runtime_services,
         num_concurrent,
         max_tokens,
