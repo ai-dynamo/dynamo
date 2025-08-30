@@ -268,7 +268,7 @@ impl KvRouter {
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returned overlap amount is in number of blocks.
     /// Now also takes context_id for request tracking
-    async fn find_best_match(
+    pub async fn find_best_match(
         &self,
         context_id: &str,
         tokens: &[u32],
