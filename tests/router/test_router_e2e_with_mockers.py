@@ -6,7 +6,8 @@ import json
 import logging
 import os
 import random
-from typing import Any, Dict
+import string
+from typing import Any, Dict, Optional
 
 import aiohttp
 import pytest
@@ -25,6 +26,12 @@ SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
 PORT = 8090  # Starting port for mocker instances
 
+
+def generate_random_suffix() -> str:
+    """Generate a 10-character random alphabetic suffix for namespace isolation."""
+    return "".join(random.choices(string.ascii_lowercase, k=10))
+
+
 # Shared test payload for all tests
 TEST_PAYLOAD: Dict[str, Any] = {
     "model": MODEL_NAME,
@@ -39,32 +46,55 @@ TEST_PAYLOAD: Dict[str, Any] = {
 }
 
 
-class MockerProcess(ManagedProcess):
-    """Manages a single mocker engine instance"""
+class MockerProcess:
+    """Manages multiple mocker engine instances with the same namespace"""
 
-    def __init__(self, request, endpoint: str, mocker_args_file: str):
-        command = [
-            "python",
-            "-m",
-            "dynamo.mocker",
-            "--model-path",
-            MODEL_NAME,
-            "--extra-engine-args",
-            mocker_args_file,
-            "--endpoint",
-            endpoint,
-        ]
+    def __init__(self, request, mocker_args_file: str, num_mockers: int = 1):
+        # Generate a unique namespace suffix shared by all mockers
+        namespace_suffix = generate_random_suffix()
+        self.namespace = f"test-namespace-{namespace_suffix}"
+        self.endpoint = f"dyn://{self.namespace}.mocker.generate"
+        self.num_mockers = num_mockers
+        self.mocker_processes = []
 
-        super().__init__(
-            command=command,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
-            log_dir=request.node.name,
-            terminate_existing=False,
-        )
-        self.endpoint = endpoint
+        # Create multiple mocker processes with the same namespace
+        for i in range(num_mockers):
+            command = [
+                "python",
+                "-m",
+                "dynamo.mocker",
+                "--model-path",
+                MODEL_NAME,
+                "--extra-engine-args",
+                mocker_args_file,
+                "--endpoint",
+                self.endpoint,
+            ]
+
+            process = ManagedProcess(
+                command=command,
+                timeout=60,
+                display_output=True,
+                health_check_ports=[],
+                health_check_urls=[],
+                log_dir=request.node.name,
+                terminate_existing=False,
+            )
+            self.mocker_processes.append(process)
+            logger.info(f"Created mocker instance {i} with endpoint: {self.endpoint}")
+
+    def __enter__(self):
+        """Start all mocker processes"""
+        for i, process in enumerate(self.mocker_processes):
+            logger.info(f"Starting mocker instance {i}")
+            process.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Stop all mocker processes"""
+        for i, process in enumerate(self.mocker_processes):
+            logger.info(f"Stopping mocker instance {i}")
+            process.__exit__(exc_type, exc_val, exc_tb)
 
 
 class KVRouterProcess(ManagedProcess):
@@ -151,11 +181,14 @@ def get_runtime():
     return _runtime_instance
 
 
-async def check_registration_in_etcd(expected_count: int):
+async def check_registration_in_etcd(
+    expected_count: int, endpoint: Optional[str] = None
+):
     """Check that the expected number of KV routers are registered in etcd.
 
     Args:
         expected_count: The number of KV routers expected to be registered
+        endpoint: The endpoint string to extract component path from (e.g., "dyn://namespace.component.generate")
 
     Returns:
         List of registered KV router entries from etcd
@@ -163,10 +196,27 @@ async def check_registration_in_etcd(expected_count: int):
     runtime = get_runtime()
     etcd = runtime.etcd_client()
 
+    # Extract component path from endpoint if provided
+    prefix = "kv_routers/"
+    if endpoint:
+        # Parse endpoint format: dyn://namespace.component.endpoint_suffix
+        # Extract namespace and component, ignoring the endpoint suffix (e.g., "generate")
+        endpoint_parts = endpoint.replace("dyn://", "").split(".")
+        if len(endpoint_parts) >= 2:
+            namespace = endpoint_parts[0]
+            component = endpoint_parts[1]
+            component_path = f"{namespace}/{component}"
+            prefix = f"kv_routers/{component_path}/"
+            logger.info(
+                f"Checking for KV routers with component path: {component_path}"
+            )
+
     # Check for kv_routers in etcd
-    # The KV router registers itself with key format: kv_routers/{model_name}/{uuid}
-    kv_routers = await etcd.kv_get_prefix("kv_routers/")
-    logger.info(f"Found {len(kv_routers)} KV router(s) registered in etcd")
+    # The KV router registers itself with key format: kv_routers/{component_path}/{uuid}
+    kv_routers = await etcd.kv_get_prefix(prefix)
+    logger.info(
+        f"Found {len(kv_routers)} KV router(s) registered in etcd under prefix: {prefix}"
+    )
 
     # Assert we have the expected number of KV routers registered
     assert (
@@ -248,9 +298,6 @@ def test_mocker_kv_router(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
-
     try:
         # Start KV router (frontend)
         frontend_port = PORT
@@ -259,17 +306,11 @@ def test_mocker_kv_router(request, runtime_services):
         kv_router = KVRouterProcess(request, frontend_port)
         kv_router.__enter__()
 
-        for i in range(NUM_MOCKERS):
-            # Use unique endpoints for each mocker
-            endpoint = "dyn://test-namespace.mocker.generate"
-            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
-
-            mocker = MockerProcess(request, endpoint, mocker_args_file)
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Use async to send requests concurrently for better performance
         asyncio.run(
@@ -285,15 +326,18 @@ def test_mocker_kv_router(request, runtime_services):
         logger.info(f"Successfully completed {NUM_REQUESTS} requests")
 
         # Check etcd registration - expect 1 KV router
-        asyncio.run(check_registration_in_etcd(expected_count=1))
+        # Use the mockers' endpoint since all mockers share the same component path
+        asyncio.run(
+            check_registration_in_etcd(expected_count=1, endpoint=mockers.endpoint)
+        )
 
     finally:
         # Clean up
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
 
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -316,8 +360,6 @@ def test_mocker_two_kv_router(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
     kv_routers = []
 
     try:
@@ -330,17 +372,11 @@ def test_mocker_two_kv_router(request, runtime_services):
             kv_router.__enter__()
             kv_routers.append(kv_router)
 
-        for i in range(NUM_MOCKERS):
-            # Use unique endpoints for each mocker
-            endpoint = "dyn://test-namespace.mocker.generate"
-            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
-
-            mocker = MockerProcess(request, endpoint, mocker_args_file)
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Build URLs for both routers
         router_urls = [
@@ -361,7 +397,10 @@ def test_mocker_two_kv_router(request, runtime_services):
         )
 
         # Check etcd registration - expect 2 KV routers
-        asyncio.run(check_registration_in_etcd(expected_count=2))
+        # Use the mockers' endpoint since all mockers share the same component path
+        asyncio.run(
+            check_registration_in_etcd(expected_count=2, endpoint=mockers.endpoint)
+        )
 
     finally:
         # Clean up routers
@@ -369,8 +408,8 @@ def test_mocker_two_kv_router(request, runtime_services):
             kv_router.__exit__(None, None, None)
 
         # Clean up mockers
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -437,13 +476,10 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
         kv_router.__enter__()
 
         # Start single mocker instance with limited resources
-        endpoint = "dyn://test-namespace.mocker.generate"
-        logger.info(
-            f"Starting single mocker instance with limited resources on endpoint {endpoint}"
-        )
-
-        mocker = MockerProcess(request, endpoint, mocker_args_file)
-        mocker.__enter__()
+        logger.info("Starting single mocker instance with limited resources")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=1)
+        logger.info(f"Mocker using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
@@ -545,8 +581,8 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
 
-        if "mocker" in locals():
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -570,28 +606,19 @@ def test_kv_push_router_bindings(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
-
     try:
-        # Start mockers
-        for i in range(NUM_MOCKERS):
-            # Use unique endpoints for each mocker
-            endpoint = "dyn://test-namespace.mocker.generate"
-            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
-
-            mocker = MockerProcess(request, endpoint, mocker_args_file)
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Wait for mockers to be ready by sending a dummy request with retry
         async def wait_for_mockers_ready():
             """Send a dummy request to ensure mockers are ready"""
             runtime = get_runtime()
-            namespace = runtime.namespace("test-namespace")
+            # Use the namespace from the mockers
+            namespace = runtime.namespace(mockers.namespace)
             component = namespace.component("mocker")
             endpoint = component.endpoint("generate")
 
@@ -653,7 +680,8 @@ def test_kv_push_router_bindings(request, runtime_services):
         async def test_kv_push_router():
             # Get runtime and create endpoint
             runtime = get_runtime()
-            namespace = runtime.namespace("test-namespace")
+            # Use the namespace from the mockers
+            namespace = runtime.namespace(mockers.namespace)
             component = namespace.component("mocker")
             endpoint = component.endpoint("generate")
 
@@ -785,8 +813,245 @@ def test_kv_push_router_bindings(request, runtime_services):
 
     finally:
         # Clean up mockers
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
+
+        if os.path.exists(mocker_args_file):
+            os.unlink(mocker_args_file)
+
+
+@pytest.mark.pre_merge
+def test_indexers_sync(request, runtime_services):
+    """
+    Test that two KV routers have synchronized indexer states after processing requests.
+    This test verifies that both routers converge to the same internal state.
+    """
+
+    # runtime_services starts etcd and nats
+    logger.info("Starting indexers sync test")
+
+    # Create mocker args file
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+
+    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
+    with open(mocker_args_file, "w") as f:
+        json.dump(mocker_args, f)
+
+    try:
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
+
+        # Run the async test
+        async def test_sync():
+            # Get runtime and create endpoint
+            runtime = get_runtime()
+            # Use the namespace from the mockers
+            namespace = runtime.namespace(mockers.namespace)
+            component = namespace.component("mocker")
+            endpoint = component.endpoint("generate")
+
+            # Create first KV router
+            from dynamo._core import KvPushRouter, KvRouterConfig
+
+            # First router with default router_reset_states=True
+            kv_router_config = KvRouterConfig(
+                router_snapshot_threshold=20, router_reset_states=True
+            )
+
+            async def send_requests_to_router(router, num_requests, router_name):
+                # First, send a test request with retry to ensure router is ready
+                max_retries = 8
+                wait_time = 1
+
+                for attempt in range(max_retries + 1):
+                    try:
+                        logger.info(
+                            f"Testing {router_name} readiness (attempt {attempt + 1})"
+                        )
+                        # Generate small test token IDs
+                        test_token_ids = [random.randint(1, 10000) for _ in range(10)]
+                        stream = await router.generate(
+                            token_ids=test_token_ids,  # Small test
+                            model=MODEL_NAME,
+                            stop_conditions={"max_tokens": 1},
+                        )
+                        # Just consume the stream to verify it works
+                        async for _ in stream:
+                            pass
+                        logger.info(f"{router_name} is ready!")
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            f"{router_name} attempt {attempt + 1} failed: {e}"
+                        )
+                        if attempt < max_retries:
+                            await asyncio.sleep(wait_time)
+                            wait_time *= 2
+                        else:
+                            raise RuntimeError(
+                                f"Failed to connect to {router_name} after retries"
+                            )
+
+                # Now send the actual requests
+                tasks = []
+                for i in range(num_requests):
+                    # Generate random token IDs for each request
+                    request_tokens = [random.randint(1, 10000) for _ in range(30)]
+
+                    async def single_request(req_id, tokens):
+                        try:
+                            stream = await router.generate(
+                                token_ids=tokens,
+                                model=MODEL_NAME,
+                                stop_conditions={"max_tokens": 10},
+                            )
+                            # Consume the stream
+                            async for _ in stream:
+                                pass
+                            return True
+                        except Exception as e:
+                            logger.error(
+                                f"Request {req_id} to {router_name} failed: {e}"
+                            )
+                            return False
+
+                    tasks.append(asyncio.create_task(single_request(i, request_tokens)))
+
+                results = await asyncio.gather(*tasks)
+                successful = sum(1 for r in results if r)
+                logger.info(
+                    f"Completed {successful}/{num_requests} requests for {router_name}"
+                )
+                return successful
+
+            logger.info("Creating first KV router")
+            kv_push_router1 = KvPushRouter(
+                endpoint=endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config,
+            )
+
+            # Send 25 requests to first router with initial retry loop
+            logger.info("Sending 25 requests to first router")
+
+            # Send requests to first router
+            successful1 = await send_requests_to_router(kv_push_router1, 25, "Router 1")
+            assert (
+                successful1 == 25
+            ), f"Expected 25 successful requests to router 1, got {successful1}"
+
+            # Wait for a second before creating the second router
+            logger.info("Waiting for 1 second before creating second router")
+            await asyncio.sleep(1)
+
+            # Launch second router with router_reset_states=False
+            logger.info("Creating second KV router with router_reset_states=False")
+            kv_router_config2 = KvRouterConfig(
+                router_snapshot_threshold=20, router_reset_states=False
+            )
+            kv_push_router2 = KvPushRouter(
+                endpoint=endpoint,
+                block_size=BLOCK_SIZE,
+                kv_router_config=kv_router_config2,
+            )
+
+            # Send 25 requests to second router with initial retry loop
+            logger.info("Sending 25 requests to second router")
+            successful2 = await send_requests_to_router(kv_push_router2, 25, "Router 2")
+            assert (
+                successful2 == 25
+            ), f"Expected 25 successful requests to router 2, got {successful2}"
+
+            # Wait for all requests to complete (they should already be complete from gather)
+            # Wait another 1 second for internal synchronization
+            logger.info("Waiting for final synchronization")
+            await asyncio.sleep(1)
+
+            # Dump states from both routers
+            logger.info("Dumping states from both routers")
+            state1_json = await kv_push_router1.dump_events()
+            state2_json = await kv_push_router2.dump_events()
+
+            # Parse JSON strings for comparison
+            state1 = json.loads(state1_json)
+            state2 = json.loads(state2_json)
+
+            # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
+            def sort_key(event):
+                data = event["event"]["data"]["stored"]
+                blocks = data["blocks"]
+                first_block = blocks[0]
+                return (
+                    event["worker_id"],
+                    first_block["tokens_hash"],
+                    data["parent_hash"],
+                )
+
+            sorted_state1 = sorted(state1, key=sort_key)
+            sorted_state2 = sorted(state2, key=sort_key)
+
+            # Verify they are equal
+            logger.info(f"Router 1 has {len(sorted_state1)} events")
+            logger.info(f"Router 2 has {len(sorted_state2)} events")
+
+            # Compare states one by one and only show differences
+            if len(sorted_state1) != len(sorted_state2):
+                logger.error(
+                    f"Router 1 has {len(sorted_state1)} events, Router 2 has {len(sorted_state2)} events"
+                )
+                assert False, "Router states have different numbers of events"
+
+            differences = []
+            for i, (state1_item, state2_item) in enumerate(
+                zip(sorted_state1, sorted_state2)
+            ):
+                # Create copies without event_id for comparison
+                item1_compare = state1_item.copy()
+                item2_compare = state2_item.copy()
+
+                # Remove event_id from the nested event structure
+                if "event" in item1_compare and "event_id" in item1_compare["event"]:
+                    del item1_compare["event"]["event_id"]
+                if "event" in item2_compare and "event_id" in item2_compare["event"]:
+                    del item2_compare["event"]["event_id"]
+
+                if item1_compare != item2_compare:
+                    differences.append(
+                        {
+                            "index": i,
+                            "router1_state": state1_item,
+                            "router2_state": state2_item,
+                        }
+                    )
+
+            if differences:
+                error_msg = f"Router states are not equal. Found {len(differences)} differences:\n"
+                for diff in differences:
+                    error_msg += f"\nDifference at index {diff['index']}:\n"
+                    error_msg += (
+                        f"Router 1: {json.dumps(diff['router1_state'], indent=2)}\n"
+                    )
+                    error_msg += (
+                        f"Router 2: {json.dumps(diff['router2_state'], indent=2)}\n"
+                    )
+                    error_msg += "-" * 80 + "\n"
+
+                assert False, error_msg
+
+            logger.info("Successfully verified that both router states are equal")
+
+        # Run the async test
+        asyncio.run(test_sync())
+
+        logger.info("Indexers sync test completed successfully")
+
+    finally:
+        # Clean up mockers
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -821,8 +1086,6 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    mocker_processes = []
-
     try:
         # Start KV router (frontend)
         frontend_port = PORT + 30  # Use unique port to avoid conflicts
@@ -831,14 +1094,10 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
         kv_router.__enter__()
 
         # Start multiple mocker engines to ensure worker selection logic
-        endpoint = "dyn://test-namespace.mocker.generate"
-        for i in range(NUM_MOCKERS):
-            logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
-            mocker = MockerProcess(request, endpoint, mocker_args_file)
-            mocker_processes.append(mocker)
-
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
@@ -981,7 +1240,7 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
     finally:
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)

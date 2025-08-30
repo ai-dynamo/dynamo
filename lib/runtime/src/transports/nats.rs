@@ -28,10 +28,12 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
+use crate::traits::events::EventPublisher;
 use crate::{Result, metrics::MetricsRegistry};
 
 use async_nats::connection::State;
 use async_nats::{Subscriber, client, jetstream};
+use async_trait::async_trait;
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
@@ -429,6 +431,9 @@ pub fn url_to_bucket_and_key(url: &Url) -> anyhow::Result<(String, String)> {
     Ok((bucket.to_string(), key.to_string()))
 }
 
+/// Default queue name for publishing events
+pub const QUEUE_NAME: &str = "queue";
+
 /// A queue implementation using NATS JetStream
 pub struct NatsQueue {
     /// The name of the stream to use for the queue
@@ -448,12 +453,32 @@ pub struct NatsQueue {
 }
 
 impl NatsQueue {
-    /// Create a new NatsQueue with the given configuration
+    /// Create a new NatsQueue with the default "worker-group" consumer
     pub fn new(stream_name: String, nats_server: String, dequeue_timeout: time::Duration) -> Self {
         // Sanitize stream name to remove path separators (like in Python version)
-        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
+        // rupei: are we sure NATs stream name accepts '_'?
+        let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
+        let subject = format!("{sanitized_stream_name}.*");
 
-        let subject = format!("{}.*", sanitized_stream_name);
+        Self {
+            stream_name: sanitized_stream_name,
+            nats_server,
+            dequeue_timeout,
+            client: None,
+            subject,
+            subscriber: None,
+            consumer_name: Some("worker-group".to_string()),
+        }
+    }
+
+    /// Create a new NatsQueue without a consumer (publisher-only mode)
+    pub fn new_without_consumer(
+        stream_name: String,
+        nats_server: String,
+        dequeue_timeout: time::Duration,
+    ) -> Self {
+        let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
+        let subject = format!("{sanitized_stream_name}.*");
 
         Self {
             stream_name: sanitized_stream_name,
@@ -474,8 +499,8 @@ impl NatsQueue {
         dequeue_timeout: time::Duration,
         consumer_name: String,
     ) -> Self {
-        let sanitized_stream_name = stream_name.replace(['/', '\\'], "_");
-        let subject = format!("{}.*", sanitized_stream_name);
+        let sanitized_stream_name = Slug::slugify(&stream_name).to_string();
+        let subject = format!("{sanitized_stream_name}.*");
 
         Self {
             stream_name: sanitized_stream_name,
@@ -490,39 +515,71 @@ impl NatsQueue {
 
     /// Connect to the NATS server and set up the stream and consumer
     pub async fn connect(&mut self) -> Result<()> {
+        self.connect_with_reset(false).await
+    }
+
+    /// Connect to the NATS server and set up the stream and consumer, optionally resetting the stream
+    pub async fn connect_with_reset(&mut self, reset_stream: bool) -> Result<()> {
         if self.client.is_none() {
             // Create a new client
             let client_options = Client::builder().server(self.nats_server.clone()).build()?;
 
             let client = client_options.connect().await?;
 
-            // Check if stream exists, if not create it
-            let streams = client.list_streams().await?;
-            if !streams.contains(&self.stream_name) {
-                log::debug!("Creating NATS stream {}", self.stream_name);
-                let stream_config = jetstream::stream::Config {
-                    name: self.stream_name.clone(),
-                    subjects: vec![self.subject.clone()],
-                    max_age: time::Duration::from_secs(60 * 10), // 10 min
-                    ..Default::default()
-                };
-                client.jetstream().create_stream(stream_config).await?;
+            // If reset_stream is true, delete the stream first
+            if reset_stream {
+                match client.jetstream().delete_stream(&self.stream_name).await {
+                    Ok(_) => {
+                        log::debug!(
+                            "Successfully deleted NATS stream {} for reset",
+                            self.stream_name
+                        );
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "Failed to delete NATS stream '{}' (may not exist): {}",
+                            self.stream_name,
+                            e
+                        );
+                    }
+                }
             }
 
-            // Create persistent subscriber
-            let consumer_config = jetstream::consumer::pull::Config {
-                durable_name: Some(
-                    self.consumer_name
-                        .clone()
-                        .unwrap_or_else(|| "worker-group".to_string()),
-                ),
+            // Always try to create the stream (removes the race condition)
+            let stream_config = jetstream::stream::Config {
+                name: self.stream_name.clone(),
+                subjects: vec![self.subject.clone()],
+                // messages older than a hour in the stream will be automatically purged
+                max_age: time::Duration::from_secs(60 * 60),
                 ..Default::default()
             };
 
-            let stream = client.jetstream().get_stream(&self.stream_name).await?;
-            let subscriber = stream.create_consumer(consumer_config).await?;
+            match client.jetstream().create_stream(stream_config).await {
+                Ok(_) => {
+                    log::debug!("Successfully created NATS stream {}", self.stream_name);
+                }
+                Err(e) => {
+                    // Log warning but continue - stream likely already exists
+                    log::warn!(
+                        "Failed to create NATS stream '{}': {}. Stream likely already exists, continuing...",
+                        self.stream_name,
+                        e
+                    );
+                }
+            }
 
-            self.subscriber = Some(subscriber);
+            // Create persistent subscriber only if consumer_name is set
+            if let Some(ref consumer_name) = self.consumer_name {
+                let consumer_config = jetstream::consumer::pull::Config {
+                    durable_name: Some(consumer_name.clone()),
+                    ..Default::default()
+                };
+
+                let stream = client.jetstream().get_stream(&self.stream_name).await?;
+                let subscriber = stream.create_consumer(consumer_config).await?;
+                self.subscriber = Some(subscriber);
+            }
+
             self.client = Some(client);
         }
 
@@ -546,28 +603,52 @@ impl NatsQueue {
 
     /// Shutdown the consumer by deleting it from the stream and closing the connection
     /// This permanently removes the consumer from the server
-    pub async fn shutdown(&mut self) -> Result<()> {
-        if let (Some(client), Some(consumer_name)) = (&self.client, &self.consumer_name) {
-            // Get the stream and delete the consumer
-            let stream = client.jetstream().get_stream(&self.stream_name).await?;
-            stream.delete_consumer(consumer_name).await.map_err(|e| {
-                anyhow::anyhow!("Failed to delete consumer {}: {}", consumer_name, e)
-            })?;
-            log::debug!(
-                "Deleted consumer {} from stream {}",
-                consumer_name,
-                self.stream_name
-            );
-        } else {
+    ///
+    /// If `consumer_name` is provided, that specific consumer will be deleted instead of the
+    /// current consumer. This allows deletion of other consumers on the same stream.
+    pub async fn shutdown(&mut self, consumer_name: Option<String>) -> Result<()> {
+        // Determine which consumer to delete
+        let target_consumer = consumer_name.as_ref().or(self.consumer_name.as_ref());
+
+        // Warn if deleting our own consumer via explicit parameter
+        if let Some(ref passed_name) = consumer_name
+            && self.consumer_name.as_ref() == Some(passed_name)
+        {
             log::warn!(
-                "Cannot shutdown consumer: client or consumer_name is None (client: {:?}, consumer_name: {:?})",
-                self.client.is_some(),
-                self.consumer_name.is_some()
+                "Deleting our own consumer '{}' via explicit consumer_name parameter. \
+                Consider calling shutdown without arguments instead.",
+                passed_name
             );
         }
 
-        // Then close the connection
-        self.close().await
+        if let (Some(client), Some(consumer_to_delete)) = (&self.client, target_consumer) {
+            // Get the stream and delete the consumer
+            let stream = client.jetstream().get_stream(&self.stream_name).await?;
+            stream
+                .delete_consumer(consumer_to_delete)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to delete consumer {}: {}", consumer_to_delete, e)
+                })?;
+            log::debug!(
+                "Deleted consumer {} from stream {}",
+                consumer_to_delete,
+                self.stream_name
+            );
+        } else {
+            log::debug!(
+                "Cannot shutdown consumer: client or target consumer is None (client: {:?}, target_consumer: {:?})",
+                self.client.is_some(),
+                target_consumer.is_some()
+            );
+        }
+
+        // Only close the connection if we deleted our own consumer
+        if consumer_name.is_none() {
+            self.close().await
+        } else {
+            Ok(())
+        }
     }
 
     /// Count the number of consumers for the stream
@@ -643,6 +724,19 @@ impl NatsQueue {
             let info = consumer.info().await?;
 
             Ok(info.num_pending)
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
+    }
+
+    /// Get the total number of messages currently in the stream
+    pub async fn get_stream_messages(&mut self) -> Result<u64> {
+        self.ensure_connection().await?;
+
+        if let Some(client) = &self.client {
+            let mut stream = client.jetstream().get_stream(&self.stream_name).await?;
+            let info = stream.info().await?;
+            Ok(info.state.messages)
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }
@@ -727,7 +821,7 @@ impl NatsQueue {
 
             self.purge_up_to_sequence(purge_sequence).await?;
 
-            log::info!(
+            log::debug!(
                 "Purged stream {} up to acknowledged sequence {} (purged up to sequence {})",
                 self.stream_name,
                 min_ack_sequence,
@@ -742,6 +836,49 @@ impl NatsQueue {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl EventPublisher for NatsQueue {
+    fn subject(&self) -> String {
+        self.stream_name.clone()
+    }
+
+    async fn publish(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+        event: &(impl Serialize + Send + Sync),
+    ) -> Result<()> {
+        let bytes = serde_json::to_vec(event)?;
+        self.publish_bytes(event_name, bytes).await
+    }
+
+    async fn publish_bytes(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        // We expect the stream to be always suffixed with "queue"
+        // This suffix itself is nothing special, just a repo standard
+        if event_name.as_ref() != QUEUE_NAME {
+            tracing::warn!(
+                "Expected event_name to be '{}', but got '{}'",
+                QUEUE_NAME,
+                event_name.as_ref()
+            );
+        }
+
+        let subject = format!("{}.{}", self.subject(), event_name.as_ref());
+
+        // Note: enqueue_task requires &mut self, but EventPublisher requires &self
+        // We need to ensure the client is connected and use it directly
+        if let Some(client) = &self.client {
+            client.jetstream().publish(subject, bytes.into()).await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Client not connected"))
+        }
     }
 }
 
@@ -966,6 +1103,20 @@ mod tests {
         let nats_server = "nats://localhost:4222".to_string();
         let timeout = time::Duration::from_secs(0);
 
+        // Connect to NATS client first to delete stream if it exists
+        let client_options = Client::builder()
+            .server(nats_server.clone())
+            .build()
+            .expect("Failed to build client options");
+
+        let client = client_options
+            .connect()
+            .await
+            .expect("Failed to connect to NATS");
+
+        // Delete the stream if it exists (to ensure clean start)
+        let _ = client.jetstream().delete_stream(&stream_name).await;
+
         // Create two consumers with different names for the same stream
         let consumer1_name = format!("consumer-{}", Uuid::new_v4());
         let consumer2_name = format!("consumer-{}", Uuid::new_v4());
@@ -977,6 +1128,35 @@ mod tests {
             consumer1_name,
         );
 
+        // Connect queue1 first (it will create the stream)
+        queue1.connect().await.expect("Failed to connect queue1");
+
+        // Send 4 messages using the EventPublisher trait
+        let message_strings = [
+            "message1".to_string(),
+            "message2".to_string(),
+            "message3".to_string(),
+            "message4".to_string(),
+        ];
+
+        // Using the EventPublisher trait to publish messages
+        for (idx, msg) in message_strings.iter().enumerate() {
+            queue1
+                .publish("queue", msg)
+                .await
+                .unwrap_or_else(|_| panic!("Failed to publish message {}", idx + 1));
+        }
+
+        // Convert messages to JSON-serialized Bytes for comparison
+        let messages: Vec<Bytes> = message_strings
+            .iter()
+            .map(|s| Bytes::from(serde_json::to_vec(s).unwrap()))
+            .collect();
+
+        // Give JetStream a moment to persist the messages
+        tokio::time::sleep(time::Duration::from_millis(100)).await;
+
+        // Now create and connect queue2 and queue3 AFTER messages are published (to test persistence)
         let mut queue2 = NatsQueue::new_with_consumer(
             stream_name.clone(),
             nats_server.clone(),
@@ -984,39 +1164,13 @@ mod tests {
             consumer2_name,
         );
 
-        // Connect both queues (first one creates the stream, second one reuses it)
-        queue1.connect().await.expect("Failed to connect queue1");
+        // Create a third queue without consumer (publisher-only)
+        let mut queue3 =
+            NatsQueue::new_without_consumer(stream_name.clone(), nats_server.clone(), timeout);
+
+        // Connect queue2 and queue3 after messages are already published
         queue2.connect().await.expect("Failed to connect queue2");
-
-        // Send 4 messages
-        let messages = vec![
-            Bytes::from("message1"),
-            Bytes::from("message2"),
-            Bytes::from("message3"),
-            Bytes::from("message4"),
-        ];
-
-        for msg in &messages {
-            queue1
-                .enqueue_task(msg.clone())
-                .await
-                .expect("Failed to enqueue message");
-        }
-
-        // Give JetStream a moment to persist the messages
-        tokio::time::sleep(time::Duration::from_millis(100)).await;
-
-        // Get stream info to find the sequence numbers
-        // We need to know the sequence of message 2 to purge up to it
-        let client_options = Client::builder()
-            .server(nats_server.clone())
-            .build()
-            .expect("Failed to build client options");
-
-        let client = client_options
-            .connect()
-            .await
-            .expect("Failed to connect to NATS");
+        queue3.connect().await.expect("Failed to connect queue3");
 
         // Purge the first two messages (sequence 1 and 2)
         // Note: JetStream sequences start at 1, and purge is exclusive of the sequence number
@@ -1127,7 +1281,10 @@ mod tests {
         queue1.connect().await.expect("Failed to reconnect queue1");
 
         // Shutdown consumer 1 and verify via consumer 2 that there is only one consumer left
-        queue1.shutdown().await.expect("Failed to shutdown queue1");
+        queue1
+            .shutdown(None)
+            .await
+            .expect("Failed to shutdown queue1");
 
         let consumer_count = queue2
             .count_consumers()
