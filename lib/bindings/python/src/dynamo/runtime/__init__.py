@@ -25,12 +25,12 @@ from pydantic import BaseModel, ValidationError
 from dynamo._core import Backend as Backend
 from dynamo._core import Client as Client
 from dynamo._core import Component as Component
+from dynamo._core import Context as Context
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 from dynamo._core import EtcdKvCache as EtcdKvCache
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
-from dynamo._core import PyContext as PyContext
 
 
 def dynamo_worker(static=False):

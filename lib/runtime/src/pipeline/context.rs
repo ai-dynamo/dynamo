@@ -22,7 +22,7 @@
 //!   registry and visitors. `StreamAdaptors` will amend themselves to the [`StreamContext`] to allow for the
 
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
 use crate::engine::AsyncEngineController;
@@ -300,6 +300,10 @@ impl AsyncEngineContext for StreamContext {
     async fn killed(&self) {
         self.controller.killed().await
     }
+
+    fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
+        self.controller.link_child(child);
+    }
 }
 
 impl AsyncEngineContextProvider for StreamContext {
@@ -331,12 +335,18 @@ pub struct Controller {
     id: String,
     tx: Sender<State>,
     rx: Receiver<State>,
+    child_context: Mutex<Vec<Arc<dyn AsyncEngineContext>>>,
 }
 
 impl Controller {
     pub fn new(id: String) -> Self {
         let (tx, rx) = channel(State::Live);
-        Self { id, tx, rx }
+        Self {
+            id,
+            tx,
+            rx,
+            child_context: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -383,15 +393,58 @@ impl AsyncEngineContext for Controller {
     }
 
     fn stop_generating(&self) {
-        self.stop();
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop_generating();
+        }
+
+        let _ = self.tx.send(State::Stopped);
     }
 
     fn stop(&self) {
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop();
+        }
+
         let _ = self.tx.send(State::Stopped);
     }
 
     fn kill(&self) {
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.kill();
+        }
+
         let _ = self.tx.send(State::Killed);
+    }
+
+    fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
+        self.child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .push(child);
     }
 }
 
