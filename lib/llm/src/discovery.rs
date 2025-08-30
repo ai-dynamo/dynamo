@@ -12,3 +12,6 @@ pub use watcher::{ModelUpdate, ModelWatcher};
 
 /// The root etcd path for ModelEntry
 pub const MODEL_ROOT_PATH: &str = "models";
+
+/// The root etcd path for KV Router registrations
+pub const KV_ROUTERS_ROOT_PATH: &str = "kv_routers";

@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicU32;
 use tokio_stream::StreamExt;
 
 use super::*;
+use crate::Component;
 use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
@@ -405,39 +406,36 @@ pub(crate) struct KvIndexer {
 #[pymethods]
 impl KvIndexer {
     #[new]
-    fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (component, kv_block_size, consumer_uuid=None))]
+    fn new(
+        component: Component,
+        kv_block_size: usize,
+        consumer_uuid: Option<String>,
+    ) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
+            let cancellation_token = component.inner.drt().runtime().child_token();
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
-                    component.inner.drt().runtime().child_token(),
+                    cancellation_token.clone(),
                     kv_block_size as u32,
                 )
                 .into();
-            // [gluo TODO] try subscribe_with_type::<RouterEvent>,
-            // error checking below will be different.
-            let mut kv_events_rx = component
-                .inner
-                .subscribe(llm_rs::kv_router::KV_EVENT_SUBJECT)
-                .await
-                .map_err(to_pyerr)?;
-            let kv_events_tx = inner.event_sender();
 
-            // [FIXME] this is the added functionality to the indexer to subscribe to kv events,
-            // should have been made to a trait and implemented here? i.e. AsyncEngine style
-            tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: llm_rs::kv_router::indexer::RouterEvent =
-                        serde_json::from_slice(&event.payload).unwrap();
-                    tracing::debug!("received kv event: {:?}", event);
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::trace!(
-                            "failed to send kv event to indexer; shutting down: {:?}",
-                            e
-                        );
-                    }
-                }
-            });
+            // Use the shared start_kv_router_background function for event consumption
+            // Pass None for snapshot_tx to skip snapshot handling in Python bindings
+            llm_rs::kv_router::subscriber::start_kv_router_background(
+                component.inner.clone(),
+                consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                inner.event_sender(),
+                None,
+                cancellation_token,
+                None,
+                true,
+            )
+            .await
+            .map_err(to_pyerr)?;
+
             Ok(Self { inner })
         })
     }
@@ -845,6 +843,7 @@ impl SpecDecodeStats {
 #[pyclass]
 pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
+    primary_token: tokio_util::sync::CancellationToken,
 }
 
 #[pymethods]
@@ -875,12 +874,25 @@ impl KvPushRouter {
             // Get component from endpoint
             let component = endpoint.inner.component();
 
-            // Create KvRouter
+            // Get the primary token from the component's primary lease
+            let primary_token = component
+                .drt()
+                .primary_lease()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "Failed to get primary lease: Cannot KV route static workers",
+                    )
+                })?
+                .primary_token();
+
+            // Create KvRouter with a unique consumer UUID
+            let consumer_uuid = uuid::Uuid::new_v4().to_string();
             let kv_router = llm_rs::kv_router::KvRouter::new(
                 component.clone(),
                 block_size as u32,
                 None, // default selector
                 Some(kv_router_config.inner()),
+                consumer_uuid,
             )
             .await
             .map_err(to_pyerr)?;
@@ -891,6 +903,7 @@ impl KvPushRouter {
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),
+                primary_token,
             })
         })
     }
@@ -995,6 +1008,25 @@ impl KvPushRouter {
                 rx: Arc::new(tokio::sync::Mutex::new(rx)),
             })
         })
+    }
+
+    /// Dump all events from the KV router's indexer as a JSON string
+    fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let events = inner.dump_events().await.map_err(to_pyerr)?;
+            // Serialize to JSON string
+            let json_str = serde_json::to_string(&events).map_err(to_pyerr)?;
+            Ok(json_str)
+        })
+    }
+}
+
+impl Drop for KvPushRouter {
+    fn drop(&mut self) {
+        // Cancel the primary token to shut down background tasks
+        self.primary_token.cancel();
     }
 }
 

@@ -180,12 +180,12 @@ impl MockVllmEngine {
         component: Option<Component>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        tracing::info!("Creating metrics publisher");
+        tracing::debug!("Creating metrics publisher");
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
-        tracing::info!("Metrics publisher created");
+        tracing::debug!("Metrics publisher created");
 
         if let Some(comp) = component {
-            tracing::info!("Creating metrics endpoint");
+            tracing::debug!("Creating metrics endpoint");
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
@@ -197,10 +197,10 @@ impl MockVllmEngine {
 
             // Give it a moment to start
             tokio::time::sleep(Duration::from_millis(100)).await;
-            tracing::info!("Metrics endpoint started (background)");
+            tracing::debug!("Metrics endpoint started (background)");
         }
 
-        tracing::info!("Starting metrics background tasks");
+        tracing::debug!("Starting metrics background tasks");
         for (dp_rank, scheduler) in schedulers.iter().enumerate() {
             let mut metrics_rx = scheduler.metrics_receiver();
             let publisher = metrics_publisher.clone();
@@ -223,7 +223,7 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::info!("Metrics publishing cancelled for DP rank {dp_rank}");
+                            tracing::debug!("Metrics publishing cancelled for DP rank {dp_rank}");
                             break;
                         }
                     }
@@ -241,14 +241,14 @@ impl MockVllmEngine {
         block_size: usize,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        tracing::info!("Starting KV events publishing");
+        tracing::debug!("Starting KV events publishing");
 
         // Only start KV events publishing if we have a component
         let Some(comp) = component else {
             tracing::warn!("No component provided, skipping KV events publishing");
             return Ok(());
         };
-        tracing::info!("Component found for KV events publishing");
+        tracing::debug!("Component found for KV events publishing");
 
         tracing::debug!("Getting worker_id");
         let worker_id = comp
@@ -259,16 +259,16 @@ impl MockVllmEngine {
         // let worker_id = 0;
         tracing::debug!("Worker_id set to: {worker_id}");
 
-        tracing::info!("Creating KV event publisher");
+        tracing::debug!("Creating KV event publisher");
         let kv_event_publisher = Arc::new(KvEventPublisher::new(
             comp.clone(),
             worker_id,
             block_size as u32,
             None,
         )?);
-        tracing::info!("KV event publisher created");
+        tracing::debug!("KV event publisher created");
 
-        tracing::info!(
+        tracing::debug!(
             "Starting KV event background tasks for {} receivers",
             kv_event_receivers.len()
         );
@@ -298,7 +298,7 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::info!("KV events publishing cancelled for DP rank {dp_rank}");
+                            tracing::debug!("KV events publishing cancelled for DP rank {dp_rank}");
                             break;
                         }
                     }
@@ -476,7 +476,7 @@ impl AnnotatedMockEngine {
                     continue;
                 }
 
-                tracing::info!("Component service is now available, starting mocker engine");
+                tracing::debug!("Component service is now available, starting mocker engine");
 
                 // Start the engine with the component
                 if let Err(e) = inner_clone.start(component).await {
@@ -515,7 +515,7 @@ pub async fn make_mocker_engine(
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
-    tracing::info!("Creating mocker engine with config: {args:?}");
+    tracing::debug!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
         AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 

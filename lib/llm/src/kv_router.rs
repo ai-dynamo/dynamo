@@ -15,6 +15,7 @@ use dynamo_runtime::{
     },
     prelude::*,
     protocols::annotated::Annotated,
+    utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction},
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
+pub mod subscriber;
 
 use crate::{
     discovery::{MODEL_ROOT_PATH, ModelEntry},
@@ -41,13 +43,12 @@ use crate::{
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
+        subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
-
-use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -63,6 +64,12 @@ pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 // for inter-router comms
 pub const PREFILL_SUBJECT: &str = "prefill_events";
 pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
+
+// for radix tree snapshot storage
+pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
+pub const RADIX_STATE_FILE: &str = "radix-state";
+pub const ROUTER_SNAPSHOT_LOCK: &str = "router-snapshot-lock";
+pub const ROUTER_CLEANUP_LOCK: &str = "router-cleanup-lock";
 
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
@@ -98,6 +105,12 @@ pub struct KvRouterConfig {
     // TODO: this is not actually used for now
     // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
+
+    /// Threshold for triggering snapshots. If None, no snapshots will be performed.
+    pub router_snapshot_threshold: Option<u32>,
+
+    /// Whether to reset the router state on startup (default: true)
+    pub router_reset_states: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -108,6 +121,8 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             max_num_batched_tokens: 8192,
+            router_snapshot_threshold: Some(10000),
+            router_reset_states: true,
         }
     }
 }
@@ -121,6 +136,8 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         max_num_batched_tokens: Option<u32>,
+        router_snapshot_threshold: Option<Option<u32>>,
+        router_reset_states: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -130,6 +147,9 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
+            router_snapshot_threshold: router_snapshot_threshold
+                .unwrap_or(default.router_snapshot_threshold),
+            router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
         }
     }
 }
@@ -151,6 +171,13 @@ impl Indexer {
             Indexer::ApproxKvIndexer(indexer) => indexer.find_matches(sequence).await,
         }
     }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        match self {
+            Indexer::KvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::ApproxKvIndexer(indexer) => indexer.dump_events().await,
+        }
+    }
 }
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
@@ -170,6 +197,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
+        consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
 
@@ -196,9 +224,6 @@ impl KvRouter {
             .etcd_client()
             .expect("Cannot KV route without etcd client");
 
-        use dynamo_runtime::utils::typed_prefix_watcher::{
-            key_extractors, watch_prefix_with_extraction,
-        };
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
             MODEL_ROOT_PATH,
@@ -230,31 +255,20 @@ impl KvRouter {
         )
         .await?;
 
-        // [gluo TODO] try subscribe_with_type::<RouterEvent>,
-        // error checking below will be different.
+        // Start unified background process if using KvIndexer
         if let Indexer::KvIndexer(ref kv_indexer) = indexer {
-            let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
-            let kv_events_tx = kv_indexer.event_sender();
-
-            tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: RouterEvent = match serde_json::from_slice(&event.payload) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                            // Choosing warn and continue to process other events from other workers
-                            // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
-                            continue;
-                        }
-                    };
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!(
-                            "failed to send kv event to indexer; shutting down: {:?}",
-                            e
-                        );
-                    }
-                }
-            });
+            start_kv_router_background(
+                component.clone(),
+                consumer_uuid,
+                kv_indexer.event_sender(),
+                kv_router_config
+                    .router_snapshot_threshold
+                    .map(|_| kv_indexer.snapshot_event_sender()),
+                cancellation_token.clone(),
+                kv_router_config.router_snapshot_threshold,
+                kv_router_config.router_reset_states,
+            )
+            .await?;
         }
 
         tracing::info!("KV Routing initialized");
@@ -318,6 +332,11 @@ impl KvRouter {
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
+
+    /// Dump all events from the indexer
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.indexer.dump_events().await
+    }
 }
 
 // NOTE: this would not be usable for now, should deprecate
@@ -350,6 +369,11 @@ impl KvPushRouter {
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
+    }
+
+    /// Dump all events from the KV router's indexer
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.chooser.dump_events().await
     }
 }
 

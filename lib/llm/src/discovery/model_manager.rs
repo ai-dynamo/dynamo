@@ -10,9 +10,8 @@ use parking_lot::Mutex;
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
-use dynamo_runtime::slug::Slug;
 
-use crate::discovery::ModelEntry;
+use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
@@ -218,10 +217,12 @@ impl ModelManager {
             .drt()
             .etcd_client()
             .ok_or_else(|| anyhow::anyhow!("KV routing requires etcd (dynamic mode)"))?;
+        let router_uuid = uuid::Uuid::new_v4();
         let router_key = format!(
-            "kv_routers/{}/{}",
-            Slug::from_string(model_name),
-            uuid::Uuid::new_v4()
+            "{}/{}/{}",
+            KV_ROUTERS_ROOT_PATH,
+            component.path(),
+            router_uuid
         );
         etcd_client
             .kv_create(
@@ -237,6 +238,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
+            router_uuid.to_string(),
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
