@@ -16,6 +16,21 @@
 
 # Subcharts configuration
 
+
+# Global configuration shared across all subcharts
+global:
+  model-express:
+    # -- Whether to enable the Model Express server deployment. If enabled, the Model Express chart will be deployed.
+    enabled: false
+    # -- Service configuration for the Model Express server
+    service:
+      # -- Port that the model-express-server service exposes
+      port: 8080
+      # -- Service name
+      name: "model-express-server"
+      # -- Protocol (http/https)
+      protocol: "http"
+
 # Dynamo operator configuration
 dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
@@ -27,7 +42,9 @@ dynamo-operator:
   # -- etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
 
-  # Namespace access controls for the operator
+  # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
+  modelExpressURL: ""
+  # -- Namespace access controls for the operator
   namespaceRestriction:
     # -- Whether to restrict operator to specific namespaces
     enabled: true

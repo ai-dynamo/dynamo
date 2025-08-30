@@ -1065,8 +1065,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 			args: args{
 				ctx: context.Background(),
 				controllerConfig: controller_common.Config{
-					EtcdAddress: "etcd-address",
-					NatsAddress: "nats-address",
+					EtcdAddress:     "etcd-address",
+					NatsAddress:     "nats-address",
+					ModelExpressURL: "model-express-url",
 					Grove: controller_common.GroveConfig{
 						TerminationDelay: 15 * time.Minute,
 					},
@@ -1343,6 +1344,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
 													},
+													{
+														Name:  "MODEL_EXPRESS_URL",
+														Value: "model-express-url",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1473,6 +1478,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "MODEL_EXPRESS_URL",
+														Value: "model-express-url",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
