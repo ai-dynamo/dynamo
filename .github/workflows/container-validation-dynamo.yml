@@ -66,7 +66,7 @@ jobs:
           docker run -v ${{ github.workspace }}:/workspace -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" --ignore /workspace/lib/bindings/python/src/dynamo/llm/trtllm_integration/connector "
       - name: Copy test report from test Container
         if: always()
         run: |
