@@ -70,6 +70,8 @@ pub fn parse_tool_calls_harmony(
     // Get the Harmony Format messages
     let messages = parser.messages();
 
+    let mut normal_text = String::new();
+
     let mut res = Vec::with_capacity(messages.len());
 
     // Iteratate through messages and extract tool calls if there
@@ -129,8 +131,15 @@ pub fn parse_tool_calls_harmony(
                 });
             }
         }
+        if message.author.role == Role::Assistant && message.channel.as_deref() == Some("analysis")
+        {
+            normal_text.push_str(match &message.content[0] {
+                Text(t) => &t.text,
+                _ => "",
+            });
+        }
     }
-    Ok((res, Some(String::new())))
+    Ok((res, Some(normal_text.to_string())))
 }
 
 #[cfg(test)]
@@ -197,5 +206,28 @@ mod tests {
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_harmony_with_normal_text() {
+        let text = r#"
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
+        <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
+        <|message|>{"location":"San Francisco"}<|call|>
+        "#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        assert_eq!(
+            normal_content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
+        assert_eq!(tool_calls.len(), 1);
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "San Francisco");
     }
 }
