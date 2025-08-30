@@ -43,6 +43,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Client](#client)
 - [Benchmarking](#benchmarking)
 - [Multimodal Support](#multimodal-support)
+- [Logits Processing](#logits-processing)
 - [Performance Sweep](#performance-sweep)
 
 ## Feature Support Matrix
@@ -241,6 +242,63 @@ To benchmark your deployment with GenAI-Perf, see this utility script, configuri
 ## Multimodal support
 
 Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [Multimodal Support Guide](./multimodal_support.md).
+
+## Logits Processing
+
+Logits processors let you modify the next-token logits at every decoding step (e.g., to apply custom constraints or sampling transforms). Dynamo provides a backend-agnostic interface and an adapter for TensorRT-LLM so you can plug in custom processors.
+
+### How it works
+- **Interface**: Implement `dynamo.logits_processing.BaseLogitsProcessor` which defines `__call__(input_ids, logits)` and modifies `logits` in-place.
+- **TRT-LLM adapter**: Use `dynamo.trtllm.logits_processing.adapter.create_trtllm_adapters(...)` to convert Dynamo processors into TRT-LLM-compatible processors and assign them to `SamplingParams.logits_processor`.
+- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](../../../lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py), [hello_world](../../../lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py)).
+
+### Quick test: HelloWorld processor
+You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
+
+```bash
+cd $DYNAMO_HOME/components/backends/trtllm
+export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
+./launch/agg.sh
+```
+
+Notes:
+- When enabled, Dynamo initializes the tokenizer so the HelloWorld processor can map text to token IDs.
+- Expected chat response contains "Hello world".
+
+### Bring your own processor
+Implement a processor by conforming to `BaseLogitsProcessor` and modify logits in-place. For example, temperature scaling:
+
+```python
+from typing import Sequence
+import torch
+from dynamo.logits_processing import BaseLogitsProcessor
+
+class TemperatureProcessor(BaseLogitsProcessor):
+    def __init__(self, temperature: float = 1.0):
+        if temperature <= 0:
+            raise ValueError("Temperature must be positive")
+        self.temperature = temperature
+
+    def __call__(self, input_ids: Sequence[int], logits: torch.Tensor):
+        if self.temperature == 1.0:
+            return
+        logits.div_(self.temperature)
+```
+
+Wire it into TRT-LLM by adapting and attaching to `SamplingParams`:
+
+```python
+from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
+from dynamo.logits_processing.examples import TemperatureProcessor
+
+processors = [TemperatureProcessor(temperature=0.7)]
+sampling_params.logits_processor = create_trtllm_adapters(processors)
+```
+
+### Current limitations
+- Per-request processing only (batch size must be 1); beam width > 1 is not supported.
+- Processors must modify logits in-place and not return a new tensor.
+- If your processor needs tokenization, ensure the tokenizer is initialized (do not skip tokenizer init).
 
 ## Performance Sweep
 
