@@ -16,7 +16,7 @@ use std::{
 
 pub mod batch;
 mod common;
-pub use common::build_routed_pipeline;
+pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;

@@ -21,8 +21,8 @@ use crate::{
     backend::Backend,
     entrypoint,
     kv_router::KvRouterConfig,
-    model_type::ModelType,
-    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest},
+    model_type::{ModelInput, ModelType},
+    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
         openai::{
@@ -53,8 +53,11 @@ pub struct ModelWatcher {
     busy_threshold: Option<f64>,
 }
 
-const ALL_MODEL_TYPES: &[ModelType] =
-    &[ModelType::Chat, ModelType::Completion, ModelType::Embedding];
+const ALL_MODEL_TYPES: &[ModelType] = &[
+    ModelType::Chat,
+    ModelType::Completions,
+    ModelType::Embedding,
+];
 
 impl ModelWatcher {
     pub fn new(
@@ -177,35 +180,33 @@ impl ModelWatcher {
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
             let mut update_tx = true;
-            let mut model_type: ModelType = model_entry.model_type;
-            if model_entry.model_type == ModelType::Chat
+            let model_type: ModelType = model_entry.model_type;
+            if model_entry.model_type.contains(ModelType::Chat)
                 && self.manager.list_chat_completions_models().is_empty()
             {
                 self.manager.remove_chat_completions_model(&model_name).ok();
-                model_type = ModelType::Chat;
-            } else if model_entry.model_type == ModelType::Completion
+            } else {
+                tracing::debug!(
+                    "Model {} is still active in other instances, not removing",
+                    model_name
+                );
+                update_tx = false;
+            }
+            if model_entry.model_type.contains(ModelType::Completions)
                 && self.manager.list_completions_models().is_empty()
             {
                 self.manager.remove_completions_model(&model_name).ok();
-                model_type = ModelType::Completion;
-            } else if model_entry.model_type == ModelType::Embedding
+            } else {
+                tracing::debug!(
+                    "Model {} is still active in other instances, not removing",
+                    model_name
+                );
+                update_tx = false;
+            }
+            if model_entry.model_type.contains(ModelType::Embedding)
                 && self.manager.list_embeddings_models().is_empty()
             {
                 self.manager.remove_embeddings_model(&model_name).ok();
-                model_type = ModelType::Embedding;
-            } else if model_entry.model_type == ModelType::Backend {
-                if self.manager.list_chat_completions_models().is_empty() {
-                    self.manager.remove_chat_completions_model(&model_name).ok();
-                    model_type = ModelType::Chat;
-                }
-                if self.manager.list_completions_models().is_empty() {
-                    self.manager.remove_completions_model(&model_name).ok();
-                    if model_type == ModelType::Chat {
-                        model_type = ModelType::Backend;
-                    } else {
-                        model_type = ModelType::Completion;
-                    }
-                }
             } else {
                 tracing::debug!(
                     "Model {} is still active in other instances, not removing",
@@ -250,7 +251,7 @@ impl ModelWatcher {
         } else {
             for model_type in ALL_MODEL_TYPES {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
-                    || (completions_model_removed && *model_type == ModelType::Completion)
+                    || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding))
                     && let Some(tx) = &self.model_update_tx
                 {
@@ -287,35 +288,40 @@ impl ModelWatcher {
             }
         };
 
-        match model_entry.model_type {
-            ModelType::Backend => {
-                // A Backend model expects pre-processed requests meaning it's up to us whether we
-                // handle Chat or Completions requests, so handle both.
+        if model_entry.model_input == ModelInput::Tokens
+            && (model_entry.model_type.supports_chat()
+                || model_entry.model_type.supports_completions())
+        {
+            // Case 1: Tokens + (Chat OR Completions OR Both)
+            // A model that expects pre-processed requests meaning it's up to us whether we
+            // handle Chat or Completions requests, so handle whatever the model supports.
 
-                let Some(mut card) = card else {
-                    anyhow::bail!("Missing model deployment card");
-                };
-                // Download tokenizer.json etc to local disk
-                // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
-                // OpenAIPreprocessor::new loads the files, so we can delete them after this
-                // function. Needs checking carefully, possibly we need to store it in state.
-                let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
+            let Some(mut card) = card else {
+                anyhow::bail!("Missing model deployment card");
+            };
+            // Download tokenizer.json etc to local disk
+            // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
+            // OpenAIPreprocessor::new loads the files, so we can delete them after this
+            // function. Needs checking carefully, possibly we need to store it in state.
+            let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                let kv_chooser = if self.router_mode == RouterMode::KV {
-                    Some(
-                        self.manager
-                            .kv_chooser_for(
-                                &model_entry.name,
-                                &component,
-                                card.kv_cache_block_size,
-                                self.kv_router_config,
-                            )
-                            .await?,
-                    )
-                } else {
-                    None
-                };
+            let kv_chooser = if self.router_mode == RouterMode::KV {
+                Some(
+                    self.manager
+                        .kv_chooser_for(
+                            &model_entry.name,
+                            &component,
+                            card.kv_cache_block_size,
+                            self.kv_router_config,
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
 
+            // Add chat engine only if the model supports chat
+            if model_entry.model_type.supports_chat() {
                 let chat_engine = entrypoint::build_routed_pipeline::<
                     NvCreateChatCompletionRequest,
                     NvCreateChatCompletionStreamResponse,
@@ -329,8 +335,15 @@ impl ModelWatcher {
                 .await?;
                 self.manager
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
+            }
 
-                let completions_engine = entrypoint::build_routed_pipeline::<
+            // Add completions engine only if the model supports completions
+            if model_entry.model_type.supports_completions() {
+                let formatter = PromptFormatter::no_op();
+                let PromptFormatter::OAI(formatter) = formatter;
+                let preprocessor =
+                    OpenAIPreprocessor::new_with_formatter(card.clone(), formatter).await?;
+                let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
                 >(
@@ -339,75 +352,90 @@ impl ModelWatcher {
                     self.router_mode,
                     self.busy_threshold,
                     kv_chooser,
+                    preprocessor,
                 )
                 .await?;
                 self.manager
                     .add_completions_model(&model_entry.name, completions_engine)?;
             }
-            ModelType::Chat => {
-                let push_router = PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_threshold(
-                    client, Default::default(), self.busy_threshold
-                )
-                .await?;
-                let engine = Arc::new(push_router);
-                self.manager
-                    .add_chat_completions_model(&model_entry.name, engine)?;
-            }
-            ModelType::Completion => {
-                let push_router = PushRouter::<
-                    NvCreateCompletionRequest,
-                    Annotated<NvCreateCompletionResponse>,
-                >::from_client_with_threshold(
-                    client, Default::default(), self.busy_threshold
-                )
-                .await?;
-                let engine = Arc::new(push_router);
-                self.manager
-                    .add_completions_model(&model_entry.name, engine)?;
-            }
-            ModelType::Embedding => {
-                let Some(mut card) = card else {
-                    anyhow::bail!("Missing model deployment card for embedding model");
-                };
+        } else if model_entry.model_input == ModelInput::Text
+            && model_entry.model_type.supports_chat()
+        {
+            // Case 3: Text + Chat
+            let push_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client_with_threshold(
+                client, Default::default(), self.busy_threshold
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_chat_completions_model(&model_entry.name, engine)?;
+        } else if model_entry.model_input == ModelInput::Text
+            && model_entry.model_type.supports_completions()
+        {
+            // Case 2: Text + Completions
+            let push_router = PushRouter::<
+                NvCreateCompletionRequest,
+                Annotated<NvCreateCompletionResponse>,
+            >::from_client_with_threshold(
+                client, Default::default(), self.busy_threshold
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_completions_model(&model_entry.name, engine)?;
+        } else if model_entry.model_input == ModelInput::Tokens
+            && model_entry.model_type.supports_embedding()
+        {
+            // Case 4: Tokens + Embeddings
+            let Some(mut card) = card else {
+                anyhow::bail!("Missing model deployment card for embedding model");
+            };
 
-                // Download tokenizer files to local disk
-                let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
+            // Download tokenizer files to local disk
+            let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                // Create preprocessing pipeline similar to Backend
-                let frontend = SegmentSource::<
-                    SingleIn<NvCreateEmbeddingRequest>,
-                    ManyOut<Annotated<NvCreateEmbeddingResponse>>,
-                >::new();
+            // Create preprocessing pipeline similar to Backend
+            let frontend = SegmentSource::<
+                SingleIn<NvCreateEmbeddingRequest>,
+                ManyOut<Annotated<NvCreateEmbeddingResponse>>,
+            >::new();
 
-                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
 
-                let router = PushRouter::<
-                    PreprocessedEmbeddingRequest,
-                    Annotated<EmbeddingsEngineOutput>,
-                >::from_client_with_threshold(
-                    client, self.router_mode, self.busy_threshold
-                )
-                .await?;
+            let router = PushRouter::<
+                PreprocessedEmbeddingRequest,
+                Annotated<EmbeddingsEngineOutput>,
+            >::from_client_with_threshold(
+                client, self.router_mode, self.busy_threshold
+            )
+            .await?;
 
-                // Note: Embeddings don't need KV routing complexity
-                let service_backend = ServiceBackend::from_engine(Arc::new(router));
+            // Note: Embeddings don't need KV routing complexity
+            let service_backend = ServiceBackend::from_engine(Arc::new(router));
 
-                // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
-                let embedding_engine = frontend
-                    .link(preprocessor.forward_edge())?
-                    .link(backend.forward_edge())?
-                    .link(service_backend)?
-                    .link(backend.backward_edge())?
-                    .link(preprocessor.backward_edge())?
-                    .link(frontend)?;
+            // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
+            let embedding_engine = frontend
+                .link(preprocessor.forward_edge())?
+                .link(backend.forward_edge())?
+                .link(service_backend)?
+                .link(backend.backward_edge())?
+                .link(preprocessor.backward_edge())?
+                .link(frontend)?;
 
-                self.manager
-                    .add_embeddings_model(&model_entry.name, embedding_engine)?;
-            }
+            self.manager
+                .add_embeddings_model(&model_entry.name, embedding_engine)?;
+        } else {
+            // Reject unsupported combinations
+            anyhow::bail!(
+                "Unsupported model configuration: {} with {} input. Supported combinations: \
+                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings",
+                model_entry.model_type,
+                model_entry.model_input.as_str()
+            );
         }
 
         Ok(())

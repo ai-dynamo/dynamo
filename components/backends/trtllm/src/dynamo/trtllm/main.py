@@ -22,7 +22,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
@@ -223,7 +223,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params = SamplingParams()
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
-    modelType = ModelType.Backend
+    model_input = ModelInput.Tokens
+    model_type = ModelType.Chat | ModelType.Completions
     multimodal_processor = None
 
     if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
@@ -234,7 +235,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        modelType = ModelType.Chat
+        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )
@@ -292,7 +293,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         if is_first_worker(config):
             # Register the model with runtime config
             await register_llm(
-                modelType,
+                model_input,
+                model_type,
                 endpoint,
                 config.model_path,
                 config.served_model_name,

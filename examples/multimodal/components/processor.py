@@ -32,7 +32,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import FlexibleArgumentParser
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -321,7 +321,8 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelType.Chat,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelType.Chat,
         generate_endpoint,
         config.model,
         config.served_model_name,

@@ -230,8 +230,38 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
+    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?;
+    build_routed_pipeline_with_preprocessor(
+        card,
+        client,
+        router_mode,
+        busy_threshold,
+        chooser,
+        preprocessor,
+    )
+    .await
+}
+
+pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    router_mode: RouterMode,
+    busy_threshold: Option<f64>,
+    chooser: Option<Arc<KvRouter>>,
+    preprocessor: Arc<OpenAIPreprocessor>,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
+{
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
-    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+    let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_mdc(card.clone()).await?.into_operator();
     let migration = Migration::from_mdc(card.clone()).await?.into_operator();
     let router =
@@ -255,13 +285,13 @@ where
     };
 
     let engine = frontend
-        .link(preprocessor.forward_edge())?
+        .link(preprocessor_op.forward_edge())?
         .link(backend.forward_edge())?
         .link(migration.forward_edge())?
         .link(service_backend)?
         .link(migration.backward_edge())?
         .link(backend.backward_edge())?
-        .link(preprocessor.backward_edge())?
+        .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
     Ok(engine)
 }

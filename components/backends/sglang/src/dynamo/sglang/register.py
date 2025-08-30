@@ -8,7 +8,7 @@ import sglang as sgl
 from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import Endpoint
-from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.sglang.args import DynamoArgs
 
 
@@ -26,7 +26,8 @@ async def register_llm_with_runtime_config(
     runtime_config = await _get_runtime_config(engine, dynamo_args)
     try:
         await register_llm(
-            ModelType.Backend,
+            ModelInput.Tokens,
+            ModelType.Chat | ModelType.Completions,
             endpoint,
             server_args.model_path,
             server_args.served_model_name,
