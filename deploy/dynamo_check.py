@@ -537,6 +537,69 @@ class DynamoChecker:
 
         return target_directory, cargo_home
 
+    def _get_framework_versions(
+        self,
+    ) -> List[Tuple[str, str, Optional[str], Optional[str]]]:
+        """Get versions of available LLM frameworks.
+
+        Checks Python packages and their associated executables.
+
+        Returns:
+            List of tuples containing (framework_name, version, executable_path, site_packages_path) for installed frameworks
+            Example: [('VLLM', '0.4.0', '/usr/local/bin/vllm', '/opt/dynamo/venv/lib/python3.12/site-packages'), ('SGLang', '0.3.0', None, None)]
+        """
+        frameworks = []
+
+        # Framework definitions
+        framework_configs = [
+            {"name": "vllm", "module": "vllm", "executables": ["vllm", "vllm-serve"]},
+            {
+                "name": "sglang",
+                "module": "sglang",
+                "executables": ["sglang", "sglang-server"],
+            },
+            {
+                "name": "tensorrt_llm",
+                "module": "tensorrt_llm",
+                "executables": ["trtllm", "tensorrt-llm"],
+            },
+        ]
+
+        for config in framework_configs:
+            version = None
+            executable_path = None
+            site_packages_path = None
+
+            # Check Python module
+            try:
+                import importlib
+
+                module = importlib.import_module(config["module"])  # type: ignore
+                version = getattr(module, "__version__", None)  # type: ignore[attr-defined]
+                if version:
+                    version = str(version)
+                    # Get the full module path
+                    if hasattr(module, "__file__"):
+                        module_file = module.__file__
+                        if module_file:
+                            site_packages_path = module_file
+            except Exception:
+                pass
+
+            # Check for executables
+            for executable in config["executables"]:
+                found_path = shutil.which(executable)
+                if found_path:
+                    executable_path = found_path
+                    break
+
+            if version:
+                frameworks.append(
+                    (config["name"], version, executable_path, site_packages_path)
+                )
+
+        return frameworks
+
     def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
         """Get git commit SHA and date for the workspace.
 
@@ -693,6 +756,9 @@ class DynamoChecker:
         except Exception:
             # torch not installed
             pass
+
+        # Framework info (vllm, sglang, trtllm)
+        framework_versions = self._get_framework_versions()
 
         # Extra lines for additional system info
         extra_lines: List[str] = []
@@ -867,7 +933,7 @@ class DynamoChecker:
         more_after_python = bool(has_cargo)
         print(f"{'├─' if more_after_python else '└─'} {python_line}")
 
-        # Torch version as a child under Python (before PYTHONPATH)
+        # Torch version as a child under Python (before VLLM)
         if torch_version:
             cuda_status = ""
             if torch_cuda_available is not None:
@@ -880,6 +946,57 @@ class DynamoChecker:
         else:
             # Show as a child under Python
             print("   ├─ ❌ Torch: not installed")
+
+        # Framework versions as children under Python (before PYTHONPATH)
+        if framework_versions:
+            for i, (
+                framework_name,
+                version,
+                executable_path,
+                site_packages_path,
+            ) in enumerate(framework_versions):
+                is_last = i == len(framework_versions) - 1
+                symbol = "└─" if is_last else "├─"
+
+                # Build the display string
+                display_parts = [f"✅ {framework_name}: {version}"]
+
+                if site_packages_path:
+                    display_site_path = self._replace_home_with_var(site_packages_path)
+                    display_parts.append(f"module: {display_site_path}")
+
+                if executable_path:
+                    display_exec_path = self._replace_home_with_var(executable_path)
+                    display_parts.append(f"exec: {display_exec_path}")
+
+                print(f"   {symbol} {', '.join(display_parts)}")
+        else:
+            print("   ├─ ❌ Frameworks: none found (vllm, sglang, trtllm)")
+
+        # Check for TensorRT-LLM in system packages if not already found
+        if not framework_versions or not any(
+            f[0] == "tensorrt_llm" for f in framework_versions
+        ):
+            python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+            system_packages = [
+                f"/usr/local/lib/python{python_version}/dist-packages",
+                f"/usr/lib/python{python_version}/dist-packages",
+            ]
+
+            for pkg_path in system_packages:
+                if os.path.exists(pkg_path):
+                    tensorrt_dirs = [
+                        d for d in os.listdir(pkg_path) if "tensorrt_llm" in d
+                    ]
+                    if tensorrt_dirs:
+                        print(
+                            f"   └─ ⚠️  tensorrt_llm: Found in {pkg_path} but not importable"
+                        )
+                        print(
+                            f'      └─ Add to PYTHONPATH: export PYTHONPATH="{pkg_path}:$PYTHONPATH"'
+                        )
+                        break
 
         # PYTHONPATH as the last child under Python
         print(f"   └─ PYTHONPATH: {py_path_str}")
@@ -1147,6 +1264,7 @@ class DynamoChecker:
                 results[component] = "✅ Success"
                 # Get module path for location info
                 module_path = getattr(module, "__file__", "built-in")
+
                 if module_path and module_path != "built-in":
                     # Only show timestamps for generated files (*.so, *.pth, etc.), not __init__.py
                     timestamp_str = ""
@@ -1508,6 +1626,20 @@ class DynamoChecker:
                 src_path = f"{backend_path}/{item}/src"
                 if os.path.exists(src_path):
                     paths.append(src_path)
+
+        # Check for TensorRT-LLM in system packages and add to PYTHONPATH if found
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        system_packages = [
+            f"/usr/local/lib/python{python_version}/dist-packages",
+            f"/usr/lib/python{python_version}/dist-packages",
+        ]
+
+        for pkg_path in system_packages:
+            if os.path.exists(pkg_path):
+                tensorrt_dirs = [d for d in os.listdir(pkg_path) if "tensorrt_llm" in d]
+                if tensorrt_dirs:
+                    paths.insert(0, pkg_path)  # Add at the beginning for priority
+                    break
 
         return ":".join(paths)
 
