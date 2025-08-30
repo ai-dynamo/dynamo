@@ -21,13 +21,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import (
-    ENABLE_LMCACHE,
-    Config,
-    configure_ports_with_etcd,
-    overwrite_args,
-    parse_args,
-)
+from .args import Config, configure_ports_with_etcd, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .publisher import StatLoggerFactory
 
@@ -49,6 +43,39 @@ def setup_lmcache_environment():
         if key not in os.environ:  # Only set if not already configured
             os.environ[key] = value
             logger.info(f"Set LMCache environment variable: {key}={value}")
+
+
+def should_enable_lmcache(config: Config) -> bool:
+    """Determine if LMCache should be enabled based on connector configuration.
+
+    Returns True if:
+    1. 'lmcache' is in the connector list, OR
+    2. KVTransferConfig contains LMCacheConnectorV1
+    """
+    # Check connector list
+    if config.connector_list and "lmcache" in config.connector_list:
+        return True
+
+    # Check existing KV transfer config
+    if (
+        hasattr(config.engine_args, "kv_transfer_config")
+        and config.engine_args.kv_transfer_config is not None
+    ):
+        kv_config = config.engine_args.kv_transfer_config
+
+        # Check if it's a direct LMCache connector
+        if getattr(kv_config, "kv_connector", None) == "LMCacheConnectorV1":
+            return True
+
+        # Check if it's a MultiConnector containing LMCache
+        if getattr(kv_config, "kv_connector", None) == "MultiConnector":
+            extra_config = getattr(kv_config, "kv_connector_extra_config", None)
+            if extra_config and "connectors" in extra_config:
+                for connector in extra_config["connectors"]:
+                    if connector.get("kv_connector") == "LMCacheConnectorV1":
+                        return True
+
+    return False
 
 
 async def graceful_shutdown(runtime):
@@ -94,8 +121,9 @@ def setup_vllm_engine(config, stat_logger=None):
 
     engine_args = config.engine_args
 
-    # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
-    if ENABLE_LMCACHE:
+    # Automatically enable LMCache if lmcache connector is configured
+    enable_lmcache = should_enable_lmcache(config)
+    if enable_lmcache:
         setup_lmcache_environment()
         logger.info("LMCache enabled for VllmWorker")
     else:
@@ -121,7 +149,7 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    if ENABLE_LMCACHE:
+    if enable_lmcache:
         logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
     else:
         logger.info(f"VllmWorker for {config.model} has been initialized")

@@ -30,8 +30,6 @@ echo "🧹 Cleaning up any existing dynamo processes..."
 pkill -f "dynamo-run" || true
 sleep 2
 
-# Disable LMCache
-export ENABLE_LMCACHE=0
 echo "🔧 Starting dynamo disaggregated serving without LMCache..."
 
 python -m dynamo.frontend &

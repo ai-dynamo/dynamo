@@ -20,10 +20,14 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ### Configuration
 
-LMCache is enabled by setting the `ENABLE_LMCACHE` environment variable:
+LMCache is enabled when the `lmcache` connector is specified:
 
 ```bash
-export ENABLE_LMCACHE=1
+# Enable LMCache via connector flag
+python -m dynamo.vllm --connector lmcache
+
+# Or with multiple connectors
+python -m dynamo.vllm --connector lmcache nixl
 ```
 
 Additional LMCache configuration can be customized via environment variables:
@@ -62,7 +66,7 @@ Disaggregated serving separates prefill and decode operations into dedicated wor
 
 ### Configuration
 
-The same `ENABLE_LMCACHE=1` environment variable enables LMCache, but the system automatically configures different connector setups for prefill and decode workers.
+LMCache is enabled when the `lmcache` connector is specified. The system automatically configures different connector setups for prefill and decode workers.
 
 ### Deployment
 
@@ -142,12 +146,12 @@ lmcache_config = {
 ### Integration Points
 
 1. **Argument Parsing** (`args.py`):
-   - Detects `ENABLE_LMCACHE` environment variable
+   - Detects LMCache usage from connector list or KVTransferConfig
    - Configures appropriate KV transfer settings
    - Sets up connector configurations based on worker type
 
 2. **Engine Setup** (`main.py`):
-   - Initializes LMCache environment variables
+   - Initializes LMCache environment variables when lmcache connector is used
    - Creates vLLM engine with proper KV transfer config
    - Handles both aggregated and disaggregated modes
 
