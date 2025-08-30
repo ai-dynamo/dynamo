@@ -433,6 +433,27 @@ class ManagedProcess:
                     # Process may have terminated or become inaccessible during iteration
                     pass
 
+    def is_running(self) -> bool:
+        """Check if the process is still running"""
+        return (
+            hasattr(self, "proc") and self.proc is not None and self.proc.poll() is None
+        )
+
+    def subprocesses(self) -> list[psutil.Process]:
+        """Find child processes of the current process."""
+        if (
+            not hasattr(self, "proc")
+            or self.proc is None
+            or self.proc.poll() is not None
+        ):
+            return []
+
+        try:
+            parent = psutil.Process(self.proc.pid)
+            return parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return []
+
 
 def main():
     with ManagedProcess(
