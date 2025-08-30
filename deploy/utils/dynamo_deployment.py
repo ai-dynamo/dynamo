@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -28,6 +29,21 @@ import httpx  # added for HTTP requests
 import kubernetes_asyncio as kubernetes
 import yaml
 from kubernetes_asyncio import client, config
+
+
+def find_available_port(start_port: int = 8000) -> int:
+    """Find first available port starting from start_port"""
+    for port in range(start_port, start_port + 100):  # Try ports 8000-8099
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("localhost", port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(
+        f"No available ports found in range {start_port}-{start_port+100}"
+    )
+
 
 # Example chat completion request for testing deployments
 EXAMPLE_CHAT_REQUEST = {
@@ -119,14 +135,18 @@ class DynamoDeploymentClient:
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
 
-    def port_forward_frontend(self, local_port: int = 8000, quiet: bool = False) -> str:
+    def port_forward_frontend(self, local_port: int = None, quiet: bool = False) -> str:
         """
         Port forward the frontend service to a local port.
 
         Args:
-            local_port: Local port to forward to (default: 8000)
+            local_port: Local port to forward to (if None, find first available port starting from 8000)
             quiet: If True, suppress kubectl port-forward output messages (default: False)
         """
+        if local_port is None:
+            local_port = find_available_port(8000)
+            print(f"Using available port: {local_port}")
+
         cmd = [
             "kubectl",
             "port-forward",
