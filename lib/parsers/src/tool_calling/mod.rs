@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod config;
+pub mod harmony_parser;
 pub mod json_parser;
 pub mod parsers;
 pub mod pythonic_parser;

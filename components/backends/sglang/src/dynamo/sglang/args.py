@@ -33,7 +33,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
         "default": None,
-        "help": "Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic'.",
+        "help": "Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic', 'harmony'.",
     },
     "reasoning-parser": {
         "flags": ["--dyn-reasoning-parser"],

@@ -134,4 +134,15 @@ impl ToolCallConfig {
             json: JsonParserConfig::default(), // This is noop here, but we keep it for consistency
         }
     }
+
+    pub fn harmony() -> Self {
+        Self {
+            format: ToolCallParserType::Harmony,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+                tool_call_end_tokens: vec!["<|call|>".to_string()],
+                ..Default::default()
+            },
+        }
+    }
 }
