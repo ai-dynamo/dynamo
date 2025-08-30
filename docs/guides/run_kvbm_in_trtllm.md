@@ -73,8 +73,14 @@ kv_connector_config:
   connector_worker_class: DynamoKVBMConnectorWorker
 EOF
 
-# serve an example LLM model
-trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8000 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
+# start dynamo frontend
+python3 -m dynamo.frontend --http-port 8000 &
+
+# To serve an LLM model with dynamo
+python3 -m dynamo.trtllm \
+  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --extra-engine-args /tmp/kvbm_llm_api_config.yaml &
 
 # make a call to LLM
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
@@ -88,4 +94,8 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "stream":false,
     "max_tokens": 30
   }'
+
+# Optionally, we could also serve an LLM with trtllm-serve to utilize the KVBM feature.
+trtllm-serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B --host localhost --port 8001 --backend pytorch --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
+
 ```
