@@ -15,6 +15,10 @@
 
 import argparse
 import asyncio
+import os
+import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -37,6 +41,38 @@ EXAMPLE_CHAT_REQUEST = {
     "stream": False,
     "max_tokens": 30,
 }
+
+
+class ProgressDisplay:
+    """Helper class for cleaner progress display during deployment waiting"""
+
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+        self.last_message = ""
+        self.spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self.spinner_idx = 0
+
+    def update(self, message: str, newline: bool = False):
+        """Update progress display"""
+        if self.verbose or newline:
+            print(message)
+        else:
+            # Clear previous line and write new message
+            sys.stdout.write(f"\r\033[K{message}")
+            sys.stdout.flush()
+            self.last_message = message
+
+    def spinner(self) -> str:
+        """Get next spinner character"""
+        char = self.spinner_chars[self.spinner_idx]
+        self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_chars)
+        return char
+
+    def finish(self, message: str):
+        """Finish with a final message"""
+        if not self.verbose and self.last_message:
+            sys.stdout.write("\r\033[K")  # Clear the line
+        print(message)
 
 
 class DynamoDeploymentClient:
@@ -68,19 +104,83 @@ class DynamoDeploymentClient:
         ] = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
+        self.port_forward_process: Optional[subprocess.Popen[bytes]] = None
 
-    def _init_kubernetes(self):
+    async def _init_kubernetes(self):
         """Initialize kubernetes client"""
         try:
             # Try in-cluster config first (for pods with service accounts)
             config.load_incluster_config()
         except Exception:
             # Fallback to kube config file (for local development)
-            config.load_kube_config()
+            await config.load_kube_config()
 
         self.k8s_client = client.ApiClient()
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
+
+    def port_forward_frontend(self, local_port: int = 8000, quiet: bool = False) -> str:
+        """
+        Port forward the frontend service to a local port.
+
+        Args:
+            local_port: Local port to forward to (default: 8000)
+            quiet: If True, suppress kubectl port-forward output messages (default: False)
+        """
+        cmd = [
+            "kubectl",
+            "port-forward",
+            f"svc/{self.service_name}",
+            f"{local_port}:{self.frontend_port}",
+            "-n",
+            self.namespace,
+        ]
+
+        print(f"Starting port forward: {' '.join(cmd)}")
+
+        # Configure output redirection based on quiet flag
+        if quiet:
+            # Suppress kubectl's "Handling connection for..." messages
+            stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
+        else:
+            stdout = None
+            stderr = None
+
+        # Start port forward in background
+        try:
+            self.port_forward_process = subprocess.Popen(
+                cmd, stdout=stdout, stderr=stderr
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "kubectl not found in PATH; required for port-forwarding"
+            ) from e
+
+        # Wait a moment for port forward to establish
+        print("Waiting for port forward to establish...")
+        time.sleep(3)
+
+        print(f"Port forward started with PID: {self.port_forward_process.pid}")
+        return f"http://localhost:{local_port}"
+
+    def stop_port_forward(self):
+        """
+        Stop the port forward process.
+        """
+        if self.port_forward_process:
+            print(
+                f"Stopping port forward process (PID: {self.port_forward_process.pid})"
+            )
+            self.port_forward_process.terminate()
+            try:
+                self.port_forward_process.wait(timeout=5)
+                print("Port forward stopped")
+            except subprocess.TimeoutExpired:
+                print("Port forward process did not terminate, killing it")
+                self.port_forward_process.kill()
+                self.port_forward_process.wait()
+            self.port_forward_process = None
 
     def get_service_url(self) -> str:
         """
@@ -97,7 +197,7 @@ class DynamoDeploymentClient:
         Args:
             deployment: Either a dict containing the deployment spec or a path to a yaml file
         """
-        self._init_kubernetes()
+        await self._init_kubernetes()
 
         if isinstance(deployment, str):
             # Load from yaml file
@@ -106,6 +206,11 @@ class DynamoDeploymentClient:
                 self.deployment_spec = yaml.safe_load(content)
         else:
             self.deployment_spec = deployment
+
+        # Ensure deployment_spec is properly loaded
+        assert (
+            self.deployment_spec is not None
+        ), "Failed to load deployment specification"
 
         # Extract component names
         self.components = [
@@ -139,15 +244,30 @@ class DynamoDeploymentClient:
                 print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
-    async def wait_for_deployment_ready(self, timeout: int = 1800):
+    async def wait_for_deployment_ready(
+        self, timeout: int = 1800, verbose: Optional[bool] = None
+    ):
         """
-        Wait for the custom resource to be ready.
+        Wait for the custom resource to be ready with improved progress display.
 
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
+            verbose: If True, show detailed status updates. If None, uses DYNAMO_VERBOSE env var.
         """
+        # Allow environment variable to control verbosity
+        if verbose is None:
+            verbose = os.environ.get("DYNAMO_VERBOSE", "false").lower() == "true"
+
+        progress = ProgressDisplay(verbose=verbose)
         start_time = time.time()
-        # TODO: A little brittle, also should output intermediate status every so often.
+        last_status = None
+        last_conditions_str = ""
+        check_interval = 20 if not verbose else 10
+
+        # Initial message
+        if not verbose:
+            print(f"⏳ Waiting for deployment '{self.deployment_name}'...")
+
         while (time.time() - start_time) < timeout:
             try:
                 status = await self.custom_api.get_namespaced_custom_object(
@@ -157,57 +277,129 @@ class DynamoDeploymentClient:
                     plural="dynamographdeployments",
                     name=self.deployment_name,
                 )
-                # Check both conditions:
-                # 1. Ready condition is True
-                # 2. State is successful
+
                 status_obj = status.get("status", {})
                 conditions = status_obj.get("conditions", [])
                 current_state = status_obj.get("state", "unknown")
+                elapsed = time.time() - start_time
 
-                print(f"Current deployment state: {current_state}")
-                print(f"Current conditions: {conditions}")
-                print(f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s")
-
+                # Check readiness
                 ready_condition = False
+                ready_message = ""
                 for condition in conditions:
-                    if (
-                        condition.get("type") == "Ready"
-                        and condition.get("status") == "True"
-                    ):
-                        ready_condition = True
+                    if condition.get("type") == "Ready":
+                        ready_condition = condition.get("status") == "True"
+                        ready_message = condition.get("message", "")
                         break
 
-                state_successful = status_obj.get("state") == "successful"
+                state_successful = current_state == "successful"
 
+                # Extract not ready components from message
+                not_ready_components = []
+                if re.search(r"resources not ready:", ready_message, re.IGNORECASE):
+                    match = re.search(r"\[(.*?)\]", ready_message)
+                    if match:
+                        items = match.group(1)
+                        not_ready_components = [
+                            s.strip() for s in re.split(r"[,\s]+", items) if s.strip()
+                        ]
+
+                # Format progress message based on mode
+                if not verbose:
+                    # Concise single-line progress with spinner
+                    spinner = progress.spinner()
+
+                    # Create status string
+                    if not_ready_components:
+                        # Show first 2 components, abbreviate if more
+                        components_str = ", ".join(not_ready_components[:2])
+                        if len(not_ready_components) > 2:
+                            components_str += f" +{len(not_ready_components)-2} more"
+                        status_str = f"Waiting for: {components_str}"
+                    else:
+                        status_str = f"State: {current_state}"
+
+                    # Format time
+                    time_str = f"[{elapsed:.0f}s]"
+
+                    message = f"{spinner} {time_str} {status_str}"
+                    progress.update(message)
+
+                else:
+                    # Verbose mode - show details when status changes
+                    conditions_str = str(conditions)
+                    if (
+                        current_state != last_status
+                        or conditions_str != last_conditions_str
+                    ):
+                        progress.update(f"Current deployment state: {current_state}")
+                        progress.update(f"Current conditions: {conditions}")
+                        progress.update(f"Elapsed time: {elapsed:.1f}s / {timeout}s")
+                        progress.update(
+                            f"Deployment not ready yet - Ready: {ready_condition}, "
+                            f"State successful: {state_successful}"
+                        )
+                        last_status = current_state
+                        last_conditions_str = conditions_str
+
+                # Check if deployment is ready
                 if ready_condition and state_successful:
-                    print(
-                        "Deployment is ready: Ready condition is True and state is successful"
+                    progress.finish(
+                        f"✅ Deployment '{self.deployment_name}' ready after {elapsed:.1f}s"
                     )
                     return True
-                else:
-                    print(
-                        f"Deployment not ready yet - Ready condition: {ready_condition}, State successful: {state_successful}"
-                    )
 
             except kubernetes.client.rest.ApiException as e:
-                print(f"API Exception while checking deployment status: {e}")
-                print(f"Status code: {e.status}, Reason: {e.reason}")
+                if verbose:
+                    progress.update(
+                        f"API Exception while checking deployment status: {e}",
+                        newline=True,
+                    )
+                    progress.update(
+                        f"Status code: {e.status}, Reason: {e.reason}", newline=True
+                    )
             except Exception as e:
-                print(f"Unexpected exception while checking deployment status: {e}")
-            await asyncio.sleep(20)
-        raise TimeoutError("Deployment failed to become ready within timeout")
+                if verbose:
+                    progress.update(
+                        f"Unexpected exception while checking deployment status: {e}",
+                        newline=True,
+                    )
 
-    async def check_chat_completion(self):
+            await asyncio.sleep(check_interval)
+
+        # Timeout reached
+        progress.finish(
+            f"❌ Deployment '{self.deployment_name}' failed to become ready within {timeout}s"
+        )
+        raise TimeoutError(f"Deployment failed to become ready within {timeout}s")
+
+    async def check_chat_completion(
+        self,
+        use_port_forward: bool = False,
+        local_port: int = 8000,
+        quiet: bool = True,
+        timeout_s: float = 30.0,
+    ):
         """
         Test the deployment with a chat completion request using httpx.
         """
         EXAMPLE_CHAT_REQUEST["model"] = self.model_name
+
+        # Use cluster DNS in-cluster; otherwise optionally port-forward
+        inside_cluster = bool(os.environ.get("KUBERNETES_SERVICE_HOST"))
         base_url = self.get_service_url()
+        if use_port_forward or not inside_cluster:
+            base_url = self.port_forward_frontend(local_port=local_port, quiet=quiet)
+
         url = f"{base_url}/v1/chat/completions"
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=EXAMPLE_CHAT_REQUEST)
-            response.raise_for_status()
-            return response.text
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                response = await client.post(url, json=EXAMPLE_CHAT_REQUEST)
+                response.raise_for_status()
+                return response.text
+        finally:
+            if use_port_forward or not inside_cluster:
+                self.stop_port_forward()
 
     async def get_deployment_logs(self):
         """
@@ -257,6 +449,10 @@ class DynamoDeploymentClient:
         except kubernetes.client.rest.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
+        finally:
+            # Close the kubernetes client session to avoid warnings
+            if hasattr(self, "k8s_client"):
+                await self.k8s_client.close()
 
 
 async def cleanup_remaining_deployments(deployment_clients, namespace):
@@ -339,7 +535,7 @@ async def main():
 
         # Test chat completion
         print("Testing chat completion...")
-        response = await client.check_chat_completion()
+        response = await client.check_chat_completion(use_port_forward=True)
         print(f"Chat completion response: {response}")
 
         # Get logs
