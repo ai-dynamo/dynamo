@@ -99,7 +99,7 @@ We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/architecture/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `profiling-pvc` PVC and queried by the SLA Planner.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/benchmarks/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `dynamo-pvc` PVC and queried by the SLA Planner.
 
 ## Usage
 
