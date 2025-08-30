@@ -359,3 +359,101 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/l
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+
+##################################################
+########## Dev Container Local Development #######
+##################################################
+#
+# PURPOSE: Local development for .devcontainer
+#
+# This stage adds development tools, utilities, and dependencies specifically
+# needed for:
+# - Local development and debugging
+# - vscode/cursor development
+#
+# Use this stage when you need a full development environment with additional
+# tooling beyond the base runtime image.
+
+FROM base AS local-dev
+
+# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
+# Will use the default ubuntu user, but give sudo access
+# Needed so files permissions aren't set to root ownership when writing from inside container
+
+# Don't want ubuntu to be editable, just change uid and gid. User ubuntu is hardcoded in .devcontainer
+ENV USERNAME=ubuntu
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# Install developer utilities
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust environment setup
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=base $CARGO_HOME $CARGO_HOME
+
+RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
+    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && mkdir -p /home/$USERNAME \
+    && chown -R $USERNAME:$USERNAME /home/$USERNAME \
+    && rm -rf /var/lib/apt/lists/* \
+    && chsh -s /bin/bash $USERNAME
+
+# This is a slow operation (~40s on my cpu)
+# Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
+COPY --from=base --chown=$USER_UID:$USER_GID ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+RUN chown $USERNAME:$USERNAME ${VIRTUAL_ENV}
+COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
+
+# so we can use maturin develop
+RUN uv pip install maturin[patchelf]
+
+USER $USERNAME
+ENV HOME=/home/$USERNAME
+ENV PYTHONPATH=$PYTHONPATH:$HOME/dynamo/components/planner/src
+ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
+WORKDIR $HOME
+
+# https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
+    && mkdir -p $HOME/.commandhistory \
+    && touch $HOME/.commandhistory/.bash_history \
+    && echo "$SNIPPET" >> "$HOME/.bashrc"
+
+RUN mkdir -p /home/$USERNAME/.cache/
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []

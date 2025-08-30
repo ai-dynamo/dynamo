@@ -225,7 +225,9 @@ git config --local gpg.program gpg1
 
 ### Custom devcontainer.json Configuration
 
-You can create a custom devcontainer configuration by copying the main configuration to another directory inside the `.devcontainer` directory. Below is an example where the custom name is `jensen_dev`, but feel free to name the directory whatever you want:
+You can create custom devcontainer configurations by copying the main configuration to another directory inside the `.devcontainer` directory.
+
+#### General Custom Configuration
 
 ```bash
 # By convention, Dev Container will look at the project's .devcontainer/<path>/devcontainer.json file.
@@ -236,29 +238,63 @@ cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 
 Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
 
-### SGLANG Custom devcontainer.json Configuration (EXPERIMENTAL)
+### Framework-Specific DevContainer Configuration (EXPERIMENTAL)
 
-This is experimental. Please update/fix if you encounter problems. For sglang Dev Container, you first need to build `dynamo:latest-sglang-local-dev` image like this (wait about half an hour):
+> **Warning**: This feature is experimental and may have issues. Only VLLM has been thoroughly tested. Other frameworks are still being developed and may not work as expected.
+
+The `copy_devcontainer.sh` script automatically generates framework-specific devcontainer configurations for different AI frameworks.
+
+#### Available Frameworks
+- **VLLM**: VLLM framework (✅ **Verified and stable** - tested by many users)
+- **TRTLLM**: TensorRT-LLM framework (🔄 **In development** - being worked on)
+- **SGLANG**: SGLang framework (🔄 **In development** - being worked on)
+- **NONE**: No specific framework (🔄 **In development** - being worked on)
+
+#### Usage
 
 ```bash
+# Generate framework-specific configurations
+./copy_devcontainer.sh
+
+# Preview changes without applying them
+./copy_devcontainer.sh --dryrun
+
+# Force overwrite existing configurations
+./copy_devcontainer.sh --force
+```
+
+#### Generated Structure
+```
+.devcontainer/
+├── devcontainer.json          # Original VLLM configuration
+├── copy_devcontainer.sh       # Original generation script
+├── vllm/
+│   └── devcontainer.json      # auto-generated VLLM-specific config
+├── sglang/
+│   └── devcontainer.json      # auto-generated SGLang-specific config
+├── trtllm/
+│   └── devcontainer.json      # auto-generated TRTLLM-specific config
+└── none/
+    └── devcontainer.json      # auto-generated no-framework config
+```
+
+#### Building Framework Images
+Before using framework-specific configurations, build the corresponding Docker images:
+
+```bash
+# Build VLLM image (already built by default)
+./container/build.sh --framework VLLM --target local-dev
+
+# Build SGLang image
 ./container/build.sh --framework SGLANG --target local-dev
+
+# Build TRTLLM image
+./container/build.sh --framework TRTLLM --target local-dev
+
+# Build no-framework image
+./container/build.sh --framework NONE --target local-dev
 ```
-
-Then, make a copy of the `devcontainer.json file` to a directory of your choice. For this example, we'll just call it `sglang`:
-
-```bash
-mkdir .devcontainer/sglang/
-cp -a .devcontainer/devcontainer.json .devcontainer/sglang/
-```
-
-Afterwards, edit your `.devcontainer/sglang/devcontainer.json` so that the name and image correspond to SGLANG. Example:
-```json
-    "name": "[sglang] This is my amazing custom Dev Container Development",
-    ...
-    "image": "dynamo:latest-sglang-local-dev",
-```
-
-Now, go to **Dev Containers: Open Folder in Container** and select `[sglang] This is my amazing custom Dev Container Development`. The post-create.sh script should be running.
+When you open a Dev Container, your IDE will show all available configurations from `.devcontainer/*/devcontainer.json` files.
 
 
 ### SSH Keys for Git Operations

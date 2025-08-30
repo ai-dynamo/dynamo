@@ -90,4 +90,8 @@ generated-values.yaml
 # Local build artifacts for devcontainer
 .build/
 **/.devcontainer/.env
+
+# Auto-generated custom devcontainer.json directories
+.devcontainer/*/
+
 TensorRT-LLM

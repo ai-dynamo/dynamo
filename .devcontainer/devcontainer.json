@@ -4,11 +4,12 @@
         "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
     ],
-    "name": "NVIDIA Dynamo Dev Container Development",
+    "name": "NVIDIA Dynamo VLLM Dev Container",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
     "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM local dev image
     "runArgs": [
+        "--name", "dynamo-vllm-devcontainer",
         "--gpus=all",
         "--network=host",
         "--ipc=host",

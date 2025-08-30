@@ -280,11 +280,11 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
-#######################################
-########## Local Development #######
-#######################################
+##################################################
+########## Dev Container Local Development #######
+##################################################
 #
-# PURPOSE: Local development
+# PURPOSE: Local development for .devcontainer
 #
 # This stage adds development tools, utilities, and dependencies specifically
 # needed for:
@@ -296,7 +296,16 @@ CMD []
 
 FROM runtime AS local-dev
 
-# Install utilities
+# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
+# Will use the default ubuntu user, but give sudo access
+# Needed so files permissions aren't set to root ownership when writing from inside container
+
+# Don't want ubuntu to be editable, just change uid and gid. User ubuntu is hardcoded in .devcontainer
+ENV USERNAME=ubuntu
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# Install developer utilities
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
     # Install utilities
@@ -333,15 +342,6 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
-
-# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
-# Will use the default ubuntu user, but give sudo access
-# Needed so files permissions aren't set to root ownership when writing from inside container
-
-# Don't want ubuntu to be editable, just change uid and gid. User ubuntu is hardcoded in .devcontainer
-ENV USERNAME=ubuntu
-ARG USER_UID=1000
-ARG USER_GID=1000
 
 RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \

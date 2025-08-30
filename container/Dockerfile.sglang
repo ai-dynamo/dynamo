@@ -245,9 +245,19 @@ RUN ARCH=$(dpkg --print-architecture) && \
     chmod +x /usr/local/bin/prometheus && \
     rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
 
-#######################################
-########## Local Development ##########
-#######################################
+##################################################
+########## Dev Container Local Development #######
+##################################################
+#
+# PURPOSE: Local development for .devcontainer
+#
+# This stage adds development tools, utilities, and dependencies specifically
+# needed for:
+# - Local development and debugging
+# - vscode/cursor development
+#
+# Use this stage when you need a full development environment with additional
+# tooling beyond the base runtime image.
 
 FROM base AS local-dev
 
@@ -259,6 +269,44 @@ FROM base AS local-dev
 ENV USERNAME=ubuntu
 ARG USER_UID=1000
 ARG USER_GID=1000
+
+# Install developer utilities
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Rust environment setup
+ENV RUSTUP_HOME=/usr/local/rustup \
+CARGO_HOME=/usr/local/cargo \
+CARGO_TARGET_DIR=/opt/dynamo/target \
+PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=base $CARGO_HOME $CARGO_HOME
 
 RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
@@ -273,6 +321,9 @@ RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
 COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
 RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
+
+# so we can use maturin develop
+RUN uv pip install maturin[patchelf]
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
