@@ -46,36 +46,55 @@ TEST_PAYLOAD: Dict[str, Any] = {
 }
 
 
-class MockerProcess(ManagedProcess):
-    """Manages a single mocker engine instance"""
+class MockerProcess:
+    """Manages multiple mocker engine instances with the same namespace"""
 
-    def __init__(self, request, mocker_args_file: str):
-        # Generate a unique endpoint with random namespace suffix
+    def __init__(self, request, mocker_args_file: str, num_mockers: int = 1):
+        # Generate a unique namespace suffix shared by all mockers
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.endpoint = f"dyn://{self.namespace}.mocker.generate"
+        self.num_mockers = num_mockers
+        self.mocker_processes = []
 
-        command = [
-            "python",
-            "-m",
-            "dynamo.mocker",
-            "--model-path",
-            MODEL_NAME,
-            "--extra-engine-args",
-            mocker_args_file,
-            "--endpoint",
-            self.endpoint,
-        ]
+        # Create multiple mocker processes with the same namespace
+        for i in range(num_mockers):
+            command = [
+                "python",
+                "-m",
+                "dynamo.mocker",
+                "--model-path",
+                MODEL_NAME,
+                "--extra-engine-args",
+                mocker_args_file,
+                "--endpoint",
+                self.endpoint,
+            ]
 
-        super().__init__(
-            command=command,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[],
-            health_check_urls=[],
-            log_dir=request.node.name,
-            terminate_existing=False,
-        )
+            process = ManagedProcess(
+                command=command,
+                timeout=60,
+                display_output=True,
+                health_check_ports=[],
+                health_check_urls=[],
+                log_dir=request.node.name,
+                terminate_existing=False,
+            )
+            self.mocker_processes.append(process)
+            logger.info(f"Created mocker instance {i} with endpoint: {self.endpoint}")
+
+    def __enter__(self):
+        """Start all mocker processes"""
+        for i, process in enumerate(self.mocker_processes):
+            logger.info(f"Starting mocker instance {i}")
+            process.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Stop all mocker processes"""
+        for i, process in enumerate(self.mocker_processes):
+            logger.info(f"Stopping mocker instance {i}")
+            process.__exit__(exc_type, exc_val, exc_tb)
 
 
 class KVRouterProcess(ManagedProcess):
@@ -279,9 +298,6 @@ def test_mocker_kv_router(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
-
     try:
         # Start KV router (frontend)
         frontend_port = PORT
@@ -290,15 +306,11 @@ def test_mocker_kv_router(request, runtime_services):
         kv_router = KVRouterProcess(request, frontend_port)
         kv_router.__enter__()
 
-        for i in range(NUM_MOCKERS):
-            logger.info(f"Starting mocker instance {i}")
-            mocker = MockerProcess(request, mocker_args_file)
-            logger.info(f"Mocker {i} using endpoint: {mocker.endpoint}")
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Use async to send requests concurrently for better performance
         asyncio.run(
@@ -314,11 +326,9 @@ def test_mocker_kv_router(request, runtime_services):
         logger.info(f"Successfully completed {NUM_REQUESTS} requests")
 
         # Check etcd registration - expect 1 KV router
-        # Use the first mocker's endpoint since all mockers share the same component path
+        # Use the mockers' endpoint since all mockers share the same component path
         asyncio.run(
-            check_registration_in_etcd(
-                expected_count=1, endpoint=mocker_processes[0].endpoint
-            )
+            check_registration_in_etcd(expected_count=1, endpoint=mockers.endpoint)
         )
 
     finally:
@@ -326,8 +336,8 @@ def test_mocker_kv_router(request, runtime_services):
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
 
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -350,8 +360,6 @@ def test_mocker_two_kv_router(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
     kv_routers = []
 
     try:
@@ -364,15 +372,11 @@ def test_mocker_two_kv_router(request, runtime_services):
             kv_router.__enter__()
             kv_routers.append(kv_router)
 
-        for i in range(NUM_MOCKERS):
-            logger.info(f"Starting mocker instance {i}")
-            mocker = MockerProcess(request, mocker_args_file)
-            logger.info(f"Mocker {i} using endpoint: {mocker.endpoint}")
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Build URLs for both routers
         router_urls = [
@@ -393,11 +397,9 @@ def test_mocker_two_kv_router(request, runtime_services):
         )
 
         # Check etcd registration - expect 2 KV routers
-        # Use the first mocker's endpoint since all mockers share the same component path
+        # Use the mockers' endpoint since all mockers share the same component path
         asyncio.run(
-            check_registration_in_etcd(
-                expected_count=2, endpoint=mocker_processes[0].endpoint
-            )
+            check_registration_in_etcd(expected_count=2, endpoint=mockers.endpoint)
         )
 
     finally:
@@ -406,8 +408,8 @@ def test_mocker_two_kv_router(request, runtime_services):
             kv_router.__exit__(None, None, None)
 
         # Clean up mockers
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -475,9 +477,9 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
 
         # Start single mocker instance with limited resources
         logger.info("Starting single mocker instance with limited resources")
-        mocker = MockerProcess(request, mocker_args_file)
-        logger.info(f"Mocker using endpoint: {mocker.endpoint}")
-        mocker.__enter__()
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=1)
+        logger.info(f"Mocker using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
@@ -579,8 +581,8 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
 
-        if "mocker" in locals():
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -604,28 +606,19 @@ def test_kv_push_router_bindings(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
-
     try:
-        # Start mockers
-        for i in range(NUM_MOCKERS):
-            logger.info(f"Starting mocker instance {i}")
-            mocker = MockerProcess(request, mocker_args_file)
-            logger.info(f"Mocker {i} using endpoint: {mocker.endpoint}")
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Wait for mockers to be ready by sending a dummy request with retry
         async def wait_for_mockers_ready():
             """Send a dummy request to ensure mockers are ready"""
             runtime = get_runtime()
-            # Use the namespace from the first mocker
-            first_mocker_namespace = mocker_processes[0].namespace
-            namespace = runtime.namespace(first_mocker_namespace)
+            # Use the namespace from the mockers
+            namespace = runtime.namespace(mockers.namespace)
             component = namespace.component("mocker")
             endpoint = component.endpoint("generate")
 
@@ -687,9 +680,8 @@ def test_kv_push_router_bindings(request, runtime_services):
         async def test_kv_push_router():
             # Get runtime and create endpoint
             runtime = get_runtime()
-            # Use the namespace from the first mocker
-            first_mocker_namespace = mocker_processes[0].namespace
-            namespace = runtime.namespace(first_mocker_namespace)
+            # Use the namespace from the mockers
+            namespace = runtime.namespace(mockers.namespace)
             component = namespace.component("mocker")
             endpoint = component.endpoint("generate")
 
@@ -821,8 +813,8 @@ def test_kv_push_router_bindings(request, runtime_services):
 
     finally:
         # Clean up mockers
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -845,28 +837,19 @@ def test_indexers_sync(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    # Start mocker instances
-    mocker_processes = []
-
     try:
-        # Start mockers first
-        for i in range(NUM_MOCKERS):
-            logger.info(f"Starting mocker instance {i}")
-            mocker = MockerProcess(request, mocker_args_file)
-            logger.info(f"Mocker {i} using endpoint: {mocker.endpoint}")
-            mocker_processes.append(mocker)
-
-        # Start all mockers
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        # Start mocker instances
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         # Run the async test
         async def test_sync():
             # Get runtime and create endpoint
             runtime = get_runtime()
-            # Use the namespace from the first mocker
-            first_mocker_namespace = mocker_processes[0].namespace
-            namespace = runtime.namespace(first_mocker_namespace)
+            # Use the namespace from the mockers
+            namespace = runtime.namespace(mockers.namespace)
             component = namespace.component("mocker")
             endpoint = component.endpoint("generate")
 
@@ -1067,8 +1050,8 @@ def test_indexers_sync(request, runtime_services):
 
     finally:
         # Clean up mockers
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
@@ -1103,8 +1086,6 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
     with open(mocker_args_file, "w") as f:
         json.dump(mocker_args, f)
 
-    mocker_processes = []
-
     try:
         # Start KV router (frontend)
         frontend_port = PORT + 30  # Use unique port to avoid conflicts
@@ -1113,14 +1094,10 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
         kv_router.__enter__()
 
         # Start multiple mocker engines to ensure worker selection logic
-        for i in range(NUM_MOCKERS):
-            logger.info(f"Starting mocker instance {i}")
-            mocker = MockerProcess(request, mocker_args_file)
-            logger.info(f"Mocker {i} using endpoint: {mocker.endpoint}")
-            mocker_processes.append(mocker)
-
-        for mocker in mocker_processes:
-            mocker.__enter__()
+        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
+        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
+        mockers.__enter__()
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
@@ -1263,7 +1240,7 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
     finally:
         if "kv_router" in locals():
             kv_router.__exit__(None, None, None)
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
+        if "mockers" in locals():
+            mockers.__exit__(None, None, None)
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
