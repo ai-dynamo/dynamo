@@ -100,7 +100,7 @@ pub async fn start_kv_router_background(
     let nats_client = client_options.connect().await?;
 
     // Create bucket name for snapshots/state
-    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.name()))
+    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
         .to_string()
         .replace("_", "-");
 
@@ -154,11 +154,11 @@ pub async fn start_kv_router_background(
         .kv_get_and_watch_prefix(&format!("{}/", KV_ROUTERS_ROOT_PATH))
         .await?
         .dissolve();
-    let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.name());
+    let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.subject());
 
     // Only set up snapshot-related resources if snapshot_tx is provided and threshold is set
     let snapshot_resources = if snapshot_tx.is_some() && router_snapshot_threshold.is_some() {
-        let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.name());
+        let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
 
         Some(SnapshotResources {
             nats_client,
