@@ -10,7 +10,6 @@ use parking_lot::Mutex;
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
-use dynamo_runtime::slug::Slug;
 
 use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
@@ -222,7 +221,7 @@ impl ModelManager {
         let router_key = format!(
             "{}/{}/{}",
             KV_ROUTERS_ROOT_PATH,
-            Slug::from_string(model_name),
+            component.path(),
             router_uuid
         );
         etcd_client
