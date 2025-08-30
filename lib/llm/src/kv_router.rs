@@ -121,7 +121,7 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             max_num_batched_tokens: 8192,
-            router_snapshot_threshold: None,
+            router_snapshot_threshold: Some(10000),
             router_reset_states: true,
         }
     }
