@@ -273,6 +273,7 @@ impl KvRouter {
         context_id: &str,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
     ) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
 
@@ -289,6 +290,7 @@ impl KvRouter {
                 seq_hashes.clone(),
                 overlap_scores.clone(),
                 router_config_override,
+                update_states,
             )
             .await?;
 
@@ -329,7 +331,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
         let (worker_id, _) = self
-            .find_best_match(ctx.id(), &request.tokens, None)
+            .find_best_match(ctx.id(), &request.tokens, None, true)
             .await?;
 
         let response = RouterResponse { worker_id };
@@ -366,6 +368,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
+
+                // Check if this is a query_instance_id request first
+                let query_instance_id = request.has_annotation("query_instance_id");
+
                 let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
                     // If instance_id is set, use it
                     (id, 0)
@@ -376,17 +382,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             &context_id,
                             &request.token_ids,
                             request.router_config_override.as_ref(),
+                            !query_instance_id, // Don't update states if query_instance_id
                         )
                         .await?
                 };
 
-                let query_instance_id = request.has_annotation("query_instance_id");
-                // Extract context information before moving the request
+                // if request has the annotation "query_instance_id",
+                // then the request will not be routed to the worker,
+                // and instead the worker_instance_id will be returned.
                 let stream_context = request.context().clone();
-                // if request has the annotation "query_instance_id", for example
-                // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
-                // request will not be routed to worker immediately.
-                // The gateway EPP will receive the worker_instance_id and the tokens.
                 if query_instance_id {
                     let instance_id_str = instance_id.to_string();
                     let response =
@@ -402,7 +406,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
-                // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
