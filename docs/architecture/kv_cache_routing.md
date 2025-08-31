@@ -50,11 +50,19 @@ We can then use the default routing methods exposed by the client class to send 
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
-## Serving Two Router Replicas
+## Serving Multiple Router Replicas
 
-For improved fault tolerance, you can launch two frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use two different HTTP ports for each instance.
+For improved fault tolerance, you can launch multiple frontend + router replicas. Since the frontend and router are currently tied together, you'll need to use different HTTP ports for each instance. (The separation of the frontend and Router is WIP.)
 
-To enable state sharing between the router replicas (which provides more accurate routing decisions), use the `--router-replica-sync` flag when starting the frontend. Router replicas are currently tied to a component, and state syncing and sharing can only happen within the component group. Here's an example of running multiple router replicas:
+### Router State Management
+
+The KV Router tracks two types of state (see [KV Router Architecture](../components/router/README.md) for details):
+
+1. **Prefix blocks (cached KV blocks)**: Maintained in a radix tree, tracking which blocks are cached on each worker. This state is **persistent** - backed by NATS JetStream events and object store snapshots. New router replicas automatically sync this state on startup, ensuring consistent cache awareness across restarts.
+
+2. **Active blocks (decoding blocks)**: Tracks blocks currently being used for active generation requests. This state is **ephemeral** - when a new router replica starts, it begins with zero active block knowledge but becomes eventually consistent as it handles requests.
+
+### Enabling Router Replica Synchronization
 
 ```bash
 # Router replica 1
@@ -64,10 +72,28 @@ python -m dynamo.frontend --router-mode kv --port 8000 --router-replica-sync
 python -m dynamo.frontend --router-mode kv --port 8001 --router-replica-sync
 ```
 
-After these two replicas are launched, they will share the same JetStream and snapshot state. By default, states are persisted across restarts, so the second replica can be started after the first has already been handling requests. The new replica will sync its KV block indexer by consuming the JetStream events and/or downloading the latest snapshot, ensuring both replicas have the same view of cached blocks across workers. It's okay for one router to go down, or even both to go down - the state persistence ensures continuity (up to the message retention of an hour we set for the stream). When a third router starts, the states will still persist:
+The `--router-replica-sync` flag enables active block synchronization between replicas:
+- Active blocks are shared via NATS core messaging (fire-and-forget)
+- Replicas exchange routing decisions to maintain consistent load estimates
+- New replicas start with zero active blocks but quickly converge through request handling
+
+Without this flag, each replica maintains its own isolated view of active blocks, potentially leading to suboptimal routing.
+
+**Active blocks are not persistent:**
+- Lost when a router stops
+- New replicas start fresh and rebuild state through request processing
+- Eventually consistent through `--router-replica-sync`
+
+### Persistence and Recovery
+
+**Prefix blocks persist by default:**
+- Stored in NATS JetStream with 1-hour retention
+- Snapshots saved to NATS object store at configurable thresholds
+- New replicas automatically restore this state on startup
+
+You can a launch a third Router replica even if the first two Router replicas are down, and it will recover the full prefix state. (As mentioned above, the tracking of active blocks will not persist, but will become eventually consistent through request handling.)
 
 ```bash
-# Router replica 3 (can be started even after replicas 1 and 2 have gone down)
 python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 ```
 
@@ -75,8 +101,6 @@ python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 > If you need to start with a fresh state, you have two options:
 > 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](distributed_runtime.md)) which will start a new stream and NATS object store path
 > 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
-
-When `--router-replica-sync` is enabled, the router replicas will additionally share their local routing decisions and active sequence predictions via NATS. Active blocks information is communicated between routers in a fire-and-forget manner, but the routers will quickly become consistent as this information is tied to the request cycle. This helps maintain consistent load estimates across instances even when requests are distributed between routers.
 
 ## Understanding KV Cache
 The leading Large Language Models (LLMs) today are auto-regressive and based off of the [transformer architecture](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf). One key inference optimization technique is to cache the already computed keys and values and to reuse them for the future tokens. This is called the [KV Cache](https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/#key-value_caching).
@@ -203,3 +227,71 @@ Each event carries a unique router ID to prevent self-event processing. This asy
 KV cache events are persisted in NATS JetStream, allowing router replicas to maintain their global view of KV blocks across restarts. By default, routers persist their state - they download any available snapshot from NATS object store and continue consuming events from their last acknowledged position in the stream. This default behavior ensures KV cache awareness is maintained across router restarts without any additional configuration.
 
 To manage stream growth, when the message count exceeds `--router-snapshot-threshold`, a router acquires an etcd-based distributed lock, purges acknowledged messages from the stream, and uploads the current radix tree state to NATS object store. This snapshot serves as a checkpoint for faster initialization of future router instances.
+
+
+## Using KvPushRouter Python API
+
+Instead of launching the KV Router via command line, you can create a `KvPushRouter` object directly in Python. This allows per-request routing configuration overrides.
+
+### Setup
+
+First, launch your backend engines:
+```bash
+python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf --endpoint dyn://inference.vllm.generate
+```
+
+### Example Script
+
+```python
+import asyncio
+from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+
+async def main():
+    # Get runtime and create endpoint
+    runtime = DistributedRuntime.detached()
+    namespace = runtime.namespace("inference")
+    component = namespace.component("vllm")
+    endpoint = component.endpoint("generate")
+
+    # Create KV router
+    kv_router_config = KvRouterConfig()
+    router = KvPushRouter(
+        endpoint=endpoint,
+        block_size=16,
+        kv_router_config=kv_router_config
+    )
+
+    # Your input tokens
+    token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    # Generate with per-request routing override
+    stream = await router.generate(
+        token_ids=token_ids,
+        model="meta-llama/Llama-2-7b-hf",
+        stop_conditions={
+            "max_tokens": 20,        # Generate exactly 20 tokens
+            "ignore_eos": True,      # Don't stop at EOS token
+        },
+        sampling_options={
+            "temperature": 0.7,
+            "top_p": 0.9,
+        },
+        router_config_override={
+            "overlap_score_weight": 2.0,    # Prioritize cache hits for this request
+            "router_temperature": 0.5,       # Add routing randomness
+        }
+    )
+
+    # Collect generated tokens
+    generated_tokens = []
+    async for response in stream:
+        if isinstance(response, dict) and "token_ids" in response:
+            generated_tokens.extend(response["token_ids"])
+
+    print(f"Generated {len(generated_tokens)} tokens: {generated_tokens}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+The `router_config_override` parameter allows you to adjust routing behavior per request without recreating the router. This is useful for implementing different routing strategies based on request characteristics.
