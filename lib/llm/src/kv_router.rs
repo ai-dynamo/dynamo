@@ -109,7 +109,7 @@ pub struct KvRouterConfig {
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     pub router_snapshot_threshold: Option<u32>,
 
-    /// Whether to reset the router state on startup (default: true)
+    /// Whether to reset the router state on startup (default: false)
     pub router_reset_states: bool,
 }
 
@@ -122,7 +122,7 @@ impl Default for KvRouterConfig {
             router_replica_sync: false,
             max_num_batched_tokens: 8192,
             router_snapshot_threshold: Some(10000),
-            router_reset_states: true,
+            router_reset_states: false,
         }
     }
 }
