@@ -71,9 +71,10 @@ After these two replicas are launched, they will share the same JetStream and sn
 python -m dynamo.frontend --router-mode kv --port 8002 --router-replica-sync
 ```
 
-> **Note:** If you need to start with a fresh state, you have two options:
+>[!Note]
+> If you need to start with a fresh state, you have two options:
 > 1. **Recommended**: Use a different namespace/component (see [Distributed Runtime](distributed_runtime.md)) which will start a new stream and NATS object store path
-> 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. **Warning**: This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
+> 2. **Use with caution**: Launch a router with the `--router-reset-states` flag, which will purge the entire stream and radix snapshot. This should only be done when launching the first router replica in a component, as it can bring existing router replicas into an inconsistent state.
 
 When `--router-replica-sync` is enabled, the router replicas will additionally share their local routing decisions and active sequence predictions via NATS. Active blocks information is communicated between routers in a fire-and-forget manner, but the routers will quickly become consistent as this information is tied to the request cycle. This helps maintain consistent load estimates across instances even when requests are distributed between routers.
 
