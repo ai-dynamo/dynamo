@@ -35,7 +35,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: hf-token-secret
-                  key: token
+                  key: HF_TOKEN
           args:
             - |
               set -eux
