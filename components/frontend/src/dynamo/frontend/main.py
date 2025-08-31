@@ -156,11 +156,11 @@ def parse_args():
         help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 10000.",
     )
     parser.add_argument(
-        "--router-persist-states",
-        action="store_false",
+        "--router-reset-states",
+        action="store_true",
         dest="router_reset_states",
-        default=True,
-        help="KV Router: Persist router state on startup. Keep existing state from stream and object store (default: reset states).",
+        default=False,
+        help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
     )
     parser.add_argument(
         "--busy-threshold",
