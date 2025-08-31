@@ -75,14 +75,9 @@ python -m dynamo.frontend --router-mode kv --port 8001 --router-replica-sync
 The `--router-replica-sync` flag enables active block synchronization between replicas:
 - Active blocks are shared via NATS core messaging (fire-and-forget)
 - Replicas exchange routing decisions to maintain consistent load estimates
-- New replicas start with zero active blocks but quickly converge through request handling
+- A new replica start with zero active blocks but quickly converge through request handling, by itself and active syncing with other replicas
 
 Without this flag, each replica maintains its own isolated view of active blocks, potentially leading to suboptimal routing.
-
-**Active blocks are not persistent:**
-- Lost when a router stops
-- New replicas start fresh and rebuild state through request processing
-- Eventually consistent through `--router-replica-sync`
 
 ### Persistence and Recovery
 
