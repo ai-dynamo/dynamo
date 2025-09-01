@@ -1198,6 +1198,61 @@ class ZmqKvEventListener:
         """
         ...
 
+class KvPushRouter:
+    """
+    A KV-aware push router that performs intelligent routing based on KV cache overlap.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        block_size: int,
+        kv_router_config: KvRouterConfig,
+    ) -> None:
+        """
+        Create a new KvPushRouter instance.
+
+        Args:
+            endpoint: The endpoint to connect to for routing requests
+            block_size: The KV cache block size
+            kv_router_config: Configuration for the KV router
+        """
+        ...
+
+    async def generate(
+        self,
+        token_ids: List[int],
+        model: str,
+        stop_conditions: Optional[JsonLike] = None,
+        sampling_options: Optional[JsonLike] = None,
+        output_options: Optional[JsonLike] = None,
+        router_config_override: Optional[JsonLike] = None,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate text using the KV-aware router.
+
+        Args:
+            token_ids: Input token IDs
+            model: Model name to use for generation
+            stop_conditions: Optional stop conditions for generation
+            sampling_options: Optional sampling configuration
+            output_options: Optional output configuration
+            router_config_override: Optional router configuration override
+
+        Returns:
+            An async iterator yielding generation responses
+        """
+        ...
+
+    async def dump_events(self) -> str:
+        """
+        Dump all events from the KV router's indexer.
+
+        Returns:
+            A JSON string containing all indexer events
+        """
+        ...
+
 class EntrypointArgs:
     """
     Settings to connect an input to a worker and run them.

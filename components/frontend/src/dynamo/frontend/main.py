@@ -131,18 +131,12 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--kv-events",
-        action="store_true",
-        dest="use_kv_events",
-        help=" KV Router: Whether to use KV events to maintain the view of cached blocks. If false, would use ApproxKvRouter for predicting block creation / deletion based only on incoming requests at a timer.",
-    )
-    parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
-        help=" KV Router. Disable KV events.",
+        default=True,
+        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
     )
-    parser.set_defaults(use_kv_events=True)
     parser.add_argument(
         "--router-replica-sync",
         action="store_true",
@@ -156,11 +150,11 @@ def parse_args():
         help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 10000.",
     )
     parser.add_argument(
-        "--router-persist-states",
-        action="store_false",
+        "--router-reset-states",
+        action="store_true",
         dest="router_reset_states",
-        default=True,
-        help="KV Router: Persist router state on startup. Keep existing state from stream and object store (default: reset states).",
+        default=False,
+        help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
     )
     parser.add_argument(
         "--busy-threshold",
