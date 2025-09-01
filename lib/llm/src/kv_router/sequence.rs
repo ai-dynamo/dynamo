@@ -271,7 +271,7 @@ impl ActiveSequencesMultiWorker {
             let component_clone = component.clone();
             let router_id_clone = router_id;
 
-            component.drt().runtime().secondary().spawn(async move {
+            tokio::spawn(async move {
                 // NATS subscription loop
                 if let Err(e) = Self::subscribe_to_events(
                     senders_clone,
