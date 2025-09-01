@@ -64,6 +64,7 @@ enum KvEventSource {
 impl KvEventSource {
     /// Start the event source from a [`KvEventSourceConfig`].
     fn start(
+        component: Component,
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
@@ -71,13 +72,17 @@ impl KvEventSource {
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq { endpoint, topic } => {
-                let zmq_handle = tokio::spawn(start_zmq_listener(
-                    endpoint,
-                    topic,
-                    tx,
-                    cancellation_token.clone(),
-                    kv_block_size,
-                ));
+                let zmq_handle = component
+                    .drt()
+                    .runtime()
+                    .secondary()
+                    .spawn(start_zmq_listener(
+                        endpoint,
+                        topic,
+                        tx,
+                        cancellation_token.clone(),
+                        kv_block_size,
+                    ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
             }
@@ -121,6 +126,7 @@ impl KvEventPublisher {
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
+                component.clone(),
                 kv_block_size,
                 config,
                 cancellation_token.clone(),
@@ -142,7 +148,7 @@ impl KvEventPublisher {
 
         // Connect the NatsQueue before passing it to the event processor
         let cancellation_token_clone = cancellation_token.clone();
-        tokio::spawn(async move {
+        component.drt().runtime().secondary().spawn(async move {
             if let Err(e) = nats_queue.connect().await {
                 tracing::error!("Failed to connect NatsQueue: {}", e);
                 return;
