@@ -170,7 +170,7 @@ pub async fn start_kv_router_background(
         None
     };
 
-    component.drt().runtime().secondary().spawn(async move {
+    tokio::spawn(async move {
         let mut check_interval = tokio::time::interval(Duration::from_secs(1));
         check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
