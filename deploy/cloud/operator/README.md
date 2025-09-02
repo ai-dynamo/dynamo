@@ -24,4 +24,4 @@ make
 
 ### Install
 
-See [Dynamo Kubernetes Platform](/docs/guides/dynamo_deploy/dynamo_cloud.md) for installation instructions.
+See [Dynamo Kubernetes Platform Installation Guide](/docs/guides/dynamo_deploy/installation_guide.md) for installation instructions.

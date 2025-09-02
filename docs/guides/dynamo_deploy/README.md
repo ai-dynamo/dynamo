@@ -36,7 +36,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 
-For more details or customization options, see **[Dynamo Kubernetes Platform](/docs/guides/dynamo_deploy/dynamo_cloud.md)**.
+For more details or customization options, see **[Installation Guide for Dynamo Kubernetes Platform](/docs/guides/dynamo_deploy/installation_guide.md)**.
 
 ## 2. Choose Your Backend
 
