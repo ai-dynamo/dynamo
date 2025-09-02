@@ -24,6 +24,7 @@ pub fn parse_tool_calls_harmony(
     config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let mut trimmed = text.trim().to_string();
+    let original_text = trimmed.clone();
 
     // Check if tool call start tokens are present, if not return everything as normal text
     // Start Token: "<|start|>assistant<|channel|>commentary" should be present in the text if tool calls are present
@@ -36,16 +37,21 @@ pub fn parse_tool_calls_harmony(
         return Ok((vec![], Some(trimmed)));
     }
 
-    // Workaround to add <|call|> token to the end of the text if it is not present
-    if !trimmed.ends_with("<|call|>") {
-        trimmed += "<|call|>";
+    // Workaround to add <|call|> token to the end of the text if it is not present. Otherwise, StreamableParser will not be able to parse the text.
+    let end_token = config
+        .tool_call_end_tokens
+        .first()
+        .map(String::as_str)
+        .unwrap_or("<|call|>");
+    if !trimmed.ends_with(end_token) {
+        trimmed.push_str(end_token);
     }
 
     let enc = match get_harmony_encoding().as_ref() {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
-            return Ok((vec![], Some(trimmed)));
+            return Ok((vec![], Some(original_text)));
         }
     };
 
@@ -60,7 +66,7 @@ pub fn parse_tool_calls_harmony(
             tracing::debug!(
                 "Failed to create harmony streamable parser: {e}. Tool calls will not be parsed."
             );
-            return Ok((vec![], Some(trimmed)));
+            return Ok((vec![], Some(original_text)));
         }
     };
 
@@ -78,6 +84,7 @@ pub fn parse_tool_calls_harmony(
     let mut normal_text = String::new();
 
     let mut res = Vec::with_capacity(messages.len());
+    let mut call_idx = 0usize; // Index of the tool call
 
     // Iteratate through messages and extract tool calls if there
     // For tool call, role should be Assistant, channel should be commentary and recipient should start with functions.
@@ -96,7 +103,7 @@ pub fn parse_tool_calls_harmony(
     //    ],
     //    channel: Some("commentary"),
     //    content_type: Some("<|constrain|>json")
-    for (idx, message) in messages.iter().enumerate() {
+    for message in messages.iter() {
         if message.author.role == Role::Assistant
             && message.channel.as_deref() == Some("commentary")
             && message
@@ -105,15 +112,18 @@ pub fn parse_tool_calls_harmony(
                 .unwrap_or_default()
                 .starts_with("functions.")
         {
-            let fname = message
+            let Some(fname) = message
                 .recipient
                 .as_ref()
                 .and_then(|r| r.split('.').nth(1))
-                .unwrap_or("")
-                .to_string();
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
 
-            let args = match &message.content[0] {
-                Text(text) => match serde_json::from_str::<Value>(text.text.trim()) {
+            let args = match message.content.first() {
+                Some(Text(text)) => match serde_json::from_str::<Value>(text.text.trim()) {
                     Ok(value) => value,
                     Err(_) => {
                         Value::Null // Set args to null if it's not valid JSON
@@ -125,8 +135,9 @@ pub fn parse_tool_calls_harmony(
             };
             // Add tool call to result if args is valid JSON
             if !args.is_null() {
+                call_idx += 1;
                 res.push(ToolCallResponse {
-                    id: format!("call-{}", idx + 1),
+                    id: format!("call-{}", call_idx),
                     tp: ToolCallType::Function,
                     function: CalledFunction {
                         name: fname.to_string(),
