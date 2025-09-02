@@ -13,6 +13,7 @@ use crate::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
+    namespace::is_global_namespace,
 };
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -35,6 +36,12 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to gRPC service
+                    let namespace = &engine_config.local_model().endpoint_id().namespace;
+                    let target_namespace = if is_global_namespace(namespace) {
+                        None
+                    } else {
+                        Some(namespace)
+                    };
                     run_watcher(
                         distributed_runtime,
                         grpc_service.state().manager_clone(),
@@ -43,6 +50,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         router_config.busy_threshold,
+                        target_namespace.cloned(),
                     )
                     .await?;
                 }
@@ -145,6 +153,7 @@ async fn run_watcher(
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
+    target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
     let watch_obj = ModelWatcher::new(
         runtime,
@@ -163,7 +172,7 @@ async fn run_watcher(
 
     // Pass the sender to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver).await;
+        watch_obj.watch(receiver, target_namespace.as_deref()).await;
     });
 
     Ok(())
