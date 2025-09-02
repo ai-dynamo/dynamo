@@ -109,12 +109,6 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
     CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
 
-ENV NIXL_SRC_DIR=/opt/nixl
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
-
 WORKDIR /workspace
 
 # Install SGLang and related dependencies
@@ -217,6 +211,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
 COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
 COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
 
+# Copies sglang repo (editable install)
+COPY --from=framework /opt/sglang /opt/sglang
 
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
