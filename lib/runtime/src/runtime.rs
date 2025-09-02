@@ -43,7 +43,7 @@ impl Runtime {
 
         // create a cancellation token
         let cancellation_token = CancellationToken::new();
-        
+
         // create endpoint shutdown token as a child of the main token
         let endpoint_shutdown_token = cancellation_token.child_token();
 
@@ -126,29 +126,29 @@ impl Runtime {
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
         tracing::info!("Runtime shutdown initiated");
-        
+
         // Spawn the shutdown coordination task BEFORE cancelling tokens
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
-        
+
         // Use the runtime handle to spawn the task
         let handle = self.primary();
         handle.spawn(async move {
             // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
             tracing::info!("Phase 1: Cancelling endpoint shutdown token");
             endpoint_token.cancel();
-            
+
             // Phase 2: Wait for all graceful endpoints to complete
             tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
-            
+
             let count = tracker.get_count();
             tracing::info!("Active graceful endpoints: {}", count);
-            
+
             if count != 0 {
                 tracker.wait_for_completion().await;
             }
-            
+
             // Phase 3: Now shutdown NATS/ETCD by cancelling the main token
             tracing::info!("Phase 3: All graceful endpoints completed, shutting down NATS/ETCD connections");
             main_token.cancel();

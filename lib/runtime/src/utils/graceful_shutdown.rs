@@ -62,21 +62,21 @@ impl GracefulShutdownTracker {
         loop {
             // Create the waiter BEFORE checking the condition
             let notified = self.shutdown_complete.notified();
-            
+
             let count = self.active_endpoints.load(Ordering::SeqCst);
             tracing::trace!("Checking completion status, active endpoints: {}", count);
-            
+
             if count == 0 {
                 tracing::debug!("All endpoints completed");
                 break;
             }
-            
+
             // Only wait if there are still active endpoints
             tracing::debug!("Waiting for {} endpoints to complete", count);
             notified.await;
             tracing::trace!("Received notification, rechecking...");
         }
     }
-    
+
     // This method is no longer needed since we can access the tracker directly
 }

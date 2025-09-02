@@ -88,7 +88,7 @@ async def worker(runtime: DistributedRuntime):
     else:
         await init(runtime, config)
         logger.debug("init completed")
-    
+
     logger.debug("Worker function completed, exiting...")
 
 
