@@ -1049,6 +1049,28 @@ impl KvPushRouter {
         })
     }
 
+    fn get_potential_loads<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let loads = inner
+                .get_potential_loads(&token_ids)
+                .await
+                .map_err(to_pyerr)?;
+
+            // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
+            Python::with_gil(|py| {
+                pythonize(py, &loads)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
     /// Dump all events from the KV router's indexer as a JSON string
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();

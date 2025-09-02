@@ -1274,6 +1274,24 @@ class KvPushRouter:
         """
         ...
 
+    async def get_potential_loads(
+        self,
+        token_ids: List[int],
+    ) -> List[Dict[str, int]]:
+        """
+        Get potential prefill and decode loads for all workers.
+
+        Args:
+            token_ids: List of token IDs to evaluate
+
+        Returns:
+            A list of dictionaries, each containing:
+                - worker_id: The worker ID
+                - potential_prefill_tokens: Number of tokens that would need prefill
+                - potential_decode_blocks: Number of blocks currently in decode phase
+        """
+        ...
+
     async def dump_events(self) -> str:
         """
         Dump all events from the KV router's indexer.

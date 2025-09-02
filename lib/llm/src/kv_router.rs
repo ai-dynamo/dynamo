@@ -41,7 +41,7 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
-        scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
+        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         scoring::ProcessedEndpoints,
         subscriber::start_kv_router_background,
     },
@@ -357,6 +357,19 @@ impl KvRouter {
         self.block_size
     }
 
+    /// Get potential prefill and decode loads for all workers
+    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
+        let isl_tokens = tokens.len();
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+
+        Ok(self
+            .scheduler
+            .get_potential_loads(seq_hashes, isl_tokens, overlap_scores)
+            .await)
+    }
+
     /// Dump all events from the indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.indexer.dump_events().await
@@ -405,6 +418,11 @@ impl KvPushRouter {
         self.chooser
             .find_best_match(context_id, tokens, router_config_override, false)
             .await
+    }
+
+    /// Get potential prefill and decode loads for all workers
+    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
+        self.chooser.get_potential_loads(tokens).await
     }
 
     /// Dump all events from the KV router's indexer

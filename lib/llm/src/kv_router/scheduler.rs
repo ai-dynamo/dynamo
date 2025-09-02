@@ -28,6 +28,13 @@ pub struct KVHitRateEvent {
     pub overlap_blocks: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialLoad {
+    pub worker_id: i64,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
     #[error("no endpoints aviailable to route work")]
@@ -302,6 +309,38 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) {
         let _ = self.slots.free(&request_id.to_string()).await;
+    }
+
+    pub async fn get_potential_loads(
+        &self,
+        token_seq: Vec<SequenceHash>,
+        isl_tokens: usize,
+        overlaps: OverlapScores,
+    ) -> Vec<PotentialLoad> {
+        let (decode_blocks, prefill_tokens) = self
+            .slots
+            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps)
+            .await;
+
+        // Get all unique worker IDs from both hashmaps
+        let mut worker_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        worker_ids.extend(decode_blocks.keys().copied());
+        worker_ids.extend(prefill_tokens.keys().copied());
+
+        // Create PotentialLoad for each worker
+        let mut loads = Vec::new();
+        for worker_id in worker_ids {
+            loads.push(PotentialLoad {
+                worker_id,
+                potential_prefill_tokens: prefill_tokens
+                    .get(&worker_id)
+                    .copied()
+                    .unwrap_or(isl_tokens),
+                potential_decode_blocks: decode_blocks.get(&worker_id).copied().unwrap_or(0),
+            });
+        }
+
+        loads
     }
 }
 
