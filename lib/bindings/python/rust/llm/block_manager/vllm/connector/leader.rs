@@ -9,7 +9,7 @@ use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
-use crate::llm::block_manager::BlockManager as PyBlockManager;
+use crate::llm::block_manager::BlockManagerBuilder;
 use crate::llm::block_manager::{
     distributed::KvbmLeader as PyKvbmLeader, vllm::connector::leader::slot::VllmConnectorSlot,
     vllm::KvbmRequest, VllmBlockManager,
@@ -26,10 +26,12 @@ use dynamo_llm::block_manager::{
     BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
-
+use std::sync::{Arc, OnceLock};
 use std::{collections::HashSet, sync::Mutex};
 use tokio;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 type VllmLocality = Logical<DistributedLeaderWorkerResources>;
 
@@ -71,11 +73,13 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
     fn has_slot(&self, request_id: String) -> bool;
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
+
+    fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
 #[derive(Debug)]
 pub struct KvConnectorLeader {
-    slot_manager: ConnectorSlotManager<String>,
+    slot_manager: Arc<OnceLock<ConnectorSlotManager<String>>>,
     block_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
@@ -87,37 +91,86 @@ impl KvConnectorLeader {
     fn new(
         worker_id: String,
         drt: PyDistributedRuntime,
-        block_manager: PyBlockManager,
-        leader: PyKvbmLeader,
+        page_size: usize,
+        leader_py: PyKvbmLeader,
     ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
             worker_id
         );
 
-        // if drt is none, then we must construct a runtime and distributed runtime
-        let block_manager = block_manager.get_block_manager().clone();
-        let block_size = block_manager.block_size();
-
-        let leader = leader.get_inner();
-
-        // if we need a drt, get it from here
+        let leader = leader_py.get_inner().clone();
         let drt = drt.inner().clone();
+        let handle: Handle = drt.runtime().primary();
 
         let ns = drt
             .namespace(kvbm_connector::KVBM_CONNECTOR_LEADER)
             .unwrap();
 
         let kvbm_metrics = KvbmMetrics::new(&ns);
+        let kvbm_metrics_clone = kvbm_metrics.clone();
+
+        let slot_manager_cell = Arc::new(OnceLock::new());
+        let (leader_ready_tx, leader_ready_rx) = oneshot::channel::<String>();
+
+        {
+            let slot_manager_cell = slot_manager_cell.clone();
+
+            handle.spawn(async move {
+                let ready = leader.wait_worker_sync_ready().await;
+                if !ready {
+                    tracing::error!(
+                        "KvConnectorLeader init aborted: leader worker barrier not ready!",
+                    );
+                    return;
+                }
+
+                let block_manager = match BlockManagerBuilder::new()
+                    .worker_id(0)
+                    .leader(leader_py)
+                    .page_size(page_size)
+                    .disable_device_pool(false)
+                    .build()
+                    .await
+                {
+                    Ok(bm) => bm,
+                    Err(e) => {
+                        tracing::error!("Failed to build BlockManager: {}", e);
+                        return;
+                    }
+                };
+
+                // Create the slot manager now that everything is ready
+                let sm = ConnectorSlotManager::new(
+                    block_manager.get_block_manager().clone(),
+                    leader.clone(),
+                    drt.clone(),
+                    kvbm_metrics_clone.clone(),
+                );
+
+                let _ = slot_manager_cell.set(sm);
+
+                // another barrier sync to make sure worker init won't return before leader is ready
+                let _ = leader.run_leader_readiness_barrier_blocking(drt);
+
+                if leader_ready_tx.send("finished".to_string()).is_err() {
+                    tracing::error!("main routine receiver dropped before result was sent");
+                }
+            });
+        }
+
+        tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                match leader_ready_rx.await {
+                    Ok(_) => tracing::info!("KvConnectorLeader init complete."),
+                    Err(_) => tracing::warn!("KvConnectorLeader init channel dropped"),
+                }
+            });
+        });
 
         Self {
-            slot_manager: ConnectorSlotManager::new(
-                block_manager.clone(),
-                leader,
-                drt.clone(),
-                kvbm_metrics.clone(),
-            ),
-            block_size,
+            slot_manager: slot_manager_cell,
+            block_size: page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
@@ -127,6 +180,13 @@ impl KvConnectorLeader {
 }
 
 impl Leader for KvConnectorLeader {
+    #[inline]
+    fn slot_manager(&self) -> &ConnectorSlotManager<String> {
+        self.slot_manager
+            .get()
+            .expect("slot_manager not initialized")
+    }
+
     /// Match the tokens in the request with the available block pools.
     /// Note: the necessary details of the request are captured prior to this call. For vllm,
     /// we make a create slot call prior to this call, so a slot is guaranteed to exist.
@@ -147,7 +207,7 @@ impl Leader for KvConnectorLeader {
         // the number of device matched tokens should be less than or equal to the number of tokens in the request
         debug_assert!(num_computed_tokens % self.block_size == 0);
 
-        let shared_slot = self.slot_manager.get_slot(&request_id)?;
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
@@ -215,7 +275,7 @@ impl Leader for KvConnectorLeader {
             num_external_tokens
         );
 
-        let shared_slot = self.slot_manager.get_slot(&request_id)?;
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
@@ -271,7 +331,7 @@ impl Leader for KvConnectorLeader {
         // This is kind of a nice abstraction as it keeps the events simplier; however, we now create the request-slot
         // once for onboarding (this loop), then again for prefill/decode (new_requests loop).
         for request_id in onboarding_slots.iter() {
-            let shared_slot = self.slot_manager.get_slot(request_id)?;
+            let shared_slot = self.slot_manager().get_slot(request_id)?;
             let mut slot = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
@@ -300,7 +360,7 @@ impl Leader for KvConnectorLeader {
                 "request_id {request_id} not found in inflight_requests: "
             );
 
-            let shared_slot = self.slot_manager.get_slot(request_id)?;
+            let shared_slot = self.slot_manager().get_slot(request_id)?;
             let mut slot = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
@@ -343,7 +403,7 @@ impl Leader for KvConnectorLeader {
                 // we really do not know what to expect here:
                 // first let's try to get the slot, it might fail because maybe preemption put us thru
                 // a finished cycle -- who knows
-                let shared_slot = self.slot_manager.get_slot(request_id);
+                let shared_slot = self.slot_manager().get_slot(request_id);
                 match &shared_slot {
                     Ok(_) => {
                         tracing::info!("after preemption, slot is still alive");
@@ -371,7 +431,7 @@ impl Leader for KvConnectorLeader {
                 "request_id {request_id} not found in inflight_requests: "
             );
 
-            let shared_slot = self.slot_manager.get_slot(request_id)?;
+            let shared_slot = self.slot_manager().get_slot(request_id)?;
             let mut slot = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
@@ -399,7 +459,7 @@ impl Leader for KvConnectorLeader {
         }
 
         for unscheduled_req in inflight_requests.iter() {
-            let shared_slot = self.slot_manager.get_slot(unscheduled_req)?;
+            let shared_slot = self.slot_manager().get_slot(unscheduled_req)?;
             let mut slot_guard = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
@@ -424,7 +484,7 @@ impl Leader for KvConnectorLeader {
     ) -> anyhow::Result<bool> {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
 
-        if !self.slot_manager.has_slot(&request_id) {
+        if !self.slot_manager().has_slot(&request_id) {
             tracing::warn!(
                 "request_finished called for request_id: {request_id} but slot is not found"
             );
@@ -433,7 +493,7 @@ impl Leader for KvConnectorLeader {
         }
 
         // grab the slot
-        let shared_slot = self.slot_manager.get_slot(&request_id)?;
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
 
         // mark the slot as finished
         let mut slot = shared_slot
@@ -450,7 +510,7 @@ impl Leader for KvConnectorLeader {
         self.inflight_requests.remove(&request_id);
 
         // remove it from the manager as we will never use it again
-        self.slot_manager.remove_slot(&request_id)?;
+        self.slot_manager().remove_slot(&request_id)?;
 
         // if the slot has finished, we can return false to vllm, indicating all gpu blocks are free to be reused
         // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
@@ -465,13 +525,13 @@ impl Leader for KvConnectorLeader {
     }
 
     fn has_slot(&self, request_id: String) -> bool {
-        self.slot_manager.has_slot(&request_id)
+        self.slot_manager().has_slot(&request_id)
     }
 
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
-        self.slot_manager
+        self.slot_manager()
             .create_slot(&request.request_id, tokens, request.salt_hash)?;
 
         self.inflight_requests.insert(request.request_id);
@@ -488,11 +548,11 @@ pub struct PyKvConnectorLeader {
 #[pymethods]
 impl PyKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, block_manager, leader))]
+    #[pyo3(signature = (worker_id, drt, page_size, leader))]
     pub fn new(
         worker_id: String,
         drt: PyDistributedRuntime,
-        block_manager: PyBlockManager,
+        page_size: usize,
         leader: PyKvbmLeader,
     ) -> Self {
         let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
@@ -501,18 +561,10 @@ impl PyKvConnectorLeader {
 
         let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
             Box::new(recorder::KvConnectorLeaderRecorder::new(
-                worker_id,
-                drt,
-                block_manager,
-                leader,
+                worker_id, drt, page_size, leader,
             ))
         } else {
-            Box::new(KvConnectorLeader::new(
-                worker_id,
-                drt,
-                block_manager,
-                leader,
-            ))
+            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader))
         };
         Self { connector_leader }
     }

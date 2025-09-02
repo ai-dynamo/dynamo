@@ -8,11 +8,12 @@ This module defines the core BaseLogitsProcessor interface that all
 logits processors must implement.
 """
 
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, runtime_checkable
 
 import torch
 
 
+@runtime_checkable
 class BaseLogitsProcessor(Protocol):
     """
     Protocol for logits processors in Dynamo.
@@ -25,7 +26,7 @@ class BaseLogitsProcessor(Protocol):
         self,
         input_ids: Sequence[int],
         logits: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> None:
         """
         Process the logits for the next token prediction.
 
@@ -33,7 +34,6 @@ class BaseLogitsProcessor(Protocol):
             input_ids: The input token IDs generated so far.
             logits: The raw logits for the next token. Shape: (vocab_size,)
 
-        Returns:
-            A tensor with the same shape, dtype, and device as `logits`.
+        The processor is expected to modify the logits in-place.
         """
         ...

@@ -163,7 +163,7 @@ where
             }
         }
 
-        tracing::info!("TypedPrefixWatcher for prefix '{}' stopped", prefix_str);
+        tracing::debug!("TypedPrefixWatcher for prefix '{}' stopped", prefix_str);
     });
 
     Ok(TypedPrefixWatcher { rx: watch_rx })
