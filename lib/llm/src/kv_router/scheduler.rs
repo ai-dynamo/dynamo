@@ -6,7 +6,7 @@ use dynamo_runtime::component::{Component, Instance};
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -323,7 +323,7 @@ impl KvScheduler {
             .await;
 
         // Get all unique worker IDs from both hashmaps
-        let mut worker_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut worker_ids: HashSet<i64> = HashSet::new();
         worker_ids.extend(decode_blocks.keys().copied());
         worker_ids.extend(prefill_tokens.keys().copied());
 
