@@ -63,7 +63,7 @@ The scripts in the `components/<backend>/launch` folder like `agg.sh` demonstrat
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](api-reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
+- **[API Reference](api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
 - **[Operator Guide](dynamo_operator.md)** - Dynamo operator configuration and management
 - **[Create Deployment](create_deployment.md)** - Step-by-step deployment creation examples
 

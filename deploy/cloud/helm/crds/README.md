@@ -15,8 +15,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo CRD API Reference
+# Dynamo Kubernetes Platform CRDs Helm Chart
 
-For the complete technical API reference for Dynamo Custom Resource Definitions, see:
-
-**📖 [Dynamo CRD API Reference](../../../deploy/cloud/operator/docs/api_reference.md)**
+This chart installs the [CRDs](../../../../docs/guides/dynamo_deploy/api_reference.md) for the Dynamo Kubernetes Platform.

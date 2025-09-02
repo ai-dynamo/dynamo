@@ -15,6 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# 🚀 Deploy Dynamo Cloud to Kubernetes
+# Dynamo Kubernetes Platform Helm Charts
 
-[See Dynamo Cloud Guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md) for details on how to install and use Dynamo Cloud.
+There are two Helm charts available for the Dynamo Kubernetes Platform:
+
+- [platform](platform/README.md) - This chart installs the complete Dynamo Kubernetes Platform, including the Dynamo Operator, NATS, etcd, Grove, and Kai Scheduler.
+- [crds](crds/README.md) - This chart installs the CRDs for the Dynamo Kubernetes Platform.

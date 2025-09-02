@@ -21,6 +21,8 @@ Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestra
 
 ## Quick Start Paths
 
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../../deploy/cloud/helm/platform/README.md).
+
 **Path A: Production Install**
 Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
 
@@ -118,9 +120,9 @@ helm repo add bitnami https://charts.bitnami.com/bitnami
 helm dep build ./platform/
 helm upgrade --install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
+  --set dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator \
+  --set dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG} \
+  --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
 
 → [Verify Installation](#verify-installation)
