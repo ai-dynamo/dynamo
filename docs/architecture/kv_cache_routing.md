@@ -292,4 +292,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### Additional Routing Features
+
+The `KvPushRouter` provides additional methods for fine-grained control:
+
+- **`best_worker_id()`**: Query which worker would be selected for given tokens without actually routing the request. Returns `(worker_id, overlap_blocks)`.
+- **`worker_id` parameter in `generate()`**: Force routing to a specific worker by passing `worker_id=<id>` to bypass the automatic KV-aware selection.
+
 The `router_config_override` parameter allows you to adjust routing behavior per request without recreating the router. This is useful for implementing different routing strategies based on request characteristics.
