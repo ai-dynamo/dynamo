@@ -21,6 +21,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock, Weak},
+    time::Instant,
 };
 
 
@@ -55,9 +56,12 @@ pub mod utils;
 pub mod worker;
 
 pub mod distributed;
+pub use distributed::distributed_test_utils;
 pub use futures::stream;
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
+
+use crate::metrics::prometheus_names::distributed_runtime;
 
 use component::{Endpoint, InstanceSource};
 use utils::GracefulShutdownTracker;
@@ -95,6 +99,8 @@ pub struct SystemHealth {
     use_endpoint_health_status: Vec<String>,
     health_path: String,
     live_path: String,
+    start_time: Instant,
+    uptime_gauge: OnceLock<prometheus::Gauge>,
 }
 
 impl SystemHealth {
@@ -114,6 +120,8 @@ impl SystemHealth {
             use_endpoint_health_status,
             health_path,
             live_path,
+            start_time: Instant::now(),
+            uptime_gauge: OnceLock::new(),
         }
     }
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -149,6 +157,34 @@ impl SystemHealth {
         };
 
         (healthy, endpoints)
+    }
+
+    /// Initialize the uptime gauge using the provided metrics registry
+    pub fn initialize_uptime_gauge<T: crate::metrics::MetricsRegistry>(
+        &self,
+        registry: &T,
+    ) -> anyhow::Result<()> {
+        let gauge = registry.create_gauge(
+            distributed_runtime::UPTIME_SECONDS,
+            "Total uptime of the DistributedRuntime in seconds",
+            &[],
+        )?;
+        self.uptime_gauge
+            .set(gauge)
+            .map_err(|_| anyhow::anyhow!("uptime_gauge already initialized"))?;
+        Ok(())
+    }
+
+    /// Get the current uptime as a Duration
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start_time.elapsed()
+    }
+
+    /// Update the uptime gauge with the current uptime value
+    pub fn update_uptime_gauge(&self) {
+        if let Some(gauge) = self.uptime_gauge.get() {
+            gauge.set(self.uptime().as_secs_f64());
+        }
     }
 }
 

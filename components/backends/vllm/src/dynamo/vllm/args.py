@@ -12,6 +12,8 @@ from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+
 from . import __version__
 from .ports import (
     DEFAULT_DYNAMO_PORT_MAX,
@@ -111,12 +113,14 @@ def parse_args() -> Config:
         "--dyn-tool-call-parser",
         type=str,
         default=None,
-        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4'.",
+        choices=get_tool_parser_names(),
+        help="Tool call parser name for the model.",
     )
     parser.add_argument(
         "--dyn-reasoning-parser",
         type=str,
         default=None,
+        choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model.",
     )
 

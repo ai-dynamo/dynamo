@@ -337,6 +337,9 @@ pub struct SamplingOptions {
     /// The seed to use when sampling
     pub seed: Option<i64>,
 
+    /// Whether to include the stop string in the output.
+    pub include_stop_str_in_output: Option<bool>,
+
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
 }

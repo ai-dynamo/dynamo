@@ -183,8 +183,8 @@ impl
         incoming_request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let mut deltas = request.response_generator();
         let ctx = context.context();
+        let mut deltas = request.response_generator(ctx.id().to_string());
         let req = request.inner.messages.into_iter().next_back().unwrap();
 
         let prompt = match req {
@@ -204,12 +204,12 @@ impl
             for c in prompt.chars() {
                 // we are returning characters not tokens, so there will be some postprocessing overhead
                 tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                let response = deltas.create_choice(0, Some(c.to_string()), None, None);
+                let response = deltas.create_choice(0, Some(c.to_string()), None, None, None);
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
 
-            let response = deltas.create_choice(0, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
+            let response = deltas.create_choice(0, None, None, Some(dynamo_async_openai::types::FinishReason::Stop), None);
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
         };
 
@@ -230,8 +230,8 @@ impl
         incoming_request: SingleIn<NvCreateCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
-        let deltas = request.response_generator();
         let ctx = context.context();
+        let deltas = request.response_generator(ctx.id().to_string());
         let chars_string = prompt_to_string(&request.inner.prompt);
         let output = stream! {
             let mut id = 1;

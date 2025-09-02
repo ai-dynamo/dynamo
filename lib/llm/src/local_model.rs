@@ -202,6 +202,7 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+            card.runtime_config = self.runtime_config.clone();
 
             return Ok(LocalModel {
                 card,
@@ -276,6 +277,7 @@ impl LocalModelBuilder {
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
+        card.runtime_config = self.runtime_config.clone();
 
         Ok(LocalModel {
             card,

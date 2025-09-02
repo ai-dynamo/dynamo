@@ -10,10 +10,11 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from sglang.srt.server_args import ServerArgs
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.sglang import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -29,6 +30,20 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": 0,
         "help": "Maximum number of times a request may be migrated to a different engine worker",
     },
+    "tool-call-parser": {
+        "flags": ["--dyn-tool-call-parser"],
+        "type": str,
+        "default": None,
+        "choices": get_tool_parser_names(),
+        "help": "Tool call parser name for the model.",
+    },
+    "reasoning-parser": {
+        "flags": ["--dyn-reasoning-parser"],
+        "type": str,
+        "default": None,
+        "choices": get_reasoning_parser_names(),
+        "help": "Reasoning parser name for the model.",
+    },
 }
 
 
@@ -38,6 +53,10 @@ class DynamoArgs:
     component: str
     endpoint: str
     migration_limit: int
+
+    # tool and reasoning parser options
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -78,6 +97,7 @@ def parse_args(args: list[str]) -> Config:
             type=info["type"],
             default=info["default"] if "default" in info else None,
             help=info["help"],
+            choices=info.get("choices", None),
         )
 
     # SGLang args
@@ -123,6 +143,8 @@ def parse_args(args: list[str]) -> Config:
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
+        tool_call_parser=parsed_args.dyn_tool_call_parser,
+        reasoning_parser=parsed_args.dyn_reasoning_parser,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 

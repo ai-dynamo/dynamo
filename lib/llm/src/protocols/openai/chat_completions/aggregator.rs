@@ -166,7 +166,7 @@ impl DeltaAggregator {
         // After aggregation, inspect each choice's text for tool call syntax
         for choice in aggregator.choices.values_mut() {
             if choice.tool_calls.is_none()
-                && let Ok(tool_calls) = try_tool_call_parse_aggregate(
+                && let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
                     &choice.text,
                     parsing_options.tool_call_parser.as_deref(),
                 )
@@ -184,6 +184,10 @@ impl DeltaAggregator {
                 }
                 choice.tool_calls = Some(tool_calls);
                 choice.text.clear();
+                // If normal text is not empty, update the choice text
+                if let Some(normal_text) = normal_text.filter(|text| !text.is_empty()) {
+                    choice.text = normal_text;
+                }
                 choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
             }
         }
@@ -223,7 +227,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
         dynamo_async_openai::types::ChatChoice {
             message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
-                content: if delta.tool_calls.is_some() {
+                content: if delta.text.is_empty() {
                     None
                 } else {
                     Some(delta.text)
@@ -571,6 +575,70 @@ mod tests {
 
         // The content should be cleared (None) after tool call parsing
         assert!(choice.message.content.is_none());
+
+        // The finish_reason should be ToolCalls
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            choice.message.role,
+            dynamo_async_openai::types::Role::Assistant
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_output_with_normal_text() {
+        // Simulate a delta with a tool call in the content
+        let tool_call_json = r#"Hey, I'm a normal text! {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
+
+        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
+        let annotated_delta = create_test_delta(
+            0,
+            tool_call_json,
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+        );
+        let data = annotated_delta.data.unwrap();
+
+        // Wrap it in Annotated and create a stream
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        // Call DeltaAggregator::apply
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        // Check the result
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // There should be one choice
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // The tool_calls field should be present and parsed
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        let tool_call = &tool_calls[0];
+        assert_eq!(tool_call.function.name, "get_weather");
+        // The arguments should be a JSON string containing the expected keys
+        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+
+        // The content should be the normal text
+        assert!(choice.message.content.is_some());
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            "Hey, I'm a normal text!"
+        );
 
         // The finish_reason should be ToolCalls
         assert_eq!(

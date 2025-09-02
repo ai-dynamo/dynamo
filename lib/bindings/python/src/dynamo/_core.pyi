@@ -9,6 +9,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Union,
 )
 
@@ -216,7 +217,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -224,6 +225,7 @@ class Endpoint:
         Args:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
+            metrics_labels: Optional list of metrics labels to add to the metrics
         """
         ...
 
@@ -438,7 +440,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component) -> None:
+    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
@@ -1193,6 +1195,61 @@ class ZmqKvEventListener:
 
         Raises:
             ValueError: If events cannot be serialized to JSON
+        """
+        ...
+
+class KvPushRouter:
+    """
+    A KV-aware push router that performs intelligent routing based on KV cache overlap.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        block_size: int,
+        kv_router_config: KvRouterConfig,
+    ) -> None:
+        """
+        Create a new KvPushRouter instance.
+
+        Args:
+            endpoint: The endpoint to connect to for routing requests
+            block_size: The KV cache block size
+            kv_router_config: Configuration for the KV router
+        """
+        ...
+
+    async def generate(
+        self,
+        token_ids: List[int],
+        model: str,
+        stop_conditions: Optional[JsonLike] = None,
+        sampling_options: Optional[JsonLike] = None,
+        output_options: Optional[JsonLike] = None,
+        router_config_override: Optional[JsonLike] = None,
+    ) -> AsyncIterator[JsonLike]:
+        """
+        Generate text using the KV-aware router.
+
+        Args:
+            token_ids: Input token IDs
+            model: Model name to use for generation
+            stop_conditions: Optional stop conditions for generation
+            sampling_options: Optional sampling configuration
+            output_options: Optional output configuration
+            router_config_override: Optional router configuration override
+
+        Returns:
+            An async iterator yielding generation responses
+        """
+        ...
+
+    async def dump_events(self) -> str:
+        """
+        Dump all events from the KV router's indexer.
+
+        Returns:
+            A JSON string containing all indexer events
         """
         ...
 

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::llm::block_manager::distributed::get_barrier_id;
+use crate::llm::block_manager::distributed::get_barrier_id_prefix;
 use crate::{
     llm::block_manager::distributed::VllmTensor, to_pyerr,
     DistributedRuntime as PyDistributedRuntime,
@@ -166,12 +166,12 @@ impl Worker for KvConnectorWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id(get_barrier_id())
+            .barrier_id_prefix(get_barrier_id_prefix())
             .scheduler_client(Some(self.transfer_client.clone()))
             .build()?;
 
         let worker = self.drt.runtime().primary().block_on(async move {
-            let worker = KvbmWorker::new(config).await?;
+            let worker = KvbmWorker::new(config, false).await?;
             anyhow::Ok(worker)
         })?;
 
@@ -265,7 +265,6 @@ impl Worker for KvConnectorWorker {
     /// Trigger layer-wise completion signals.
     /// Trigger block-wise completion signals afer last layer.
     fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
-        self.kvbm_metrics.save_kv_layer_requests.inc();
         self.layers_complete += 1;
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
@@ -278,6 +277,7 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
+        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 
@@ -477,7 +477,7 @@ fn _get_current_context() -> CUcontext {
     ctx
 }
 
-fn event_sync_blocking(event: u64) {
+pub fn event_sync_blocking(event: u64) {
     let status = unsafe { cuEventSynchronize(event as CUevent) };
     assert_eq!(
         status,

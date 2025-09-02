@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Component, InstanceSource},
     pipeline::{
@@ -14,6 +15,7 @@ use dynamo_runtime::{
     },
     prelude::*,
     protocols::annotated::Annotated,
+    utils::typed_prefix_watcher::{key_extractors, watch_prefix_with_extraction},
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,7 @@ pub mod recorder;
 pub mod scheduler;
 pub mod scoring;
 pub mod sequence;
+pub mod subscriber;
 
 use crate::{
     discovery::{MODEL_ROOT_PATH, ModelEntry},
@@ -40,13 +43,12 @@ use crate::{
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
+        subscriber::start_kv_router_background,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
 };
-
-use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -63,6 +65,12 @@ pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
 pub const PREFILL_SUBJECT: &str = "prefill_events";
 pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 
+// for radix tree snapshot storage
+pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
+pub const RADIX_STATE_FILE: &str = "radix-state";
+pub const ROUTER_SNAPSHOT_LOCK: &str = "router-snapshot-lock";
+pub const ROUTER_CLEANUP_LOCK: &str = "router-cleanup-lock";
+
 /// A trait that users can implement to define custom selection logic
 pub trait WorkerSelector {
     fn select_worker(
@@ -71,6 +79,16 @@ pub trait WorkerSelector {
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+}
+
+/// Override configuration for router settings that can be specified per-request
+#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
+pub struct RouterConfigOverride {
+    #[builder(default)]
+    pub overlap_score_weight: Option<f64>,
+
+    #[builder(default)]
+    pub router_temperature: Option<f64>,
 }
 
 /// KV Router configuration parameters
@@ -87,6 +105,12 @@ pub struct KvRouterConfig {
     // TODO: this is not actually used for now
     // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
+
+    /// Threshold for triggering snapshots. If None, no snapshots will be performed.
+    pub router_snapshot_threshold: Option<u32>,
+
+    /// Whether to reset the router state on startup (default: false)
+    pub router_reset_states: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -97,6 +121,8 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             max_num_batched_tokens: 8192,
+            router_snapshot_threshold: Some(10000),
+            router_reset_states: false,
         }
     }
 }
@@ -110,6 +136,8 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         max_num_batched_tokens: Option<u32>,
+        router_snapshot_threshold: Option<Option<u32>>,
+        router_reset_states: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -119,6 +147,9 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
+            router_snapshot_threshold: router_snapshot_threshold
+                .unwrap_or(default.router_snapshot_threshold),
+            router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
         }
     }
 }
@@ -140,6 +171,13 @@ impl Indexer {
             Indexer::ApproxKvIndexer(indexer) => indexer.find_matches(sequence).await,
         }
     }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        match self {
+            Indexer::KvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::ApproxKvIndexer(indexer) => indexer.dump_events().await,
+        }
+    }
 }
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
@@ -159,6 +197,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
+        consumer_uuid: String,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
 
@@ -185,9 +224,6 @@ impl KvRouter {
             .etcd_client()
             .expect("Cannot KV route without etcd client");
 
-        use dynamo_runtime::utils::typed_prefix_watcher::{
-            key_extractors, watch_prefix_with_extraction,
-        };
         let runtime_configs_watcher = watch_prefix_with_extraction(
             etcd_client,
             MODEL_ROOT_PATH,
@@ -219,31 +255,20 @@ impl KvRouter {
         )
         .await?;
 
-        // [gluo TODO] try subscribe_with_type::<RouterEvent>,
-        // error checking below will be different.
+        // Start unified background process if using KvIndexer
         if let Indexer::KvIndexer(ref kv_indexer) = indexer {
-            let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
-            let kv_events_tx = kv_indexer.event_sender();
-
-            tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: RouterEvent = match serde_json::from_slice(&event.payload) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                            // Choosing warn and continue to process other events from other workers
-                            // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
-                            continue;
-                        }
-                    };
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::warn!(
-                            "failed to send kv event to indexer; shutting down: {:?}",
-                            e
-                        );
-                    }
-                }
-            });
+            start_kv_router_background(
+                component.clone(),
+                consumer_uuid,
+                kv_indexer.event_sender(),
+                kv_router_config
+                    .router_snapshot_threshold
+                    .map(|_| kv_indexer.snapshot_event_sender()),
+                cancellation_token.clone(),
+                kv_router_config.router_snapshot_threshold,
+                kv_router_config.router_reset_states,
+            )
+            .await?;
         }
 
         tracing::info!("KV Routing initialized");
@@ -261,6 +286,7 @@ impl KvRouter {
         &self,
         context_id: &str,
         tokens: &[u32],
+        router_config_override: Option<&RouterConfigOverride>,
     ) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
 
@@ -276,6 +302,7 @@ impl KvRouter {
                 isl_tokens,
                 seq_hashes.clone(),
                 overlap_scores.clone(),
+                router_config_override,
             )
             .await?;
 
@@ -305,6 +332,11 @@ impl KvRouter {
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
+
+    /// Dump all events from the indexer
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.indexer.dump_events().await
+    }
 }
 
 // NOTE: this would not be usable for now, should deprecate
@@ -315,7 +347,9 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let (worker_id, _) = self.find_best_match(ctx.id(), &request.tokens).await?;
+        let (worker_id, _) = self
+            .find_best_match(ctx.id(), &request.tokens, None)
+            .await?;
 
         let response = RouterResponse { worker_id };
         let response = Annotated::from_data(response);
@@ -335,6 +369,11 @@ impl KvPushRouter {
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
+    }
+
+    /// Dump all events from the KV router's indexer
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        self.chooser.dump_events().await
     }
 }
 
@@ -357,28 +396,40 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 } else {
                     // Otherwise, find the best match
                     self.chooser
-                        .find_best_match(&context_id, &request.token_ids)
+                        .find_best_match(
+                            &context_id,
+                            &request.token_ids,
+                            request.router_config_override.as_ref(),
+                        )
                         .await?
                 };
 
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();
-                // Update the request with the estimated prefix hit blocks
-                let (mut backend_input, context) = request.into_parts();
-                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
-                let updated_request = context.map(|_| backend_input);
-
                 // if request has the annotation "query_instance_id", for example
                 // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
-                // request will not be routed to worker immediately
+                // request will not be routed to worker immediately.
+                // The gateway EPP will receive the worker_instance_id and the tokens.
                 if query_instance_id {
                     let instance_id_str = instance_id.to_string();
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
-                    let stream = stream::iter(vec![response]);
+
+                    // Return the tokens in nvext.token_data format
+                    let response_tokens =
+                        Annotated::from_annotation("token_data", &request.token_ids)?;
+                    tracing::trace!(
+                        "Tokens requested in the response through the query_instance_id annotation: {:?}",
+                        response_tokens
+                    );
+                    let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
+                // Update the request with the estimated prefix hit blocks
+                let (mut backend_input, context) = request.into_parts();
+                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+                let updated_request = context.map(|_| backend_input);
 
                 let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
                 let stream_context = response_stream.context();

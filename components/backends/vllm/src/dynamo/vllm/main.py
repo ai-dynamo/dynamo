@@ -146,7 +146,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # TODO register_prefill in similar vein to register_llm
 
-    handler = PrefillWorkerHandler(component, engine_client, default_sampling_params)
+    handler = PrefillWorkerHandler(
+        runtime, component, engine_client, default_sampling_params
+    )
 
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
@@ -208,7 +210,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     logger.info(f"VllmWorker for {config.model} has been initialized")
 
     handler = DecodeWorkerHandler(
-        component, engine_client, default_sampling_params, prefill_worker_client
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        prefill_worker_client,
     )
 
     if config.engine_args.enable_prefix_caching:

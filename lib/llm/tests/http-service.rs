@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use anyhow::Error;
 use async_stream::stream;
@@ -23,7 +11,7 @@ use dynamo_llm::http::{
     service::{
         Metrics,
         error::HttpError,
-        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        metrics::{Endpoint, RequestType, Status},
         service_v2::HttpService,
     },
 };
@@ -36,6 +24,7 @@ use dynamo_llm::protocols::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
     engine::AsyncEngineContext,
@@ -95,12 +84,12 @@ impl
         let max_tokens = request.inner.max_tokens.unwrap_or(0) as u64;
 
         // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
-        let mut generator = request.response_generator();
+        let mut generator = request.response_generator(ctx.id().to_string());
 
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None);
+                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None, None);
 
                 yield Annotated::from_data(output);
             }
@@ -362,7 +351,14 @@ async fn test_http_service() {
     let families = registry.gather();
     let histogram_metric_family = families
         .into_iter()
-        .find(|m| m.get_name() == format!("{}_request_duration_seconds", FRONTEND_METRIC_PREFIX))
+        .find(|m| {
+            m.get_name()
+                == format!(
+                    "{}_{}",
+                    name_prefix::FRONTEND,
+                    frontend_service::REQUEST_DURATION_SECONDS
+                )
+        })
         .expect("Histogram metric not found");
 
     assert_eq!(

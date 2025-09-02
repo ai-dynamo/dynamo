@@ -55,20 +55,6 @@ const (
 	PendingState State = "pending"
 )
 
-var (
-	// Grove GroupVersionResources for scaling operations
-	podCliqueGVR = schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliques",
-	}
-	podCliqueScalingGroupGVR = schema.GroupVersionResource{
-		Group:    "grove.io",
-		Version:  "v1alpha1",
-		Resource: "podcliquescalinggroups",
-	}
-)
-
 type etcdStorage interface {
 	DeleteKeys(ctx context.Context, prefix string) error
 }
@@ -88,6 +74,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podgangsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -105,7 +92,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	reason := Reason("undefined")
 	message := Message("")
 	state := PendingState
-	readyStatus := metav1.ConditionFalse
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -123,10 +109,13 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(err, "Reconciliation failed")
 		}
 		dynamoDeployment.SetState(string(state))
+
+		readyStatus := metav1.ConditionFalse
 		if state == ReadyState {
 			readyStatus = metav1.ConditionTrue
 		}
-		// update the CRD status condition
+
+		// Update Ready condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
 			Type:               "Ready",
 			Status:             readyStatus,
@@ -134,6 +123,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			Message:            string(message),
 			LastTransitionTime: metav1.Now(),
 		})
+
 		err = r.Status().Update(ctx, dynamoDeployment)
 		if err != nil {
 			logger.Error(err, "Unable to update the CRD status", "crd", req.NamespacedName)
@@ -160,20 +150,33 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 type Resource interface {
-	IsReady() bool
+	IsReady() (ready bool, reason string)
 	GetName() string
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
 	logger := log.FromContext(ctx)
-	if r.Config.Grove.Enabled {
-		// check if explicit opt out of grove
-		if dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove] == consts.KubeLabelValueFalse {
-			logger.Info("Grove is explicitly disabled for this deployment, skipping grove resources reconciliation")
-			return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
-		}
+	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
+	// Unset or not "false": Grove if available; else component mode
+	// "false": component mode (multinode -> LWS; single-node -> standard)
+	enableGrove := true
+	if dynamoDeployment.Annotations != nil && strings.ToLower(dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
+		enableGrove = false
+	}
+
+	// Determine if any service is multinode
+	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
+
+	if enableGrove && r.Config.Grove.Enabled {
+		logger.Info("Reconciling Grove resources", "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled, "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
 	}
+	if hasMultinode && !r.Config.LWS.Enabled {
+		err := fmt.Errorf("no multinode orchestrator available")
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled, "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
+		return "", "", "", err
+	}
+	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled, "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
 	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
 
 }
@@ -185,9 +188,9 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	var gvr schema.GroupVersionResource
 	switch resourceType {
 	case "PodClique":
-		gvr = podCliqueGVR
+		gvr = consts.PodCliqueGVR
 	case "PodCliqueScalingGroup":
-		gvr = podCliqueScalingGroupGVR
+		gvr = consts.PodCliqueScalingGroupGVR
 	default:
 		return fmt.Errorf("unsupported Grove resource type: %s", resourceType)
 	}
@@ -267,17 +270,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return "", "", "", fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
-	groveGangSetAsResource := commonController.WrapResource(syncedGroveGangSet, func() bool {
-		if syncedGroveGangSet.Status.LastOperation != nil && syncedGroveGangSet.Status.LastOperation.State == grovev1alpha1.LastOperationStateSucceeded {
-			return true
-		}
-		return false
-	})
+	groveGangSetAsResource := commonController.WrapResource(
+		syncedGroveGangSet,
+		func() (bool, string) {
+			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
+			allComponentsReady, reason := dynamo.EvaluateAllComponentsReady(ctx, r.Client, dynamoDeployment)
+			if !allComponentsReady {
+				return false, reason
+			}
+			return true, ""
+		},
+	)
 
 	// Handle Grove scaling operations after structural changes
 	if err := r.reconcileGroveScaling(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
-		return FailedState, "grove_scaling_failed", Message(err.Error()), err
+		return "", "", "", fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
 	resources := []Resource{groveGangSetAsResource}
@@ -296,9 +304,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				logger.Error(err, "failed to sync the main component service")
 				return "", "", "", fmt.Errorf("failed to sync the main component service: %w", err)
 			}
-			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService, func() bool {
-				return true
-			})
+			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService,
+				func() (bool, string) {
+					return true, ""
+				})
 			resources = append(resources, mainComponentServiceAsResource)
 			// generate the main component ingress
 			ingressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
@@ -317,9 +326,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				logger.Error(err, "failed to sync the main component ingress")
 				return "", "", "", fmt.Errorf("failed to sync the main component ingress: %w", err)
 			}
-			resources = append(resources, commonController.WrapResource(syncedMainComponentIngress, func() bool {
-				return true
-			}))
+			resources = append(resources, commonController.WrapResource(syncedMainComponentIngress,
+				func() (bool, string) {
+					return true, ""
+				}))
 			// generate the main component virtual service
 			if r.Config.IngressConfig.UseVirtualService() {
 				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
@@ -334,9 +344,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 					logger.Error(err, "failed to sync the main component virtual service")
 					return "", "", "", fmt.Errorf("failed to sync the main component virtual service: %w", err)
 				}
-				resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService, func() bool {
-					return true
-				}))
+				resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService,
+					func() (bool, string) {
+						return true, ""
+					}))
 			}
 		}
 	}
@@ -344,16 +355,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) (State, Reason, Message, error) {
+	var notReadyReasons []string
 	notReadyResources := []string{}
+
 	for _, resource := range resources {
-		if !resource.IsReady() {
+		ready, reason := resource.IsReady()
+		if !ready {
 			notReadyResources = append(notReadyResources, resource.GetName())
+			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s: %s", resource.GetName(), reason))
 		}
 	}
+
 	if len(notReadyResources) == 0 {
 		return ReadyState, "all_resources_are_ready", Message("All resources are ready"), nil
 	}
-	return PendingState, "some_resources_are_not_ready", Message(fmt.Sprintf("%d resources not ready: %v", len(notReadyResources), notReadyResources)), nil
+	return PendingState, "some_resources_are_not_ready", Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))), nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {

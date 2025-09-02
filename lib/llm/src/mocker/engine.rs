@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, OnceCell, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
@@ -180,12 +180,12 @@ impl MockVllmEngine {
         component: Option<Component>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        tracing::info!("Creating metrics publisher");
+        tracing::debug!("Creating metrics publisher");
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
-        tracing::info!("Metrics publisher created");
+        tracing::debug!("Metrics publisher created");
 
         if let Some(comp) = component {
-            tracing::info!("Creating metrics endpoint");
+            tracing::debug!("Creating metrics endpoint");
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
@@ -197,10 +197,10 @@ impl MockVllmEngine {
 
             // Give it a moment to start
             tokio::time::sleep(Duration::from_millis(100)).await;
-            tracing::info!("Metrics endpoint started (background)");
+            tracing::debug!("Metrics endpoint started (background)");
         }
 
-        tracing::info!("Starting metrics background tasks");
+        tracing::debug!("Starting metrics background tasks");
         for (dp_rank, scheduler) in schedulers.iter().enumerate() {
             let mut metrics_rx = scheduler.metrics_receiver();
             let publisher = metrics_publisher.clone();
@@ -223,7 +223,7 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::info!("Metrics publishing cancelled for DP rank {dp_rank}");
+                            tracing::debug!("Metrics publishing cancelled for DP rank {dp_rank}");
                             break;
                         }
                     }
@@ -241,14 +241,14 @@ impl MockVllmEngine {
         block_size: usize,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        tracing::info!("Starting KV events publishing");
+        tracing::debug!("Starting KV events publishing");
 
         // Only start KV events publishing if we have a component
         let Some(comp) = component else {
             tracing::warn!("No component provided, skipping KV events publishing");
             return Ok(());
         };
-        tracing::info!("Component found for KV events publishing");
+        tracing::debug!("Component found for KV events publishing");
 
         tracing::debug!("Getting worker_id");
         let worker_id = comp
@@ -259,16 +259,16 @@ impl MockVllmEngine {
         // let worker_id = 0;
         tracing::debug!("Worker_id set to: {worker_id}");
 
-        tracing::info!("Creating KV event publisher");
+        tracing::debug!("Creating KV event publisher");
         let kv_event_publisher = Arc::new(KvEventPublisher::new(
             comp.clone(),
             worker_id,
             block_size as u32,
             None,
         )?);
-        tracing::info!("KV event publisher created");
+        tracing::debug!("KV event publisher created");
 
-        tracing::info!(
+        tracing::debug!(
             "Starting KV event background tasks for {} receivers",
             kv_event_receivers.len()
         );
@@ -298,7 +298,7 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::info!("KV events publishing cancelled for DP rank {dp_rank}");
+                            tracing::debug!("KV events publishing cancelled for DP rank {dp_rank}");
                             break;
                         }
                     }
@@ -366,7 +366,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         self.direct(direct_request, dp_rank as usize);
 
         // Create a simple channel for the stream
-        let (stream_tx, stream_rx) = mpsc::channel::<LLMEngineOutput>(64);
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
@@ -380,19 +380,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 tokio::select! {
                     maybe_signal = request_rx.recv() => {
                         let Some(signal) = maybe_signal else {
-                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string())).await;
+                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string()));
                             break;
                         };
-
-                        if signal.completed && token_count < max_tokens - 1 {
-                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string())).await;
-                            break;
-                        }
-
-                        if signal.completed {
-                            let _ = stream_tx.send(LLMEngineOutput::length()).await;
-                            break;
-                        }
 
                         // Generate a new token
                         let token_id = generate_random_token();
@@ -409,13 +399,25 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             index: None,
                         };
 
-                        if stream_tx.send(output).await.is_err() {
+                        if signal.completed && token_count < max_tokens {
+                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
+                            break;
+                        }
+
+                        if signal.completed {
+                            let _ = stream_tx.send(output);
+                            let _ = stream_tx.send(LLMEngineOutput::length());
+                            break;
+                        }
+
+                        if stream_tx.send(output).is_err() {
+                            tracing::error!("Output stream receiver closed.");
                             break;
                         }
                     }
 
                     _ = async_context.stopped() => {
-                        let _ = stream_tx.send(LLMEngineOutput::cancelled()).await;
+                        let _ = stream_tx.send(LLMEngineOutput::cancelled());
                         break;
                     }
                 }
@@ -426,8 +428,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             active.remove(&request_uuid);
         });
 
-        // Create a simple ReceiverStream which is naturally Send + Sync
-        let stream = ReceiverStream::new(stream_rx);
+        // Create a simple UnboundedReceiverStream which is naturally Send + Sync
+        let stream = UnboundedReceiverStream::new(stream_rx);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
@@ -474,7 +476,7 @@ impl AnnotatedMockEngine {
                     continue;
                 }
 
-                tracing::info!("Component service is now available, starting mocker engine");
+                tracing::debug!("Component service is now available, starting mocker engine");
 
                 // Start the engine with the component
                 if let Err(e) = inner_clone.start(component).await {
@@ -513,7 +515,7 @@ pub async fn make_mocker_engine(
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
-    tracing::info!("Creating mocker engine with config: {args:?}");
+    tracing::debug!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
         AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint_id);
 
@@ -632,21 +634,20 @@ mod integration_tests {
         tracing::info!("✓ Router created");
 
         // Create test requests for both DP workers
-        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
-            model: "mock".to_string(),
-            token_ids: tokens,
-            batch_token_ids: None,
-            stop_conditions: StopConditions {
-                max_tokens: Some(TOKENS_PER_REQUEST as u32),
-                ..Default::default()
-            },
-            sampling_options: SamplingOptions::default(),
-            output_options: OutputOptions::default(),
-            eos_token_ids: vec![],
-            mdc_sum: None,
-            annotations: vec![format!("dp_rank:{dp_rank}")],
-            estimated_prefix_hit_num_blocks: None,
-            backend_instance_id: None,
+        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| {
+            PreprocessedRequest::builder()
+                .model("mock".to_string())
+                .token_ids(tokens)
+                .stop_conditions(StopConditions {
+                    max_tokens: Some(TOKENS_PER_REQUEST as u32),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .eos_token_ids(vec![])
+                .annotations(vec![format!("dp_rank:{dp_rank}")])
+                .build()
+                .unwrap()
         };
 
         let requests = vec![

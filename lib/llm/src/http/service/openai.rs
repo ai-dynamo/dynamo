@@ -31,7 +31,6 @@ use super::{
     metrics::{Endpoint, ResponseMetricCollector},
     service_v2,
 };
-use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     ParsingOptions,
@@ -42,6 +41,7 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use crate::{discovery::ModelManager, preprocessor::LLMMetricAnnotation};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -195,8 +195,8 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
-fn get_parsing_options(state: &Arc<service_v2::State>, model: &str) -> ParsingOptions {
-    let tool_call_parser = state.manager().get_model_tool_call_parser(model);
+fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
+    let tool_call_parser = manager.get_model_tool_call_parser(model);
     let reasoning_parser = None; // TODO: Implement reasoning parser
 
     ParsingOptions::new(tool_call_parser, reasoning_parser)
@@ -253,8 +253,7 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request.id().to_string();
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -275,7 +274,7 @@ async fn completions(
         .get_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(&state, model);
+    let parsing_options = get_parsing_options(state.manager(), model);
 
     let mut inflight_guard =
         state
@@ -354,13 +353,15 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
     Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let request_id = request.id().to_string();
 
     // Embeddings are typically not streamed, so we default to non-streaming
     let streaming = false;
@@ -380,10 +381,6 @@ async fn embeddings(
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
-
-    // setup context
-    // todo - inherit request_id from distributed trace details
-    let request = Context::with_id(request, request_id.clone());
 
     // issue the generate call on the engine
     let stream = engine
@@ -504,7 +501,7 @@ async fn chat_completions(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(&state, model);
+    let parsing_options = get_parsing_options(state.manager(), model);
 
     let mut inflight_guard =
         state
@@ -739,7 +736,7 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(&state, model);
+    let parsing_options = get_parsing_options(state.manager(), model);
 
     let mut inflight_guard =
         state

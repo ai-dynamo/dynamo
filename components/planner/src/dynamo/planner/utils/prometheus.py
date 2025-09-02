@@ -43,6 +43,7 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
+            # TODO: use prometheus_names.rs
             full_metric_name = f"dynamo_frontend_{metric_name}"
             query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
             result = self.prom.custom_query(query=query)
