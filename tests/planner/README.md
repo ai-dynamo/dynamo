@@ -139,8 +139,9 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 
 1. **Unit Tests** (`test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
 2. **End-to-End Tests** (`scaling/run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
+3. **End-to-End Perf Tests** (see instructions below) - Compare performance (goodput and goodput/GPU) on deployments with and without sla planner
 
-### Quick Start
+### Quick Start for Unit Tests and End-to-End Tests
 
 #### Run Unit Tests Only
 Test the replica calculation logic without requiring Kubernetes:
@@ -189,6 +190,56 @@ The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D con
 - **Transition delay**: 30s between phases
 - **Total test duration**: ~7 minutes + scaling observation
 - **Smart cleanup**: Only removes deployment if test created it (preserves existing deployments)
+
+### Instructions for End-to-End Perf Tests
+
+In this test, we compare performance (goodput and goodput/GPU) on deployments on the following four deployments using the aforementioned 8b FP8 model on H200 and the dataset used in dryrun:
+- Config 1 with inefficient P/D ratio: 3xTP1P_1xTP1D_4GPU
+ `./perf_test_configs/disagg_8b_3p1d.yaml`
+- Config 2 with best static deployment: 2xTP1P_2xTP1D_4GPU
+ `./perf_test_configs/disagg_8b_2p2d.yaml`
+- Config 3 with inefficient parallelization mapping: 1xTP2P_1xTP2D_4GPU
+ `./perf_test_configs/disagg_8b_tp2.yaml`
+- Config 4 with sla planner: `./perf_test_configs/disagg_8b_planner.yaml`
+
+To run the test on each configuration, first deploy the corresponding DynamoGraphDeployment by
+
+```bash
+kubectl apply -f ./perf_test_configs/<config_file_name> -n <namespace>
+```
+
+When running deployment with sla-planner, to reduce the image pulling time, deploy a `DaemonSet` to cache the image in advance:
+
+```bash
+kubectl apply -f ./perf_test_configs/image_cache_daemonset.yaml -n <namespace>
+```
+
+Then, port-forward or shell into the frontend pod and run GenAI-Perf to get the goodput:
+
+```bash
+genai-perf profile \
+  --model nvidia/Llama-3.1-8B-Instruct-FP8 \
+  --tokenizer nvidia/Llama-3.1-8B-Instruct-FP8 \
+  --endpoint-type chat \
+  --url localhost:8000 \ # or the port-forwarded port
+  --streaming \
+  --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
+  --fixed-schedule True \
+  --goodput time_to_first_token:200 inter_token_latency:10 \
+  -- -v -max-threads 64 \
+```
+
+#### E2E Perf Test Results
+
+![Results](./figures/sla_planner_perf.png)
+
+The table below shows the performance improvement of SLA planner across different deployment configurations:
+
+| Baseline | Goodput Improvement | Goodput/GPU Improvement |
+|---------------|-----------------|-------------------------|
+| Inefficient P/D ratio | 725% | 600% |
+| Inefficient parallelization mapping | 311% | 249% |
+| Best static deployment | 52% | 29% |
 
 ### Prerequisites
 
