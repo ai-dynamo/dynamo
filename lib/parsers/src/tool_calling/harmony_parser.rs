@@ -23,7 +23,7 @@ pub fn parse_tool_calls_harmony(
     text: &str,
     config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let trimmed = text.trim();
+    let mut trimmed = text.trim().to_string();
 
     // Check if tool call start tokens are present, if not return everything as normal text
     // Start Token: "<|start|>assistant<|channel|>commentary" should be present in the text if tool calls are present
@@ -33,19 +33,24 @@ pub fn parse_tool_calls_harmony(
         .iter()
         .any(|token| trimmed.contains(token))
     {
-        return Ok((vec![], Some(trimmed.to_string())));
+        return Ok((vec![], Some(trimmed)));
+    }
+
+    // Workaround to add <|call|> token to the end of the text if it is not present
+    if !trimmed.ends_with("<|call|>") {
+        trimmed += "<|call|>";
     }
 
     let enc = match get_harmony_encoding().as_ref() {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
-            return Ok((vec![], Some(text.to_string())));
+            return Ok((vec![], Some(trimmed)));
         }
     };
 
     // Encode the text into tokens using harmony encoding
-    let tokens = enc.tokenizer().encode_with_special_tokens(text);
+    let tokens = enc.tokenizer().encode_with_special_tokens(&trimmed);
 
     // Create StreamableParser to process each token and create Harmony Format messages
     // Set Role to Assistant because we are parsing tool calls from an assistant message
@@ -55,7 +60,7 @@ pub fn parse_tool_calls_harmony(
             tracing::debug!(
                 "Failed to create harmony streamable parser: {e}. Tool calls will not be parsed."
             );
-            return Ok((vec![], Some(text.to_string())));
+            return Ok((vec![], Some(trimmed)));
         }
     };
 
@@ -164,7 +169,10 @@ mod tests {
             ..Default::default()
         };
         let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
+        assert_eq!(
+            normal_content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -200,7 +208,10 @@ mod tests {
             ..Default::default()
         };
         let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
+        assert_eq!(
+            normal_content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -229,5 +240,22 @@ mod tests {
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_harmony_without_call_token() {
+        let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        assert_eq!(normal_content, Some("We need to call get_weather function. The user asks \"What's the weather like in San Francisco in Celsius?\" So location: \"San Francisco, CA\" unit: \"celsius\". Let's call function.".to_string()));
+        assert_eq!(tool_calls.len(), 1);
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "celsius");
     }
 }
