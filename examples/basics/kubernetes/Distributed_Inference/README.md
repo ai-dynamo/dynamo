@@ -20,11 +20,11 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 ```
 3. Model hosting with vLLM backend
 This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.com/ai-dynamo/dynamo/blob/main/components/backends/vllm/deploy/agg_router.yaml). It has following customizations
-- Deployed `Qwen/Qwen2.5-1.5B-Instruct` model 
+- Deployed `Qwen/Qwen2.5-1.5B-Instruct` model
 - Use KV cache based routing in frontend deployment `--router-mode kv`
 - Mounted a local cache folder `/YOUR/LOCAL/CACHE/FOLDER` for model artifacts reuse
 - Created 4 replicas for this model deployment by setting `replicas: 4`
-- Added `debug` flag environment variable for observability 
+- Added `debug` flag environment variable for observability
 Create a K8S secret with your Huggingface token and then deploy the models
 ```sh
 export HF_TOKEN=YOUR_HF_TOKEN
