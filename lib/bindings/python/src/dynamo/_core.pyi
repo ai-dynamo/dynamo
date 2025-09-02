@@ -1227,6 +1227,7 @@ class KvPushRouter:
         sampling_options: Optional[JsonLike] = None,
         output_options: Optional[JsonLike] = None,
         router_config_override: Optional[JsonLike] = None,
+        worker_id: Optional[int] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1238,9 +1239,38 @@ class KvPushRouter:
             sampling_options: Optional sampling configuration
             output_options: Optional output configuration
             router_config_override: Optional router configuration override
+            worker_id: Optional worker ID to route to directly. If set, the request
+                      will be sent to this specific worker and router states will be
+                      updated accordingly.
 
         Returns:
             An async iterator yielding generation responses
+
+        Note:
+            - If worker_id is set, the request bypasses KV matching and routes directly
+              to the specified worker while still updating router states.
+            - This is different from query_instance_id which doesn't route the request.
+        """
+        ...
+
+    async def best_worker_id(
+        self,
+        context_id: str,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+    ) -> Tuple[int, int]:
+        """
+        Find the best matching worker for the given tokens without updating states.
+
+        Args:
+            context_id: String identifier for the request
+            token_ids: List of token IDs to find matches for
+            router_config_override: Optional router configuration override
+
+        Returns:
+            A tuple of (worker_id, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - overlap_blocks: The number of overlapping blocks found
         """
         ...
 

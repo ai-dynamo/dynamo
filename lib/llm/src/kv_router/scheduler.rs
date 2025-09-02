@@ -279,6 +279,20 @@ impl KvScheduler {
         Ok(best_worker_id)
     }
 
+    pub async fn add_request(
+        &self,
+        request_id: String,
+        token_sequence: Vec<SequenceHash>,
+        isl: usize,
+        overlap: u32,
+        worker_id: i64,
+    ) {
+        let _ = self
+            .slots
+            .add_request(request_id, token_sequence, isl, overlap, worker_id)
+            .await;
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) {
         let _ = self
             .slots
