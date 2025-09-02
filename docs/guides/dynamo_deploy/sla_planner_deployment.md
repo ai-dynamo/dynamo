@@ -23,7 +23,7 @@ flowchart LR
 
 ## Prerequisites
 - Kubernetes cluster with GPU nodes
-- [Pre-Deployment Profiling](../../benchmarks/pre_deployment_profiling.md) results saved to `dynamo-pvc` PVC.
+- [Pre-Deployment Profiling](../../benchmarks/pre_deployment_profiling.md) completed and its results saved to `dynamo-pvc` PVC.
 - Prefill and decode worker uses the best parallelization mapping suggested by the pre-deployment profiling script.
 
 > [!NOTE]
