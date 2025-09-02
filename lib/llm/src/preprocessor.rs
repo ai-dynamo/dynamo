@@ -223,17 +223,18 @@ impl OpenAIPreprocessor {
                 .nvext()
                 .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
 
-            if use_raw_prompt {
+            let formatted_prompt = if use_raw_prompt {
                 match request.raw_prompt() {
-                    Some(prompt) => Ok(Some(prompt)),
+                    Some(prompt) => prompt,
                     None => {
                         tracing::warn!("Raw prompt requested but not available");
-                        Ok(Some(self.formatter.render(request)?))
+                        self.formatter.render(request)?
                     }
                 }
             } else {
-                Ok(Some(self.formatter.render(request)?))
-            }
+                self.formatter.render(request)?
+            };
+            Ok(Some(formatted_prompt))
         } else {
             Ok(None)
         }
@@ -275,8 +276,16 @@ impl OpenAIPreprocessor {
             PromptInput::Text(_) => {
                 if let Some(text_input) = request.extract_text() {
                     match text_input {
-                        TextInput::Single(_) => {
-                            let formatted_prompt = formatted_prompt.expect("Could not find a prompt. The paired match statements earlier should make this unreachable");
+                        TextInput::Single(raw_prompt) => {
+                            if let Some(f) = formatted_prompt.as_ref()
+                                && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
+                            {
+                                annotations
+                                    .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
+                            }
+
+                            // Completions will use raw_prompt, no template
+                            let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
                             // Check if backend_instance_id is present and token_data is provided
                             let has_backend_instance_id = request
@@ -299,21 +308,14 @@ impl OpenAIPreprocessor {
                                     tracing::warn!(
                                         "backend_instance_id provided but no token_data; tokenizing prompt"
                                     );
-                                    let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                    let encoding = self.tokenizer.encode(&prompt)?;
                                     (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
                                 // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                                let encoding = self.tokenizer.encode(&prompt)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
-
-                            if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-                                annotations.insert(
-                                    ANNOTATION_FORMATTED_PROMPT.to_string(),
-                                    formatted_prompt,
-                                );
-                            }
 
                             if request.has_annotation(ANNOTATION_TOKEN_IDS)
                                 && !skip_token_annotation
