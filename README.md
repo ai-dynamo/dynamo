@@ -151,6 +151,13 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 - Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
+### Benchmarking Dynamo
+
+Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
+
+* **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using GenAI-Perf
+* **[Pre-Deployment Profiling](docs/benchmarks/pre_deployment_profiling.md)** – Optimize configurations before deployment to meet SLA requirements
+
 # Engines
 
 Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, NATS and etcd need to be installed, along with a Dynamo frontend (`python -m dynamo.frontend [--interactive]`).

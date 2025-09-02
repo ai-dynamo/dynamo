@@ -73,6 +73,14 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 --set "kai-scheduler.enabled=true"
 ```
 
+> [!TIP]
+> By default, Model Express Server is not used.
+> If you wish to use an existing Model Express Server, you can set the modelExpressURL to the existing server's URL in the helm install command:
+
+```bash
+--set "dynamo-operator.modelExpressURL=http://model-express-server.model-express.svc.cluster.local:8080"
+```
+
 
 → [Verify Installation](#verify-installation)
 
@@ -189,3 +197,4 @@ kubectl create secret generic hf-token-secret \
 - [GKE-specific setup](gke_setup.md)
 - [Create custom deployments](create_deployment.md)
 - [Dynamo Operator details](dynamo_operator.md)
+- [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

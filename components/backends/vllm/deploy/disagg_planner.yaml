@@ -20,7 +20,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -47,11 +47,11 @@ spec:
         failureThreshold: 10
       pvc:
         create: false
-        name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -95,7 +95,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -118,7 +118,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -141,7 +141,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

@@ -28,7 +28,7 @@ The SLA planner consists of several key components:
 
 ## Pre-Deployment Profiling
 
-SLA-based planner requires pre-deployment profiling to operate. See [Pre-Deployment Profiling](pre_deployment_profiling.md) for more details.
+SLA-based planner requires pre-deployment profiling to operate. See [Pre-Deployment Profiling](../benchmarks/pre_deployment_profiling.md) for more details.
 
 ## Load Prediction
 
@@ -115,4 +115,4 @@ kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
 ```
 
 > [!NOTE]
-> The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The dynamo frontend provides these metrics automatically.
+> The SLA planner requires a frontend that reports metrics at the `/metrics` HTTP endpoint with the number of requests, ISL, OSL, TTFT, and ITL in the correct format. The dynamo frontend provides these metrics automatically.

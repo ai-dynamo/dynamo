@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -225,6 +226,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     model_input = ModelInput.Tokens
     model_type = ModelType.Chat | ModelType.Completions
     multimodal_processor = None
+
+    if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        # We need to initialize the tokenizer for the test logits processor
+        # But detokenizing still happens in the rust engine, so we do _not_ want
+        # to set default_sampling_params.detokenize to True.
+        engine_args["skip_tokenizer_init"] = False
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False

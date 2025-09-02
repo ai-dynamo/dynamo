@@ -88,3 +88,34 @@ def completions_response_handler(response):
     assert len(result["choices"]) > 0, "Empty choices in response"
     assert "text" in result["choices"][0], "Missing 'text' in first choice"
     return result["choices"][0]["text"]
+
+
+def metrics_handler(response):
+    """Handler to check if metrics endpoint is working and contains model label."""
+    import logging
+    import re
+
+    logger = logging.getLogger(__name__)
+    metrics_text = response.text
+
+    # Check for any model label in dynamo_component_requests_total metric
+    pattern = r'dynamo_component_requests_total\{[^}]*model="[^"]*"[^}]*\}\s+(\d+)'
+    matches = re.findall(pattern, metrics_text)
+
+    if not matches:
+        raise AssertionError(
+            "Metric 'dynamo_component_requests_total' with model label not found in metrics output"
+        )
+
+    # Since we send a request first, the counter should be > 0
+    for match in matches:
+        request_count = int(match)
+        if request_count > 0:
+            logger.info(
+                f"Found dynamo_component_requests_total with count: {request_count}"
+            )
+            return metrics_text
+
+    raise AssertionError(
+        "dynamo_component_requests_total exists but has count of 0 - request was not tracked"
+    )

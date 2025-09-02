@@ -16,7 +16,6 @@ Quick deployment guide for the disaggregated planner with automatic scaling.
 ```mermaid
 flowchart LR
   Frontend --"/metrics"--> Prometheus
-  Prometheus --"scrape"--> Prometheus
   Planner --"query API"--> Prometheus
   Planner --"scaling decisions"--> Workers["prefill<br/>backend"]
   Frontend -.->|"requests"| Workers
@@ -25,7 +24,7 @@ flowchart LR
 ## Prerequisites
 - Kubernetes cluster with GPU nodes
 - `hf-token-secret` created in target namespace
-- [Pre-Deployment Profiling](../../architecture/pre_deployment_profiling.md) results saved to `profiling-pvc` PVC.
+- [Pre-Deployment Profiling](../../benchmarks/pre_deployment_profiling.md) results saved to `dynamo-pvc` PVC.
 - Prefill and decode worker uses the best parallelization mapping suggested by the pre-deployment profiling script.
 
 ```bash
@@ -62,7 +61,7 @@ vllm-disagg-planner-prefill-*             1/1 Running
 kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-frontend 8000:8000
 
 # Send a streaming request (required for full metrics)
-curl http://localhost:8000/v1/chat/completions \
+curl -N http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -101,8 +100,8 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 **Connection Issues:**
 ```bash
 # Verify Prometheus is accessible (runs on port 8000)
-kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 8000:8000
-curl "http://localhost:8000/api/v1/query?query=up"
+kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 9090:8000
+curl "http://localhost:9090/api/v1/query?query=up"
 ```
 
 **Missing Metrics:**
