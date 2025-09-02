@@ -15,10 +15,9 @@
 
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 
 from pydantic import BaseModel
-
 from utils.defaults import DEFAULT_MODEL_NAME, DYNAMO_RUN_DEFAULT_PORT
 
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
@@ -137,11 +136,11 @@ class VllmV1ConfigModifier:
 
         if target == "prefill":
             # convert prefill worker into decode worker
-            cfg.spec.services[WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name] = (
-                cfg.spec.services[
-                    WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
-                ]
-            )
+            cfg.spec.services[
+                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+            ] = cfg.spec.services[
+                WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
+            ]
             del cfg.spec.services[
                 WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
             ]
@@ -191,7 +190,7 @@ class VllmV1ConfigModifier:
         decode_worker_config = cfg.spec.services[
             WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
         ]
-        decode_worker_config["replicas"] = 1
+        decode_worker_config.replicas = 1
 
         return cfg.model_dump()
 
@@ -203,14 +202,19 @@ class VllmV1ConfigModifier:
             WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
         ].resources.requests["gpu"] = str(tp_size)
         if (
-            "limits"
-            in cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].resources
-        ):
             cfg.spec.services[
                 WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].resources.limits["gpu"] = str(tp_size)
+            ].resources.limits
+            is not None
+        ):
+            # Explicitly cast `limits` as the typecheck cannot determine that
+            # limits is not None here
+            cast(
+                dict[str, str],
+                cfg.spec.services[
+                    WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+                ].resources.limits,
+            )["gpu"] = str(tp_size)
 
         args = cfg.spec.services[
             WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
@@ -369,14 +373,19 @@ class SGLangConfigModifier:
             WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
         ].resources.requests["gpu"] = str(tp_size)
         if (
-            "limits"
-            in cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].resources
-        ):
             cfg.spec.services[
                 WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].resources.limits["gpu"] = str(tp_size)
+            ].resources.limits
+            is not None
+        ):
+            # Explicitly cast `limits` as the typecheck cannot determine that
+            # limits is not None here
+            cast(
+                dict[str, str],
+                cfg.spec.services[
+                    WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+                ].resources.limits,
+            )["gpu"] = str(tp_size)
 
         args = cfg.spec.services[
             WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name

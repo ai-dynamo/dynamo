@@ -42,7 +42,7 @@ classifiers = [
 dependencies = [
     "networkx",
     "pandas",
-    "pydantic",
+    "pydantic>=2",
     "tabulate",
     "types-tabulate",
     "transformers",
