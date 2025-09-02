@@ -273,8 +273,7 @@ class Planner:
 
         logger.info(
             f"Prefill calculation: {pred_prefill_throughput:.2f}(p_thpt) / "
-            f"{self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
-            * self.args.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
+            f"{self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl) * self.args.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
             f"{next_num_p}(num_p)"
         )
 
@@ -297,11 +296,11 @@ class Planner:
             itl=corrected_itl, context_length=next_isl + next_osl / 2
         )
         # 3. compute number of decode replicas needed
-        pred_decode_throughput = (
-            next_num_req * next_osl / self.args.adjustment_interval
-        )
+        pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
         next_num_d = math.ceil(
-            pred_decode_throughput / pred_decode_thpt_per_gpu / self.args.decode_engine_num_gpu
+            pred_decode_throughput
+            / pred_decode_thpt_per_gpu
+            / self.args.decode_engine_num_gpu
         )
 
         logger.info(
