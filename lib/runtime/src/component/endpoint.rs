@@ -152,7 +152,10 @@ impl EndpointConfigBuilder {
 
         // Register with graceful shutdown tracker if needed
         if graceful_shutdown {
-            tracing::debug!("Registering endpoint '{}' with graceful shutdown tracker", endpoint.name);
+            tracing::debug!(
+                "Registering endpoint '{}' with graceful shutdown tracker",
+                endpoint.name
+            );
             let tracker = endpoint.drt().graceful_shutdown_tracker();
             tracker.register_endpoint();
         } else {
@@ -179,14 +182,16 @@ impl EndpointConfigBuilder {
         let endpoint_name_for_task = endpoint_name.clone();
 
         let task = tokio::spawn(async move {
-            let result = push_endpoint.start(
-                service_endpoint,
-                namespace_name_for_task,
-                component_name_for_task,
-                endpoint_name_for_task,
-                lease_id,
-                system_health,
-            ).await;
+            let result = push_endpoint
+                .start(
+                    service_endpoint,
+                    namespace_name_for_task,
+                    component_name_for_task,
+                    endpoint_name_for_task,
+                    lease_id,
+                    system_health,
+                )
+                .await;
 
             // Unregister from graceful shutdown tracker
             if let Some(tracker) = tracker_clone {
@@ -212,11 +217,7 @@ impl EndpointConfigBuilder {
 
         if let Some(etcd_client) = &etcd_client
             && let Err(e) = etcd_client
-                .kv_create(
-                    &etcd_path,
-                    info,
-                    Some(lease_id),
-                )
+                .kv_create(&etcd_path, info, Some(lease_id))
                 .await
         {
             tracing::error!("Failed to register discoverable service: {:?}", e);

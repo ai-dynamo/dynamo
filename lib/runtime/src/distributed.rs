@@ -24,8 +24,8 @@ use crate::{
     transports::{etcd, nats, tcp},
 };
 
-use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use super::utils::GracefulShutdownTracker;
+use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
 use derive_getters::Dissolve;

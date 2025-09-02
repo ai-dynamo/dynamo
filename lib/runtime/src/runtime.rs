@@ -25,14 +25,14 @@
 //! Notes: We will need to do an evaluation on what is fully public, what is pub(crate) and what is
 //! private; however, for now we are exposing most objects as fully public while the API is maturing.
 
-use super::{Result, Runtime, RuntimeType, error};
 use super::utils::GracefulShutdownTracker;
+use super::{Result, Runtime, RuntimeType, error};
 use crate::config::{self, RuntimeConfig};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, atomic::Ordering};
-use tokio::{signal, task::JoinHandle, sync::Mutex};
+use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -150,7 +150,9 @@ impl Runtime {
             }
 
             // Phase 3: Now shutdown NATS/ETCD by cancelling the main token
-            tracing::info!("Phase 3: All graceful endpoints completed, shutting down NATS/ETCD connections");
+            tracing::info!(
+                "Phase 3: All graceful endpoints completed, shutting down NATS/ETCD connections"
+            );
             main_token.cancel();
         });
     }

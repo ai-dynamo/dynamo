@@ -229,7 +229,7 @@ genai-perf profile \
   -- -v -max-threads 64 \
 ```
 
-> [!NOTE]  
+> [!NOTE]
 > Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause GenAI-Perf to stuck. We are aware of this issue and are working on fixing it.
 
 #### E2E Perf Test Results

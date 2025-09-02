@@ -24,7 +24,6 @@ use std::{
     time::Instant,
 };
 
-
 pub use anyhow::{
     Context as ErrorContext, Error, Ok as OK, Result, anyhow as error, bail as raise,
 };
@@ -74,8 +73,6 @@ enum RuntimeType {
     Shared(Arc<tokio::runtime::Runtime>),
     External(tokio::runtime::Handle),
 }
-
-
 
 /// Local [Runtime] which provides access to shared resources local to the physical node/machine.
 #[derive(Debug, Clone)]

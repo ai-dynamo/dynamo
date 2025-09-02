@@ -25,7 +25,10 @@ pub struct GracefulShutdownTracker {
 impl std::fmt::Debug for GracefulShutdownTracker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GracefulShutdownTracker")
-            .field("active_endpoints", &self.active_endpoints.load(Ordering::SeqCst))
+            .field(
+                "active_endpoints",
+                &self.active_endpoints.load(Ordering::SeqCst),
+            )
             .finish()
     }
 }
@@ -40,12 +43,20 @@ impl GracefulShutdownTracker {
 
     pub(crate) fn register_endpoint(&self) {
         let count = self.active_endpoints.fetch_add(1, Ordering::SeqCst);
-        tracing::debug!("Endpoint registered, total active: {} -> {}", count, count + 1);
+        tracing::debug!(
+            "Endpoint registered, total active: {} -> {}",
+            count,
+            count + 1
+        );
     }
 
     pub(crate) fn unregister_endpoint(&self) {
         let prev = self.active_endpoints.fetch_sub(1, Ordering::SeqCst);
-        tracing::debug!("Endpoint unregistered, remaining active: {} -> {}", prev, prev - 1);
+        tracing::debug!(
+            "Endpoint unregistered, remaining active: {} -> {}",
+            prev,
+            prev - 1
+        );
         if prev == 1 {
             // Last endpoint completed
             tracing::info!("Last endpoint completed, notifying all waiters");
