@@ -28,9 +28,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend | Available Configurations |
 |---------|--------------------------|
-| **[vLLM](../../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
-| **[SGLang](../../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](../../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router |
+| **[vLLM](/components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
+| **[SGLang](/components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
+| **[TensorRT-LLM](/components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router |
 
 ## 3. Deploy Your First Model
 
@@ -64,8 +64,8 @@ The scripts in the `components/<backend>/launch` folder like `agg.sh` demonstrat
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
 - **[API Reference](/docs/guides/dynamo_deploy/api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
-- **[Operator Guide](dynamo_operator.md)** - Dynamo operator configuration and management
-- **[Create Deployment](create_deployment.md)** - Step-by-step deployment creation examples
+- **[Operator Guide](/docs/guides/dynamo_deploy/dynamo_operator.md)** - Dynamo operator configuration and management
+- **[Create Deployment](/docs/guides/dynamo_deploy/create_deployment.md)** - Step-by-step deployment creation examples
 
 ### Choosing Your Architecture Pattern
 
@@ -148,7 +148,7 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](../../examples/README.md)** - Complete working examples
-- **[Create Custom Deployments](create_deployment.md)** - Build your own CRDs
-- **[Operator Documentation](dynamo_operator.md)** - How the platform works
-- **[Helm Charts](../../../deploy/helm/README.md)** - For advanced users
+- **[Examples](/examples/README.md)** - Complete working examples
+- **[Create Custom Deployments](/docs/guides/dynamo_deploy/create_deployment.md)** - Build your own CRDs
+- **[Operator Documentation](/docs/guides/dynamo_deploy/dynamo_operator.md)** - How the platform works
+- **[Helm Charts](/deploy/helm/README.md)** - For advanced users
