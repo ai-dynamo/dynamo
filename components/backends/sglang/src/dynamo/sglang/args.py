@@ -97,6 +97,7 @@ def parse_args(args: list[str]) -> Config:
             type=info["type"],
             default=info["default"] if "default" in info else None,
             help=info["help"],
+            choices=info.get("choices", None),
         )
 
     # SGLang args
