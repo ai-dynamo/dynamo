@@ -102,7 +102,7 @@ curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":
 {"time":"2025-09-02T16:38:08.788268Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CLOSED","method":"POST","span_id":"6959a1b2d1ee41a5","span_name":"http-request","time.busy_us":13000,"time.duration_us":2133000,"time.idle_us":2120000,"trace_id":"425ef761ca5b44c795b4c912f1d84b39","uri":"/v1/chat/completions","version":"HTTP/1.1"}
 ```
 
-### Example Request with User Supplied Tracing
+### Example Request with User Supplied `x-request-id`
 
 ```
 curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' -H 'x-request-id: 8372eac7-5f43-4d76-beca-0a94cfb311d0' http://localhost:8080/v1/chat/completions
