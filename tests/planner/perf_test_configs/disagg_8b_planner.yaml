@@ -94,13 +94,13 @@ spec:
               python3 -m planner_sla
               --environment=kubernetes
               --backend=vllm
-              --ttft 0.2 
-              --itl 0.01 
-              --profile-results-dir /workspace/tests/planner/profiling_results/H200_TP1P_TP1D/ 
+              --ttft 0.2
+              --itl 0.01
+              --profile-results-dir /workspace/tests/planner/profiling_results/H200_TP1P_TP1D/
               --adjustment-interval=60
               --prometheus-port=9085
               --no-correction
-    Prometheus: 
+    Prometheus:
       dynamoNamespace: vllm-disagg-planner
       componentType: main
       replicas: 1
