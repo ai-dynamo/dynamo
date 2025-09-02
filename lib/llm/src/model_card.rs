@@ -36,7 +36,7 @@ pub const ROOT_PATH: &str = "mdc";
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
 const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
     HfConfigJson(String),
@@ -48,17 +48,6 @@ pub enum ModelInfoType {
 pub enum TokenizerKind {
     HfTokenizerJson(String),
     GGUF(Box<HfTokenizer>),
-}
-
-impl PartialEq for TokenizerKind {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (TokenizerKind::HfTokenizerJson(a), TokenizerKind::HfTokenizerJson(b)) => a == b,
-            // GGUF tokenizers can't be compared directly, so we treat them as always different
-            (TokenizerKind::GGUF(_), TokenizerKind::GGUF(_)) => false,
-            _ => false,
-        }
-    }
 }
 
 /// Supported types of prompt formatters.
@@ -73,7 +62,7 @@ impl PartialEq for TokenizerKind {
 /// TODO(): Add an enum for the PromptFormatDataModel with at minimum arms for:
 /// - OaiChat
 /// - OaiChatToolUse
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(String),
@@ -91,14 +80,14 @@ pub enum PromptContextMixin {
     Llama3DateTime,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationConfig {
     HfGenerationConfigJson(String),
     GGUF(PathBuf),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Builder, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
     pub display_name: String,
@@ -119,10 +108,6 @@ pub struct ModelDeploymentCard {
     /// chat template may be stored as a separate file instead of in `prompt_formatter`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_file: Option<PromptFormatterArtifact>,
-
-    /// Custom chat template provided via CLI flag
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_chat_template: Option<PromptFormatterArtifact>,
 
     /// Generation config - default sampling params
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,11 +280,6 @@ impl ModelDeploymentCard {
             "chat_template.jinja"
         );
         nats_upload!(
-            self.custom_chat_template,
-            PromptFormatterArtifact::HfChatTemplate,
-            "custom_chat_template.jinja"
-        );
-        nats_upload!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
             "tokenizer.json"
@@ -354,11 +334,6 @@ impl ModelDeploymentCard {
             "chat_template.jinja"
         );
         nats_download!(
-            self.custom_chat_template,
-            PromptFormatterArtifact::HfChatTemplate,
-            "custom_chat_template.jinja"
-        );
-        nats_download!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
             "tokenizer.json"
@@ -396,18 +371,14 @@ impl ModelDeploymentCard {
     /// Build an in-memory ModelDeploymentCard from either:
     /// - a folder containing config.json, tokenizer.json and token_config.json
     /// - a GGUF file
-    pub async fn load(config_path: impl AsRef<Path>) -> anyhow::Result<ModelDeploymentCard> {
-        Self::load_with_custom_template(config_path, None).await
-    }
-
-    /// Build an in-memory ModelDeploymentCard with an optional custom template
-    pub async fn load_with_custom_template(
+    /// With an optional custom template
+    pub async fn load(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<ModelDeploymentCard> {
         let config_path = config_path.as_ref();
         if config_path.is_dir() {
-            Self::from_local_path_with_custom_template(config_path, custom_template_path).await
+            Self::from_local_path(config_path, custom_template_path).await
         } else {
             // GGUF files don't support custom templates yet
             if custom_template_path.is_some() {
@@ -432,12 +403,7 @@ impl ModelDeploymentCard {
     /// - The path doesn't exist or isn't a directory
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
-    #[allow(dead_code)]
-    async fn from_local_path(local_root_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Self::from_local_path_with_custom_template(local_root_dir, None).await
-    }
-
-    async fn from_local_path_with_custom_template(
+    async fn from_local_path(
         local_root_dir: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
@@ -453,7 +419,7 @@ impl ModelDeploymentCard {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
 
-        Self::from_repo_with_custom_template(&repo_id, model_name, custom_template_path).await
+        Self::from_repo(&repo_id, model_name, custom_template_path).await
     }
 
     async fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
@@ -484,7 +450,6 @@ impl ModelDeploymentCard {
             gen_config: None, // AFAICT there is no equivalent in a GGUF
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
             chat_template_file: None,
-            custom_chat_template: None,  // Ensure this field is included
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
@@ -503,12 +468,7 @@ impl ModelDeploymentCard {
         ))
     }
 
-    #[allow(dead_code)]
-    async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
-        Self::from_repo_with_custom_template(repo_id, model_name, None).await
-    }
-
-    async fn from_repo_with_custom_template(
+    async fn from_repo(
         repo_id: &str,
         model_name: &str,
         custom_template_path: Option<&Path>,
@@ -528,8 +488,8 @@ impl ModelDeploymentCard {
         // If neither of those are present let the engine default it
         .unwrap_or(0);
 
-        // Load custom template if provided
-        let custom_chat_template = if let Some(template_path) = custom_template_path {
+        // Load chat template - either custom or from repo
+        let chat_template_file = if let Some(template_path) = custom_template_path {
             if !template_path.exists() {
                 anyhow::bail!("Custom template file does not exist: {}", template_path.display());
             }
@@ -542,7 +502,7 @@ impl ModelDeploymentCard {
                 template_path.display().to_string()
             ))
         } else {
-            None
+            PromptFormatterArtifact::chat_template_from_repo(repo_id).await?
         };
 
         Ok(Self {
@@ -552,8 +512,7 @@ impl ModelDeploymentCard {
             tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
             gen_config: GenerationConfig::from_repo(repo_id).await.ok(), // optional
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
-            chat_template_file: PromptFormatterArtifact::chat_template_from_repo(repo_id).await?,
-            custom_chat_template,
+            chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
@@ -563,22 +522,6 @@ impl ModelDeploymentCard {
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
         })
-    }
-}
-
-impl ModelDeploymentCard {
-    /// Compare content of two MDCs, ignoring metadata fields (revision, last_published)
-    pub fn content_equals(&self, other: &Self) -> bool {
-        let mut self_cmp = self.clone();
-        let mut other_cmp = other.clone();
-
-        // Clear metadata fields for comparison
-        self_cmp.revision = 0;
-        self_cmp.last_published = None;
-        other_cmp.revision = 0;
-        other_cmp.last_published = None;
-
-        self_cmp == other_cmp
     }
 }
 

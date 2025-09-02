@@ -27,23 +27,11 @@ impl PromptFormatter {
                     .with_context(|| format!("fs:read_to_string '{file}'"))?;
                 let mut config: ChatTemplate = serde_json::from_str(&content)?;
 
-                // Chat template precedence:
-                // 1. Custom template (highest priority)
-                // 2. chat_template.jinja from model repo
-                // 3. chat_template field in tokenizer_config.json (already in config)
-                //
-                // Note: Reason for Option 2: chat_template.jinja from model repo
                 // Some HF models (e.g. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // store the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
-                if let Some(PromptFormatterArtifact::HfChatTemplate(custom_template_file)) =
-                    mdc.custom_chat_template
-                {
-                    let chat_template = std::fs::read_to_string(&custom_template_file)
-                        .with_context(|| format!("fs:read_to_string '{}'", custom_template_file))?;
-                    let chat_template = chat_template.replace('\n', "");
-                    config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
-                } else if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
+                // This may also be a custom template provided via CLI flag.
+                if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
                     mdc.chat_template_file
                 {
                     let chat_template = std::fs::read_to_string(&chat_template_file)
