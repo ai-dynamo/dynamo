@@ -1,12 +1,12 @@
 # Dynamo Deployment of vLLM Example on AWS ECS
-## 1. ECS Cluster Setup 
+## 1. ECS Cluster Setup
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.
 3. Choose the ECS-optimized GPU AMI `Amazon Linux 2 (GPU)` (Amazon ECS–optimized), which includes NVIDIA drivers and the Docker GPU runtime out of the box.
 4. Choose `g6e.2xlarge` as the **EC2 instance type** and add an `SSH Key pair` so you can log in the instance for debugging purpose.
 5. Set **Root EBS volume size** as `200`
-6. For the networking, use the default settings. Make sure the **security group** has 
-- an inbound rule which allows "All traffic" from this security group. 
+6. For the networking, use the default settings. Make sure the **security group** has
+- an inbound rule which allows "All traffic" from this security group.
 - an inbound rule for port 22 and 8000, so that you can ssh into the instance for debugging purpose
 7. Select `Turn on` for **Auto-assign public IP** option.
 8. Click on **Create** and a cluster will be deployed through cloudformation.
@@ -16,7 +16,7 @@ Add a task for ETCD and NATS services. A sample task definition JSON is attached
 1. ETCD container
 - Container name use `etcd`
 - Image URL is `bitnami/etcd` and **Yes** for Essential container
-- Container port  
+- Container port
 
 |Container port|Protocol|Port name| App protocol|
 |-|-|-|-|
@@ -26,7 +26,7 @@ Add a task for ETCD and NATS services. A sample task definition JSON is attached
 2. NATS container
 - Container name use `nats`
 - Image URL is `nats` and **Yes** for Essential container
-- Container port  
+- Container port
 
 |Container port|Protocol|Port name| App protocol|
 |-|-|-|-|
@@ -41,10 +41,10 @@ This task will create vLLM frontend, processors, routers and a decode worker.
 Please follow steps below to create this task
 - Set container name as `dynamo-frontend` and use prebuild [Dynamo container](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime).
 - Choose `Amazon EC2 instances` as the **Launch type** with **Task size** `2 vCPU` and `40 GB`memory
-- Choose `host` as the Network mode. 
+- Choose `host` as the Network mode.
 - Container name use `dynamo-vLLM-frontend`
-- Add your Image URL (You can use the prebuild [Dynamo container](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)) and **Yes** for Essential container. It can be AWS ECR URL or Nvidia NGC URL. If using NGC URL, please also choose **Private registry authentication** and add your Secret Manager ARN or name. 
-- Container port  
+- Add your Image URL (You can use the prebuild [Dynamo container](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)) and **Yes** for Essential container. It can be AWS ECR URL or Nvidia NGC URL. If using NGC URL, please also choose **Private registry authentication** and add your Secret Manager ARN or name.
+- Container port
 
 |Container port|Protocol|Port name| App protocol|
 |-|-|-|-|
@@ -56,7 +56,7 @@ Please follow steps below to create this task
 |-|-|-|
 |ETCD_ENDPOINTS|Value|http://IP_ADDRESS:2379|
 |NATS_SERVER|Value|nats://IP_ADDRESS:4222|
-- Docker configuration  
+- Docker configuration
 Add `sh,-c` in **Entry point** and `cd components/backends/vllm && python -m dynamo.frontend --router-mode kv & python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager` in **Command**
 
 2. Dynamo vLLM PrefillWorker Task
@@ -69,7 +69,7 @@ Create the PrefillWorker task same as the frontend worker, except for following 
 You can create a service or directly run the task from the task definition
 1. ETCD/NATS Task
 - Choose the Fargate cluster for **Existing cluster** created in the hello world example.
-- Wait for this deployment to finish, and get the **Private IP** of this task. 
+- Wait for this deployment to finish, and get the **Private IP** of this task.
 2. Dynamo Frontend Task
 - Choose the EC2 cluster for **Existing cluster** created in step 1.
 - In the **Container Overrides**, use the IP for ETCD/NATS task for the `ETCD_ENDPOINTS` and `NATS_SERVER` values.
