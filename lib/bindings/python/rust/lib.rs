@@ -263,6 +263,7 @@ struct ModelType {
 }
 
 #[pymethods]
+#[allow(non_upper_case_globals)]
 impl ModelType {
     #[classattr]
     const Chat: Self = ModelType {
@@ -288,8 +289,8 @@ impl ModelType {
     }
 }
 
-#[pyclass]
-#[derive(Clone)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, PartialEq)]
 enum ModelInput {
     Text = 1,
     Tokens = 2,
