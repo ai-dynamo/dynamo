@@ -113,7 +113,7 @@ def parse_args() -> Config:
         help="List of connectors to use in order (e.g., --connector nixl lmcache). "
         "Options: nixl, lmcache, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
     )
-    # To avoid name conflicts with different backends, adoped prefix "dyn-" for dynamo specific args
+    # To avoid name conflicts with different backends, adopted prefix "dyn-" for dynamo specific args
     parser.add_argument(
         "--dyn-tool-call-parser",
         type=str,
