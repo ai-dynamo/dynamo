@@ -32,16 +32,19 @@ from kubernetes_asyncio import client, config
 
 
 def find_available_port(start_port: int = 8000) -> int:
-    """Find first available port starting from start_port"""
-    for port in range(start_port, start_port + 100):  # Try ports 8000-8099
+    """Find the first available TCP port on 127.0.0.1 starting at start_port (inclusive), scanning up to start_port+99."""
+    for port in range(
+        start_port, start_port + 100
+    ):  # Try ports start_port..start_port+99
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("localhost", port))
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", port))
                 return port
         except OSError:
             continue
     raise RuntimeError(
-        f"No available ports found in range {start_port}-{start_port+100}"
+        f"No available ports found in range {start_port}-{start_port+99}"
     )
 
 
@@ -135,7 +138,9 @@ class DynamoDeploymentClient:
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
 
-    def port_forward_frontend(self, local_port: int = None, quiet: bool = False) -> str:
+    def port_forward_frontend(
+        self, local_port: Optional[int] = None, quiet: bool = False
+    ) -> str:
         """
         Port forward the frontend service to a local port.
 
@@ -145,7 +150,8 @@ class DynamoDeploymentClient:
         """
         if local_port is None:
             local_port = find_available_port(8000)
-            print(f"Using available port: {local_port}")
+            if not quiet:
+                print(f"Using available local port: {local_port}")
 
         cmd = [
             "kubectl",
