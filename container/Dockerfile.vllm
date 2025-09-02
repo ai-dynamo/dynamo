@@ -69,6 +69,8 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # Use dynamo base image (see /container/Dockerfile for more details)
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
+ARG PYTHON_VERSION
+
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python runtime - CRITICAL for virtual environment to work
@@ -89,7 +91,6 @@ RUN apt-get update -y \
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-ARG PYTHON_VERSION
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
