@@ -304,20 +304,20 @@ RUN apt-get update -y && \
     wget \
     tmux \
     vim \
-    autoconf \
-    automake \
-    libtool \
-    net-tools \
     git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
     # Build Dependencies
     autoconf \
     automake \
     cmake \
-    git \
     libtool \
     meson \
     net-tools \
-    ninja-build \
     pybind11-dev \
     # Rust build dependencies
     clang \
