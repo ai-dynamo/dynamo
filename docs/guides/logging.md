@@ -39,168 +39,91 @@ distributed tracing.
 Environment Setting:
 
 ```
-
+export DYN_LOG="info,dynamo_runtime::system_status_server:trace"
+export DYN_LOGGING_JSONL="0"
 ```
 
-## Frontend Liveness Check
-
-The frontend liveness endpoint reports a status of `live` as long as
-the service is running. 
-
-#### Example Request
+Resulting Log format:
 
 ```
-curl -s localhost:8080/live -q |  jq
+2025-09-02T15:50:01.770028Z  INFO main.init: VllmWorker for Qwen/Qwen3-0.6B has been initialized   
+2025-09-02T15:50:01.770195Z  INFO main.init: Reading Events from tcp://127.0.0.1:21555   
+2025-09-02T15:50:01.770265Z  INFO main.init: Getting engine runtime configuration metadata from vLLM engine...   
+2025-09-02T15:50:01.770316Z  INFO main.get_engine_cache_info: Cache config values: {'num_gpu_blocks': 24064}   
+2025-09-02T15:50:01.770358Z  INFO main.get_engine_cache_info: Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048} 
 ```
 
-#### Example Response
+## Example JSONL Format
+
+Environment Setting:
 
 ```
-{
-  "message": "Service is live",
-  "status": "live"
-}
+export DYN_LOG="info,dynamo_runtime::system_status_server:trace"
+export DYN_LOGGING_JSONL="1"
 ```
 
-## Frontend Health Check
+Resulting Log format:
 
-The frontend liveness endpoint reports a status of `healthy` once a
-model has been registered. During initial startup the frontend will
-report `unhealthy` until workers have been initialized and registred
-with the frontend. Once workers have been registered the `health`
-endpoint additionally will list registred endpoints and instances.
-
-
-
-#### Example Request
-
-```
-curl -s localhost:8080/health -q |  jq
+```json
+{"time":"2025-09-02T15:53:31.943377Z","level":"INFO","target":"log","message":"VllmWorker for Qwen/Qwen3-0.6B has been initialized","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":191,"log.target":"main.init"}
+{"time":"2025-09-02T15:53:31.943550Z","level":"INFO","target":"log","message":"Reading Events from tcp://127.0.0.1:26771","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":212,"log.target":"main.init"}
+{"time":"2025-09-02T15:53:31.943636Z","level":"INFO","target":"log","message":"Getting engine runtime configuration metadata from vLLM engine...","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":220,"log.target":"main.init"}
+{"time":"2025-09-02T15:53:31.943701Z","level":"INFO","target":"log","message":"Cache config values: {'num_gpu_blocks': 24064}","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":267,"log.target":"main.get_engine_cache_info"}
+{"time":"2025-09-02T15:53:31.943747Z","level":"INFO","target":"log","message":"Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}","log.file":"/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py","log.line":268,"log.target":"main.get_engine_cache_info"}
 ```
 
-#### Example Response
+## Trace and Span information
 
-Before workers are registered:
+When `DYN_LOGGING_JSONL` with `DYN_LOG` set to greate than or equal to
+`info` level trace information is added to all spans along with
+`SPAN_CREATED` and `SPAN_CLOSED` events.
 
-``` 
-{
-  "instances": [],
-  "message": "No endpoints available",
-  "status": "unhealthy"
-}
-```
-
-After workers are registered:
+### Example Request
 
 ```
-{
-  "endpoints": [
-    "dyn://dynamo.backend.generate"
-  ],
-  "instances": [
-    {
-      "component": "backend",
-      "endpoint": "clear_kv_blocks",
-      "instance_id": 7587888160958628000,
-      "namespace": "dynamo",
-      "transport": {
-        "nats_tcp": "dynamo_backend.clear_kv_blocks-694d98147d54be25"
-      }
-    },
-    {
-      "component": "backend",
-      "endpoint": "generate",
-      "instance_id": 7587888160958628000,
-      "namespace": "dynamo",
-      "transport": {
-        "nats_tcp": "dynamo_backend.generate-694d98147d54be25"
-      }
-    },
-    {
-      "component": "backend",
-      "endpoint": "load_metrics",
-      "instance_id": 7587888160958628000,
-      "namespace": "dynamo",
-      "transport": {
-        "nats_tcp": "dynamo_backend.load_metrics-694d98147d54be25"
-      }
-    }
-  ],
-  "status": "healthy"
-}
+curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
 
-## Worker Liveness and Health Check
-
-Health checks for components other than the frontend are enabled
-selectively based on environment variables. If a health check for a
-component is enabled the starting status can be set along with the set
-of endpoints that are required to be served before the component is
-declared `ready`.
-
-Once all endpoints declared in `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`
-are served the component transitions to a `ready` state until the
-component is shutdown.
-
-> **Note**: Both /live and /ready return the same information
-
-### Environment Variables for Enabling Health Checks
-
-| **Environment Variable** | **Description**     | **Example Settings**                             |
-| -------------------------| ------------------- | ------------------------------------------------ |
-| `DYN_SYSTEM_ENABLED`     | Enables the system status server.                                            | `true`, `false`                           |
-| `DYN_SYSTEM_PORT`        | Specifies the port for the system status server.                              | `9090`                                   |
-| `DYN_SYSTEM_STARTING_HEALTH_STATUS`     | Sets the initial health status of the system (ready/not ready).                | `ready`, `notready`      |
-| `DYN_SYSTEM_HEALTH_PATH`                | Custom path for the health endpoint.                                         | `/custom/health`           |
-| `DYN_SYSTEM_LIVE_PATH`                   | Custom path for the liveness endpoint.                                       | `/custom/live`            |
-| `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Specifies endpoints to check for determining overall system health status.    | `["generate"]`            |
-
-### Example Environment Setting
+### Example Logs
 
 ```
-export DYN_SYSTEM_ENABLED="true"
-export DYN_SYSTEM_STARTING_HEALTH_STATUS="notready"
-export DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS="[\"generate\"]"
-export DYN_SYSTEM_PORT=9090
+# Span Created in HTTP Frontend
+
+{"time":"2025-09-02T16:38:06.656503Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CREATED","method":"POST","span_id":"6959a1b2d1ee41a5","span_name":"http-request","trace_id":"425ef761ca5b44c795b4c912f1d84b39","uri":"/v1/chat/completions","version":"HTTP/1.1"}
+
+# Span Created and Closed in Worker with parent_id from frontend
+
+{"time":"2025-09-02T16:38:06.666672Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CREATED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"6959a1b2d1ee41a5","span_id":"b035f33bdd5c4b50","span_name":"handle_payload","trace_id":"425ef761ca5b44c795b4c912f1d84b39"}
+{"time":"2025-09-02T16:38:06.685333Z","level":"WARN","target":"log","message":"cudagraph dispatching keys are not initialized. No cudagraph will be used.","log.file":"/opt/vllm/vllm/v1/cudagraph_dispatcher.py","log.line":101,"log.target":"cudagraph_dispatcher.dispatch"}
+{"time":"2025-09-02T16:38:08.787232Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CLOSED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"6959a1b2d1ee41a5","span_id":"b035f33bdd5c4b50","span_name":"handle_payload","time.busy_us":1090,"time.duration_us":2121090,"time.idle_us":2120000,"trace_id":"425ef761ca5b44c795b4c912f1d84b39"}
+
+# Span Closed in HTTP Frontend
+
+{"time":"2025-09-02T16:38:08.788268Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CLOSED","method":"POST","span_id":"6959a1b2d1ee41a5","span_name":"http-request","time.busy_us":13000,"time.duration_us":2133000,"time.idle_us":2120000,"trace_id":"425ef761ca5b44c795b4c912f1d84b39","uri":"/v1/chat/completions","version":"HTTP/1.1"}
 ```
 
-#### Example Request
+### Example Request with User Supplied Tracing
 
 ```
-curl -s localhost:9000/health -q |  jq
+curl -d '{"model": "Qwen/Qwen3-0.6B", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' -H 'x-request-id: 8372eac7-5f43-4d76-beca-0a94cfb311d0' http://localhost:8080/v1/chat/completions
 ```
 
-#### Example Response
-Before endpoints are being served:
+### Example Logs
 
 ```
-{
-  "endpoints": {
-    "generate": "notready"
-  },
-  "status": "notready",
-  "uptime": {
-    "nanos": 775381996,
-    "secs": 2
-  }
-}
-```
+# Span Created in HTTP Frontend
 
-After endpoints are being served:
+{"time":"2025-09-02T17:01:46.306801Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CREATED","method":"POST","span_id":"906902a4e74b4264","span_name":"http-request","trace_id":"3924188ea88d40febdfa173afd246a3a","uri":"/v1/chat/completions","version":"HTTP/1.1","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
 
-```
-{
-  "endpoints": {
-    "clear_kv_blocks": "ready",
-    "generate": "ready",
-    "load_metrics": "ready"
-  },
-  "status": "ready",
-  "uptime": {
-    "nanos": 435707697,
-    "secs": 55
-  }
-}
+# Span Created and Closed in Worker with parent_id and x_request_id from frontend
+
+{"time":"2025-09-02T17:01:46.307484Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CREATED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"906902a4e74b4264","span_id":"5a732a3721814f5e","span_name":"handle_payload","trace_id":"3924188ea88d40febdfa173afd246a3a","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
+{"time":"2025-09-02T17:01:47.975228Z","level":"INFO","file":"/workspace/lib/runtime/src/pipeline/network/ingress/push_endpoint.rs","line":108,"target":"dynamo_runtime::pipeline::network::ingress::push_endpoint","message":"SPAN_CLOSED","component":"backend","endpoint":"generate","instance_id":"7587888160958627596","namespace":"dynamo","parent_id":"906902a4e74b4264","span_id":"5a732a3721814f5e","span_name":"handle_payload","time.busy_us":646,"time.duration_us":1670646,"time.idle_us":1670000,"trace_id":"3924188ea88d40febdfa173afd246a3a","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
+
+# Span Closed in HTTP Frontend
+
+{"time":"2025-09-02T17:01:47.975616Z","level":"INFO","file":"/workspace/lib/runtime/src/logging.rs","line":248,"target":"dynamo_runtime::logging","message":"SPAN_CLOSED","method":"POST","span_id":"906902a4e74b4264","span_name":"http-request","time.busy_us":2980,"time.duration_us":1672980,"time.idle_us":1670000,"trace_id":"3924188ea88d40febdfa173afd246a3a","uri":"/v1/chat/completions","version":"HTTP/1.1","x_request_id":"8372eac7-5f43-4d76-beca-0a94cfb311d0"}
+
 ```
 
 ## Related Documentation
@@ -208,3 +131,4 @@ After endpoints are being served:
 - [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
 - [Dynamo Architecture Overview](../architecture/architecture.md)
 - [Backend Guide](backend.md)
+- [Log Aggregation in Kubernetes](dynamo_deploy/logging.md)
