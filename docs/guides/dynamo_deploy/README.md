@@ -20,7 +20,23 @@ limitations under the License.
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
 ## 1. Install Platform First
-**[Dynamo Kubernetes Platform](dynamo_cloud.md)** - Main installation guide with 3 paths
+
+```bash
+# 1. Set environment
+export NAMESPACE=dynamo-kubernetes
+export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+
+# 2. Install CRDs
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
+helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
+
+# 3. Install Platform
+kubectl create namespace ${NAMESPACE}
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
+```
+
+For more details or customization options, see **[Dynamo Kubernetes Platform](/docs/guides/dynamo_deploy/dynamo_cloud.md)**.
 
 ## 2. Choose Your Backend
 
