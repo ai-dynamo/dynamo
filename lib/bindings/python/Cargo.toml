@@ -40,6 +40,7 @@ block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
+dynamo-parsers = { path = "../../parsers" }
 
 anyhow = { version = "1" }
 dynamo-async-openai = { path = "../../async-openai" }

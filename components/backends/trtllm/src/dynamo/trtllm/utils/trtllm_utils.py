@@ -6,6 +6,7 @@ from typing import Optional
 
 from tensorrt_llm.llmapi import BuildConfig
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.trtllm import __version__
 from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
@@ -274,13 +275,15 @@ def cmd_line_args():
         "--dyn-tool-call-parser",
         type=str,
         default=None,
-        help="Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic', 'harmony'.",
+        choices=get_tool_parser_names(),
+        help="Tool call parser name for the model.",
     )
     parser.add_argument(
         "--dyn-reasoning-parser",
         type=str,
         default=None,
-        help="Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss', 'kimi', 'step3', 'qwen3', 'nemotron_deci', 'mistral'.",
+        choices=get_reasoning_parser_names(),
+        help="Reasoning parser name for the model.",
     )
 
     args = parser.parse_args()
