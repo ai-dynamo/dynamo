@@ -774,7 +774,6 @@ class TestDeterminism:
         ],
         indirect=True,
     )
-
     @pytest.mark.vllm
     def test_determinism_with_cache_reset(self, tester, llm_server, runtime_services):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
