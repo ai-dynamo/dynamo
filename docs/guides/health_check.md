@@ -26,7 +26,7 @@ orchestration frameworks such as Kubernetes.
 ## Frontend Liveness Check
 
 The frontend liveness endpoint reports a status of `live` as long as
-the service is running. 
+the service is running.
 
 #### Example Request
 
@@ -63,7 +63,7 @@ curl -s localhost:8080/health -q |  jq
 
 Before workers are registered:
 
-``` 
+```
 {
   "instances": [],
   "message": "No endpoints available",
