@@ -137,3 +137,25 @@ class RequestHandler:
 When `GeneratorExit` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
 
 For more information about how request migration works, see the [Request Migration Architecture](../architecture/request_migration.md) documentation.
+
+## Request Cancellation
+
+Your Python worker's request handler can optionally support request cancellation by accepting a `context` argument after the `request` argument. This context object allows you to check for cancellation signals and respond appropriately:
+
+```python
+class RequestHandler:
+
+    async def generate(self, request, context):
+        """Generate response with cancellation support"""
+        for result in self.engine.generate_streaming(request):
+            # Check if the request has been cancelled
+            if context.is_stopped():
+                # Stop processing and clean up
+                break
+
+            yield result
+```
+
+The context parameter is optional - if your generate method doesn't include it in its signature, Dynamo will call your method without the context argument.
+
+For detailed information about request cancellation, including async cancellation monitoring and context propagation patterns, see the [Request Cancellation Architecture](../architecture/request_cancellation.md) documentation.
