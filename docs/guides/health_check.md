@@ -45,12 +45,11 @@ curl -s localhost:8080/live -q |  jq
 
 ## Frontend Health Check
 
-The frontend liveness endpoint reports a status of `healthy` once a
+The frontend health endpoint reports a status of `healthy` once a
 model has been registered. During initial startup the frontend will
-report `unhealthy` until workers have been initialized and registred
-with the frontend. Once workers have been registered the `health`
-endpoint additionally will list registred endpoints and instances.
-
+report `unhealthy` until workers have been initialized and registered
+with the frontend. Once workers have been registered, the `health`
+endpoint will also list registered endpoints and instances.
 
 
 #### Example Request
