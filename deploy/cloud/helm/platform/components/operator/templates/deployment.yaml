@@ -104,6 +104,9 @@ spec:
         {{- if .Values.dynamo.groveTerminationDelay }}
           - --grove-termination-delay={{ .Values.dynamo.groveTerminationDelay }}
         {{- end }}
+        {{- if .Values.modelExpressURL }}
+          - --model-express-url={{ .Values.modelExpressURL }}
+        {{- end }}
         command:
         - /manager
         env:
