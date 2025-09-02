@@ -93,6 +93,24 @@ class ManagedProcess:
     _tee_proc = None
     _sed_proc = None
 
+    @property
+    def log_path(self):
+        """Return the absolute path to the process log file if available."""
+        return self._log_path
+
+    def read_logs(self) -> str:
+        """Read and return the entire contents of the process log file.
+
+        Returns an empty string if the log file is not yet available.
+        """
+        try:
+            if self._log_path and os.path.exists(self._log_path):
+                with open(self._log_path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+        except Exception as e:
+            self._logger.warning("Could not read log file %s: %s", self._log_path, e)
+        return ""
+
     def __enter__(self):
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
@@ -327,7 +345,7 @@ class ManagedProcess:
             elapsed += self._check_url(url, timeout - elapsed)
         return elapsed
 
-    def _check_url(self, url, timeout=30, sleep=1, log_interval=10):
+    def _check_url(self, url, timeout=30, sleep=1, log_interval=20):
         if isinstance(url, tuple):
             response_check = url[1]
             url = url[0]
