@@ -32,6 +32,16 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from openai_harmony import (
+    HarmonyEncodingName,
+    load_harmony_encoding,
+    Conversation,
+    Message,
+    Role,
+    SystemContent,
+    DeveloperContent,
+)
+
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
@@ -254,6 +264,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     logging.info("Initializing NIXL Connect.")
     connector = nixl_connect.Connector()
     await connector.initialize()
+    print(f"[-++++---]config.response_style: {config.response_style}")
+    if config.response_style == "harmony":
+        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        stop_token_ids = encoding.stop_tokens_for_assistant_actions()
+        default_sampling_params.stop_token_ids = stop_token_ids #[200002, 200012]
+        print(f"[-----+++----]default_sampling_params.stop_token_ids: {default_sampling_params.stop_token_ids}")
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
@@ -266,8 +282,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
 
-        runtime_config.reasoning_parser = config.reasoning_parser
-        runtime_config.tool_call_parser = config.tool_call_parser
+        # runtime_config.reasoning_parser = config.reasoning_parser
+        # runtime_config.tool_call_parser = config.tool_call_parser
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
@@ -331,3 +347,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
