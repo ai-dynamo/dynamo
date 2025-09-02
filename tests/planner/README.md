@@ -229,6 +229,9 @@ genai-perf profile \
   -- -v -max-threads 64 \
 ```
 
+> [!NOTE]  
+> Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause GenAI-Perf to stuck. We are aware of this issue and are working on fixing it.
+
 #### E2E Perf Test Results
 
 ![Results](./figures/sla_planner_perf.png)
@@ -239,7 +242,7 @@ The table below shows the performance improvement of SLA planner across differen
 |---------------|-----------------|-------------------------|
 | Inefficient P/D ratio | 725% | 600% |
 | Inefficient parallelization mapping | 311% | 249% |
-| Best static deployment | 52% | 29% |
+| Best static deployment | 52% | 29% |`
 
 ### Prerequisites
 
