@@ -128,13 +128,12 @@ etcd:
   global:
     security:
       allowInsecureImages: true
-  
+
   # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance
   enabled: true
 
   image:
     repository: bitnamilegacy/etcd
-  
 
   # Persistent storage configuration for etcd data
   persistence:
