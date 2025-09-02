@@ -14,7 +14,8 @@
 # limitations under the License.
 
 
-from dynamo._core import get_tool_parser_names, get_reasoning_parser_names
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+
 
 def test_get_tool_parser_names():
     parsers = get_tool_parser_names()
