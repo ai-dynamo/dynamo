@@ -16,7 +16,8 @@ use tokio::sync::Mutex;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        network::egress::push_router::RouterMode as RsRouterMode, EngineStream, ManyOut, SingleIn,
+        context::Context as RsContext, network::egress::push_router::RouterMode as RsRouterMode,
+        EngineStream, ManyOut, SingleIn,
     },
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -104,7 +105,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
-    m.add_class::<context::PyContext>()?;
+    m.add_class::<context::Context>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;
@@ -699,27 +700,29 @@ impl Client {
     }
 
     /// Issue a request to the endpoint using the default routing strategy.
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
+        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         if self.router.client.is_static() {
-            self.r#static(py, request, annotated)
+            self.r#static(py, request, annotated, context)
         } else {
-            self.random(py, request, annotated)
+            self.random(py, request, annotated, context)
         }
     }
 
     /// Send a request to the next endpoint in a round-robin fashion.
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn round_robin<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
+        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
         let annotated = annotated.unwrap_or(false);
@@ -728,7 +731,15 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = client.round_robin(request.into()).await.map_err(to_pyerr)?;
+            let stream = match context {
+                Some(context) => {
+                    let request = RsContext::with_id(request, context.inner().id().to_string());
+                    let stream = client.round_robin(request).await.map_err(to_pyerr)?;
+                    context.inner().link_child(stream.context());
+                    stream
+                }
+                _ => client.round_robin(request.into()).await.map_err(to_pyerr)?,
+            };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
                 rx: Arc::new(Mutex::new(rx)),
@@ -738,12 +749,13 @@ impl Client {
     }
 
     /// Send a request to a random endpoint.
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn random<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
+        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
         let annotated = annotated.unwrap_or(false);
@@ -752,7 +764,15 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = client.random(request.into()).await.map_err(to_pyerr)?;
+            let stream = match context {
+                Some(context) => {
+                    let request = RsContext::with_id(request, context.inner().id().to_string());
+                    let stream = client.random(request).await.map_err(to_pyerr)?;
+                    context.inner().link_child(stream.context());
+                    stream
+                }
+                _ => client.random(request.into()).await.map_err(to_pyerr)?,
+            };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
                 rx: Arc::new(Mutex::new(rx)),
@@ -762,13 +782,14 @@ impl Client {
     }
 
     /// Directly send a request to a specific endpoint.
-    #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING))]
+    #[pyo3(signature = (request, instance_id, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn direct<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         instance_id: i64,
         annotated: Option<bool>,
+        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
         let annotated = annotated.unwrap_or(false);
@@ -777,10 +798,21 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = client
-                .direct(request.into(), instance_id)
-                .await
-                .map_err(to_pyerr)?;
+            let stream = match context {
+                Some(context) => {
+                    let request = RsContext::with_id(request, context.inner().id().to_string());
+                    let stream = client
+                        .direct(request, instance_id)
+                        .await
+                        .map_err(to_pyerr)?;
+                    context.inner().link_child(stream.context());
+                    stream
+                }
+                _ => client
+                    .direct(request.into(), instance_id)
+                    .await
+                    .map_err(to_pyerr)?,
+            };
 
             tokio::spawn(process_stream(stream, tx));
 
@@ -792,12 +824,13 @@ impl Client {
     }
 
     /// Directly send a request to a pre-defined static worker
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING))]
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn r#static<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         annotated: Option<bool>,
+        context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
         let annotated = annotated.unwrap_or(false);
@@ -806,7 +839,15 @@ impl Client {
         let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = client.r#static(request.into()).await.map_err(to_pyerr)?;
+            let stream = match context {
+                Some(context) => {
+                    let request = RsContext::with_id(request, context.inner().id().to_string());
+                    let stream = client.r#static(request).await.map_err(to_pyerr)?;
+                    context.inner().link_child(stream.context());
+                    stream
+                }
+                _ => client.r#static(request.into()).await.map_err(to_pyerr)?,
+            };
 
             tokio::spawn(process_stream(stream, tx));
 
