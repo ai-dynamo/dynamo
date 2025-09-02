@@ -55,21 +55,26 @@ OPTIONS:
     --verbose                     Enable verbose output
 
 EXAMPLES:
-    # Compare aggregated vs disaggregated Dynamo deployments
+    # Compare Dynamo deployments of a single backend
     $0 --namespace \$NAMESPACE \\
        --input agg=components/backends/vllm/deploy/agg.yaml \\
        --input disagg=components/backends/vllm/deploy/disagg.yaml
+
+    # Compare different backend types (vLLM vs TensorRT-LLM)
+    $0 --namespace \$NAMESPACE \\
+       --input vllm-agg=components/backends/vllm/deploy/agg.yaml \\
+       --input trtllm-agg=components/backends/trtllm/deploy/agg.yaml
 
     # Compare Dynamo deployment vs external endpoint
     $0 --namespace \$NAMESPACE \\
        --input dynamo=components/backends/vllm/deploy/disagg.yaml \\
        --input external=http://localhost:8000
 
-    # Compare three different configurations
+    # Compare multiple different configurations (vLLM, TensorRT-LLM, SGLang)
     $0 --namespace \$NAMESPACE \\
-       --input dynamo-agg=components/backends/vllm/deploy/agg.yaml \\
-       --input dynamo-disagg=components/backends/vllm/deploy/disagg.yaml \\
-       --input external-vllm=http://localhost:8000
+       --input vllm-agg=components/backends/vllm/deploy/agg.yaml \\
+       --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml \\
+       --input existing-sglang=http://localhost:8000
 
     # Benchmark a single Dynamo deployment
     $0 --namespace \$NAMESPACE \\
