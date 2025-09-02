@@ -27,8 +27,8 @@ impl PromptFormatter {
                     .with_context(|| format!("fs:read_to_string '{file}'"))?;
                 let mut config: ChatTemplate = serde_json::from_str(&content)?;
 
-                // Some HF models (e.g. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
-                // store the chat template in a separate file, we check if the file exists and
+                // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
+                // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
                 if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
@@ -36,6 +36,7 @@ impl PromptFormatter {
                 {
                     let chat_template = std::fs::read_to_string(&chat_template_file)
                         .with_context(|| format!("fs:read_to_string '{}'", chat_template_file))?;
+                    // clean up the string to remove newlines
                     let chat_template = chat_template.replace('\n', "");
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
                 }

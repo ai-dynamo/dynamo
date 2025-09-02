@@ -371,7 +371,7 @@ impl ModelDeploymentCard {
     /// Build an in-memory ModelDeploymentCard from either:
     /// - a folder containing config.json, tokenizer.json and token_config.json
     /// - a GGUF file
-    /// With an optional custom template
+    ///   With an optional custom template
     pub async fn load(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
