@@ -18,6 +18,7 @@ fn strip_text(message: &str) -> String {
 
 fn get_regex_matches(message: &str) -> Vec<String> {
     use regex::Regex;
+    // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
     let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
     let re = Regex::new(pattern).unwrap();
 
@@ -89,7 +90,7 @@ pub fn parse_tool_calls(src: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
             function: CalledFunction {
                 name: name.to_string(),
                 // Safety: `Value::Object` is always valid JSON, so serialization cannot fail
-                arguments: serde_json::to_string(&Value::Object(obj)).unwrap(),
+                arguments: serde_json::to_string(&Value::Object(obj))?,
             },
         });
     }

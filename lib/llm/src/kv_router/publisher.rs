@@ -30,6 +30,7 @@ use dynamo_runtime::{
         network::Ingress,
     },
     protocols::annotated::Annotated,
+    transports::nats::{NatsQueue, QUEUE_NAME, Slug},
 };
 use futures::stream;
 use std::sync::{Arc, OnceLock};
@@ -133,16 +134,27 @@ impl KvEventPublisher {
             )?);
         }
 
-        component
-            .drt()
-            .runtime()
-            .secondary()
-            .spawn(start_event_processor(
-                component,
-                worker_id,
-                cancellation_token.clone(),
-                rx,
-            ));
+        let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+            .to_string()
+            .replace("_", "-");
+        let nats_server =
+            std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+        // Create NatsQueue without consumer since we're only publishing
+        let mut nats_queue = NatsQueue::new_without_consumer(
+            stream_name,
+            nats_server,
+            std::time::Duration::from_secs(60), // 1 minute timeout
+        );
+
+        // Connect the NatsQueue before passing it to the event processor
+        let cancellation_token_clone = cancellation_token.clone();
+        component.drt().runtime().secondary().spawn(async move {
+            if let Err(e) = nats_queue.connect().await {
+                tracing::error!("Failed to connect NatsQueue: {}", e);
+                return;
+            }
+            start_event_processor(nats_queue, worker_id, cancellation_token_clone, rx).await
+        });
 
         Ok(Self {
             kv_block_size,
@@ -198,7 +210,7 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                 // Encapsulate in a router event and publish.
                 tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
                 let router_event = RouterEvent::new(worker_id, event);
-                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
+                if let Err(e) = publisher.publish(QUEUE_NAME, &router_event).await {
                     tracing::error!("Failed to publish event: {}", e);
                 }
             }
@@ -929,7 +941,7 @@ mod tests_startup_helpers {
         let published = published.lock().unwrap();
         assert_eq!(published.len(), 1);
         let (subject, _) = &published[0];
-        assert_eq!(subject, &KV_EVENT_SUBJECT.to_string());
+        assert_eq!(subject, QUEUE_NAME);
     }
 
     //--------------------------------------------------------------------

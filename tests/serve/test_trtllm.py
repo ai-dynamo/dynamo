@@ -57,6 +57,33 @@ class TRTLLMProcess(EngineProcess):
         )
 
 
+def run_trtllm_test_case(config: TRTLLMConfig, request) -> None:
+    payload = create_payload_for_config(config)
+
+    with TRTLLMProcess(config, request) as server_process:
+        assert len(config.endpoints) == len(config.response_handlers)
+        for endpoint, response_handler in zip(
+            config.endpoints, config.response_handlers
+        ):
+            url = f"http://localhost:{server_process.port}/{endpoint}"
+            start_time = time.time()
+            elapsed = 0.0
+
+            request_body = (
+                payload.payload_chat
+                if endpoint == "v1/chat/completions"
+                else payload.payload_completions
+            )
+
+            for _ in range(payload.repeat_count):
+                elapsed = time.time() - start_time
+
+                response = server_process.send_request(
+                    url, payload=request_body, timeout=config.timeout - elapsed
+                )
+                server_process.check_response(payload, response, response_handler)
+
+
 # trtllm test configurations
 trtllm_configs = {
     "aggregated": TRTLLMConfig(
@@ -137,33 +164,9 @@ def test_deployment(trtllm_config_test, request, runtime_services):
     logger.info("Starting test_deployment")
 
     config = trtllm_config_test
-    payload = create_payload_for_config(config)
-
     logger.info(f"Using model: {config.model}")
     logger.info(f"Script: {config.script_name}")
-
-    with TRTLLMProcess(config, request) as server_process:
-        assert len(config.endpoints) == len(config.response_handlers)
-        for endpoint, response_handler in zip(
-            config.endpoints, config.response_handlers
-        ):
-            url = f"http://localhost:{server_process.port}/{endpoint}"
-            start_time = time.time()
-            elapsed = 0.0
-
-            request_body = (
-                payload.payload_chat
-                if endpoint == "v1/chat/completions"
-                else payload.payload_completions
-            )
-
-            for _ in range(payload.repeat_count):
-                elapsed = time.time() - start_time
-
-                response = server_process.send_request(
-                    url, payload=request_body, timeout=config.timeout - elapsed
-                )
-                server_process.check_response(payload, response, response_handler)
+    run_trtllm_test_case(config, request)
 
 
 @pytest.mark.e2e
@@ -331,3 +334,34 @@ def test_metrics_labels(request, runtime_services):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.trtllm_marker
+@pytest.mark.slow
+def test_chat_only_aggregated_with_test_logits_processor(
+    request, runtime_services, monkeypatch
+):
+    """
+    Run a single aggregated chat-completions test using Qwen 0.6B with the
+    test logits processor enabled, and expect "Hello world" in the response.
+    """
+
+    # Enable HelloWorld logits processor only for this test
+    monkeypatch.setenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR", "1")
+
+    base = trtllm_configs["aggregated"]
+    config = TRTLLMConfig(
+        name="aggregated_qwen_chatonly",
+        directory=base.directory,
+        script_name=base.script_name,  # agg.sh
+        marks=[],  # not used by this direct test
+        endpoints=["v1/chat/completions"],
+        response_handlers=[chat_completions_response_handler],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=base.delayed_start,
+        timeout=base.timeout,
+    )
+
+    run_trtllm_test_case(config, request)
