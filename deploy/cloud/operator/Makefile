@@ -285,8 +285,12 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 		--source-path=api \
 		--config=docs/crd-ref-docs-config.yaml \
 		--renderer=markdown \
-		--output-path=docs/api_reference.md
-	@echo "✅ Generated API reference at docs/api_reference.md"
+		--output-path=./docs/api_reference.md
+	@echo "✅ Generated API reference at ./docs/api_reference.md"
+	# concatenate header.md and api_reference.md
+	cat docs/header.md ./docs/api_reference.md > ../../../docs/guides/dynamo_deploy/api_reference.md
+	rm ./docs/api_reference.md
+	@echo "✅ Concatenated header.md and api_reference.md"
 
 .PHONY: coverage
 coverage: test
