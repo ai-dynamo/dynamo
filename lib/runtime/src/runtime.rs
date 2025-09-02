@@ -25,7 +25,8 @@
 //! Notes: We will need to do an evaluation on what is fully public, what is pub(crate) and what is
 //! private; however, for now we are exposing most objects as fully public while the API is maturing.
 
-use super::{Result, Runtime, RuntimeType, error, GracefulShutdownTracker};
+use super::{Result, Runtime, RuntimeType, error};
+use super::utils::GracefulShutdownTracker;
 use crate::config::{self, RuntimeConfig};
 
 use futures::Future;
@@ -61,7 +62,7 @@ impl Runtime {
             secondary,
             cancellation_token,
             endpoint_shutdown_token,
-            graceful_shutdown_tracker: Arc::new(Mutex::new(GracefulShutdownTracker::new())),
+            graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
         })
     }
 
@@ -118,7 +119,7 @@ impl Runtime {
     }
 
     /// Get access to the graceful shutdown tracker
-    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<Mutex<GracefulShutdownTracker>> {
+    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
         self.graceful_shutdown_tracker.clone()
     }
 
@@ -141,28 +142,11 @@ impl Runtime {
             // Phase 2: Wait for all graceful endpoints to complete
             tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
             
-            // Get a reference to the tracker's internals without holding the lock
-            let (endpoints, notify) = {
-                let guard = tracker.lock().await;
-                let (endpoints, notify) = guard.get_state();
-                let count = endpoints.load(Ordering::SeqCst);
-                tracing::info!("Active graceful endpoints: {}", count);
-                (endpoints, notify)
-            }; // Lock released here
+            let count = tracker.get_count();
+            tracing::info!("Active graceful endpoints: {}", count);
             
-            // Now wait without holding any locks
-            loop {
-                let notified = notify.notified();
-                let count = endpoints.load(Ordering::SeqCst);
-                
-                if count == 0 {
-                    tracing::debug!("All endpoints completed");
-                    break;
-                }
-                
-                tracing::debug!("Waiting for {} endpoints to complete", count);
-                notified.await;
-                tracing::trace!("Received notification, rechecking...");
+            if count != 0 {
+                tracker.wait_for_completion().await;
             }
             
             // Phase 3: Now shutdown NATS/ETCD by cancelling the main token

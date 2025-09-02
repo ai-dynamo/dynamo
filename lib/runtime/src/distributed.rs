@@ -24,7 +24,8 @@ use crate::{
     transports::{etcd, nats, tcp},
 };
 
-use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error, GracefulShutdownTracker};
+use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
+use super::utils::GracefulShutdownTracker;
 use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
@@ -263,7 +264,7 @@ impl DistributedRuntime {
         self.runtime.child_token()
     }
 
-    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<Mutex<GracefulShutdownTracker>> {
+    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
         self.runtime.graceful_shutdown_tracker()
     }
 
