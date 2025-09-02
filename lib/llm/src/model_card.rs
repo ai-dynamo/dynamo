@@ -491,15 +491,22 @@ impl ModelDeploymentCard {
         // Load chat template - either custom or from repo
         let chat_template_file = if let Some(template_path) = custom_template_path {
             if !template_path.exists() {
-                anyhow::bail!("Custom template file does not exist: {}", template_path.display());
+                anyhow::bail!(
+                    "Custom template file does not exist: {}",
+                    template_path.display()
+                );
             }
 
             // Verify the file is readable
-            let _template_content = std::fs::read_to_string(template_path)
-                .with_context(|| format!("Failed to read custom template file: {}", template_path.display()))?;
+            let _template_content = std::fs::read_to_string(template_path).with_context(|| {
+                format!(
+                    "Failed to read custom template file: {}",
+                    template_path.display()
+                )
+            })?;
 
             Some(PromptFormatterArtifact::HfChatTemplate(
-                template_path.display().to_string()
+                template_path.display().to_string(),
             ))
         } else {
             PromptFormatterArtifact::chat_template_from_repo(repo_id).await?
