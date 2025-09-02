@@ -168,7 +168,17 @@ fn register_llm<'p>(
     let model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
-    let custom_template_path_owned = custom_template_path.map(|s| s.to_string());
+
+    // Early validation of custom template path
+    let custom_template_path_owned = custom_template_path.map(|s| {
+        let path = PathBuf::from(s);
+        if !path.exists() {
+            return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
+                format!("Custom template file does not exist: {}", path.display())
+            ));
+        }
+        Ok(path)
+    }).transpose()?;
 
     let user_data_json = user_data
         .map(|dict| pythonize::depythonize(dict))
@@ -188,7 +198,7 @@ fn register_llm<'p>(
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned.map(PathBuf::from));
+            .custom_template_path(custom_template_path_owned);
         // Download from HF, load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us

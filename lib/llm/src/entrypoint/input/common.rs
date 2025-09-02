@@ -282,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH).await?;
+        let card = ModelDeploymentCard::load(HF_PATH, None).await?;
         let engine = crate::engines::make_engine_core();
 
         // Build pipeline for chat completions
@@ -301,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH).await?;
+        let card = ModelDeploymentCard::load(HF_PATH, None).await?;
         let engine = crate::engines::make_engine_core();
 
         // Build pipeline for completions
