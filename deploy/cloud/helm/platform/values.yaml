@@ -125,8 +125,15 @@ kai-scheduler:
 # etcd configuration - distributed key-value store for operator state
 # For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd
 etcd:
+  global:
+    security:
+      allowInsecureImages: true
+
   # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance
   enabled: true
+
+  image:
+    repository: bitnamilegacy/etcd
 
   # Persistent storage configuration for etcd data
   persistence:
