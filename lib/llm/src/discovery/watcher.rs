@@ -35,7 +35,7 @@ use crate::{
     },
 };
 
-use super::{ModelEntry, ModelManager, MODEL_ROOT_PATH};
+use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
 use crate::namespace::is_global_namespace;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
