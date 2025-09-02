@@ -9,11 +9,11 @@ use crate::{
     entrypoint::{self, EngineConfig, input::common},
     grpc::service::kserve,
     kv_router::KvRouterConfig,
+    namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
-    namespace::is_global_namespace,
 };
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};

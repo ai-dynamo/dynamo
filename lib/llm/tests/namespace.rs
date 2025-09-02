@@ -4,7 +4,7 @@
 use dynamo_llm::{
     discovery::ModelEntry,
     model_type::ModelType,
-    namespace::{is_global_namespace, GLOBAL_NAMESPACE},
+    namespace::{GLOBAL_NAMESPACE, is_global_namespace},
 };
 use dynamo_runtime::protocols::EndpointId;
 
@@ -186,8 +186,14 @@ fn test_model_entry_serialization() {
     let deserialized: ModelEntry =
         serde_json::from_str(&json).expect("Failed to deserialize ModelEntry");
     assert_eq!(deserialized.name, model.name);
-    assert_eq!(deserialized.endpoint_id.namespace, model.endpoint_id.namespace);
-    assert_eq!(deserialized.endpoint_id.component, model.endpoint_id.component);
+    assert_eq!(
+        deserialized.endpoint_id.namespace,
+        model.endpoint_id.namespace
+    );
+    assert_eq!(
+        deserialized.endpoint_id.component,
+        model.endpoint_id.component
+    );
     assert_eq!(deserialized.endpoint_id.name, model.endpoint_id.name);
     assert_eq!(deserialized.model_type, model.model_type);
 }

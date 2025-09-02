@@ -7,7 +7,7 @@
 use dynamo_llm::{
     discovery::ModelEntry,
     model_type::ModelType,
-    namespace::{is_global_namespace, GLOBAL_NAMESPACE},
+    namespace::{GLOBAL_NAMESPACE, is_global_namespace},
 };
 use dynamo_runtime::protocols::EndpointId;
 
@@ -192,9 +192,11 @@ fn test_model_discovery_scoping_scenarios() {
         .collect();
 
     assert_eq!(visible_models.len(), 2);
-    assert!(visible_models
-        .iter()
-        .all(|m| m.endpoint_id.namespace == "vllm-agg"));
+    assert!(
+        visible_models
+            .iter()
+            .all(|m| m.endpoint_id.namespace == "vllm-agg")
+    );
 
     // Scenario 2: Frontend configured for global namespace should see all models
     let frontend_namespace = GLOBAL_NAMESPACE;
