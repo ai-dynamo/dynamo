@@ -366,7 +366,7 @@ impl ModelWatcher {
                 NvCreateChatCompletionRequest,
                 Annotated<NvCreateChatCompletionStreamResponse>,
             >::from_client_with_threshold(
-                client, Default::default(), self.busy_threshold
+                client, self.router_mode, self.busy_threshold
             )
             .await?;
             let engine = Arc::new(push_router);
@@ -380,7 +380,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, Default::default(), self.busy_threshold
+                client, self.router_mode, self.busy_threshold
             )
             .await?;
             let engine = Arc::new(push_router);

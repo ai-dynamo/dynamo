@@ -19,6 +19,28 @@ use std::fmt;
 use strum::Display;
 
 bitflags! {
+    /// Represents the set of model capabilities (endpoints) a model can support.
+    ///
+    /// This type is implemented using `bitflags` instead of a plain `enum`
+    /// so that multiple capabilities can be combined in a single value:
+    ///
+    /// - `ModelType::Chat`
+    /// - `ModelType::Completions`
+    /// - `ModelType::Embedding`
+    ///
+    /// For example, a model that supports both chat and completions can be
+    /// expressed as:
+    ///
+    /// ```rust
+    /// use dynamo_llm::model_type::ModelType;
+    /// let mt = ModelType::Chat | ModelType::Completions;
+    /// assert!(mt.supports_chat());
+    /// assert!(mt.supports_completions());
+    /// ```
+    ///
+    /// Using bitflags avoids deep branching on a single enum variant,
+    /// simplifies checks like `supports_chat()`, and enables efficient,
+    /// type-safe combinations of multiple endpoint types within a single byte.
     #[derive(Copy, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
     pub struct ModelType: u8 {
         const Chat = 1 << 0;

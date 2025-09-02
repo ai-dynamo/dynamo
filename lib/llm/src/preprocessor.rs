@@ -99,8 +99,9 @@ pub struct OpenAIPreprocessor {
 impl OpenAIPreprocessor {
     pub async fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
-        let PromptFormatter::OAI(formatter) = formatter;
-        Self::new_with_formatter(mdc, formatter).await
+        match formatter {
+            PromptFormatter::OAI(formatter) => Self::new_with_formatter(mdc, formatter).await,
+        }
     }
 
     pub async fn new_with_formatter(
