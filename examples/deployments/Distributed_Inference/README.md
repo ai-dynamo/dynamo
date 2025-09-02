@@ -10,7 +10,7 @@ helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 2. Install Dynamo platform
 Create a K8S namespace for your Dynamo application and install the Dynamo platform. It will install following pods:
 - ETCD
-- NATs
+- NATS
 - Dynamo Operator Controller
 ```sh
 export NAMESPACE=YOUR_DYNAMO_NAMESPACE
@@ -36,14 +36,14 @@ kubectl apply -f agg_router.yaml --namespace ${NAMESPACE}
 4. Testing the deployment and run benchmarks
 After deployment, forward the frontend service to access the API:
 ```sh
-kubectl port-forward deployment/vllm-agg-router-frontend-<pod-uuid-info> 8000:8000
+kubectl port-forward deployment/vllm-agg-router-frontend 8000:8000 -n ${NAMESPACE}
 ```
 and use following request to test the deployed model
 ```sh
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
         "role": "user",

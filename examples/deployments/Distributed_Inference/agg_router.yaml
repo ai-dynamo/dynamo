@@ -86,7 +86,7 @@ spec:
         volumes:
         - name: local-model-cache
           hostPath:
-            path: /raid/models
+            path: /YOUR/LOCAL/CACHE/FOLDER
             type: DirectoryOrCreate
         mainContainer:
           startupProbe:
@@ -104,4 +104,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen2.5-1.5B-Instruct  2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log
