@@ -13,27 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[package]
-name = "dynamo-parsers"
-version.workspace = true
-edition.workspace = true
-description = "Dynamo Parser Library for Tool Calling and Reasoning"
-authors.workspace = true
-license.workspace = true
-homepage.workspace = true
-repository.workspace = true
-keywords.workspace = true
+import subprocess
+from time import sleep
 
-[dependencies]
-anyhow = { workspace = true }
-dynamo-async-openai = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
+import pytest
 
-regex = "1"
-openai-harmony = "0.0.3"
-lazy_static = "1.5.0"
-rustpython-parser = "0.4.0"
-num-traits = "0.2"
+
+@pytest.fixture(scope="module", autouse=True)
+def nats_and_etcd():
+    # Setup code
+    nats_server = subprocess.Popen(["nats-server", "-js"])
+    etcd = subprocess.Popen(["etcd"])
+    print("Setting up resources")
+
+    sleep(5)  # wait for nats-server and etcd to start
+    yield
+
+    # Teardown code
+    print("Tearing down resources")
+    nats_server.terminate()
+    nats_server.wait()
+    etcd.terminate()
+    etcd.wait()

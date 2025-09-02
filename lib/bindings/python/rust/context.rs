@@ -1,28 +1,46 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// PyContext is a wrapper around the AsyncEngineContext to allow for Python bindings.
+// Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 
+use dynamo_runtime::pipeline::context::Controller;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-// PyContext is a wrapper around the AsyncEngineContext to allow for Python bindings.
+// Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 // Not all methods of the AsyncEngineContext are exposed, jsut the primary ones for tracing + cancellation.
 // Kept as class, to allow for future expansion if needed.
+#[derive(Clone)]
 #[pyclass]
-pub struct PyContext {
-    pub inner: Arc<dyn AsyncEngineContext>,
+pub struct Context {
+    inner: Arc<dyn AsyncEngineContext>,
 }
 
-impl PyContext {
+impl Context {
     pub fn new(inner: Arc<dyn AsyncEngineContext>) -> Self {
         Self { inner }
+    }
+
+    pub fn inner(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.clone()
     }
 }
 
 #[pymethods]
-impl PyContext {
+impl Context {
+    #[new]
+    #[pyo3(signature = (id=None))]
+    fn py_new(id: Option<String>) -> Self {
+        let controller = match id {
+            Some(id) => Controller::new(id),
+            None => Controller::default(),
+        };
+        Self {
+            inner: Arc::new(controller),
+        }
+    }
+
     // sync method of `await async_is_stopped()`
     fn is_stopped(&self) -> bool {
         self.inner.is_stopped()
