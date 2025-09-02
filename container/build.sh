@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["KVBM"]=5)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
 
 DEFAULT_FRAMEWORK=VLLM
 
@@ -460,8 +460,6 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
-elif [[ $FRAMEWORK == "KVBM" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.kvbm
 fi
 
 # Add NIXL_REF as a build argument
@@ -580,6 +578,11 @@ fi
 if [  ! -z ${RELEASE_BUILD} ]; then
     echo "Performing a release build!"
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
+fi
+
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    echo "Forcing enable_kvbm to true in vLLM image build"
+    ENABLE_KVBM=true
 fi
 
 if [  ! -z ${ENABLE_KVBM} ]; then

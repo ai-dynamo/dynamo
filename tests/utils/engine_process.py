@@ -32,6 +32,23 @@ class EngineProcess(ManagedProcess):
         except Exception:
             return False
 
+    def get_metrics(self, port=8081):
+        """Curl the metrics endpoint and return the response."""
+        import requests
+
+        metrics_url = f"http://localhost:{port}/metrics"
+        logger.info(f"Curling metrics endpoint: {metrics_url}")
+
+        try:
+            response = requests.get(metrics_url, timeout=10)
+            logger.info(
+                f"Metrics endpoint responded with status: {response.status_code}"
+            )
+            return response
+        except requests.RequestException as e:
+            logger.error(f"Failed to curl metrics endpoint: {e}")
+            raise
+
     def send_request(
         self, url: str, payload: Dict[str, Any], timeout: float = 30.0
     ) -> requests.Response:

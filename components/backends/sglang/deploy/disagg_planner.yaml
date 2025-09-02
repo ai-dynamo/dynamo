@@ -47,7 +47,7 @@ spec:
         failureThreshold: 10
       pvc:
         create: false
-        name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:

@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"net/url"
 	"os"
 	"time"
 
@@ -130,6 +131,7 @@ func main() {
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
 	var groveTerminationDelay time.Duration
+	var modelExpressURL string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -157,11 +159,22 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
 		"The termination delay for Grove PodGangSets")
+	flag.StringVar(&modelExpressURL, "model-express-url", "",
+		"URL of the Model Express server to inject into all pods")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Validate modelExpressURL if provided
+	if modelExpressURL != "" {
+		if _, err := url.Parse(modelExpressURL); err != nil {
+			setupLog.Error(err, "invalid model-express-url provided", "url", modelExpressURL)
+			os.Exit(1)
+		}
+		setupLog.Info("Model Express URL configured", "url", modelExpressURL)
+	}
 
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
@@ -183,6 +196,7 @@ func main() {
 			IngressControllerTLSSecret: ingressControllerTLSSecretName,
 			IngressHostSuffix:          ingressHostSuffix,
 		},
+		ModelExpressURL: modelExpressURL,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()

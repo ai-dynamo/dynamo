@@ -178,8 +178,8 @@ impl ReasoningParserType {
             Some(parser_type) => parser_type.get_reasoning_parser(),
             None => {
                 tracing::warn!(
-                    "Unknown reasoning parser type '{}', falling back to Basic Reasoning Parser",
-                    name
+                    parser_name = name,
+                    "Unknown reasoning parser type, falling back to Basic Reasoning Parser",
                 );
                 Self::Basic.get_reasoning_parser()
             }
