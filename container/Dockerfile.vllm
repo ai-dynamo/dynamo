@@ -69,8 +69,13 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 # Use dynamo base image (see /container/Dockerfile for more details)
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
+ARG PYTHON_VERSION
+
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Python runtime - CRITICAL for virtual environment to work
+        python${PYTHON_VERSION}-dev \
+        build-essential \
         # vLLM build dependencies
         cmake \
         ibverbs-providers \
@@ -86,7 +91,6 @@ RUN apt-get update -y \
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-ARG PYTHON_VERSION
 # Create virtual environment
 RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
@@ -170,6 +174,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 ARG ARCH_ALT
+ARG PYTHON_VERSION
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
@@ -178,7 +183,7 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # Python runtime - CRITICAL for virtual environment to work
-        python3-dev \
+        python${PYTHON_VERSION}-dev \
         build-essential \
         # jq and curl for polling various endpoints and health checks
         jq \
@@ -242,14 +247,9 @@ $LD_LIBRARY_PATH
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-ARG PYTHON_VERSION
-RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION
-
-# Copy virtual environment from framework image to avoid re-installing framework + vllm dependencies
-COPY --from=framework \
-    /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages \
-    /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages
+# Copy uv and entire virtual environment from framework container
+COPY --from=framework /bin/uv /bin/uvx /bin/
+COPY --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 COPY benchmarks/ /opt/dynamo/benchmarks/

@@ -2,13 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
+use regex::Regex;
 use rustpython_parser::{
     Mode,
     ast::{Constant, Expr, Mod},
     parse,
 };
 use serde_json::{Number, Value, json};
+use std::sync::OnceLock;
 
+static PYTHONIC_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Get the compiled regex pattern for pythonic tool calls
+/// Initialize the regex pattern once, no need to compile it everytime
+fn get_pythonic_regex() -> &'static Regex {
+    PYTHONIC_REGEX.get_or_init(|| {
+        // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
+        let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
+        Regex::new(pattern).expect("Failed to compile pythonic regex pattern")
+    })
+}
 fn strip_text(message: &str) -> String {
     // Remove unexpected python tags if any
     message
@@ -17,10 +30,7 @@ fn strip_text(message: &str) -> String {
 }
 
 fn get_regex_matches(message: &str) -> Vec<String> {
-    use regex::Regex;
-    // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
-    let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
-    let re = Regex::new(pattern).unwrap();
+    let re = get_pythonic_regex();
 
     let mut matches = Vec::new();
     for cap in re.find_iter(message) {

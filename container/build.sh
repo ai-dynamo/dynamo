@@ -580,6 +580,11 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    echo "Forcing enable_kvbm to true in vLLM image build"
+    ENABLE_KVBM=true
+fi
+
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the ai-dynamo-runtime"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
