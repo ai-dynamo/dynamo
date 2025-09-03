@@ -244,9 +244,9 @@ get_options() {
         RM="TRUE"
     fi
 
-    if [[ ${PRIVILEGED^^} == "FALSE" ]]; then
-        PRIVILEGED_STRING=""
-    else
+    # Initialize PRIVILEGED_STRING
+    PRIVILEGED_STRING=""
+    if [[ ${PRIVILEGED^^} != "FALSE" ]]; then
         PRIVILEGED_STRING="--privileged"
     fi
 
@@ -350,12 +350,13 @@ if [ -n "$MOUNT_WORKSPACE" ]; then
         # This currently only works with Dockerfile.vllm which has proper ubuntu user setup.
         echo "Dev Container mode enabled - using ubuntu user with host UID/GID"
         # Use ubuntu user (with correct UID/GID baked into image)
-        USER_ARGS+="--user ubuntu"
+        PRIVILEGED_STRING+=" --user ubuntu"
     else
         # Standard workspace mode - enable privileged mode
-        # TODO(keivenc): Security risk. Dockerfiles (trtllm, sglang) still need to run as root.
+        # TODO(keivenc): Security risk, remove soon. Dockerfiles (trtllm, sglang) still need to run as root.
         if [ -z "${PRIVILEGED}" ]; then
             PRIVILEGED="TRUE"
+            PRIVILEGED_STRING="--privileged"
         fi
     fi
 fi
@@ -375,7 +376,6 @@ ${RUN_PREFIX} docker run \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
     --ulimit nofile=65536:65536 \
-    ${USER_ARGS} \
     ${ENVIRONMENT_VARIABLES} \
     ${VOLUME_MOUNTS} \
     -w "$WORKDIR" \
