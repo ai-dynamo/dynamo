@@ -37,18 +37,14 @@ This will start both etcd and NATS with the required configurations in the backg
 First, start the vLLM worker engines in a terminal:
 
 ```bash
-./run_engines.sh
+# Default: 8 workers with DeepSeek model
+./run_engines.sh --num-workers 8 --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+
+# Example: 4 workers with larger model using tensor parallelism (2 GPUs per worker)
+./run_engines.sh --num-workers 4 --model-path openai/gpt-oss-120b --tensor-parallel-size 2
 ```
 
-This script will:
-- Start 8 vLLM workers (by default) on GPUs 0-7
-- Load the DeepSeek-R1-Distill-Llama-8B model
-- Configure each worker with:
-  - Max batched tokens: 16384
-  - Max model length: 32768
-  - Block size: 64
-
-Press `Ctrl+C` to stop all workers when done.
+Any additional arguments are passed directly to vLLM. Press `Ctrl+C` to stop all workers when done.
 
 ### Step 2: Start the Router
 
