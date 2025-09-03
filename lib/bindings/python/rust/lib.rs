@@ -170,15 +170,17 @@ fn register_llm<'p>(
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
     // Early validation of custom template path
-    let custom_template_path_owned = custom_template_path.map(|s| {
-        let path = PathBuf::from(s);
-        if !path.exists() {
-            return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
-                format!("Custom template file does not exist: {}", path.display())
-            ));
-        }
-        Ok(path)
-    }).transpose()?;
+    let custom_template_path_owned = custom_template_path
+        .map(|s| {
+            let path = PathBuf::from(s);
+            if !path.exists() {
+                return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
+                    format!("Custom template file does not exist: {}", path.display()),
+                ));
+            }
+            Ok(path)
+        })
+        .transpose()?;
 
     let user_data_json = user_data
         .map(|dict| pythonize::depythonize(dict))

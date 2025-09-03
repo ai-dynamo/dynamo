@@ -1476,6 +1476,7 @@ dependencies = [
  "dlpark",
  "dynamo-async-openai",
  "dynamo-llm",
+ "dynamo-parsers",
  "dynamo-runtime",
  "either",
  "futures",
