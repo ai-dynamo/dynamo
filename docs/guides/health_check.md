@@ -28,6 +28,8 @@ orchestration frameworks such as Kubernetes.
 The frontend liveness endpoint reports a status of `live` as long as
 the service is running.
 
+> **Note**: Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
+
 #### Example Request
 
 ```
@@ -52,6 +54,7 @@ until workers have been initialized and registered
 with the frontend. Once workers have been registered, the `health`
 endpoint will also list registered endpoints and instances and returl an HTTP status code of `HTTP/1.1 200 OK`.
 
+> **Note**: Frontend health doesn't depend on worker health or liveness only on if endpoints have been registered with the Frontend.
 
 #### Example Request
 
