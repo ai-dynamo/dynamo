@@ -11,7 +11,7 @@ from typing import AsyncGenerator
 
 import msgspec
 from vllm.inputs import TokensPrompt
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, GuidedDecodingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -143,6 +143,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params.detokenize = False
         for key, value in request["sampling_options"].items():
             if value is not None and hasattr(sampling_params, key):
+                if key == "guided_decoding" and isinstance(value, dict):
+                    value = GuidedDecodingParams(**value)
                 setattr(sampling_params, key, value)
 
         for key, value in request["stop_conditions"].items():
