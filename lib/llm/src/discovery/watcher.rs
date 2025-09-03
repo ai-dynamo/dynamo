@@ -176,46 +176,6 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
         if !active_instances.is_empty() {
-            let mut update_tx = true;
-            let mut model_type: ModelType = model_entry.model_type;
-            if model_entry.model_type == ModelType::Chat
-                && self.manager.list_chat_completions_models().is_empty()
-            {
-                self.manager.remove_chat_completions_model(&model_name).ok();
-                model_type = ModelType::Chat;
-            } else if model_entry.model_type == ModelType::Completion
-                && self.manager.list_completions_models().is_empty()
-            {
-                self.manager.remove_completions_model(&model_name).ok();
-                model_type = ModelType::Completion;
-            } else if model_entry.model_type == ModelType::Embedding
-                && self.manager.list_embeddings_models().is_empty()
-            {
-                self.manager.remove_embeddings_model(&model_name).ok();
-                model_type = ModelType::Embedding;
-            } else if model_entry.model_type == ModelType::Backend {
-                if self.manager.list_chat_completions_models().is_empty() {
-                    self.manager.remove_chat_completions_model(&model_name).ok();
-                    model_type = ModelType::Chat;
-                }
-                if self.manager.list_completions_models().is_empty() {
-                    self.manager.remove_completions_model(&model_name).ok();
-                    if model_type == ModelType::Chat {
-                        model_type = ModelType::Backend;
-                    } else {
-                        model_type = ModelType::Completion;
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    "Model {} is still active in other instances, not removing",
-                    model_name
-                );
-                update_tx = false;
-            }
-            if update_tx && let Some(tx) = &self.model_update_tx {
-                tx.send(ModelUpdate::Removed(model_type)).await.ok();
-            }
             return Ok(None);
         }
 

@@ -25,13 +25,14 @@
 //! Notes: We will need to do an evaluation on what is fully public, what is pub(crate) and what is
 //! private; however, for now we are exposing most objects as fully public while the API is maturing.
 
+use super::utils::GracefulShutdownTracker;
 use super::{Result, Runtime, RuntimeType, error};
 use crate::config::{self, RuntimeConfig};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
-use std::sync::Arc;
-use tokio::{signal, task::JoinHandle};
+use std::sync::{Arc, atomic::Ordering};
+use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -42,6 +43,9 @@ impl Runtime {
 
         // create a cancellation token
         let cancellation_token = CancellationToken::new();
+
+        // create endpoint shutdown token as a child of the main token
+        let endpoint_shutdown_token = cancellation_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -57,6 +61,8 @@ impl Runtime {
             primary: runtime,
             secondary,
             cancellation_token,
+            endpoint_shutdown_token,
+            graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
         })
     }
 
@@ -107,14 +113,48 @@ impl Runtime {
         self.cancellation_token.clone()
     }
 
-    /// Creates a child [`CancellationToken`] tied to the life-cycle of the [`Runtime`]'s root [`CancellationToken::child_token`] method.
+    /// Creates a child [`CancellationToken`] tied to the life-cycle of the [`Runtime`]'s endpoint shutdown token.
     pub fn child_token(&self) -> CancellationToken {
-        self.cancellation_token.child_token()
+        self.endpoint_shutdown_token.child_token()
+    }
+
+    /// Get access to the graceful shutdown tracker
+    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
+        self.graceful_shutdown_tracker.clone()
     }
 
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
-        self.cancellation_token.cancel();
+        tracing::info!("Runtime shutdown initiated");
+
+        // Spawn the shutdown coordination task BEFORE cancelling tokens
+        let tracker = self.graceful_shutdown_tracker.clone();
+        let main_token = self.cancellation_token.clone();
+        let endpoint_token = self.endpoint_shutdown_token.clone();
+
+        // Use the runtime handle to spawn the task
+        let handle = self.primary();
+        handle.spawn(async move {
+            // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
+            tracing::info!("Phase 1: Cancelling endpoint shutdown token");
+            endpoint_token.cancel();
+
+            // Phase 2: Wait for all graceful endpoints to complete
+            tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
+
+            let count = tracker.get_count();
+            tracing::info!("Active graceful endpoints: {}", count);
+
+            if count != 0 {
+                tracker.wait_for_completion().await;
+            }
+
+            // Phase 3: Now shutdown NATS/ETCD by cancelling the main token
+            tracing::info!(
+                "Phase 3: All graceful endpoints completed, shutting down NATS/ETCD connections"
+            );
+            main_token.cancel();
+        });
     }
 }
 
