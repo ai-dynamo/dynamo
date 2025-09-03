@@ -3,7 +3,7 @@
 
 use dynamo_llm::{
     discovery::ModelEntry,
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
     namespace::{GLOBAL_NAMESPACE, is_global_namespace},
 };
 use dynamo_runtime::protocols::EndpointId;
@@ -53,6 +53,7 @@ fn create_test_model_entry(
     component: &str,
     endpoint_name: &str,
     model_type: ModelType,
+    model_input: ModelInput,
 ) -> ModelEntry {
     ModelEntry {
         name: name.to_string(),
@@ -62,6 +63,7 @@ fn create_test_model_entry(
             name: endpoint_name.to_string(),
         },
         model_type,
+        model_input,
         runtime_config: None,
     }
 }
@@ -75,6 +77,7 @@ fn test_model_entry_creation_with_different_namespaces() {
         "backend",
         "generate",
         ModelType::Chat,
+        ModelInput::Tokens,
     );
 
     assert_eq!(model_vllm.name, "test-model-1");
@@ -82,6 +85,7 @@ fn test_model_entry_creation_with_different_namespaces() {
     assert_eq!(model_vllm.endpoint_id.component, "backend");
     assert_eq!(model_vllm.endpoint_id.name, "generate");
     assert_eq!(model_vllm.model_type, ModelType::Chat);
+    assert_eq!(model_vllm.model_input, ModelInput::Tokens);
 
     // Test creating ModelEntry with global namespace
     let model_global = create_test_model_entry(
@@ -89,14 +93,16 @@ fn test_model_entry_creation_with_different_namespaces() {
         "dynamo",
         "frontend",
         "http",
-        ModelType::Completion,
+        ModelType::Completions,
+        ModelInput::Text,
     );
 
     assert_eq!(model_global.name, "test-model-2");
     assert_eq!(model_global.endpoint_id.namespace, "dynamo");
     assert_eq!(model_global.endpoint_id.component, "frontend");
     assert_eq!(model_global.endpoint_id.name, "http");
-    assert_eq!(model_global.model_type, ModelType::Completion);
+    assert_eq!(model_global.model_type, ModelType::Completions);
+    assert_eq!(model_global.model_input, ModelInput::Text);
 }
 
 #[test]
@@ -109,6 +115,7 @@ fn test_namespace_filtering_logic() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
         create_test_model_entry(
             "model-2",
@@ -116,9 +123,24 @@ fn test_namespace_filtering_logic() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
-        create_test_model_entry("model-3", "dynamo", "backend", "generate", ModelType::Chat),
-        create_test_model_entry("model-4", "", "backend", "generate", ModelType::Chat),
+        create_test_model_entry(
+            "model-3",
+            "dynamo",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ),
+        create_test_model_entry(
+            "model-4",
+            "",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ),
     ];
 
     // Test filtering for specific namespace "vllm-agg"
@@ -173,6 +195,7 @@ fn test_model_entry_serialization() {
         "backend",
         "generate",
         ModelType::Chat,
+        ModelInput::Tokens,
     );
 
     // Serialize to JSON
@@ -196,6 +219,7 @@ fn test_model_entry_serialization() {
     );
     assert_eq!(deserialized.endpoint_id.name, model.endpoint_id.name);
     assert_eq!(deserialized.model_type, model.model_type);
+    assert_eq!(deserialized.model_input, model.model_input);
 }
 
 #[test]
