@@ -20,7 +20,7 @@ limitations under the License.
 ## Overview
 
 Dynamo provides health check and liveness HTTP endpoints for each component which
-can be used configure startup, liveness and readiness probes in
+can be used to configure startup, liveness and readiness probes in
 orchestration frameworks such as Kubernetes.
 
 ## Frontend Liveness Check
