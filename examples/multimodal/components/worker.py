@@ -25,7 +25,6 @@ from typing import Tuple
 import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
@@ -107,7 +106,6 @@ class VllmBaseWorker:
     def __init__(
         self,
         args: argparse.Namespace,
-        engine_args: AsyncEngineArgs,
         component: Component,
         endpoint: Endpoint,
         config: Config = None,
@@ -115,7 +113,7 @@ class VllmBaseWorker:
         self.enable_disagg = args.enable_disagg
         self.endpoint = args.endpoint
         self.downstream_endpoint = args.downstream_endpoint
-        self.engine_args = engine_args
+        self.engine_args = config.engine_args
         self.config = config
         self.setup_vllm_engine(component, endpoint)
 
@@ -141,10 +139,14 @@ class VllmBaseWorker:
         vllm_config = self.engine_args.create_engine_config(usage_context=usage_context)
 
         # Create vLLM engine with metrics logger and KV event publisher attached
+        metrics_labels = []
+        if self.config:
+            metrics_labels = [("model", self.config.model)]
+
         self.stats_logger = StatLoggerFactory(
             component,
             self.engine_args.data_parallel_rank or 0,
-            metrics_labels=[("model", self.config.model)],
+            metrics_labels=metrics_labels,
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
@@ -447,12 +449,10 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     if args.worker_type in ["prefill", "encode_prefill"]:
         handler: VllmBaseWorker = VllmPDWorker(
-            args, config.engine_args, component, generate_endpoint, config
+            args, component, generate_endpoint, config
         )
     elif args.worker_type == "decode":
-        handler = VllmDecodeWorker(
-            args, config.engine_args, component, generate_endpoint, config
-        )
+        handler = VllmDecodeWorker(args, component, generate_endpoint, config)
     await handler.async_init(runtime)
 
     logger.info(f"Starting to serve the {args.endpoint} endpoint...")

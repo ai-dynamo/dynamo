@@ -255,7 +255,6 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     await handler.async_init(runtime)
 
     logger.info("Waiting for PD Worker Instances ...")
-
     await pd_worker_client.wait_for_instances()
 
     logger.info(f"Starting to serve the {args.endpoint} endpoint...")
