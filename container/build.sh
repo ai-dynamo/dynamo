@@ -465,7 +465,7 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
-if [[ $TARGET == "local-dev" ]]; then
+if [[ $TARGET == "dev" ]]; then
     BUILD_ARGS+=" --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) "
 fi
 

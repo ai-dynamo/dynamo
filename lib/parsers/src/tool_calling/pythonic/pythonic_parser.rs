@@ -22,6 +22,7 @@ fn get_pythonic_regex() -> &'static Regex {
         Regex::new(pattern).expect("Failed to compile pythonic regex pattern")
     })
 }
+
 fn strip_text(message: &str) -> String {
     // Remove unexpected python tags if any
     message
@@ -31,7 +32,6 @@ fn strip_text(message: &str) -> String {
 
 fn get_regex_matches(message: &str) -> Vec<String> {
     let re = get_pythonic_regex();
-
     let mut matches = Vec::new();
     for cap in re.find_iter(message) {
         matches.push(cap.as_str().to_string());

@@ -4,7 +4,6 @@
 
 import logging
 import os
-import sys
 from typing import Optional
 
 from vllm.config import KVTransferConfig
@@ -29,7 +28,6 @@ from .ports import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
@@ -71,12 +69,6 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Backend VLLM {__version__}"
-    )
-    parser.add_argument(
-        "--endpoint",
-        type=str,
-        default=DEFAULT_ENDPOINT,
-        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
     )
     parser.add_argument(
         "--is-prefill-worker",
@@ -145,27 +137,9 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
-
-    if args.is_prefill_worker:
-        args.endpoint = f"dyn://{namespace}.prefill.generate"
-    else:
-        # For decode workers, also use the provided namespace instead of hardcoded "dynamo"
-        args.endpoint = f"dyn://{namespace}.backend.generate"
-
-    endpoint_str = args.endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        logger.error(
-            f"Invalid endpoint format: '{args.endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        sys.exit(1)
-
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
-
-    config.namespace = parsed_namespace
-    config.component = parsed_component_name
-    config.endpoint = parsed_endpoint_name
+    config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    config.component = "prefill" if args.is_prefill_worker else "backend"
+    config.endpoint = "generate"
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.migration_limit = args.migration_limit
