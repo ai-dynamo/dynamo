@@ -36,11 +36,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to gRPC service
-                    let namespace = &engine_config.local_model().endpoint_id().namespace;
+                    let namespace = engine_config.local_model().namespace().unwrap_or("");
                     let target_namespace = if is_global_namespace(namespace) {
                         None
                     } else {
-                        Some(namespace)
+                        Some(namespace.to_string())
                     };
                     run_watcher(
                         distributed_runtime,
@@ -50,7 +50,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         router_config.busy_threshold,
-                        target_namespace.cloned(),
+                        target_namespace,
                     )
                     .await?;
                 }
