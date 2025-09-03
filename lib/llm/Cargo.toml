@@ -94,7 +94,7 @@ xxhash-rust = { workspace = true }
 
 akin = "0.4.0"
 bitflags = { version = "2.4", features = ["serde"] }
-blake3 = "1"
+blake3 = { version = "1.8", features=["mmap", "rayon"] }
 bytemuck = "1.22"
 candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
