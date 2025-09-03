@@ -168,5 +168,5 @@ Higher prefix ratios should show better performance due to KV cache sharing.
 
 1. **Workers fail to start**: Check CUDA_VISIBLE_DEVICES and GPU availability
 2. **Router connection refused**: Ensure router is running and port is correct
-3. **Benchmark timeout**: Increase concurrency or reduce request count
+3. **Benchmark timeout**: Decrease concurrency or reduce request count
 4. **OOM errors**: Reduce max-num-batched-tokens or max-model-len in run_engines.sh

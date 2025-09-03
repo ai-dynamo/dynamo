@@ -10,6 +10,8 @@ import os
 import subprocess
 from typing import Dict, List, Optional
 
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
 # Setup logging
@@ -414,7 +416,6 @@ def main():
         plot_path = f"{args.output_dir}/prefix_ratio_performance.png"
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         logger.info(f"Performance plot saved to {plot_path}")
-        plt.show()
 
         # Save results to JSON
         results_data = {
