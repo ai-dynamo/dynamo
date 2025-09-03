@@ -108,7 +108,7 @@ class VllmBaseWorker:
         args: argparse.Namespace,
         component: Component,
         endpoint: Endpoint,
-        config: Config = None,
+        config: Config,
     ):
         self.enable_disagg = args.enable_disagg
         self.endpoint = args.endpoint
@@ -139,14 +139,10 @@ class VllmBaseWorker:
         vllm_config = self.engine_args.create_engine_config(usage_context=usage_context)
 
         # Create vLLM engine with metrics logger and KV event publisher attached
-        metrics_labels = []
-        if self.config:
-            metrics_labels = [("model", self.config.model)]
-
         self.stats_logger = StatLoggerFactory(
             component,
             self.engine_args.data_parallel_rank or 0,
-            metrics_labels=metrics_labels,
+            metrics_labels=[("model", self.config.model)],
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
