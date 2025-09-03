@@ -68,7 +68,7 @@ pub fn parse_tool_calls_deepseek_v3_1(
             };
 
             let Some(arg_match) = grp.get(2) else {
-                continue; // Skip if arguments Match is not found. 
+                continue; // Skip if arguments Match is not found.
             };
 
             let arguments = match serde_json::from_str::<Value>(arg_match.as_str()) {
