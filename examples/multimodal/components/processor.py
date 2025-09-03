@@ -332,7 +332,9 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")

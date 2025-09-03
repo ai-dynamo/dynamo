@@ -255,13 +255,16 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     await handler.async_init(runtime)
 
     logger.info("Waiting for PD Worker Instances ...")
+
     await pd_worker_client.wait_for_instances()
 
     logger.info(f"Starting to serve the {args.endpoint} endpoint...")
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
