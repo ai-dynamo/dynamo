@@ -115,15 +115,16 @@ impl ActiveSequences {
     }
 
     /// Add a new request with its initial tokens
+    /// Returns the set of expired request IDs that were removed during cleanup
     pub fn add_request(
         &mut self,
         request_id: RequestId,
         token_sequence: Vec<SequenceHash>,
         isl: usize,
         overlap: u32,
-    ) -> usize {
-        // Lazily check and clean up expired requests
-        self.force_expiry();
+    ) -> HashSet<RequestId> {
+        // Lazily check and clean up expired requests, capturing removed IDs
+        let removed_requests = self.force_expiry();
 
         let prefill_tokens = self.new_tokens(isl, overlap);
         self.prefill_tokens
@@ -136,7 +137,7 @@ impl ActiveSequences {
 
         self.active_seqs.insert(request_id.clone(), token_sequence);
 
-        self.active_blocks
+        removed_requests
     }
 
     /// Mark prefill as completed for a request, removing it from prefill_tokens tracking
@@ -200,23 +201,26 @@ impl ActiveSequences {
     }
 
     /// Force expiry of stale requests if the timer has elapsed
-    pub fn force_expiry(&mut self) {
+    /// Returns the set of expired request IDs that were removed
+    pub fn force_expiry(&mut self) -> HashSet<RequestId> {
         let now = Instant::now();
 
         // Early return if timer hasn't expired yet
         if now < self.expiry_timer {
-            return;
+            return HashSet::new();
         }
 
         // Process expired requests
-        let expired_requests: Vec<RequestId> = self.expiry_requests.iter().cloned().collect();
-        for request_id in expired_requests {
+        let expired_requests: HashSet<RequestId> = self.expiry_requests.iter().cloned().collect();
+        for request_id in &expired_requests {
             tracing::warn!("Force expiring stale request: {}", request_id);
-            self.free(&request_id);
+            self.free(request_id);
         }
 
         self.expiry_timer = now + Duration::from_secs(300);
         self.expiry_requests = self.active_seqs.keys().cloned().collect();
+
+        expired_requests
     }
 }
 
@@ -226,6 +230,7 @@ enum UpdateSequences {
         token_sequence: Vec<SequenceHash>,
         isl: usize,
         overlap: u32,
+        resp_tx: tokio::sync::oneshot::Sender<HashSet<RequestId>>,
     },
     Free {
         request_id: RequestId,
@@ -349,8 +354,10 @@ impl ActiveSequencesMultiWorker {
                                         token_sequence,
                                         isl,
                                         overlap,
+                                        resp_tx,
                                     } => {
-                                        active_sequences.add_request(request_id, token_sequence, isl, overlap);
+                                        let removed = active_sequences.add_request(request_id, token_sequence, isl, overlap);
+                                        let _ = resp_tx.send(removed);
                                     }
                                     UpdateSequences::Free { request_id } => {
                                         active_sequences.free(&request_id);
@@ -450,11 +457,14 @@ impl ActiveSequencesMultiWorker {
                     request_to_worker.insert(event.request_id.clone(), event.worker_id);
 
                     if let Some(sender) = senders.get(&event.worker_id) {
+                        // For replicated events, we create a dummy response channel since we don't need to handle expired requests
+                        let (resp_tx, _) = tokio::sync::oneshot::channel();
                         let _ = sender.send(UpdateSequences::AddRequest {
                             request_id: event.request_id.clone(),
                             token_sequence: token_sequence.clone(),
                             isl: *isl,
                             overlap: *overlap,
+                            resp_tx,
                         });
                     } else {
                         tracing::warn!(
@@ -536,6 +546,9 @@ impl ActiveSequencesMultiWorker {
             return Err(anyhow::anyhow!("Worker ID {worker_id} not found"));
         }
 
+        // Create response channel
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+
         // Publish event only if replica_sync is enabled
         if self.replica_sync {
             let event = ActiveSequenceEvent {
@@ -564,8 +577,19 @@ impl ActiveSequencesMultiWorker {
                 token_sequence,
                 isl,
                 overlap,
+                resp_tx,
             })
             .map_err(|_| anyhow::anyhow!("Failed to send add_request command to worker"))?;
+
+        // Wait for response and handle removed requests
+        let removed_requests = resp_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to receive response from worker"))?;
+
+        // Remove expired requests from request_to_worker mapping
+        for expired_id in &removed_requests {
+            self.request_to_worker.remove(expired_id);
+        }
 
         Ok(())
     }
