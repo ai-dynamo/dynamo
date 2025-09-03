@@ -43,7 +43,6 @@ from dynamo.runtime import DistributedRuntime
 
 from . import __version__
 
-GLOBAL_NAMESPACE = "dynamo"
 DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
 
 logger = logging.getLogger(__name__)
@@ -262,6 +261,8 @@ async def async_main():
         kwargs["tls_cert_path"] = flags.tls_cert_path
     if flags.tls_key_path:
         kwargs["tls_key_path"] = flags.tls_key_path
+    if flags.namespace:
+        kwargs["namespace"] = flags.namespace
 
     if is_static:
         # out=dyn://<static_endpoint>
