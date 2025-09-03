@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony_parser::parse_tool_calls_harmony;
-use super::json_parser::try_tool_call_parse_json;
-use super::pythonic_parser::try_tool_call_parse_pythonic;
+use super::harmony::parse_tool_calls_harmony;
+use super::json::try_tool_call_parse_json;
+use super::pythonic::try_tool_call_parse_pythonic;
 use super::response::ToolCallResponse;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -22,6 +22,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("phi4", ToolCallConfig::phi4());
         map.insert("pythonic", ToolCallConfig::pythonic());
         map.insert("harmony", ToolCallConfig::harmony());
+        map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
         map.insert("default", ToolCallConfig::default());
         map
     })
@@ -111,6 +112,7 @@ mod tests {
             "phi4",
             "default",
             "pythonic",
+            "deepseek_v3_1",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
@@ -1169,5 +1171,19 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_deepseek_v3_1_parser_basic() {
+        let input = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3_1")).unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Tokyo");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Paris");
     }
 }
