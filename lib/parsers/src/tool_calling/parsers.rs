@@ -2,10 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony_parser::parse_tool_calls_harmony;
-use super::json_parser::try_tool_call_parse_json;
-use super::pythonic_parser::try_tool_call_parse_pythonic;
+use super::harmony::parse_tool_calls_harmony;
+use super::json::try_tool_call_parse_json;
+use super::pythonic::try_tool_call_parse_pythonic;
 use super::response::ToolCallResponse;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+static PARSER_MAP: OnceLock<HashMap<&'static str, ToolCallConfig>> = OnceLock::new();
+
+// Always update this parsermap when adding a new parser
+pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
+    PARSER_MAP.get_or_init(|| {
+        let mut map = HashMap::new();
+        map.insert("hermes", ToolCallConfig::hermes());
+        map.insert("nemotron_deci", ToolCallConfig::nemotron_deci());
+        map.insert("llama3_json", ToolCallConfig::llama3_json());
+        map.insert("mistral", ToolCallConfig::mistral());
+        map.insert("phi4", ToolCallConfig::phi4());
+        map.insert("pythonic", ToolCallConfig::pythonic());
+        map.insert("harmony", ToolCallConfig::harmony());
+        map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
+        map.insert("default", ToolCallConfig::default());
+        map
+    })
+}
+
+pub fn get_available_tool_parsers() -> Vec<&'static str> {
+    get_tool_parser_map().keys().copied().collect()
+}
 
 pub fn try_tool_call_parse(
     message: &str,
@@ -75,6 +100,27 @@ mod tests {
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
         (call.function.name, args)
+    }
+
+    #[test]
+    fn test_get_available_tool_parsers() {
+        let parsers = get_available_tool_parsers();
+        assert!(!parsers.is_empty());
+        // Update this list when adding a new parser
+        let available_parsers = [
+            "hermes",
+            "llama3_json",
+            "harmony",
+            "nemotron_deci",
+            "mistral",
+            "phi4",
+            "default",
+            "pythonic",
+            "deepseek_v3_1",
+        ];
+        for parser in available_parsers {
+            assert!(parsers.contains(&parser));
+        }
     }
 
     #[test]
@@ -1129,5 +1175,19 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_deepseek_v3_1_parser_basic() {
+        let input = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3_1")).unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Tokyo");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Paris");
     }
 }
