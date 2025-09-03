@@ -7,17 +7,47 @@ The mocker engine is a mock vLLM implementation designed for testing and develop
 - Developing and debugging Dynamo components
 - Load testing and performance analysis
 
-**Basic usage:**
+## Basic usage
 
-The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights (but the pre-processor needs the tokenizer). The arguments `block_size`, `num_gpu_blocks`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, and `enable_chunked_prefill` are common arguments shared with the real VLLM engine.
+The mocker engine now supports a vLLM-style CLI interface with individual arguments for all configuration options.
 
-And below are arguments that are mocker-specific:
-- `speedup_ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster.
-- `dp_size`: Number of data parallel workers to simulate (default: 1)
-- `watermark`: KV cache watermark threshold as a fraction (default: 0.01). This argument also exists for the real VLLM engine but cannot be passed as an engine arg.
+### Required arguments:
+- `--model-path`: Path to model directory or HuggingFace model ID (required for tokenizer)
 
+### MockEngineArgs parameters (vLLM-style):
+- `--num-gpu-blocks-override`: Number of GPU blocks for KV cache (default: 16384)
+- `--block-size`: Token block size for KV cache blocks (default: 64)
+- `--max-num-seqs`: Maximum number of sequences per iteration (default: 256)
+- `--max-num-batched-tokens`: Maximum number of batched tokens per iteration (default: 8192)
+- `--enable-prefix-caching` / `--no-enable-prefix-caching`: Enable/disable automatic prefix caching (default: True)
+- `--enable-chunked-prefill` / `--no-enable-chunked-prefill`: Enable/disable chunked prefill (default: True)
+- `--watermark`: KV cache watermark threshold as a fraction (default: 0.01)
+- `--speedup-ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster
+- `--data-parallel-size`: Number of data parallel workers to simulate (default: 1)
+
+### Example with individual arguments (vLLM-style):
 ```bash
-echo '{"speedup_ratio": 10.0}' > mocker_args.json
-python -m dynamo.mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args mocker_args.json
+# Start mocker with custom configuration
+python -m dynamo.mocker \
+  --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --num-gpu-blocks-override 8192 \
+  --block-size 16 \
+  --speedup-ratio 10.0 \
+  --max-num-seqs 512 \
+  --enable-prefix-caching
+
+# Start frontend server
 python -m dynamo.frontend --http-port 8080
 ```
+
+### Legacy JSON file support:
+For backward compatibility, you can still provide configuration via a JSON file:
+
+```bash
+echo '{"speedup_ratio": 10.0, "num_gpu_blocks": 8192}' > mocker_args.json
+python -m dynamo.mocker \
+  --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --extra-engine-args mocker_args.json
+```
+
+Note: If `--extra-engine-args` is provided, it overrides all individual CLI arguments.

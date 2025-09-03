@@ -49,13 +49,17 @@ TEST_PAYLOAD: Dict[str, Any] = {
 class MockerProcess:
     """Manages multiple mocker engine instances with the same namespace"""
 
-    def __init__(self, request, mocker_args_file: str, num_mockers: int = 1):
+    def __init__(self, request, mocker_args: Optional[Dict[str, Any]] = None, num_mockers: int = 1):
         # Generate a unique namespace suffix shared by all mockers
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.endpoint = f"dyn://{self.namespace}.mocker.generate"
         self.num_mockers = num_mockers
         self.mocker_processes = []
+        
+        # Default mocker args if not provided
+        if mocker_args is None:
+            mocker_args = {}
 
         # Create multiple mocker processes with the same namespace
         for i in range(num_mockers):
@@ -65,11 +69,35 @@ class MockerProcess:
                 "dynamo.mocker",
                 "--model-path",
                 MODEL_NAME,
-                "--extra-engine-args",
-                mocker_args_file,
                 "--endpoint",
                 self.endpoint,
             ]
+            
+            # Add individual CLI arguments from mocker_args
+            if "speedup_ratio" in mocker_args:
+                command.extend(["--speedup-ratio", str(mocker_args["speedup_ratio"])])
+            if "block_size" in mocker_args:
+                command.extend(["--block-size", str(mocker_args["block_size"])])
+            if "num_gpu_blocks" in mocker_args:
+                command.extend(["--num-gpu-blocks-override", str(mocker_args["num_gpu_blocks"])])
+            if "max_num_seqs" in mocker_args:
+                command.extend(["--max-num-seqs", str(mocker_args["max_num_seqs"])])
+            if "max_num_batched_tokens" in mocker_args:
+                command.extend(["--max-num-batched-tokens", str(mocker_args["max_num_batched_tokens"])])
+            if "enable_prefix_caching" in mocker_args:
+                if mocker_args["enable_prefix_caching"]:
+                    command.append("--enable-prefix-caching")
+                else:
+                    command.append("--no-enable-prefix-caching")
+            if "enable_chunked_prefill" in mocker_args:
+                if mocker_args["enable_chunked_prefill"]:
+                    command.append("--enable-chunked-prefill")
+                else:
+                    command.append("--no-enable-chunked-prefill")
+            if "watermark" in mocker_args:
+                command.extend(["--watermark", str(mocker_args["watermark"])])
+            if "dp_size" in mocker_args:
+                command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
 
             process = ManagedProcess(
                 command=command,
@@ -291,12 +319,8 @@ def test_mocker_kv_router(request, runtime_services):
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router test")
 
-    # Create mocker args file
+    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
-
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
 
     try:
         # Start KV router (frontend)
@@ -306,9 +330,9 @@ def test_mocker_kv_router(request, runtime_services):
         kv_router = KVRouterProcess(request, frontend_port)
         kv_router.__enter__()
 
-        # Start mocker instances
+        # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -339,9 +363,6 @@ def test_mocker_kv_router(request, runtime_services):
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
 
 @pytest.mark.pre_merge
 def test_mocker_two_kv_router(request, runtime_services):
@@ -353,12 +374,8 @@ def test_mocker_two_kv_router(request, runtime_services):
     # runtime_services starts etcd and nats
     logger.info("Starting mocker two KV router test")
 
-    # Create mocker args file
+    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
-
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
 
     kv_routers = []
 
@@ -372,9 +389,9 @@ def test_mocker_two_kv_router(request, runtime_services):
             kv_router.__enter__()
             kv_routers.append(kv_router)
 
-        # Start mocker instances
+        # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -411,9 +428,6 @@ def test_mocker_two_kv_router(request, runtime_services):
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
 
 @pytest.mark.pre_merge
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
@@ -426,16 +440,12 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router overload test for 503 status")
 
-    # Create mocker args file with limited resources
+    # Create mocker args dictionary with limited resources
     mocker_args = {
         "speedup_ratio": 10,
         "block_size": 4,  # Smaller block size
         "num_gpu_blocks": 64,  # Limited GPU blocks to exhaust quickly
     }
-
-    mocker_args_file = os.path.join(request.node.name, "mocker_args_overload.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
 
     try:
         # Start KV router (frontend) with limited block size
@@ -475,9 +485,9 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
         )
         kv_router.__enter__()
 
-        # Start single mocker instance with limited resources
+        # Start single mocker instance with limited resources using the new CLI interface
         logger.info("Starting single mocker instance with limited resources")
-        mockers = MockerProcess(request, mocker_args_file, num_mockers=1)
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=1)
         logger.info(f"Mocker using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -584,9 +594,6 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
 
 @pytest.mark.pre_merge
 def test_kv_push_router_bindings(request, runtime_services):
@@ -599,17 +606,13 @@ def test_kv_push_router_bindings(request, runtime_services):
     # runtime_services starts etcd and nats
     logger.info("Starting KvPushRouter bindings test")
 
-    # Create mocker args file
+    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
-
     try:
-        # Start mocker instances
+        # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -816,9 +819,6 @@ def test_kv_push_router_bindings(request, runtime_services):
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
 
 @pytest.mark.pre_merge
 def test_indexers_sync(request, runtime_services):
@@ -830,17 +830,13 @@ def test_indexers_sync(request, runtime_services):
     # runtime_services starts etcd and nats
     logger.info("Starting indexers sync test")
 
-    # Create mocker args file
+    # Create mocker args dictionary
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
-
     try:
-        # Start mocker instances
+        # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -1048,9 +1044,6 @@ def test_indexers_sync(request, runtime_services):
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
 
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
 
 @pytest.mark.pre_merge
 def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
@@ -1076,10 +1069,7 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
     logger.info("Starting KV router query_instance_id annotation test")
 
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
     os.makedirs(request.node.name, exist_ok=True)
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
 
     try:
         # Start KV router (frontend)
@@ -1090,7 +1080,7 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
 
         # Start multiple mocker engines to ensure worker selection logic
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args_file, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -1237,5 +1227,3 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
             kv_router.__exit__(None, None, None)
         if "mockers" in locals():
             mockers.__exit__(None, None, None)
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
