@@ -55,7 +55,7 @@ endpoint will also list registered endpoints and instances.
 #### Example Request
 
 ```
-curl -s localhost:8080/health -q |  jq
+curl -s localhost:8080/health -q | jq
 ```
 
 #### Example Response
