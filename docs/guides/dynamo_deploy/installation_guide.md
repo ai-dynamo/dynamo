@@ -174,6 +174,18 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
+**Bitnami etcd "unrecognized" image?**
+
+```bash
+ERROR: Original containers have been substituted for unrecognized ones. Deploying this chart with non-standard containers is likely to cause degraded security and performance, broken chart features, and missing environment variables.
+```
+This error that you might encounter during helm install is due to bitnami changing their docker repository to a [secure one](https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog).
+
+just add the following to the helm install command:
+```bash
+--set "etcd.image.repository=bitnamilegacy/etcd" --set "etcd.global.security.allowInsecureImages=true"
+```
+
 **Clean uninstall?**
 ```bash
 ./uninstall.sh  # Removes all CRDs and platform
