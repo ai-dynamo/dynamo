@@ -294,7 +294,7 @@ CMD []
 # Use this stage when you need a full development environment with additional
 # tooling beyond the base runtime image.
 
-FROM runtime AS local-dev
+FROM runtime AS dev
 
 # Install utilities
 RUN apt-get update -y && \
