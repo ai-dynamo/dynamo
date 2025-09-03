@@ -273,13 +273,13 @@ impl Component {
     /// Add Prometheus metrics for this component's NATS service stats.
     ///
     /// Starts a background task that periodically requests service statistics from NATS
-    /// and updates the corresponding Prometheus metrics. The scraping interval is set to
-    /// approximately 873ms (MAX_DELAY_MS), which is arbitrary but any value less than a second
-    /// is fair game. This frequent scraping provides real-time service statistics updates.
+    /// and updates the corresponding Prometheus metrics. The scraping interval starts at
+    /// 500ms (INITIAL_WAIT_MS) and doubles after each scrape (regardless of success or failure)
+    /// up to 9.8 seconds (MAX_WAIT_MS).
     pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
-        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
-            std::time::Duration::from_millis(300);
-        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(873);
+        const NATS_TIMEOUT_MS: std::time::Duration = std::time::Duration::from_millis(300);
+        const INITIAL_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(500);
+        const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Arbitrary value
 
         // If there is another component with the same service name, this will fail.
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
@@ -308,8 +308,9 @@ impl Component {
         // By using the DRT's own runtime handle, we ensure the task runs in the
         // correct runtime that will persist for the lifetime of the component.
         c.drt().runtime().secondary().spawn(async move {
-            let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
-            let mut interval = tokio::time::interval(MAX_DELAY_MS);
+            let timeout = NATS_TIMEOUT_MS;
+            let mut current_wait = INITIAL_WAIT_MS;
+            let mut interval = tokio::time::interval(current_wait);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -326,6 +327,15 @@ impl Component {
                         m.reset_to_zeros();
                     }
                 }
+
+                // Always double the wait time up to MAX_WAIT_MS
+                let new_wait = std::cmp::min(current_wait * 2, MAX_WAIT_MS);
+                if new_wait != current_wait {
+                    current_wait = new_wait;
+                    interval = tokio::time::interval(current_wait);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                }
+
                 interval.tick().await;
             }
         });
