@@ -47,15 +47,16 @@ curl -s localhost:8080/live -q | jq
 
 The frontend health endpoint reports a status of `healthy` once a
 model has been registered. During initial startup the frontend will
-report `unhealthy` until workers have been initialized and registered
+report `unhealthy` with a HTTP status code of `HTTP/1.1 503 Service Unavailable` 
+until workers have been initialized and registered
 with the frontend. Once workers have been registered, the `health`
-endpoint will also list registered endpoints and instances.
+endpoint will also list registered endpoints and instances and returl an HTTP status code of `HTTP/1.1 200 OK`.
 
 
 #### Example Request
 
 ```
-curl -s localhost:8080/health -q | jq
+curl -v localhost:8080/health -q | jq
 ```
 
 #### Example Response
@@ -63,6 +64,11 @@ curl -s localhost:8080/health -q | jq
 Before workers are registered:
 
 ```
+HTTP/1.1 503 Service Unavailable
+content-type: application/json
+content-length: 72
+date: Wed, 03 Sep 2025 13:31:44 GMT
+
 {
   "instances": [],
   "message": "No endpoints available",
@@ -73,6 +79,11 @@ Before workers are registered:
 After workers are registered:
 
 ```
+HTTP/1.1 200 OK
+content-type: application/json
+content-length: 609
+date: Wed, 03 Sep 2025 13:32:03 GMT
+ 
 {
   "endpoints": [
     "dyn://dynamo.backend.generate"
@@ -120,7 +131,8 @@ declared `ready`.
 
 Once all endpoints declared in `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`
 are served the component transitions to a `ready` state until the
-component is shutdown.
+component is shutdown. The endpoints return HTTP status code of `HTTP/1.1 503 Service Unavailable` 
+when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 
 > **Note**: Both /live and /ready return the same information
 
@@ -147,19 +159,26 @@ export DYN_SYSTEM_PORT=9090
 #### Example Request
 
 ```
-curl -s localhost:9090/health -q | jq
+curl -v localhost:9090/health | jq
+```
+
 #### Example Response
 Before endpoints are being served:
 
 ```
+HTTP/1.1 503 Service Unavailable
+content-type: text/plain; charset=utf-8
+content-length: 96
+date: Wed, 03 Sep 2025 13:42:39 GMT
+
 {
   "endpoints": {
     "generate": "notready"
   },
   "status": "notready",
   "uptime": {
-    "nanos": 775381996,
-    "secs": 2
+    "nanos": 313803539,
+    "secs": 12
   }
 }
 ```
@@ -167,6 +186,11 @@ Before endpoints are being served:
 After endpoints are being served:
 
 ```
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 139
+date: Wed, 03 Sep 2025 13:42:45 GMT
+
 {
   "endpoints": {
     "clear_kv_blocks": "ready",
@@ -175,8 +199,8 @@ After endpoints are being served:
   },
   "status": "ready",
   "uptime": {
-    "nanos": 435707697,
-    "secs": 55
+    "nanos": 356504530,
+    "secs": 18
   }
 }
 ```
