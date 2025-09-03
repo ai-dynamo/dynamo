@@ -92,7 +92,6 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 ### Step 1: Build the Development Container Image
 
 Build `dynamo:latest-vllm` from scratch from the source:
-- Note that currently, `dev` is only implemented for `--framework VLLM`.
 
 ```bash
 ./container/build.sh --target dev --framework VLLM
