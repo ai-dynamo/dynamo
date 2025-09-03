@@ -74,8 +74,8 @@ Resulting Log format:
 
 ## Trace and Span information
 
-When `DYN_LOGGING_JSONL` with `DYN_LOG` set to greate than or equal to
-`info` level trace information is added to all spans along with
+When `DYN_LOGGING_JSONL` is enabled with `DYN_LOG` set to greater than or equal to
+`info` level trace information is added to all logged spans along with
 `SPAN_CREATED` and `SPAN_CLOSED` events.
 
 ### Example Request
