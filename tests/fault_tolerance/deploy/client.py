@@ -138,6 +138,39 @@ def _single_request(
     }
 
 
+def _connect_to_pod(pod, deployment_spec, logger, max_connection_attempts=3):
+    """Attempt to connect to a pod and return the port-forward object on success."""
+    port_forward = pod.portforward(
+        remote_port=deployment_spec.port,
+        local_port=0,
+        address="0.0.0.0",
+    )
+    port_forward.start()
+
+    for _ in range(max_connection_attempts):
+        if port_forward.local_port == 0:
+            time.sleep(1)
+            continue
+
+        test_url = f"http://localhost:{port_forward.local_port}/"
+        try:
+            # Send HEAD request to test connection
+            response = requests.head(test_url, timeout=5)
+            if response.status_code in (200, 404):  # 404 is acceptable
+                return port_forward
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning(f"Connection test failed for pod {pod.name}: {e}")
+
+        # Retry port-forward
+        port_forward.stop()
+        port_forward.start()
+        time.sleep(1)
+
+    # All attempts failed
+    port_forward.stop()
+    return None
+
+
 def client(
     deployment_spec,
     namespace,
@@ -167,6 +200,8 @@ def client(
                 pods = managed_deployment.get_pods(
                     managed_deployment.frontend_service_name
                 )
+                port = 0
+                pod_name = None
 
                 pods_ready = []
 
@@ -181,21 +216,12 @@ def client(
                 if pods_ready:
                     pod = pods_ready[i % len(pods_ready)]
                     if pod.name not in pod_ports:
-                        pod_ports[pod.name] = pod.portforward(
-                            remote_port=deployment_spec.port,
-                            local_port=0,
-                            address="0.0.0.0",
-                        )
-                        pod_ports[pod.name].start()
-
-                        while pod_ports[pod.name].local_port == 0:
-                            time.sleep(1)
-
-                    port = pod_ports[pod.name].local_port
-                    pod_name = pod.name
-                else:
-                    port = 0
-                    pod_name = None
+                        connection = _connect_to_pod(pod, deployment_spec, logger)
+                        if connection:
+                            pod_ports[pod.name] = connection
+                    if pod.name in pod_ports:
+                        port = pod_ports[pod.name].local_port
+                        pod_name = pod.name
 
                 url = f"http://localhost:{port}/{deployment_spec.endpoint}"
 

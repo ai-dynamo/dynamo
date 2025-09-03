@@ -482,10 +482,11 @@ class ManagedDeployment:
         except Exception as e:
             self._logger.error(e)
         try:
+            previous_logs = pod.logs(previous=True)
             with open(
                 os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
             ) as f:
-                f.write("\n".join(pod.logs(previous=True)))
+                f.write("\n".join(previous_logs))
         except Exception as e:
             self._logger.error(e)
 
