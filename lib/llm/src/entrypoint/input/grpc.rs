@@ -145,6 +145,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,

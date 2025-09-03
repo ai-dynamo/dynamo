@@ -114,16 +114,17 @@ impl ModelWatcher {
                     };
 
                     // Filter by namespace if target_namespace is specified
-                    if let Some(target_ns) = target_namespace {
-                        if !global_namespace && model_entry.endpoint_id.namespace != target_ns {
-                            tracing::debug!(
-                                model_namespace = model_entry.endpoint_id.namespace,
-                                target_namespace = target_ns,
-                                model_name = model_entry.name,
-                                "Skipping model from different namespace"
-                            );
-                            continue;
-                        }
+                    if !global_namespace
+                        && let Some(target_ns) = target_namespace
+                        && model_entry.endpoint_id.namespace != target_ns
+                    {
+                        tracing::debug!(
+                            model_namespace = model_entry.endpoint_id.namespace,
+                            target_namespace = target_ns,
+                            model_name = model_entry.name,
+                            "Skipping model from different namespace"
+                        );
+                        continue;
                     }
 
                     let key = match kv.key_str() {
