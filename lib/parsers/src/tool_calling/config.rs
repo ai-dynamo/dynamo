@@ -35,7 +35,9 @@ pub struct JsonParserConfig {
     /// i.e. `{"name": "function", "arguments": {...}}` it would be
     /// "arguments"
     pub arguments_keys: Vec<String>,
+
     /// The type of JSON parser to use
+    #[serde(default)]
     pub parser_type: JsonParserType,
 }
 

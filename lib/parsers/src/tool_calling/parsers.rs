@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony::harmony_parser::parse_tool_calls_harmony;
+use super::harmony::parse_tool_calls_harmony;
 use super::json::try_tool_call_parse_json;
-use super::pythonic::pythonic_parser::try_tool_call_parse_pythonic;
+use super::pythonic::try_tool_call_parse_pythonic;
 use super::response::ToolCallResponse;
 use std::collections::HashMap;
 use std::sync::OnceLock;

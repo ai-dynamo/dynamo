@@ -14,7 +14,7 @@ static DEEPSEEK_V3_1_INNER_REGEX: OnceLock<Regex> = OnceLock::new();
 pub fn get_deepseek_v3_1_outer_regex() -> &'static Regex {
     DEEPSEEK_V3_1_OUTER_REGEX.get_or_init(|| {
         // Outer regex: matches the entire tool call block
-        Regex::new(r"<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>")
+        Regex::new(r"(?s)<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>")
             .expect("Failed to compile deepseek v3.1 outer regex pattern")
     })
 }
@@ -22,7 +22,7 @@ pub fn get_deepseek_v3_1_outer_regex() -> &'static Regex {
 pub fn get_deepseek_v3_1_inner_regex() -> &'static Regex {
     DEEPSEEK_V3_1_INNER_REGEX.get_or_init(|| {
         // Inner regex: captures function name and arguments between sep tokens
-        Regex::new(r"<｜tool▁call▁begin｜>(.*?)<｜tool▁sep｜>(.*?)<｜tool▁call▁end｜>")
+        Regex::new(r"(?s)<｜tool▁call▁begin｜>(.*?)<｜tool▁sep｜>(.*?)<｜tool▁call▁end｜>")
             .expect("Failed to compile deepseek v3.1 inner regex pattern")
     })
 }

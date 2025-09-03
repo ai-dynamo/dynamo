@@ -19,6 +19,12 @@ pub enum JsonParserType {
     DeepseekV31,
 }
 
+impl Default for JsonParserType {
+    fn default() -> Self {
+        Self::Basic
+    }
+}
+
 pub fn try_tool_call_parse_json(
     message: &str,
     config: &JsonParserConfig,
