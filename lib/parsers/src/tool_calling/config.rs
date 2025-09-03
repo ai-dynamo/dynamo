@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::json::JsonParserType;
+
 /// Represents the format type for tool calls
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ToolCallParserType {
@@ -33,6 +35,10 @@ pub struct JsonParserConfig {
     /// i.e. `{"name": "function", "arguments": {...}}` it would be
     /// "arguments"
     pub arguments_keys: Vec<String>,
+
+    /// The type of JSON parser to use
+    #[serde(default)]
+    pub parser_type: JsonParserType,
 }
 
 impl Default for JsonParserConfig {
@@ -44,6 +50,7 @@ impl Default for JsonParserConfig {
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string(), "".to_string()],
             function_name_keys: vec!["name".to_string()],
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
+            parser_type: JsonParserType::Basic,
         }
     }
 }
@@ -141,6 +148,18 @@ impl ToolCallConfig {
             json: JsonParserConfig {
                 tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
                 tool_call_end_tokens: vec!["<|call|>".to_string()],
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn deepseek_v3_1() -> Self {
+        Self {
+            format: ToolCallParserType::Json,
+            json: JsonParserConfig {
+                tool_call_start_tokens: vec!["<｜tool▁calls▁begin｜>".to_string()],
+                tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
+                parser_type: JsonParserType::DeepseekV31,
                 ..Default::default()
             },
         }

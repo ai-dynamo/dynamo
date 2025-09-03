@@ -60,6 +60,7 @@ pub struct LocalModelBuilder {
     runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
+    namespace: Option<String>,
 }
 
 impl Default for LocalModelBuilder {
@@ -83,6 +84,7 @@ impl Default for LocalModelBuilder {
             runtime_config: Default::default(),
             user_data: Default::default(),
             custom_template_path: Default::default(),
+            namespace: Default::default(),
         }
     }
 }
@@ -144,6 +146,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn namespace(&mut self, namespace: Option<String>) -> &mut Self {
+        self.namespace = namespace;
+        self
+    }
+
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
         self
@@ -196,6 +203,7 @@ impl LocalModelBuilder {
             .endpoint_id
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
+
         let template = self
             .template_file
             .as_deref()
@@ -222,6 +230,7 @@ impl LocalModelBuilder {
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
+                namespace: self.namespace.clone(),
             });
         }
 
@@ -299,6 +308,7 @@ impl LocalModelBuilder {
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
+            namespace: self.namespace.clone(),
         })
     }
 }
@@ -315,6 +325,7 @@ pub struct LocalModel {
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
+    namespace: Option<String>,
 }
 
 impl LocalModel {
@@ -363,6 +374,10 @@ impl LocalModel {
 
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
         &self.runtime_config
+    }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
 
     pub fn is_gguf(&self) -> bool {

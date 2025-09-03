@@ -7,7 +7,7 @@
     "name": "NVIDIA Dynamo Dev Container Development",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
-    "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM local dev image
+    "image": "dynamo:latest-vllm", // Use the latest VLLM local dev image
     "runArgs": [
         "--gpus=all",
         "--network=host",
