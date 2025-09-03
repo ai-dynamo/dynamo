@@ -6,7 +6,7 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::build_routed_pipeline;
+pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 
 use std::sync::Arc;
 

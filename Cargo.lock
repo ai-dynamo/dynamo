@@ -726,6 +726,9 @@ name = "bitflags"
 version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34efbcccd345379ca2868b2b2c9d3782e9cc58ba87bc7d79d5b53d9c9ae6f25d"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitstream-io"
@@ -1985,6 +1988,7 @@ dependencies = [
  "async_zmq",
  "axum 0.8.4",
  "axum-server",
+ "bitflags 2.9.3",
  "blake3",
  "bs62",
  "bytemuck",
