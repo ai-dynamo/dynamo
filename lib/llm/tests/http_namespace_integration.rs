@@ -6,7 +6,7 @@
 
 use dynamo_llm::{
     discovery::ModelEntry,
-    model_type::{ModelType, ModelInput},
+    model_type::{ModelInput, ModelType},
     namespace::{GLOBAL_NAMESPACE, is_global_namespace},
 };
 use dynamo_runtime::protocols::EndpointId;
@@ -189,7 +189,14 @@ fn test_model_discovery_scoping_scenarios() {
             ModelType::Chat,
             ModelInput::Tokens,
         ),
-        create_test_model_entry("claude-3", "dynamo", "backend", "generate", ModelType::Chat, ModelInput::Tokens),
+        create_test_model_entry(
+            "claude-3",
+            "dynamo",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ),
     ];
 
     let visible_models: Vec<&ModelEntry> = available_models
@@ -237,8 +244,22 @@ fn test_namespace_boundary_conditions() {
     // Test edge cases and boundary conditions for namespace handling
 
     let test_models = vec![
-        create_test_model_entry("model-1", "", "backend", "generate", ModelType::Chat, ModelInput::Tokens), // Empty namespace
-        create_test_model_entry("model-2", "dynamo", "backend", "generate", ModelType::Chat, ModelInput::Tokens), // Global namespace
+        create_test_model_entry(
+            "model-1",
+            "",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ), // Empty namespace
+        create_test_model_entry(
+            "model-2",
+            "dynamo",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ), // Global namespace
         create_test_model_entry(
             "model-3",
             "ns-with-special-chars_123",
