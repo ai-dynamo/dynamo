@@ -355,7 +355,6 @@ if [ -n "$MOUNT_WORKSPACE" ]; then
         # Standard workspace mode - enable privileged mode
         # TODO(keivenc): Security risk, remove soon. Dockerfiles (trtllm, sglang) still need to run as root.
         if [ -z "${PRIVILEGED}" ]; then
-            PRIVILEGED="TRUE"
             PRIVILEGED_STRING="--privileged"
         fi
     fi
