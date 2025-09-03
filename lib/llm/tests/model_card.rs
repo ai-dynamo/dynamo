@@ -9,7 +9,7 @@ const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 #[tokio::test]
 async fn test_model_info_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::load(HF_PATH).await.unwrap();
-    let info = mdc.model_info.unwrap().get_model_info().await.unwrap();
+    let info = mdc.model_info.unwrap().get_model_info().unwrap();
     assert_eq!(info.model_type(), "llama");
     assert_eq!(info.bos_token_id(), 1);
     assert_eq!(info.eos_token_ids(), vec![2]);

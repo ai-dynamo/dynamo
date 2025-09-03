@@ -120,7 +120,7 @@ impl OpenAIPreprocessor {
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
-        let model_info = model_info.get_model_info().await?;
+        let model_info = model_info.get_model_info()?;
 
         Ok(Arc::new(Self {
             formatter,

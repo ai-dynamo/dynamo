@@ -173,10 +173,10 @@ impl Client {
     }
 
     /// Upload file to NATS at this URL
-    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
+    pub async fn object_store_upload(&self, filepath: &Path, nats_url: &Url) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::open(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -193,12 +193,12 @@ impl Client {
     /// Download file from NATS at this URL
     pub async fn object_store_download(
         &self,
-        nats_url: Url,
+        nats_url: &Url,
         filepath: &Path,
     ) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::create(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
