@@ -31,7 +31,7 @@ the service is running.
 #### Example Request
 
 ```
-curl -s localhost:8080/live -q |  jq
+curl -s localhost:8080/live -q | jq
 ```
 
 #### Example Response
@@ -147,7 +147,7 @@ export DYN_SYSTEM_PORT=9090
 #### Example Request
 
 ```
-curl -s localhost:9090/health -q |  jq
+curl -s localhost:9090/health -q | jq
 #### Example Response
 Before endpoints are being served:
 
