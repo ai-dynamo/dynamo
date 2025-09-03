@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-#!/usr/bin/env python3
-
 import argparse
 import json
 import logging
 import os
 import subprocess
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
 
@@ -121,7 +119,7 @@ def run_benchmark_single_url(
     num_prefix_prompts,
     artifact_dir,
     url,
-):
+) -> Optional[Dict]:
     """Run genai-perf benchmark for a single URL"""
     genai_perf_cmd = get_genai_perf_cmd(
         model,
@@ -156,7 +154,7 @@ def run_benchmark_single_url(
         return None
 
 
-def aggregate_results(results: List[Dict]) -> Dict:
+def aggregate_results(results: List[Optional[Dict]]) -> Optional[Dict]:
     """Aggregate results from multiple URLs"""
     if not results:
         return None
@@ -193,7 +191,7 @@ def run_benchmark(
     num_prefix_prompts,
     output_dir,
     urls,
-):
+) -> Optional[Dict]:
     """Run genai-perf benchmark for a specific prefix ratio"""
     logger.info(
         f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, URLs={urls}"
@@ -261,7 +259,7 @@ def run_benchmark(
         processes.append((process, url, artifact_dir))
 
     # Wait for all processes to complete and collect results
-    results = []
+    results: List[Optional[Dict]] = []
     for process, url, artifact_dir in processes:
         stdout, stderr = process.communicate()
 

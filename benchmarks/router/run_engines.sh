@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Parse command-line arguments
 NUM_WORKERS=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
