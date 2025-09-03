@@ -52,7 +52,7 @@ model has been registered. During initial startup the frontend will
 report `unhealthy` with a HTTP status code of `HTTP/1.1 503 Service Unavailable`
 until workers have been initialized and registered
 with the frontend. Once workers have been registered, the `health`
-endpoint will also list registered endpoints and instances and returl an HTTP status code of `HTTP/1.1 200 OK`.
+endpoint will also list registered endpoints and instances and return an HTTP status code of `HTTP/1.1 200 OK`.
 
 > **Note**: Frontend health depends only on endpoints (workers) being registered. It doesn't depend on worker health or liveness.
 
