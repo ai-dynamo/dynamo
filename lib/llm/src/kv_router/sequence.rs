@@ -122,6 +122,9 @@ impl ActiveSequences {
         isl: usize,
         overlap: u32,
     ) -> usize {
+        // Lazily check and clean up expired requests
+        self.force_expiry();
+
         let prefill_tokens = self.new_tokens(isl, overlap);
         self.prefill_tokens
             .insert(request_id.clone(), prefill_tokens);
