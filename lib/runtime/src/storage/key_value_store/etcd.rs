@@ -186,10 +186,11 @@ impl EtcdBucket {
         // Key already existed, get its version
         if let Some(etcd_client::TxnOpResponse::Get(get_resp)) =
             result.op_responses().into_iter().next()
-            && let Some(kv) = get_resp.kvs().first() {
-                let version = kv.version() as u64;
-                return Ok(StorageOutcome::Exists(version));
-            }
+            && let Some(kv) = get_resp.kvs().first()
+        {
+            let version = kv.version() as u64;
+            return Ok(StorageOutcome::Exists(version));
+        }
         // Shouldn't happen, but handle edge case
         Err(StorageError::EtcdError(
             "Unexpected transaction response".to_string(),
