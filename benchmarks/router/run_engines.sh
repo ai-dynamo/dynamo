@@ -81,11 +81,11 @@ echo "Starting $NUM_WORKERS workers..."
 for i in $(seq 1 $NUM_WORKERS); do
     {
         echo "[Worker-$i] Starting..."
-        
+
         # Calculate GPU indices for this worker
         START_GPU=$(( (i - 1) * TENSOR_PARALLEL_SIZE ))
         END_GPU=$(( START_GPU + TENSOR_PARALLEL_SIZE - 1 ))
-        
+
         # Build CUDA_VISIBLE_DEVICES string
         if [ "$TENSOR_PARALLEL_SIZE" -eq 1 ]; then
             GPU_DEVICES="$START_GPU"
@@ -99,9 +99,9 @@ for i in $(seq 1 $NUM_WORKERS); do
                 fi
             done
         fi
-        
+
         echo "[Worker-$i] Using GPUs: $GPU_DEVICES"
-        
+
         CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
             --model "$MODEL_PATH" \
             --endpoint dyn://test.vllm.generate \
