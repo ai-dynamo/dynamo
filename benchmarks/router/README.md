@@ -76,7 +76,7 @@ python -m dynamo.frontend \
     --router-mode kv \
     --kv-cache-block-size 64 \
     --http-port 8080 \
-    # --no-kv-events
+    --no-kv-events
 ```
 
 ### Step 3: Verify Setup
