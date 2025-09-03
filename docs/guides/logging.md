@@ -40,7 +40,7 @@ Environment Setting:
 
 ```
 export DYN_LOG="info,dynamo_runtime::system_status_server:trace"
-export DYN_LOGGING_JSONL="0"
+export DYN_LOGGING_JSONL="false"
 ```
 
 Resulting Log format:
@@ -59,7 +59,7 @@ Environment Setting:
 
 ```
 export DYN_LOG="info,dynamo_runtime::system_status_server:trace"
-export DYN_LOGGING_JSONL="1"
+export DYN_LOGGING_JSONL="true"
 ```
 
 Resulting Log format:
