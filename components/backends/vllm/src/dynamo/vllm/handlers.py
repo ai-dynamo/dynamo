@@ -116,6 +116,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if self.prefill_worker_client is not None:
                     self.can_prefill = len(self.prefill_worker_client.instance_ids())
                     logger.debug(f"Current Prefill Workers: {self.can_prefill}")
+                else:
+                    self.can_prefill = 0
             except asyncio.CancelledError:
                 logger.warning("Prefill check loop cancelled.")
                 raise
@@ -147,6 +149,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
+        # TODO Change to prefill queue
         if self.can_prefill:
             # Create a copy for prefill with specific modifications
             prefill_sampling_params = deepcopy(sampling_params)
@@ -165,8 +168,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "request_id": request_id,
             }
 
-        # TODO Change to prefill queue
-        if self.prefill_worker_client is not None:
             try:
                 prefill_response = await anext(
                     await self.prefill_worker_client.round_robin(
