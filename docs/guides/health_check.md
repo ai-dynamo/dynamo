@@ -49,7 +49,7 @@ curl -s localhost:8080/live -q | jq
 
 The frontend health endpoint reports a status of `healthy` once a
 model has been registered. During initial startup the frontend will
-report `unhealthy` with a HTTP status code of `HTTP/1.1 503 Service Unavailable` 
+report `unhealthy` with a HTTP status code of `HTTP/1.1 503 Service Unavailable`
 until workers have been initialized and registered
 with the frontend. Once workers have been registered, the `health`
 endpoint will also list registered endpoints and instances and returl an HTTP status code of `HTTP/1.1 200 OK`.
@@ -86,7 +86,7 @@ HTTP/1.1 200 OK
 content-type: application/json
 content-length: 609
 date: Wed, 03 Sep 2025 13:32:03 GMT
- 
+
 {
   "endpoints": [
     "dyn://dynamo.backend.generate"
@@ -134,7 +134,7 @@ declared `ready`.
 
 Once all endpoints declared in `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`
 are served the component transitions to a `ready` state until the
-component is shutdown. The endpoints return HTTP status code of `HTTP/1.1 503 Service Unavailable` 
+component is shutdown. The endpoints return HTTP status code of `HTTP/1.1 503 Service Unavailable`
 when initializing and HTTP status code `HTTP/1.1 200 OK` once ready.
 
 > **Note**: Both /live and /ready return the same information
