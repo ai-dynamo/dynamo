@@ -59,6 +59,7 @@ pub struct LocalModelBuilder {
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
+    custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
 }
 
@@ -82,6 +83,7 @@ impl Default for LocalModelBuilder {
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
             user_data: Default::default(),
+            custom_template_path: Default::default(),
             namespace: Default::default(),
         }
     }
@@ -151,6 +153,11 @@ impl LocalModelBuilder {
 
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
+        self
+    }
+
+    pub fn custom_template_path(&mut self, custom_template_path: Option<PathBuf>) -> &mut Self {
+        self.custom_template_path = custom_template_path;
         self
     }
 
@@ -245,7 +252,9 @@ impl LocalModelBuilder {
         // --model-config takes precedence over --model-path
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
-        let mut card = ModelDeploymentCard::load(&model_config_path).await?;
+        let mut card =
+            ModelDeploymentCard::load(&model_config_path, self.custom_template_path.as_deref())
+                .await?;
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {

@@ -874,6 +874,7 @@ async def register_llm(
     migration_limit: int = 0,
     router_mode: Optional[RouterMode] = None,
     user_data: Optional[Dict[str, Any]] = None,
+    custom_template_path: Optional[str] = None,
 ) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
