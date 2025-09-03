@@ -4,6 +4,7 @@
 # Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B-Q8_0.gguf --extra-engine-args args.json`
 
 import argparse
+import os
 from pathlib import Path
 
 import uvloop
@@ -14,7 +15,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 
 configure_dynamo_logging()
 

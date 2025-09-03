@@ -36,6 +36,7 @@ use crate::{
 };
 
 use super::{MODEL_ROOT_PATH, ModelEntry, ModelManager};
+use crate::namespace::is_global_namespace;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ModelUpdate {
@@ -90,8 +91,9 @@ impl ModelWatcher {
         }
     }
 
-    pub async fn watch(&self, mut events_rx: Receiver<WatchEvent>) {
-        tracing::debug!("model watcher started");
+    /// Common watch logic with optional namespace filtering
+    pub async fn watch(&self, mut events_rx: Receiver<WatchEvent>, target_namespace: Option<&str>) {
+        let global_namespace = target_namespace.is_none_or(is_global_namespace);
 
         while let Some(event) = events_rx.recv().await {
             match event {
@@ -110,6 +112,21 @@ impl ModelWatcher {
                             continue;
                         }
                     };
+
+                    // Filter by namespace if target_namespace is specified
+                    if !global_namespace
+                        && let Some(target_ns) = target_namespace
+                        && model_entry.endpoint_id.namespace != target_ns
+                    {
+                        tracing::debug!(
+                            model_namespace = model_entry.endpoint_id.namespace,
+                            target_namespace = target_ns,
+                            model_name = model_entry.name,
+                            "Skipping model from different namespace"
+                        );
+                        continue;
+                    }
+
                     let key = match kv.key_str() {
                         Ok(k) => k,
                         Err(err) => {
@@ -126,21 +143,30 @@ impl ModelWatcher {
                     }
 
                     if self.manager.has_model_any(&model_entry.name) {
-                        tracing::trace!(name = model_entry.name, "New endpoint for existing model");
+                        tracing::trace!(
+                            name = model_entry.name,
+                            namespace = model_entry.endpoint_id.namespace,
+                            "New endpoint for existing model"
+                        );
                         self.notify_on_model.notify_waiters();
                         continue;
                     }
 
                     match self.handle_put(&model_entry).await {
                         Ok(()) => {
-                            tracing::info!(model_name = model_entry.name, "added model");
+                            tracing::info!(
+                                model_name = model_entry.name,
+                                namespace = model_entry.endpoint_id.namespace,
+                                "added model"
+                            );
                             self.notify_on_model.notify_waiters();
                         }
                         Err(err) => {
                             tracing::error!(
                                 error = format!("{err:#}"),
-                                "error adding model {}",
-                                model_entry.name
+                                "error adding model {} from namespace {}",
+                                model_entry.name,
+                                model_entry.endpoint_id.namespace,
                             );
                         }
                     }
