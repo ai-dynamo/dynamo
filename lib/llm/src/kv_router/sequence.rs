@@ -34,6 +34,8 @@ use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
@@ -60,6 +62,12 @@ pub struct ActiveSequences {
 
     #[getter(copy)]
     active_tokens: usize,
+
+    /// Timer for when to force expiry of stale requests
+    expiry_timer: Instant,
+
+    /// Set of request IDs to check for expiry
+    expiry_requests: HashSet<RequestId>,
 }
 
 impl ActiveSequences {
@@ -75,6 +83,8 @@ impl ActiveSequences {
             block_size,
             active_blocks: 0,
             active_tokens: 0,
+            expiry_timer: Instant::now() + Duration::from_secs(300),
+            expiry_requests: HashSet::new(),
         }
     }
 
@@ -170,6 +180,8 @@ impl ActiveSequences {
     pub fn free(&mut self, request_id: &RequestId) -> usize {
         self.mark_prefill_completed(request_id);
 
+        self.expiry_requests.remove(request_id);
+
         let Some(token_seq) = self.active_seqs.get(request_id) else {
             tracing::warn!("Trying to free free non-existent request {request_id}");
             return 0;
@@ -182,6 +194,26 @@ impl ActiveSequences {
         self.active_seqs.remove(request_id).unwrap();
 
         self.active_blocks
+    }
+
+    /// Force expiry of stale requests if the timer has elapsed
+    pub fn force_expiry(&mut self) {
+        let now = Instant::now();
+
+        // Early return if timer hasn't expired yet
+        if now < self.expiry_timer {
+            return;
+        }
+
+        // Process expired requests
+        let expired_requests: Vec<RequestId> = self.expiry_requests.iter().cloned().collect();
+        for request_id in expired_requests {
+            tracing::warn!("Force expiring stale request: {}", request_id);
+            self.free(&request_id);
+        }
+
+        self.expiry_timer = now + Duration::from_secs(300);
+        self.expiry_requests = self.active_seqs.keys().cloned().collect();
     }
 }
 
