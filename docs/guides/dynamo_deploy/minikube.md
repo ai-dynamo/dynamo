@@ -58,5 +58,5 @@ kubectl get storageclass
 
 ## Next Steps
 
-Once your local environment is set up, you can proceed with the [Dynamo Kubernetes Platform deployment guide](./dynamo_cloud.md) to deploy the platform to your local cluster.
+Once your local environment is set up, you can proceed with the [Dynamo Kubernetes Platform installation guide](./installation_guide.md) to deploy the platform to your local cluster.
 

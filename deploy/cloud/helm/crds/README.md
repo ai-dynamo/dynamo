@@ -15,9 +15,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo Cloud Platform
+# Dynamo Kubernetes Platform CRDs Helm Chart
 
-This directory contains the infrastructure components required for the Dynamo cloud platform.
-
-For detailed documentation on setting up and using the Dynamo Cloud Platform, please refer to:
-- [Dynamo Cloud Platform Guide](../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+This chart installs the [CRDs](../../../../docs/guides/dynamo_deploy/api_reference.md) for the Dynamo Kubernetes Platform.

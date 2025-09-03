@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 mod base_parser;
 mod gpt_oss_parser;
@@ -7,6 +9,29 @@ mod gpt_oss_parser;
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
+
+static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
+
+/// Initialize the global reasoning parser map
+fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserType> {
+    REASONING_PARSER_MAP.get_or_init(|| {
+        let mut map = HashMap::new();
+        map.insert("deepseek_r1", ReasoningParserType::DeepseekR1);
+        map.insert("basic", ReasoningParserType::Basic);
+        map.insert("gpt_oss", ReasoningParserType::GptOss);
+        map.insert("qwen3", ReasoningParserType::Qwen);
+        map.insert("nemotron_deci", ReasoningParserType::NemotronDeci);
+        map.insert("kimi", ReasoningParserType::Kimi);
+        map.insert("step3", ReasoningParserType::Step3);
+        map.insert("mistral", ReasoningParserType::Mistral);
+        map
+    })
+}
+
+/// Get all available reasoning parser names
+pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
+    get_reasoning_parser_map().keys().copied().collect()
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ParserResult {
@@ -144,23 +169,45 @@ impl ReasoningParserType {
     }
 
     pub fn get_reasoning_parser_from_name(name: &str) -> ReasoningParserWrapper {
-        tracing::debug!(parser_name = name, "Selected reasoning parser");
-        match name.to_lowercase().as_str() {
-            "deepseek_r1" => Self::DeepseekR1.get_reasoning_parser(),
-            "basic" => Self::Basic.get_reasoning_parser(),
-            "gpt_oss" => Self::GptOss.get_reasoning_parser(),
-            "qwen3" => Self::Qwen.get_reasoning_parser(),
-            "nemotron_deci" => Self::NemotronDeci.get_reasoning_parser(),
-            "kimi" => Self::Kimi.get_reasoning_parser(),
-            "step3" => Self::Step3.get_reasoning_parser(),
-            "mistral" => Self::Mistral.get_reasoning_parser(),
-            _ => {
+        tracing::debug!("Selected reasoning parser: {}", name);
+
+        let parser_map = get_reasoning_parser_map();
+        let normalized_name = name.to_lowercase();
+
+        match parser_map.get(normalized_name.as_str()) {
+            Some(parser_type) => parser_type.get_reasoning_parser(),
+            None => {
                 tracing::warn!(
                     parser_name = name,
                     "Unknown reasoning parser type, falling back to Basic Reasoning Parser",
                 );
                 Self::Basic.get_reasoning_parser()
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_available_reasoning_parsers() {
+        let parsers = get_available_reasoning_parsers();
+        assert!(!parsers.is_empty());
+        // Update this list when adding a new parser
+        let available_parsers = [
+            "deepseek_r1",
+            "basic",
+            "gpt_oss",
+            "qwen3",
+            "nemotron_deci",
+            "kimi",
+            "step3",
+            "mistral",
+        ];
+        for parser in available_parsers {
+            assert!(parsers.contains(&parser));
         }
     }
 }

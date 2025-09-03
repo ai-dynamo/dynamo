@@ -13,24 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = [
-    "hello_world",
-    "service_metrics",
-    "system_metrics",
-]
-resolver = "3"
 
-[workspace.package]
-version = "0.5.0"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 
 
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../" }
-prometheus = { version = "0.14" }
+def test_get_tool_parser_names():
+    parsers = get_tool_parser_names()
+    # Just make sure it's not None and has some parsers
+    # No Need to update this test when adding a new parser everytime
+    assert parsers is not None
+    assert len(parsers) > 0
+
+
+def test_get_reasoning_parser_names():
+    parsers = get_reasoning_parser_names()
+    # Just make sure it's not None and has some parsers
+    # No Need to update this test when adding a new parser everytime
+    assert parsers is not None
+    assert len(parsers) > 0

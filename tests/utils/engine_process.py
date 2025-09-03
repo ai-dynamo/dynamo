@@ -34,7 +34,6 @@ class EngineProcess(ManagedProcess):
 
     def get_metrics(self, port=8081):
         """Curl the metrics endpoint and return the response."""
-        import requests
 
         metrics_url = f"http://localhost:{port}/metrics"
         logger.info(f"Curling metrics endpoint: {metrics_url}")

@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -92,10 +96,11 @@ def completions_response_handler(response):
 
 def metrics_handler(response):
     """Handler to check if metrics endpoint is working and contains model label."""
-    import logging
-    import re
+    if response.status_code != 200:
+        raise AssertionError(
+            f"Metrics endpoint returned non-200 status code: {response.status_code}"
+        )
 
-    logger = logging.getLogger(__name__)
     metrics_text = response.text
 
     # Check for any model label in dynamo_component_requests_total metric

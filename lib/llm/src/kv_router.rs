@@ -41,7 +41,7 @@ use crate::{
             compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
-        scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
+        scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         scoring::ProcessedEndpoints,
         subscriber::start_kv_router_background,
     },
@@ -287,6 +287,7 @@ impl KvRouter {
         context_id: &str,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
     ) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
 
@@ -303,6 +304,7 @@ impl KvRouter {
                 seq_hashes.clone(),
                 overlap_scores.clone(),
                 router_config_override,
+                update_states,
             )
             .await?;
 
@@ -321,6 +323,28 @@ impl KvRouter {
         Ok((best_worker_id, overlap_amount))
     }
 
+    pub async fn add_request(
+        &self,
+        request_id: String,
+        tokens: &[u32],
+        overlap_blocks: u32,
+        worker_id: i64,
+    ) {
+        let isl_tokens = tokens.len();
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        self.scheduler
+            .add_request(
+                request_id,
+                seq_hashes,
+                isl_tokens,
+                overlap_blocks,
+                worker_id,
+            )
+            .await;
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) {
         self.scheduler.mark_prefill_completed(request_id).await
     }
@@ -331,6 +355,19 @@ impl KvRouter {
 
     pub fn block_size(&self) -> u32 {
         self.block_size
+    }
+
+    /// Get potential prefill and decode loads for all workers
+    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
+        let isl_tokens = tokens.len();
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+
+        Ok(self
+            .scheduler
+            .get_potential_loads(seq_hashes, isl_tokens, overlap_scores)
+            .await)
     }
 
     /// Dump all events from the indexer
@@ -348,7 +385,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
         let (worker_id, _) = self
-            .find_best_match(ctx.id(), &request.tokens, None)
+            .find_best_match(ctx.id(), &request.tokens, None, true)
             .await?;
 
         let response = RouterResponse { worker_id };
@@ -371,6 +408,23 @@ impl KvPushRouter {
         KvPushRouter { inner, chooser }
     }
 
+    /// Find the best matching worker for the given tokens without updating states
+    pub async fn find_best_match(
+        &self,
+        context_id: &str,
+        tokens: &[u32],
+        router_config_override: Option<&RouterConfigOverride>,
+    ) -> Result<(i64, u32)> {
+        self.chooser
+            .find_best_match(context_id, tokens, router_config_override, false)
+            .await
+    }
+
+    /// Get potential prefill and decode loads for all workers
+    pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
+        self.chooser.get_potential_loads(tokens).await
+    }
+
     /// Dump all events from the KV router's indexer
     pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         self.chooser.dump_events().await
@@ -381,6 +435,25 @@ impl KvPushRouter {
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for KvPushRouter
 {
+    /// Generate method that handles KV-aware routing with three distinct behaviors:
+    ///
+    /// 1. **If `query_instance_id` annotation is set**:
+    ///    - Returns the best matching worker ID without routing the request
+    ///    - Does NOT update any router local states
+    ///    - Response includes worker_instance_id and token_data annotations
+    ///
+    /// 2. **If `backend_instance_id` is set in the request**:
+    ///    - Routes directly to the specified backend instance
+    ///    - DOES update router states to track this request (unless query_instance_id is also set)
+    ///    - Bypasses the normal KV matching logic
+    ///
+    /// 3. **If neither are set (default behavior)**:
+    ///    - Finds the best worker based on KV cache overlap
+    ///    - Updates router states to track the request
+    ///    - Routes to the selected worker
+    ///
+    /// The router state updates include tracking active sequences and managing
+    /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -390,8 +463,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
+
+                // Check if this is a query_instance_id request first
+                let query_instance_id = request.has_annotation("query_instance_id");
+
                 let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
-                    // If instance_id is set, use it
+                    // If instance_id is set, use it and manually add the request to track it
+                    if !query_instance_id {
+                        self.chooser
+                            .add_request(context_id.clone(), &request.token_ids, 0, id)
+                            .await;
+                    }
                     (id, 0)
                 } else {
                     // Otherwise, find the best match
@@ -400,17 +482,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             &context_id,
                             &request.token_ids,
                             request.router_config_override.as_ref(),
+                            !query_instance_id, // Don't update states if query_instance_id
                         )
                         .await?
                 };
 
-                let query_instance_id = request.has_annotation("query_instance_id");
-                // Extract context information before moving the request
+                // if request has the annotation "query_instance_id",
+                // then the request will not be routed to the worker,
+                // and instead the worker_instance_id will be returned.
                 let stream_context = request.context().clone();
-                // if request has the annotation "query_instance_id", for example
-                // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
-                // request will not be routed to worker immediately.
-                // The gateway EPP will receive the worker_instance_id and the tokens.
                 if query_instance_id {
                     let instance_id_str = instance_id.to_string();
                     let response =
@@ -426,7 +506,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let stream = stream::iter(vec![response, response_tokens]);
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
-                // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);

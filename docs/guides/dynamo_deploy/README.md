@@ -20,7 +20,23 @@ limitations under the License.
 High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
 
 ## 1. Install Platform First
-**[Dynamo Kubernetes Platform](dynamo_cloud.md)** - Main installation guide with 3 paths
+
+```bash
+# 1. Set environment
+export NAMESPACE=dynamo-kubernetes
+export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+
+# 2. Install CRDs
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
+helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
+
+# 3. Install Platform
+kubectl create namespace ${NAMESPACE}
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
+```
+
+For more details or customization options, see **[Installation Guide for Dynamo Kubernetes Platform](/docs/guides/dynamo_deploy/installation_guide.md)**.
 
 ## 2. Choose Your Backend
 
@@ -28,9 +44,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend | Available Configurations |
 |---------|--------------------------|
-| **[vLLM](../../../components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
-| **[SGLang](../../../components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](../../../components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router |
+| **[vLLM](/components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner |
+| **[SGLang](/components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
+| **[TensorRT-LLM](/components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router |
 
 ## 3. Deploy Your First Model
 
@@ -63,9 +79,9 @@ The scripts in the `components/<backend>/launch` folder like `agg.sh` demonstrat
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](api-reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
-- **[Operator Guide](dynamo_operator.md)** - Dynamo operator configuration and management
-- **[Create Deployment](create_deployment.md)** - Step-by-step deployment creation examples
+- **[API Reference](/docs/guides/dynamo_deploy/api_reference.md)** - Complete CRD field specifications for `DynamoGraphDeployment` and `DynamoComponentDeployment`
+- **[Operator Guide](/docs/guides/dynamo_deploy/dynamo_operator.md)** - Dynamo operator configuration and management
+- **[Create Deployment](/docs/guides/dynamo_deploy/create_deployment.md)** - Step-by-step deployment creation examples
 
 ### Choosing Your Architecture Pattern
 
@@ -148,7 +164,7 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](../../examples/README.md)** - Complete working examples
-- **[Create Custom Deployments](create_deployment.md)** - Build your own CRDs
-- **[Operator Documentation](dynamo_operator.md)** - How the platform works
-- **[Helm Charts](../../../deploy/helm/README.md)** - For advanced users
+- **[Examples](/examples/README.md)** - Complete working examples
+- **[Create Custom Deployments](/docs/guides/dynamo_deploy/create_deployment.md)** - Build your own CRDs
+- **[Operator Documentation](/docs/guides/dynamo_deploy/dynamo_operator.md)** - How the platform works
+- **[Helm Charts](/deploy/helm/README.md)** - For advanced users
