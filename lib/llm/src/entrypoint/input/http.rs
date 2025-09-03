@@ -225,7 +225,6 @@ async fn run_watcher(
     watch_obj.set_notify_on_model_update(tx);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints
-    let http_service = http_service.clone();
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_type) = rx.recv().await {
             tracing::debug!("Received model type update: {:?}", model_type);

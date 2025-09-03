@@ -4,7 +4,6 @@
 import argparse
 import asyncio
 import logging
-import os
 
 from dynamo.runtime import DistributedRuntime, EtcdKvCache, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -25,9 +24,7 @@ async def clear_namespace(runtime: DistributedRuntime, namespace: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--namespace", type=str, required=False, default=os.environ.get("DYN_NAMESPACE")
-    )
+    parser.add_argument("--namespace", type=str, required=True)
     args = parser.parse_args()
     assert (
         args.namespace

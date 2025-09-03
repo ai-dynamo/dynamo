@@ -148,7 +148,6 @@ def parse_args():
         default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
         help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
-    parser.set_defaults(use_kv_events=True)
     parser.add_argument(
         "--router-replica-sync",
         action="store_true",
