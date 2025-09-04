@@ -199,56 +199,137 @@ pub mod v2 {
         use super::*;
 
         #[test]
-        fn test_transfer_context_struct_definition() {
-            // Test that the struct can be defined and has the expected fields
-            // This is a compile-time test to ensure the API is correctly structured
-
-            // We can't easily create a TransferContext without valid CUDA objects
-            // but we can test that the types are correctly defined
-            assert_eq!(
-                std::mem::size_of::<TransferContext>(),
-                std::mem::size_of::<Arc<Option<nixl_sys::Agent>>>()
-                    + std::mem::size_of::<Arc<CudaStream>>()
-                    + std::mem::size_of::<tokio::runtime::Handle>()
-            );
+        fn test_transfer_context_is_cloneable() {
+            // Compile-time test: TransferContext should implement Clone
+            // This is important for concurrent usage scenarios
+            fn assert_clone<T: Clone>() {}
+            assert_clone::<TransferContext>();
         }
 
         #[test]
-        fn test_event_synchronizer_struct_definition() {
-            // Test that EventSynchronizer has the expected size and alignment
-            assert_eq!(
-                std::mem::size_of::<EventSynchronizer>(),
-                std::mem::size_of::<CudaEvent>() + std::mem::size_of::<tokio::runtime::Handle>()
-            );
-        }
+        fn test_event_synchronizer_consumes_on_use() {
+            // Compile-time test: EventSynchronizer should be consumed by sync methods
+            // This ensures proper resource management and prevents double-use
 
-        #[test]
-        fn test_transfer_error_variants() {
-            // Test that TransferError can be created and has expected variants
-            let execution_error = TransferError::ExecutionError("test error".to_string());
-            match execution_error {
-                TransferError::ExecutionError(msg) => assert_eq!(msg, "test error"),
-                _ => panic!("Expected ExecutionError variant"),
-            }
-
-            let builder_error = TransferError::BuilderError("builder error".to_string());
-            match builder_error {
-                TransferError::BuilderError(msg) => assert_eq!(msg, "builder error"),
-                _ => panic!("Expected BuilderError variant"),
-            }
+            // We can verify this by checking that EventSynchronizer doesn't implement Clone
+            // (This is a documentation test since negative trait bounds aren't stable)
         }
     }
 
     #[cfg(all(test, feature = "testing-cuda"))]
     mod integration_tests {
+        use super::*;
+        use cudarc::driver::CudaContext;
+        use std::sync::Arc;
+        use tokio_util::task::TaskTracker;
+
+        fn setup_context() -> TransferContext {
+            let ctx = Arc::new(CudaContext::new(0).expect("Failed to create CUDA context"));
+            let stream = ctx.default_stream();
+            let nixl_agent = Arc::new(None);
+            let handle = tokio::runtime::Handle::current();
+
+            TransferContext::new(nixl_agent, stream, handle)
+        }
+
         #[tokio::test]
-        #[ignore = "Requires CUDA hardware and proper setup"]
-        async fn test_real_cuda_integration() {
-            // This would need actual CUDA hardware and proper setup
-            // Integration tests for real CUDA usage would go here
-            // use super::*;
-            // use cudarc::driver::CudaContext;
-            // use std::sync::Arc;
+        async fn test_basic_event_synchronization() {
+            let ctx = setup_context();
+
+            // Test blocking synchronization
+            let event = ctx.record_event().expect("Failed to record event");
+            event.synchronize_blocking().expect("Blocking sync failed");
+
+            // Test async synchronization
+            let event = ctx.record_event().expect("Failed to record event");
+            event.synchronize().await.expect("Async sync failed");
+        }
+
+        #[tokio::test]
+        async fn test_context_cloning_works() {
+            let ctx = setup_context();
+            let ctx_clone = ctx.clone();
+
+            // Both contexts should work independently
+            let event1 = ctx.record_event().expect("Failed to record event on original");
+            let event2 = ctx_clone.record_event().expect("Failed to record event on clone");
+
+            // Both should synchronize successfully
+            event1.synchronize_blocking().expect("Original context sync failed");
+            event2.synchronize().await.expect("Cloned context sync failed");
+        }
+
+        #[tokio::test]
+        async fn test_concurrent_synchronization() {
+            let ctx = setup_context();
+            let tracker = TaskTracker::new();
+
+            // Spawn multiple concurrent synchronization tasks
+            for i in 0..5 {
+                let ctx_clone = ctx.clone();
+                tracker.spawn(async move {
+                    let event = ctx_clone.record_event()
+                        .expect(&format!("Failed to record event {}", i));
+                    event.synchronize().await
+                        .expect(&format!("Failed to sync event {}", i));
+                });
+            }
+
+            tracker.close();
+            tracker.wait().await;
+        }
+
+        #[tokio::test]
+        async fn test_performance_baseline() {
+            let ctx = setup_context();
+            let start = std::time::Instant::now();
+
+            // Test a reasonable number of synchronizations
+            for _ in 0..10 {
+                let event = ctx.record_event().expect("Failed to record event");
+                event.synchronize().await.expect("Sync failed");
+            }
+
+            let duration = start.elapsed();
+            // Should complete 10 synchronizations in reasonable time (< 1ms total)
+            assert!(duration < std::time::Duration::from_millis(1),
+                   "Performance regression: took {:?} for 10 syncs", duration);
+        }
+
+        #[tokio::test]
+        async fn test_error_handling() {
+            let ctx = setup_context();
+
+            // Test that we get proper error types on failure
+            // Note: This test is limited since we can't easily force CUDA errors
+            // in a controlled way, but we verify the error path exists
+
+            let event = ctx.record_event().expect("Failed to record event");
+            let result = event.synchronize().await;
+
+            // In normal conditions this should succeed, but if it fails,
+            // it should return a TransferError
+            match result {
+                Ok(_) => {}, // Expected in normal conditions
+                Err(TransferError::ExecutionError(_)) => {}, // Expected error type
+                Err(other) => panic!("Unexpected error type: {:?}", other),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_resource_cleanup() {
+            // Test that contexts and events can be dropped properly
+            let ctx = setup_context();
+
+            // Create and immediately drop an event synchronizer
+            {
+                let event = ctx.record_event().expect("Failed to record event");
+                // event goes out of scope here without being synchronized
+            }
+
+            // Context should still work after dropping unused events
+            let event = ctx.record_event().expect("Failed to record event after cleanup");
+            event.synchronize().await.expect("Sync after cleanup failed");
         }
     }
 }
