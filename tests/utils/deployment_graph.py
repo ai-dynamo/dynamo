@@ -102,6 +102,7 @@ def metrics_handler(response):
         )
 
     metrics_text = response.text
+    logger.info(f"Metrics text: {metrics_text}")
 
     # Check for any model label in dynamo_component_requests_total metric
     pattern = r'dynamo_component_requests_total\{[^}]*model="[^"]*"[^}]*\}\s+(\d+)'

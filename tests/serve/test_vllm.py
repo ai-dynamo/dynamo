@@ -15,6 +15,7 @@ from tests.utils.deployment_graph import (
     Payload,
     chat_completions_response_handler,
     completions_response_handler,
+    metrics_handler,
 )
 from tests.utils.engine_process import EngineProcess
 
@@ -93,6 +94,7 @@ class VLLMProcess(EngineProcess):
 
     def __init__(self, config: VLLMConfig, request):
         self.port = 8080
+        self.backend_metrics_port = 8081
         self.config = config
         self.dir = config.directory
         script_path = os.path.join(self.dir, "launch", config.script_name)
@@ -132,6 +134,18 @@ vllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
+        model="Qwen/Qwen3-0.6B",
+    ),
+    "aggregated_metrics": VLLMConfig(
+        name="aggregated_metrics",
+        directory="/workspace/components/backends/vllm",
+        script_name="agg_metrics.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        endpoints=[
+            "v1/chat/completions",
+            "metrics",
+        ],  # Make a request to make sure the model is loaded and metrics are published.
+        response_handlers=[chat_completions_response_handler, metrics_handler],
         model="Qwen/Qwen3-0.6B",
     ),
     "agg-router": VLLMConfig(
@@ -285,9 +299,15 @@ def test_serve_deployment(vllm_config_test, request, runtime_services):
             )
 
             for _ in range(payload.repeat_count):
-                elapsed = time.time() - start_time
+                if endpoint == "metrics":
+                    response = server_process.get_metrics(
+                        server_process.backend_metrics_port
+                    )
+                    response_handler(response)
+                else:
+                    elapsed = time.time() - start_time
 
-                response = server_process.send_request(
-                    url, payload=request_body, timeout=config.timeout - elapsed
-                )
-                server_process.check_response(payload, response, response_handler)
+                    response = server_process.send_request(
+                        url, payload=request_body, timeout=config.timeout - elapsed
+                    )
+                    server_process.check_response(payload, response, response_handler)
