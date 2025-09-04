@@ -456,7 +456,7 @@ impl ModelWatcher {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings",
+                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+Tensor",
                 model_entry.model_type,
                 model_entry.model_input.as_str()
             );

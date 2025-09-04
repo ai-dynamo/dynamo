@@ -6,6 +6,9 @@ pub mod kserve_test {
     pub mod inference {
         tonic::include_proto!("inference");
     }
+    use dynamo_llm::discovery::ModelEntry;
+    use dynamo_llm::model_type::{ModelInput, ModelType};
+    use dynamo_runtime::protocols::EndpointId;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
         DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,
@@ -1093,7 +1096,7 @@ pub mod kserve_test {
             .unwrap();
 
         // start server
-        let _running = RunningService::spawn(service_with_engines.0);
+        let _running = RunningService::spawn(service_with_engines.0.clone());
 
         let mut client = get_ready_client(TestPort::TensorModel as u16, 5).await;
 
@@ -1102,7 +1105,20 @@ pub mod kserve_test {
             version: "".into(),
         });
 
-        // Failure, model registered as Tensor but does not provide model config
+        // Failure, model registered as Tensor but does not provide model config (in runtime config)
+        let entry = ModelEntry {
+            name: "tensor".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "endpoint".to_string(),
+            },
+            model_type: ModelType::Tensor,
+            model_input: ModelInput::Tensor,
+            runtime_config: None,
+        };
+        service_with_engines.0.model_manager().save_model_entry("key", entry);
+
         let response = client.model_metadata(request).await;
         assert!(response.is_err());
         let err = response.unwrap_err();
