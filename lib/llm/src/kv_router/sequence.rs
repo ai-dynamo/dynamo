@@ -42,6 +42,9 @@ use super::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 use dynamo_runtime::CancellationToken;
 
+/// Duration after which stale requests are forcibly expired (5 minutes)
+const EXPIRY_DURATION: Duration = Duration::from_secs(300);
+
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
 
@@ -83,7 +86,7 @@ impl ActiveSequences {
             block_size,
             active_blocks: 0,
             active_tokens: 0,
-            expiry_timer: Instant::now() + Duration::from_secs(300),
+            expiry_timer: Instant::now() + EXPIRY_DURATION,
             expiry_requests: HashSet::new(),
         }
     }
@@ -210,14 +213,14 @@ impl ActiveSequences {
             return HashSet::new();
         }
 
-        // Process expired requests
-        let expired_requests: HashSet<RequestId> = self.expiry_requests.iter().cloned().collect();
+        // Process expired requests - drain to avoid clone
+        let expired_requests: HashSet<RequestId> = self.expiry_requests.drain().collect();
         for request_id in &expired_requests {
             tracing::warn!("Force expiring stale request: {}", request_id);
             self.free(request_id);
         }
 
-        self.expiry_timer = now + Duration::from_secs(300);
+        self.expiry_timer = now + EXPIRY_DURATION;
         self.expiry_requests = self.active_seqs.keys().cloned().collect();
 
         expired_requests
