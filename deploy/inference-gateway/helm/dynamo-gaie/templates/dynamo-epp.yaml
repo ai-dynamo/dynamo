@@ -59,8 +59,10 @@ spec:
           - "9002"
           - -grpcHealthPort
           - "9003"
-          - -configFile
+        {{- if .Values.eppAware.enabled }}
+          - -configFile{{"\n"}}
           - "/etc/epp/epp-config-dynamo.yaml"
+        {{- end }}
         {{- end }}
         {{- if .Values.eppAware.enabled }}
         volumeMounts:
