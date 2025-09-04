@@ -101,7 +101,7 @@ def parse_args():
     parser.add_argument(
         "--http-port",
         type=int,
-        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        default=int(os.environ.get("DYN_HTTP_PORT", "8000")),
         help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
     )
     parser.add_argument(
