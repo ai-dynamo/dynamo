@@ -35,24 +35,21 @@ def create_temp_engine_args_file(args) -> Path:
     
     # Only include non-None values that differ from defaults
     # Note: argparse converts hyphens to underscores in attribute names
-    if hasattr(args, 'num_gpu_blocks') and args.num_gpu_blocks is not None:
-        engine_args["num_gpu_blocks"] = args.num_gpu_blocks
-    if hasattr(args, 'block_size') and args.block_size is not None:
-        engine_args["block_size"] = args.block_size
-    if hasattr(args, 'max_num_seqs') and args.max_num_seqs is not None:
-        engine_args["max_num_seqs"] = args.max_num_seqs
-    if hasattr(args, 'max_num_batched_tokens') and args.max_num_batched_tokens is not None:
-        engine_args["max_num_batched_tokens"] = args.max_num_batched_tokens
-    if hasattr(args, 'enable_prefix_caching') and args.enable_prefix_caching is not None:
-        engine_args["enable_prefix_caching"] = args.enable_prefix_caching
-    if hasattr(args, 'enable_chunked_prefill') and args.enable_chunked_prefill is not None:
-        engine_args["enable_chunked_prefill"] = args.enable_chunked_prefill
-    if hasattr(args, 'watermark') and args.watermark is not None:
-        engine_args["watermark"] = args.watermark
-    if hasattr(args, 'speedup_ratio') and args.speedup_ratio is not None:
-        engine_args["speedup_ratio"] = args.speedup_ratio
-    if hasattr(args, 'dp_size') and args.dp_size is not None:
-        engine_args["dp_size"] = args.dp_size
+    # Extract all potential engine arguments, using None as default for missing attributes
+    engine_args = {
+        "num_gpu_blocks": args.get('num_gpu_blocks'),
+        "block_size": args.get('block_size'),
+        "max_num_seqs": args.get('max_num_seqs'),
+        "max_num_batched_tokens": args.get('max_num_batched_tokens'),
+        "enable_prefix_caching": args.get('enable_prefix_caching'),
+        "enable_chunked_prefill": args.get('enable_chunked_prefill'),
+        "watermark": args.get('watermark'),
+        "speedup_ratio": args.get('speedup_ratio'),
+        "dp_size": args.get('dp_size'),
+    }
+    
+    # Remove None values to only include explicitly set arguments
+    engine_args = {k: v for k, v in engine_args.items() if v is not None}
     
     # Create temporary file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
