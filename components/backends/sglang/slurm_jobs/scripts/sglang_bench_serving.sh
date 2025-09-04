@@ -4,7 +4,7 @@
 
 ### Benchmark configuration and setup
 # Benchmarking script setup - ISL/OSL/concurrencies/request_rate
-chosen_isl=8192
+chosen_isl=1024
 chosen_osl=1024
 chosen_req_rate=250
 chosen_concurrencies=(2 10 20 50 100 200 500 1000 2000 2500 3000 3500 4000 4500 5000 7500 10000 12500 15000 16250 17500 18750 20000)
