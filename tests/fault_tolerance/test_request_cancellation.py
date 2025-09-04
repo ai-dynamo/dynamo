@@ -70,12 +70,27 @@ class DynamoWorkerProcess(ManagedProcess):
             "3",
         ]
 
-        # Add prefill worker flag if needed
-        if is_prefill:
-            command.append("--is-prefill-worker")
+        health_check_urls = [
+            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+        ]
+        health_check_funcs = [
+            make_chat_health_check(
+                FRONTEND_PORT, "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+            ),
+            make_completions_health_check(
+                FRONTEND_PORT, "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+            ),
+        ]
 
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
+
+        # Add prefill worker flag if needed
+        if is_prefill:
+            command.append("--is-prefill-worker")
+            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_funcs = []
 
         # Set debug logging environment
         env = os.environ.copy()
@@ -99,18 +114,8 @@ class DynamoWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[
-                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
-            ],
-            health_check_funcs=[
-                make_chat_health_check(
-                    FRONTEND_PORT, "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-                ),
-                make_completions_health_check(
-                    FRONTEND_PORT, "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-                ),
-            ],
+            health_check_urls=health_check_urls,
+            health_check_funcs=health_check_funcs,
             timeout=300,
             display_output=True,
             terminate_existing=False,

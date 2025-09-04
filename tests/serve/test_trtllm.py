@@ -29,7 +29,7 @@ trtllm_configs = {
         name="aggregated",
         directory=trtllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -41,7 +41,7 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -53,7 +53,7 @@ trtllm_configs = {
         name="aggregated_router",
         directory=trtllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.trtllm],
+        marks=[pytest.mark.gpu_1, pytest.mark.trtllm_marker],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -73,7 +73,7 @@ trtllm_configs = {
         name="disaggregated_router",
         directory=trtllm_dir,
         script_name="disagg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm],
+        marks=[pytest.mark.gpu_2, pytest.mark.trtllm_marker],
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
@@ -95,7 +95,7 @@ def trtllm_config_test(request):
     return trtllm_configs[request.param]
 
 
-@pytest.mark.trtllm
+@pytest.mark.trtllm_marker
 @pytest.mark.e2e
 def test_deployment(trtllm_config_test, request, runtime_services):
     """
@@ -109,7 +109,7 @@ def test_deployment(trtllm_config_test, request, runtime_services):
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.trtllm
+@pytest.mark.trtllm_marker
 @pytest.mark.slow
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, monkeypatch
