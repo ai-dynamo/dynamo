@@ -61,7 +61,6 @@ fi
 if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
-    SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
     SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=100000 \
@@ -92,7 +91,7 @@ if [ "$mode" = "prefill" ]; then
         --context-length 9600 \
         --disable-radix-cache \
         --enable-deepep-moe \
-        --deepep-mode low_latency \
+        --deepep-mode normal \
         --ep-dispatch-algorithm dynamic \
         --moe-dense-tp-size 1 \
         --enable-dp-lm-head \
@@ -103,8 +102,8 @@ if [ "$mode" = "prefill" ]; then
         --watchdog-timeout 1000000 \
         --init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json  \
         --disable-cuda-graph \
-        --chunked-prefill-size 16384 \
-        --max-total-tokens 65536 \
+        --chunked-prefill-size 131072 \
+        --max-total-tokens 524288 \
         --deepep-config /configs/deepep_config.json \
         --stream-interval 50 \
         --log-level debug
