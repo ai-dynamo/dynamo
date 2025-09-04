@@ -271,7 +271,7 @@ COPY . /workspace/
 
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
-# Copy launch banner
+# Copy launch banner as a root user
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc && \
@@ -390,6 +390,12 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && mkdir -p $HOME/.commandhistory \
     && touch $HOME/.commandhistory/.bash_history \
     && echo "$SNIPPET" >> "$HOME/.bashrc"
+
+# Copy launch banner from root user to ubuntu user
+RUN sudo cp /root/.launch_screen $HOME/.launch_screen && \
+    sudo chown $USERNAME:$USERNAME $HOME/.launch_screen && \
+    echo "cat $HOME/.launch_screen" >> $HOME/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> $HOME/.bashrc
 
 RUN mkdir -p /home/$USERNAME/.cache/
 
