@@ -53,10 +53,7 @@ spec:
         size: 100Gi
 ```
 
-Commit and push this file to your Git repository. FluxCD will detect the new CR and create the initial deployment in your cluster. The operator will:
-- Create the specified PVCs
-- Build container images for all components
-- Deploy the services with the configured resources
+Commit and push this file to your Git repository. FluxCD will detect the new CR and create the initial Dynamo deployment in your cluster.
 
 ## Step 3: Update Existing Deployment
 
