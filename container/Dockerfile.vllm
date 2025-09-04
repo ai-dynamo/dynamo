@@ -302,6 +302,8 @@ ARG USER_UID
 ARG USER_GID
 ARG WORKSPACE_DIR=/workspace
 
+ARG ARCH_ALT
+
 # Install utilities as root
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
@@ -329,6 +331,15 @@ RUN apt-get update -y && \
     clang \
     libclang-dev \
     protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG ARCH_ALT
+RUN rm -f /etc/apt/sources.list.d/cuda*.list && \
+    curl -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${ARCH_ALT}/cuda-keyring_1.1-1_all.deb && \
+    apt install /tmp/cuda-keyring.deb && \
+    rm /tmp/cuda-keyring.deb && \
+    apt-get update && \
+    apt-get install -y nsight-systems-2025.3.2 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=runtime /usr/local/bin /usr/local/bin
