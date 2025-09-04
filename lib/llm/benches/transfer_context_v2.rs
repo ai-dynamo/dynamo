@@ -17,105 +17,96 @@
 mod benchmarks {
     use std::sync::Arc;
 
-    use criterion::{criterion_group, BenchmarkId, Criterion};
-    use cudarc::driver::CudaContext;
-    use rand;
+    use criterion::{BenchmarkId, Criterion, criterion_group};
+    use cudarc::driver::{CudaContext, CudaStream};
+    use nixl_sys;
     use tokio::runtime::Runtime;
     use tokio_util::task::TaskTracker;
 
     use dynamo_llm::block_manager::block::transfer::context;
 
-    fn setup_transfer_context() -> context::v2::TransferContext {
-        let ctx = Arc::new(CudaContext::new(0).expect("Failed to create CUDA context"));
-        let stream = ctx.default_stream();
-        let nixl_agent = Arc::new(None);
-        let handle = tokio::runtime::Handle::try_current()
-            .unwrap_or_else(|_| {
-                // If no current runtime, create one for the benchmark setup
-                Runtime::new().unwrap().handle().clone()
-            });
+    struct BenchmarkRuntime {
+        _runtime: Runtime,
+        handle: tokio::runtime::Handle,
+        stream: Arc<CudaStream>,
+        nixl_agent: Arc<Option<nixl_sys::Agent>>,
+    }
 
-        context::v2::TransferContext::new(nixl_agent, stream, handle)
+    impl BenchmarkRuntime {
+        fn new() -> Self {
+            let runtime = Runtime::new().expect("Failed to create benchmark runtime");
+            let handle = runtime.handle().clone();
+
+            let cuda_ctx = Arc::new(CudaContext::new(0).expect("Failed to create CUDA context"));
+            let stream = cuda_ctx.default_stream();
+            let nixl_agent = Arc::new(None);
+
+            Self {
+                _runtime: runtime,
+                handle,
+                stream,
+                nixl_agent,
+            }
+        }
+
+        fn create_transfer_context(&self) -> context::v2::TransferContext {
+            context::v2::TransferContext::new(
+                self.nixl_agent.clone(),
+                self.stream.clone(),
+                self.handle.clone(),
+            )
+        }
     }
 
     /// Benchmark blocking synchronization in tight loop
     /// This measures the baseline performance of direct CUDA event sync
     fn bench_blocking(c: &mut Criterion) {
-        let ctx = setup_transfer_context();
+        let runtime = BenchmarkRuntime::new();
+        let ctx = runtime.create_transfer_context();
 
-        c.bench_function("blocking_sync", |b| {
+        let mut group = c.benchmark_group("blocking_sync");
+        group.warm_up_time(std::time::Duration::from_millis(500));
+        group.measurement_time(std::time::Duration::from_secs(3));
+
+        group.bench_function("sync", |b| {
             b.iter(|| {
-                let total_start = std::time::Instant::now();
-
-                let event_start = std::time::Instant::now();
                 let event = ctx.record_event().unwrap();
-                let event_elapsed = event_start.elapsed();
-
-                let sync_start = std::time::Instant::now();
                 event.synchronize_blocking().unwrap();
-                let sync_elapsed = sync_start.elapsed();
-
-                let total_elapsed = total_start.elapsed();
-
-                // Occasionally log timing breakdown (every 1000th iteration)
-                if rand::random::<u32>() % 1000 == 0 {
-                    eprintln!("[BLOCKING] Total: {:?}, Record: {:?}, Sync: {:?}",
-                             total_elapsed, event_elapsed, sync_elapsed);
-                }
             })
         });
-    }
 
+        group.finish();
+    }
 
     /// Benchmark single-threaded async synchronization
     /// This measures only the tokio spawn_blocking overhead vs direct blocking
     fn bench_async_single(c: &mut Criterion) {
-        let rt = Runtime::new().unwrap();
+        let runtime = BenchmarkRuntime::new();
+        let ctx = runtime.create_transfer_context();
 
-        // Create CUDA context ONCE outside the benchmark loop (same as blocking benchmark)
-        let (_cuda_ctx, stream, nixl_agent) = rt.block_on(async {
-            let cuda_ctx = Arc::new(CudaContext::new(0).expect("Failed to create CUDA context"));
-            let stream = cuda_ctx.default_stream();
-            let nixl_agent = Arc::new(None);
-            (cuda_ctx, stream, nixl_agent)
-        });
+        let mut group = c.benchmark_group("async_sync");
+        group.warm_up_time(std::time::Duration::from_millis(500));
+        group.measurement_time(std::time::Duration::from_secs(3));
 
-        c.bench_function("async_sync", |b| {
+        group.bench_function("sync", |b| {
             b.iter(|| {
-                rt.block_on(async {
-                    let total_start = std::time::Instant::now();
-
-                    // Only create TransferContext and do the actual work
-                    let handle = tokio::runtime::Handle::current();
-                    let ctx_start = std::time::Instant::now();
-                    let ctx = context::v2::TransferContext::new(nixl_agent.clone(), stream.clone(), handle);
-                    let ctx_elapsed = ctx_start.elapsed();
-
-                    let event_start = std::time::Instant::now();
+                runtime._runtime.block_on(async {
                     let event = ctx.record_event().unwrap();
-                    let event_elapsed = event_start.elapsed();
-
-                    let sync_start = std::time::Instant::now();
                     event.synchronize().await.unwrap();
-                    let sync_elapsed = sync_start.elapsed();
-
-                    let total_elapsed = total_start.elapsed();
-
-                    // Occasionally log timing breakdown (every 1000th iteration)
-                    if rand::random::<u32>() % 1000 == 0 {
-                        eprintln!("[ASYNC] Total: {:?}, Context: {:?}, Record: {:?}, Sync: {:?}",
-                                 total_elapsed, ctx_elapsed, event_elapsed, sync_elapsed);
-                    }
                 })
             })
         });
+
+        group.finish();
     }
 
     /// Benchmark concurrent async synchronization at different scales
     /// This shows where async becomes beneficial due to parallelism
     fn bench_concurrent_async(c: &mut Criterion) {
-        let rt = Runtime::new().unwrap();
+        let runtime = BenchmarkRuntime::new();
         let mut group = c.benchmark_group("concurrent_async");
+        group.warm_up_time(std::time::Duration::from_millis(500));
+        group.measurement_time(std::time::Duration::from_secs(3));
 
         // Test different concurrency levels
         for concurrency in [1, 5, 10, 25, 50, 100].iter() {
@@ -123,15 +114,9 @@ mod benchmarks {
                 BenchmarkId::new("concurrent", concurrency),
                 concurrency,
                 |b, &concurrency| {
+                    let ctx = runtime.create_transfer_context();
                     b.iter(|| {
-                        rt.block_on(async {
-                            // Create context inside the runtime
-                            let ctx_arc = Arc::new(CudaContext::new(0).expect("Failed to create CUDA context"));
-                            let stream = ctx_arc.default_stream();
-                            let nixl_agent = Arc::new(None);
-                            let handle = tokio::runtime::Handle::current();
-                            let ctx = context::v2::TransferContext::new(nixl_agent, stream, handle);
-
+                        runtime._runtime.block_on(async {
                             // Spawn concurrent tasks using TaskTracker
                             let tracker = TaskTracker::new();
 
@@ -148,7 +133,7 @@ mod benchmarks {
                             tracker.wait().await;
                         });
                     });
-                }
+                },
             );
         }
 
@@ -157,9 +142,11 @@ mod benchmarks {
 
     /// Benchmark throughput: events per second at different concurrency levels
     fn bench_throughput(c: &mut Criterion) {
-        let rt = Runtime::new().unwrap();
+        let runtime = BenchmarkRuntime::new();
         let mut group = c.benchmark_group("throughput");
         group.sample_size(50); // Fewer samples for throughput tests
+        group.warm_up_time(std::time::Duration::from_millis(500));
+        group.measurement_time(std::time::Duration::from_secs(3));
 
         for concurrency in [1, 10, 50].iter() {
             let events_per_task = 10; // Process multiple events per task
@@ -168,15 +155,9 @@ mod benchmarks {
                 BenchmarkId::new("events_per_sec", concurrency),
                 concurrency,
                 |b, &concurrency| {
+                    let ctx = runtime.create_transfer_context();
                     b.iter(|| {
-                        rt.block_on(async {
-                            // Create context inside the runtime
-                            let ctx_arc = Arc::new(CudaContext::new(0).expect("Failed to create CUDA context"));
-                            let stream = ctx_arc.default_stream();
-                            let nixl_agent = Arc::new(None);
-                            let handle = tokio::runtime::Handle::current();
-                            let ctx = context::v2::TransferContext::new(nixl_agent, stream, handle);
-
+                        runtime._runtime.block_on(async {
                             let tracker = TaskTracker::new();
 
                             for _ in 0..concurrency {
@@ -194,20 +175,18 @@ mod benchmarks {
                             tracker.wait().await;
                         });
                     });
-                }
+                },
             );
         }
 
         group.finish();
     }
 
-
     criterion_group!(
         benches,
         // Core comparison benchmarks
         bench_blocking,
         bench_async_single,
-
         // Concurrency benchmarks
         bench_concurrent_async,
         bench_throughput
@@ -219,5 +198,7 @@ criterion::criterion_main!(benchmarks::benches);
 
 #[cfg(not(feature = "testing-cuda"))]
 fn main() {
-    println!("Benchmarks require 'testing-cuda' feature. Run with: cargo bench --features testing-cuda");
+    println!(
+        "Benchmarks require 'testing-cuda' feature. Run with: cargo bench --features testing-cuda"
+    );
 }
