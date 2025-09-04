@@ -72,12 +72,12 @@ You can also list models or send a request:
 
 *List the models*
 ```
-curl localhost:8080/v1/models
+curl localhost:8000/v1/models
 ```
 
 *Send a request*
 ```
-curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
+curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8000/v1/chat/completions
 ```
 
 ## Distributed System
