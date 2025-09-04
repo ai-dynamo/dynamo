@@ -49,14 +49,19 @@ TEST_PAYLOAD: Dict[str, Any] = {
 class MockerProcess:
     """Manages multiple mocker engine instances with the same namespace"""
 
-    def __init__(self, request, mocker_args: Optional[Dict[str, Any]] = None, num_mockers: int = 1):
+    def __init__(
+        self,
+        request,
+        mocker_args: Optional[Dict[str, Any]] = None,
+        num_mockers: int = 1,
+    ):
         # Generate a unique namespace suffix shared by all mockers
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.endpoint = f"dyn://{self.namespace}.mocker.generate"
         self.num_mockers = num_mockers
         self.mocker_processes = []
-        
+
         # Default mocker args if not provided
         if mocker_args is None:
             mocker_args = {}
@@ -72,18 +77,25 @@ class MockerProcess:
                 "--endpoint",
                 self.endpoint,
             ]
-            
+
             # Add individual CLI arguments from mocker_args
             if "speedup_ratio" in mocker_args:
                 command.extend(["--speedup-ratio", str(mocker_args["speedup_ratio"])])
             if "block_size" in mocker_args:
                 command.extend(["--block-size", str(mocker_args["block_size"])])
             if "num_gpu_blocks" in mocker_args:
-                command.extend(["--num-gpu-blocks-override", str(mocker_args["num_gpu_blocks"])])
+                command.extend(
+                    ["--num-gpu-blocks-override", str(mocker_args["num_gpu_blocks"])]
+                )
             if "max_num_seqs" in mocker_args:
                 command.extend(["--max-num-seqs", str(mocker_args["max_num_seqs"])])
             if "max_num_batched_tokens" in mocker_args:
-                command.extend(["--max-num-batched-tokens", str(mocker_args["max_num_batched_tokens"])])
+                command.extend(
+                    [
+                        "--max-num-batched-tokens",
+                        str(mocker_args["max_num_batched_tokens"]),
+                    ]
+                )
             if "enable_prefix_caching" in mocker_args:
                 if mocker_args["enable_prefix_caching"]:
                     command.append("--enable-prefix-caching")
@@ -332,7 +344,9 @@ def test_mocker_kv_router(request, runtime_services):
 
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -391,7 +405,9 @@ def test_mocker_two_kv_router(request, runtime_services):
 
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -612,7 +628,9 @@ def test_kv_push_router_bindings(request, runtime_services):
     try:
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -836,7 +854,9 @@ def test_indexers_sync(request, runtime_services):
     try:
         # Start mocker instances with the new CLI interface
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
@@ -1080,7 +1100,9 @@ def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
 
         # Start multiple mocker engines to ensure worker selection logic
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        mockers = MockerProcess(request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS)
+        mockers = MockerProcess(
+            request, mocker_args=mocker_args, num_mockers=NUM_MOCKERS
+        )
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
         mockers.__enter__()
 
