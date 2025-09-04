@@ -11,7 +11,8 @@ import subprocess
 from typing import Dict, List, Optional
 
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
+
+matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
 # Setup logging
