@@ -49,17 +49,30 @@ This will start both etcd and NATS with the required configurations in the backg
 
 ### Step 1: Launch vLLM Workers
 
-First, start the vLLM worker engines in a terminal:
+First, start the vLLM worker engines in a terminal.
 
 ```bash
-# Default: 8 workers with DeepSeek model
+# Default: 8 vLLM workers with DeepSeek model (explicitly sets --block-size 64)
 ./run_engines.sh --num-workers 8 --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-# Example: 4 workers with larger model using tensor parallelism (2 GPUs per worker)
+# Example: 4 vLLM workers with larger model using tensor parallelism (2 GPUs per worker)
 ./run_engines.sh --num-workers 4 --model-path openai/gpt-oss-120b --tensor-parallel-size 2
 ```
 
-Any additional arguments are passed directly to vLLM. Press `Ctrl+C` to stop all workers when done.
+#### Alternative: Launch vLLM Mock Workers
+
+We also supports running lightweight mock engines that simulate vLLM behavior without performing actual model inference. Mocker engines are useful for testing router logic and performance without GPU requirements. Use the `--mockers` flag to run mocker engines instead of real vLLM workers.
+
+```bash
+# Example: Running mocker engines for testing (no GPU required)
+./run_engines.sh --mockers \
+    --num-workers 8 \
+    --model-path meta-llama/Llama-3.2-1B \
+    --block-size 64 \
+    --speedup-ratio 2.0
+```
+
+**Note**: The `--speedup-ratio` parameter controls the inference speed of mocker engines. A higher value (e.g., 2.0) makes the mocker engines simulate faster inference, allowing benchmarks to complete more quickly. This is particularly useful for testing router performance without waiting for realistic inference times.
 
 ### Step 2: Start the Router
 
@@ -74,7 +87,7 @@ python -m dynamo.frontend \
 
 This starts the router with:
 - KV cache routing mode
-- Block size of 64 (matching the workers)
+- Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
 - HTTP port 8080
 
 To see all available router arguments, run:
@@ -154,15 +167,6 @@ The benchmark script generates:
 
 3. **Detailed artifacts** (in subdirectories):
    - Full genai-perf profiling data for each run
-
-## Understanding Prefix Ratios
-
-The prefix ratio determines how much of the input is shared across requests:
-- **0.1**: 10% shared prefix, 90% unique content
-- **0.5**: 50% shared prefix, 50% unique content
-- **0.9**: 90% shared prefix, 10% unique content
-
-Higher prefix ratios should show better performance due to KV cache sharing.
 
 ## Troubleshooting
 
