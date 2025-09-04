@@ -33,10 +33,10 @@ import requests
 # Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
     pytest.mark.kvbm,
-    #    pytest.mark.e2e,
-    #    pytest.mark.slow,
-    #    pytest.mark.nightly,
-    #    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.slow,
+    pytest.mark.nightly,
+    pytest.mark.gpu_1,
 ]
 
 
@@ -774,6 +774,7 @@ class TestDeterminism:
         ],
         indirect=True,
     )
+    @pytest.mark.vllm
     def test_determinism_with_cache_reset(self, tester, llm_server, runtime_services):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
         print("\n" + "=" * 70)

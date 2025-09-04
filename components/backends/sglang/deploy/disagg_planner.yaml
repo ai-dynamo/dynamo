@@ -111,19 +111,24 @@ spec:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
+            - python3
           args:
-            - >-
-              python3 -m dynamo.sglang
-              --model-path Qwen/Qwen3-0.6B
-              --served-model-name Qwen/Qwen3-0.6B
-              --page-size 16
-              --tp 1
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode decode
-              --disaggregation-transfer-backend nixl
+            - -m
+            - dynamo.sglang
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
     SGLangPrefillWorker:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
@@ -137,16 +142,21 @@ spec:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
           workingDir: /workspace/components/backends/sglang
           command:
-            - /bin/sh
-            - -c
+            - python3
           args:
-            - >-
-              python3 -m dynamo.sglang
-              --model-path Qwen/Qwen3-0.6B
-              --served-model-name Qwen/Qwen3-0.6B
-              --page-size 16
-              --tp 1
-              --trust-remote-code
-              --skip-tokenizer-init
-              --disaggregation-mode prefill
-              --disaggregation-transfer-backend nixl
+            - -m
+            - dynamo.sglang
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --page-size
+            - "16"
+            - --tp
+            - "1"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl

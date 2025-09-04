@@ -112,3 +112,5 @@ metricsService:
 
 natsAddr: ""
 etcdAddr: ""
+modelExpressURL: ""
+

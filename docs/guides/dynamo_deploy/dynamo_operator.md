@@ -29,7 +29,7 @@ For the complete technical API reference for Dynamo Custom Resource Definitions,
 
 ## Installation
 
-[See installation steps](dynamo_cloud.md#overview)
+[See installation steps](installation_guide.md#overview)
 
 
 ## GitOps Deployment with FluxCD
@@ -38,7 +38,7 @@ This section describes how to use FluxCD for GitOps-based deployment of Dynamo i
 
 ### Prerequisites
 
-- A Kubernetes cluster with [Dynamo Cloud](dynamo_cloud.md) installed
+- A Kubernetes cluster with [Dynamo Cloud](installation_guide.md) installed
 - [FluxCD](https://fluxcd.io/flux/installation/) installed in your cluster
 - A Git repository to store your deployment configurations
 

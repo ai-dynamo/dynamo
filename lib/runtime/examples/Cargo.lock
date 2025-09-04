@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1030,7 +1030,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello_world"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "dynamo-runtime",
 ]
@@ -2265,7 +2265,7 @@ checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustc_version"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
@@ -2502,7 +2502,7 @@ dependencies = [
 
 [[package]]
 name = "service_metrics"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "dynamo-runtime",
  "futures",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "system_metrics"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",

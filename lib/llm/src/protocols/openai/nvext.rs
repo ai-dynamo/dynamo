@@ -100,6 +100,12 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guided_decoding_backend: Option<String>,
+
+    /// Maximum number of thinking tokens allowed
+    /// NOTE: Currently passed through to backends as a no-op for future implementation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub max_thinking_tokens: Option<u32>,
 }
 
 impl Default for NvExt {
@@ -157,6 +163,7 @@ mod tests {
         assert_eq!(nv_ext.guided_regex, None);
         assert_eq!(nv_ext.guided_grammar, None);
         assert_eq!(nv_ext.guided_choice, None);
+        assert_eq!(nv_ext.max_thinking_tokens, None);
     }
 
     // Test valid builder configurations
@@ -172,6 +179,7 @@ mod tests {
             .guided_grammar("S -> 'a' S 'b' | 'c'".to_string())
             .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
             .guided_decoding_backend("xgrammar".to_string())
+            .max_thinking_tokens(1024)
             .build()
             .unwrap();
 
@@ -193,6 +201,7 @@ mod tests {
             Some(vec!["choice1".to_string(), "choice2".to_string()])
         );
         assert_eq!(nv_ext.guided_decoding_backend, Some("xgrammar".to_string()));
+        assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
     }

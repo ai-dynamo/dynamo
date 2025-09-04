@@ -6,7 +6,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 
 #[tokio::test]
 async fn test_sequence_factory() {
-    let mdc = ModelDeploymentCard::load("tests/data/sample-models/TinyLlama_v1.1")
+    let mdc = ModelDeploymentCard::load("tests/data/sample-models/TinyLlama_v1.1", None)
         .await
         .unwrap();
 

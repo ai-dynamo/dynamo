@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::{self, ModelDeploymentCard},
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
 };
 
 /// [ModelEntry] contains the information to discover models from the etcd cluster.
@@ -34,6 +34,11 @@ pub struct ModelEntry {
     /// Runtime configuration specific to this model instance
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<ModelRuntimeConfig>,
+
+    /// Specifies the model input type.
+    /// `Tokens` for engines that expect pre-processed input.
+    /// `Text` for engines that take care of pre-processing themselves.
+    pub model_input: ModelInput,
 }
 
 impl ModelEntry {
@@ -43,7 +48,7 @@ impl ModelEntry {
     }
 
     pub fn requires_preprocessing(&self) -> bool {
-        matches!(self.model_type, ModelType::Backend)
+        matches!(self.model_input, ModelInput::Tokens)
     }
 
     /// Fetch the ModelDeploymentCard from etcd.

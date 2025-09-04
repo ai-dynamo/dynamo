@@ -7,7 +7,7 @@ This guide provides a walkthrough for collecting and visualizing metrics from Dy
 ## Prerequisites
 
 ### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/dynamo_cloud.md) for detailed instructions on deploying the Dynamo operator.
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/installation_guide.md) for detailed instructions on deploying the Dynamo operator.
 
 ### Install kube-prometheus-stack
 If you don't have an existing Prometheus setup, you'll likely want to install the kube-prometheus-stack. This is a collection of Kubernetes manifests that includes the Prometheus Operator, Prometheus, Grafana, and other monitoring components in a pre-configured setup. The stack introduces custom resources that make it easy to deploy and manage monitoring in Kubernetes:

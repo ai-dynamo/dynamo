@@ -6,7 +6,7 @@ use dynamo_runtime::component::{Component, Instance};
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -26,6 +26,13 @@ pub struct KVHitRateEvent {
     pub worker_id: i64,
     pub isl_blocks: usize,
     pub overlap_blocks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialLoad {
+    pub worker_id: i64,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +62,8 @@ pub struct SchedulingRequest {
     pub prefill_tokens: HashMap<i64, usize>,
     // Router config overrides for this specific request
     pub router_config_override: Option<RouterConfigOverride>,
+    // Whether to update scheduler states (false for query_instance_id requests)
+    pub update_states: bool,
     // Option to take it out to send the response without moving the struct
     resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
@@ -204,15 +213,18 @@ impl KvScheduler {
                         };
                         request.respond(response);
 
-                        let _ = slots_clone
-                            .add_request(
-                                request.request_id,
-                                request.token_seq,
-                                request.isl_tokens,
-                                selection.overlap_blocks,
-                                selection.worker_id,
-                            )
-                            .await;
+                        // Only update the state if update_states is true
+                        if request.update_states {
+                            let _ = slots_clone
+                                .add_request(
+                                    request.request_id,
+                                    request.token_seq,
+                                    request.isl_tokens,
+                                    selection.overlap_blocks,
+                                    selection.worker_id,
+                                )
+                                .await;
+                        }
 
                         continue;
                     }
@@ -247,6 +259,7 @@ impl KvScheduler {
         token_seq: Vec<SequenceHash>,
         overlaps: OverlapScores,
         router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
     ) -> Result<i64, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
@@ -257,6 +270,7 @@ impl KvScheduler {
             decode_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             router_config_override: router_config_override.cloned(),
+            update_states,
             resp_tx: Some(resp_tx), // Wrap in Some()
         };
 
@@ -272,6 +286,20 @@ impl KvScheduler {
         Ok(best_worker_id)
     }
 
+    pub async fn add_request(
+        &self,
+        request_id: String,
+        token_sequence: Vec<SequenceHash>,
+        isl: usize,
+        overlap: u32,
+        worker_id: i64,
+    ) {
+        let _ = self
+            .slots
+            .add_request(request_id, token_sequence, isl, overlap, worker_id)
+            .await;
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) {
         let _ = self
             .slots
@@ -281,6 +309,38 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) {
         let _ = self.slots.free(&request_id.to_string()).await;
+    }
+
+    pub async fn get_potential_loads(
+        &self,
+        token_seq: Vec<SequenceHash>,
+        isl_tokens: usize,
+        overlaps: OverlapScores,
+    ) -> Vec<PotentialLoad> {
+        let (decode_blocks, prefill_tokens) = self
+            .slots
+            .potential_blocks_and_tokens(token_seq, isl_tokens, overlaps)
+            .await;
+
+        // Get all unique worker IDs from both hashmaps
+        let mut worker_ids: HashSet<i64> = HashSet::new();
+        worker_ids.extend(decode_blocks.keys().copied());
+        worker_ids.extend(prefill_tokens.keys().copied());
+
+        // Create PotentialLoad for each worker
+        let mut loads = Vec::new();
+        for worker_id in worker_ids {
+            loads.push(PotentialLoad {
+                worker_id,
+                potential_prefill_tokens: prefill_tokens
+                    .get(&worker_id)
+                    .copied()
+                    .unwrap_or(isl_tokens),
+                potential_decode_blocks: decode_blocks.get(&worker_id).copied().unwrap_or(0),
+            });
+        }
+
+        loads
     }
 }
 
