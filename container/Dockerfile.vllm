@@ -334,17 +334,16 @@ RUN apt-get update -y && \
 COPY --from=runtime /usr/local/bin /usr/local/bin
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
-# Will use the default ubuntu user, but give sudo access
-# Needed so files permissions aren't set to root ownership when writing from inside container
+# Create ubuntu user with specific UID/GID for proper volume mount permissions
+# Clean up any existing user/group first, then create with sudo access
 RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
+    && (userdel -r $USERNAME 2>/dev/null || true) \
+    && (groupdel $USERNAME 2>/dev/null || true) \
+    && (getent group ${USER_GID} >/dev/null || groupadd -g ${USER_GID} $USERNAME) \
+    && useradd -m -u ${USER_UID} -g ${USER_GID} -s /bin/bash $USERNAME \
     && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
-    && mkdir -p /home/$USERNAME \
-    && groupmod -g $USER_GID $USERNAME \
-    && usermod -u $USER_UID -g $USER_GID $USERNAME \
-    && chown -R $USERNAME:$USERNAME /home/$USERNAME \
-    && rm -rf /var/lib/apt/lists/* \
-    && chsh -s /bin/bash $USERNAME
+    && rm -rf /var/lib/apt/lists/*
 
 # At this point, we are executing as the ubuntu user
 USER $USERNAME
