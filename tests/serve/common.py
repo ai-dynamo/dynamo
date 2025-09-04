@@ -6,7 +6,8 @@
 import logging
 from typing import Any, Dict, Optional
 
-from tests.utils.engine_process import EngineConfig, EngineProcess, send_request
+from tests.utils.client import send_request
+from tests.utils.engine_process import EngineConfig, EngineProcess
 
 DEFAULT_TIMEOUT = 10
 

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
+    stragglers: list[str] = ["VLLM:EngineCore"]
+
 
 vllm_dir = os.environ.get("VLLM_DIR", "/workspace/components/backends/vllm")
 

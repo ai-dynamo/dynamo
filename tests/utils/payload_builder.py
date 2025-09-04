@@ -3,6 +3,7 @@
 
 from typing import Any, Dict, List, Optional, Union
 
+from tests.utils.client import send_request
 from tests.utils.payloads import ChatPayload, CompletionPayload, MetricsPayload
 
 # Common default text prompt used across tests
@@ -120,3 +121,62 @@ def completion_payload(
         expected_log=expected_log or [],
         expected_response=expected_response or [],
     )
+
+
+# Build small request-based health checks for chat and completions
+# these should only be used as a last resort. Generally want to use an actual health check
+
+
+def make_chat_health_check(port: int, model: str):
+    def _check_chat_endpoint(remaining_timeout: float = 30.0) -> bool:
+        payload = chat_payload_default(
+            repeat_count=1,
+            expected_response=[],
+            max_tokens=8,
+            temperature=0.0,
+            stream=False,
+        ).with_model(model)
+        payload.port = port
+        try:
+            resp = send_request(
+                payload.url(),
+                payload.body,
+                timeout=min(max(1.0, remaining_timeout), 5.0),
+                method=payload.method,
+                log_level=10,
+            )
+            # Validate structure only; expected_response is empty
+            _ = payload.response_handler(resp)
+            return True
+        except Exception:
+            return False
+
+    return _check_chat_endpoint
+
+
+def make_completions_health_check(port: int, model: str):
+    def _check_completions_endpoint(remaining_timeout: float = 30.0) -> bool:
+        payload = completion_payload_default(
+            repeat_count=1,
+            expected_response=[],
+            max_tokens=8,
+            temperature=0.0,
+            stream=False,
+        ).with_model(model)
+        payload.port = port
+        try:
+            resp = send_request(
+                payload.url(),
+                payload.body,
+                timeout=min(max(1.0, remaining_timeout), 5.0),
+                method=payload.method,
+                log_level=10,
+            )
+            out = payload.response_handler(resp)
+            if not out:
+                raise ValueError("")
+            return True
+        except Exception:
+            return False
+
+    return _check_completions_endpoint

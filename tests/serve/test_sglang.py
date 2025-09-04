@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 class SGLangConfig(EngineConfig):
     """Configuration for SGLang test scenarios"""
 
+    stragglers: list[str] = ["SGLANG:EngineCore"]
+
 
 sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang")
 

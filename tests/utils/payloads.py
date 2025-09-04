@@ -83,8 +83,7 @@ class ChatPayload(BasePayload):
         """
         Process chat completions API responses.
         """
-        if response.status_code != 200:
-            return ""
+        response.raise_for_status()
         result = response.json()
         assert "choices" in result, "Missing 'choices' in response"
         assert len(result["choices"]) > 0, "Empty choices in response"
@@ -136,8 +135,7 @@ class CompletionPayload(BasePayload):
         """
         Process completions API responses.
         """
-        if response.status_code != 200:
-            return ""
+        response.raise_for_status()
         result = response.json()
         assert "choices" in result, "Missing 'choices' in response"
         assert len(result["choices"]) > 0, "Empty choices in response"
@@ -160,6 +158,7 @@ class MetricsPayload(BasePayload):
         return self
 
     def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
         return response.text
 
     def validate(self, response: Any, content: str) -> None:
@@ -192,3 +191,42 @@ def check_models_api(response):
         return data.get("data") and len(data["data"]) > 0
     except Exception:
         return False
+
+
+# Additional health check helpers
+def check_health_generate(response):
+    """Validate /health reports a 'generate' endpoint.
+
+    Returns True if either of the following is found:
+      - "endpoints" contains a string mentioning 'generate'
+      - "instances" contains an object with endpoint == 'generate'
+    """
+    try:
+        if response.status_code != 200:
+            return False
+        data = response.json()
+
+        # Check endpoints list for any entry containing 'generate'
+        endpoints = data.get("endpoints", []) or []
+        for ep in endpoints:
+            if isinstance(ep, str) and "generate" in ep:
+                return True
+
+        # Check instances for an entry with endpoint == 'generate'
+        instances = data.get("instances", []) or []
+        for inst in instances:
+            if isinstance(inst, dict) and inst.get("endpoint") == "generate":
+                return True
+
+        return False
+    except Exception:
+        return False
+
+
+# backwards compatiability
+def completions_response_handler(response):
+    return CompletionPayload.extract_text(response)
+
+
+def chat_completions_response_handler(response):
+    return ChatPayload.extract_content(response)

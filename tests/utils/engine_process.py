@@ -4,16 +4,21 @@
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.payloads import BasePayload, check_models_api
+from tests.utils.payload_builder import (
+    make_chat_health_check,
+    make_completions_health_check,
+)
+from tests.utils.payloads import BasePayload, check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
+
+FRONTEND_PORT = 8080
 
 
 class EngineResponseError(Exception):
@@ -44,6 +49,7 @@ class EngineConfig:
     timeout: int = 600
     delayed_start: int = 0
     env: Dict[str, str] = field(default_factory=dict)
+    stragglers: list[str] = field(default_factory=list)
 
 
 class EngineProcess(ManagedProcess):
@@ -163,92 +169,18 @@ class EngineProcess(ManagedProcess):
             working_dir=directory,
             health_check_ports=[],
             health_check_urls=[
-                (f"http://localhost:{config.models_port}/v1/models", check_models_api)
+                (f"http://localhost:{config.models_port}/v1/models", check_models_api),
+                (
+                    f"http://localhost:{config.models_port}/health",
+                    check_health_generate,
+                ),
+            ],
+            health_check_funcs=[
+                make_chat_health_check(config.models_port, config.model),
+                make_completions_health_check(config.models_port, config.model),
             ],
             delayed_start=config.delayed_start,
             terminate_existing=False,
-            stragglers=[],
+            stragglers=config.stragglers,
             log_dir=request.node.name,
         )
-
-
-def send_request(
-    url: str, payload: Dict[str, Any], timeout: float = 30.0, method: str = "POST"
-) -> requests.Response:
-    """
-    Send an HTTP request to the engine with detailed logging.
-
-    Args:
-        url: The endpoint URL
-        payload: The request payload (for GET, sent as query params)
-        timeout: Request timeout in seconds
-        method: HTTP method ("POST" or "GET")
-
-    Returns:
-        The response object
-
-    Raises:
-        requests.RequestException: If the request fails
-    """
-
-    method_upper = method.upper()
-    payload_json = json.dumps(payload, indent=2)
-    curl_command = f'curl -X {method_upper} "{url}"'
-    if method_upper == "POST":
-        curl_command += (
-            ' \\\n  -H "Content-Type: application/json" \\\n  -d \''
-            + payload_json
-            + "'"
-        )
-    logger.info("Sending request (curl equivalent):\n%s", curl_command)
-
-    start_time = time.time()
-    try:
-        if method_upper == "GET":
-            response = requests.get(url, params=payload, timeout=timeout)
-        elif method_upper == "POST":
-            response = requests.post(url, json=payload, timeout=timeout)
-        else:
-            # Fallback for other methods if needed
-            response = requests.request(
-                method_upper, url, json=payload, timeout=timeout
-            )
-
-        elapsed = time.time() - start_time
-
-        # Log response details
-        logger.info(
-            "Received response: status=%d, elapsed=%.2fs",
-            response.status_code,
-            elapsed,
-        )
-
-        logger.debug("Response headers: %s", dict(response.headers))
-
-        # Try to log response body (truncated if too long)
-        try:
-            if response.headers.get("content-type", "").startswith("application/json"):
-                response_data = response.json()
-                response_str = json.dumps(response_data, indent=2)
-                if len(response_str) > 1000:
-                    response_str = response_str[:1000] + "... (truncated)"
-                logger.debug("Response body: %s", response_str)
-            else:
-                response_text = response.text
-                if len(response_text) > 1000:
-                    response_text = response_text[:1000] + "... (truncated)"
-                logger.debug("Response body: %s", response_text)
-        except Exception as e:
-            logger.debug("Could not parse response body: %s", e)
-
-        return response
-
-    except requests.exceptions.Timeout:
-        logger.error("Request timed out after %.2f seconds", timeout)
-        raise
-    except requests.exceptions.ConnectionError as e:
-        logger.error("Connection error: %s", e)
-        raise
-    except requests.exceptions.RequestException as e:
-        logger.error("Request failed: %s", e)
-        raise
