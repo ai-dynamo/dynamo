@@ -223,6 +223,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
 
+        if hasattr(sampling_params, "guided_decoding") and isinstance(
+            sampling_params.guided_decoding, dict
+        ):
+            sampling_params.guided_decoding = GuidedDecodingParams(
+                **sampling_params.guided_decoding
+            )
+
         try:
             gen = self.engine_client.generate(prompt, sampling_params, request_id)
         except EngineDeadError as e:

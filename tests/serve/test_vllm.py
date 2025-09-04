@@ -297,10 +297,7 @@ def test_serve_deployment(vllm_config_test, request, runtime_services):
 @pytest.mark.gpu_1
 @pytest.mark.vllm
 def test_guided_decoding(request, runtime_services):
-    """
-    Test guided decoding functionality with vLLM using Pydantic model schema.
-    """
-    # runtime_services is used to start nats and etcd
+    """Test guided decoding functionality with vLLM using Pydantic model schema."""
     logger = logging.getLogger(request.node.name)
     logger.info("Starting test_guided_decoding")
 
@@ -328,15 +325,12 @@ def test_guided_decoding(request, runtime_services):
             "messages": [
                 {
                     "role": "user",
-                    "content": "Generate a JSON with the name and age of one random person.",
+                    "content": "Generate a JSON with name and age of one random person. No thinking is required.",
                 }
             ],
-            "max_tokens": 50,
+            "max_tokens": 250,
             "temperature": 0.0,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "people", "schema": People.model_json_schema()},
-            },
+            "guided_json": People.model_json_schema(),
         }
 
         response = server_process.send_request(
@@ -351,6 +345,9 @@ def test_guided_decoding(request, runtime_services):
         assert len(response_json["choices"]) > 0
 
         message_content = response_json["choices"][0]["message"]["content"]
+        if "</think>" in message_content:
+            message_content = message_content.split("</think>")[-1].strip()
+
         logger.info(f"Generated text with guided decoding: {message_content}")
 
         import json
