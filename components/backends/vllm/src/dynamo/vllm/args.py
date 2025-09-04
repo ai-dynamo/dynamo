@@ -149,11 +149,13 @@ def convert_trtllm_speculative_config_to_vllm(trtllm_config: dict) -> Optional[d
     decoding_type = trtllm_config.get("decoding_type", "").lower()
     
     if decoding_type == "eagle":
-        # Map Eagle speculative decoding to vLLM draft model approach
-        vllm_config = {}
+        # Map Eagle speculative decoding to vLLM format
+        vllm_config = {
+            "method": "draft_model"  # Required for Eagle
+        }
         
         if "speculative_model_dir" in trtllm_config:
-            vllm_config["draft_model"] = trtllm_config["speculative_model_dir"]
+            vllm_config["model"] = trtllm_config["speculative_model_dir"]
         
         if "max_draft_len" in trtllm_config:
             vllm_config["num_speculative_tokens"] = trtllm_config["max_draft_len"]
@@ -162,19 +164,20 @@ def convert_trtllm_speculative_config_to_vllm(trtllm_config: dict) -> Optional[d
         if "num_speculative_tokens" not in vllm_config:
             vllm_config["num_speculative_tokens"] = 5
             
-        logger.info(f"Converted Eagle config to vLLM draft model config: {vllm_config}")
+        logger.info(f"Converted Eagle config to vLLM format: {vllm_config}")
         return vllm_config
         
     elif decoding_type == "mtp":
         # MTP (Multi-Token Prediction) doesn't have a direct vLLM equivalent
         # We'll use n-gram lookup as the closest alternative
         vllm_config = {
-            "draft_model": "[ngram]",
+            "method": "ngram",
+            "model": "[ngram]",
             "num_speculative_tokens": trtllm_config.get("num_nextn_predict_layers", 1) * 2,  # Rough approximation
-            "ngram_prompt_lookup_max": 4,
-            "ngram_prompt_lookup_min": 1
+            "prompt_lookup_max": 4,
+            "prompt_lookup_min": 1
         }
-        logger.info(f"Converted MTP config to vLLM n-gram config: {vllm_config}")
+        logger.info(f"Converted MTP config to vLLM n-gram format: {vllm_config}")
         return vllm_config
         
     else:
