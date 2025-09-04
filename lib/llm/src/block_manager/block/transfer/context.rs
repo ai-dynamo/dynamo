@@ -114,3 +114,141 @@ impl Drop for TransferContext {
         }
     }
 }
+
+pub mod v2 {
+    use super::*;
+
+    use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
+    use nixl_sys::Agent as NixlAgent;
+
+    use std::sync::Arc;
+    use tokio::runtime::Handle;
+
+    #[derive(Clone)]
+    pub struct TransferContext {
+        nixl_agent: Arc<Option<NixlAgent>>,
+        stream: Arc<CudaStream>,
+        async_rt_handle: Handle,
+    }
+
+    pub struct EventSynchronizer {
+        event: CudaEvent,
+        async_rt_handle: Handle,
+    }
+
+    impl TransferContext {
+        pub fn new(
+            nixl_agent: Arc<Option<NixlAgent>>,
+            stream: Arc<CudaStream>,
+            async_rt_handle: Handle,
+        ) -> Self {
+            Self {
+                nixl_agent,
+                stream,
+                async_rt_handle,
+            }
+        }
+
+        pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+            self.nixl_agent.clone()
+        }
+
+        pub fn stream(&self) -> &Arc<CudaStream> {
+            &self.stream
+        }
+
+        pub fn async_rt_handle(&self) -> &Handle {
+            &self.async_rt_handle
+        }
+
+        pub fn record_event(&self) -> Result<EventSynchronizer, TransferError> {
+            let event = self
+                .stream
+                .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
+                .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
+
+            Ok(EventSynchronizer {
+                event,
+                async_rt_handle: self.async_rt_handle.clone(),
+            })
+        }
+    }
+
+    impl EventSynchronizer {
+        pub fn synchronize_blocking(self) -> Result<(), TransferError> {
+            self.event
+                .synchronize()
+                .map_err(|e| TransferError::ExecutionError(e.to_string()))
+        }
+
+        pub async fn synchronize(self) -> Result<(), TransferError> {
+            let event = self.event;
+            self.async_rt_handle
+                .spawn_blocking(move || {
+                    event
+                        .synchronize()
+                        .map_err(|e| TransferError::ExecutionError(e.to_string()))
+                })
+                .await
+                .map_err(|e| TransferError::ExecutionError(format!("Task join error: {}", e)))?
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_transfer_context_struct_definition() {
+            // Test that the struct can be defined and has the expected fields
+            // This is a compile-time test to ensure the API is correctly structured
+
+            // We can't easily create a TransferContext without valid CUDA objects
+            // but we can test that the types are correctly defined
+            assert_eq!(
+                std::mem::size_of::<TransferContext>(),
+                std::mem::size_of::<Arc<Option<nixl_sys::Agent>>>()
+                    + std::mem::size_of::<Arc<CudaStream>>()
+                    + std::mem::size_of::<tokio::runtime::Handle>()
+            );
+        }
+
+        #[test]
+        fn test_event_synchronizer_struct_definition() {
+            // Test that EventSynchronizer has the expected size and alignment
+            assert_eq!(
+                std::mem::size_of::<EventSynchronizer>(),
+                std::mem::size_of::<CudaEvent>() + std::mem::size_of::<tokio::runtime::Handle>()
+            );
+        }
+
+        #[test]
+        fn test_transfer_error_variants() {
+            // Test that TransferError can be created and has expected variants
+            let execution_error = TransferError::ExecutionError("test error".to_string());
+            match execution_error {
+                TransferError::ExecutionError(msg) => assert_eq!(msg, "test error"),
+                _ => panic!("Expected ExecutionError variant"),
+            }
+
+            let builder_error = TransferError::BuilderError("builder error".to_string());
+            match builder_error {
+                TransferError::BuilderError(msg) => assert_eq!(msg, "builder error"),
+                _ => panic!("Expected BuilderError variant"),
+            }
+        }
+    }
+
+    #[cfg(all(test, feature = "testing-cuda"))]
+    mod integration_tests {
+        #[tokio::test]
+        #[ignore = "Requires CUDA hardware and proper setup"]
+        async fn test_real_cuda_integration() {
+            // This would need actual CUDA hardware and proper setup
+            // Integration tests for real CUDA usage would go here
+            // use super::*;
+            // use cudarc::driver::CudaContext;
+            // use std::sync::Arc;
+        }
+    }
+}

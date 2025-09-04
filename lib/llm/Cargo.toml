@@ -25,9 +25,9 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+# default = []
 # todo(ops): get this working in CI as a default.
-# default = ["block-manager", "testing-full"]
+default = ["block-manager", "testing-full"]
 
 testing-full  = ["testing-cuda", "testing-nixl"]
 testing-cuda  = ["dep:cudarc"]
@@ -42,6 +42,11 @@ integration   = ["dynamo-runtime/integration"]
 [[bench]]
 name = "tokenizer"
 harness = false
+
+[[bench]]
+name = "transfer_context_v2"
+harness = false
+required-features = ["testing-cuda"]
 
 [dependencies]
 # repo
