@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# vLLM Engine Configuration with MTP Speculative Decoding
+# This configuration matches the TRT-LLM mtp_decode.yaml format
+
+tensor_parallel_size: 4
+max_num_seqs: 256
+max_num_batched_tokens: 512
+max_model_len: 8704  # 8192 ISL + 512 OSL
+gpu_memory_utilization: 0.85
+
+# Enable MTP (Multi-Token Prediction) speculative decoding
+# Note: vLLM doesn't have native MTP support, so this maps to n-gram lookup
+speculative_config:
+  decoding_type: MTP
+  num_nextn_predict_layers: 1
+
+# KV Cache configuration
+kv_cache_config:
+  free_gpu_memory_fraction: 0.85
+
+# Additional vLLM specific settings
+enable_prefix_caching: true
+block_size: 16 

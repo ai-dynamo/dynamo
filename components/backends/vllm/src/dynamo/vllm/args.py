@@ -5,13 +5,22 @@
 import logging
 import os
 from typing import Optional
+import yaml
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
-from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+# Import with fallbacks for compatibility
+try:
+    from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+except ImportError:
+    # Provide fallback functions if not available
+    def get_reasoning_parser_names():
+        return []
+    def get_tool_parser_names():
+        return []
 
 from . import __version__
 from .ports import (
@@ -48,6 +57,7 @@ class Config:
     kv_port: Optional[int] = None
     port_range: DynamoPortRange
     custom_jinja_template: Optional[str] = None
+    extra_engine_args: str = ""
 
     # mirror vLLM
     model: str
@@ -62,6 +72,114 @@ class Config:
     # tool and reasoning parser info
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+
+
+def update_vllm_args_with_extra_options(engine_args: AsyncEngineArgs, extra_args_path: str) -> AsyncEngineArgs:
+    """Load extra engine arguments from YAML file and apply them to vLLM engine args.
+    
+    This function mimics the behavior of TRT-LLM's update_llm_args_with_extra_options
+    to provide consistent configuration interface between backends.
+    """
+    if not extra_args_path or not os.path.exists(extra_args_path):
+        logger.warning(f"Extra engine args file not found: {extra_args_path}")
+        return engine_args
+    
+    try:
+        with open(extra_args_path, 'r') as f:
+            extra_config = yaml.safe_load(f)
+        
+        if not extra_config:
+            logger.warning(f"Empty or invalid YAML file: {extra_args_path}")
+            return engine_args
+            
+        logger.info(f"Loading extra engine args from {extra_args_path}: {extra_config}")
+        
+        # Handle speculative_config specifically
+        if "speculative_config" in extra_config:
+            spec_config = extra_config["speculative_config"]
+            vllm_spec_config = convert_trtllm_speculative_config_to_vllm(spec_config)
+            
+            if vllm_spec_config:
+                engine_args.speculative_config = vllm_spec_config
+                logger.info(f"Applied speculative config: {vllm_spec_config}")
+        
+        # Handle other configs that can be directly mapped
+        direct_mappings = {
+            "max_batch_size": "max_num_seqs",
+            "max_num_tokens": "max_num_batched_tokens", 
+            "max_seq_len": "max_model_len",
+            "tensor_parallel_size": "tensor_parallel_size",
+            "pipeline_parallel_size": "pipeline_parallel_size",
+            "gpu_memory_utilization": "gpu_memory_utilization",
+        }
+        
+        for yaml_key, vllm_key in direct_mappings.items():
+            if yaml_key in extra_config:
+                setattr(engine_args, vllm_key, extra_config[yaml_key])
+                logger.info(f"Set {vllm_key} = {extra_config[yaml_key]} from YAML")
+        
+        # Handle kv_cache_config
+        if "kv_cache_config" in extra_config:
+            kv_config = extra_config["kv_cache_config"]
+            if "free_gpu_memory_fraction" in kv_config:
+                engine_args.gpu_memory_utilization = kv_config["free_gpu_memory_fraction"]
+                logger.info(f"Set gpu_memory_utilization = {kv_config['free_gpu_memory_fraction']} from YAML")
+        
+        return engine_args
+        
+    except Exception as e:
+        logger.error(f"Failed to load extra engine args from {extra_args_path}: {e}")
+        return engine_args
+
+
+def convert_trtllm_speculative_config_to_vllm(trtllm_config: dict) -> Optional[dict]:
+    """Convert TRT-LLM speculative_config format to vLLM format.
+    
+    TRT-LLM format examples:
+    - Eagle: {"decoding_type": "Eagle", "max_draft_len": 3, "speculative_model_dir": "model_path", "eagle3_one_model": true}
+    - MTP: {"decoding_type": "MTP", "num_nextn_predict_layers": 1}
+    
+    vLLM format examples:
+    - Draft model: {"speculative_model": "model_path", "num_speculative_tokens": 5}
+    - N-gram: {"speculative_model": "[ngram]", "num_speculative_tokens": 5, "ngram_prompt_lookup_max": 4}
+    """
+    if not trtllm_config:
+        return None
+    
+    decoding_type = trtllm_config.get("decoding_type", "").lower()
+    
+    if decoding_type == "eagle":
+        # Map Eagle speculative decoding to vLLM draft model approach
+        vllm_config = {}
+        
+        if "speculative_model_dir" in trtllm_config:
+            vllm_config["speculative_model"] = trtllm_config["speculative_model_dir"]
+        
+        if "max_draft_len" in trtllm_config:
+            vllm_config["num_speculative_tokens"] = trtllm_config["max_draft_len"]
+        
+        # Set reasonable defaults if not specified
+        if "num_speculative_tokens" not in vllm_config:
+            vllm_config["num_speculative_tokens"] = 5
+            
+        logger.info(f"Converted Eagle config to vLLM draft model config: {vllm_config}")
+        return vllm_config
+        
+    elif decoding_type == "mtp":
+        # MTP (Multi-Token Prediction) doesn't have a direct vLLM equivalent
+        # We'll use n-gram lookup as the closest alternative
+        vllm_config = {
+            "speculative_model": "[ngram]",
+            "num_speculative_tokens": trtllm_config.get("num_nextn_predict_layers", 1) * 2,  # Rough approximation
+            "ngram_prompt_lookup_max": 4,
+            "ngram_prompt_lookup_min": 1
+        }
+        logger.info(f"Converted MTP config to vLLM n-gram config: {vllm_config}")
+        return vllm_config
+        
+    else:
+        logger.warning(f"Unsupported decoding_type '{decoding_type}' in speculative_config. Supported types: Eagle, MTP")
+        return None
 
 
 def parse_args() -> Config:
@@ -122,6 +240,12 @@ def parse_args() -> Config:
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    parser.add_argument(
+        "--extra-engine-args",
+        type=str,
+        default="",
+        help="Path to a YAML file containing extra engine arguments to pass to vLLM. These arguments will override the default values set by the backend.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -156,6 +280,8 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.extra_engine_args = args.extra_engine_args
+
     # Check for conflicting flags
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
@@ -335,6 +461,11 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
+    # First apply extra engine args from YAML file if provided
+    if config.extra_engine_args:
+        logger.info(f"Processing extra engine args from: {config.extra_engine_args}")
+        config.engine_args = update_vllm_args_with_extra_options(config.engine_args, config.extra_engine_args)
+    
     defaults = {
         "task": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls

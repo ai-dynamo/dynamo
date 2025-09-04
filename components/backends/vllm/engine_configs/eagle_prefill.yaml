@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# vLLM Engine Configuration for Eagle Speculative Decoding (Prefill)
+# This configuration matches the TRT-LLM eagle_prefill.yaml format
+
+tensor_parallel_size: 4
+max_num_seqs: 1
+max_num_batched_tokens: 8192
+max_model_len: 8192
+gpu_memory_utilization: 0.5
+
+# Enable Speculative Decoding in the vLLM engine
+speculative_config:
+  decoding_type: Eagle
+  max_draft_len: 3
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  eagle3_one_model: true
+
+# KV Cache configuration
+kv_cache_config:
+  free_gpu_memory_fraction: 0.5
+
+# Additional vLLM specific settings
+enable_prefix_caching: true
+block_size: 16 

@@ -42,6 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | WIP |
 | [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**Speculative Decoding**](./SPECULATIVE_DECODING.md) | ✅ | Eagle, MTP (via n-gram), YAML config support |
 
 ### Large Scale P/D and WideEP Features
 
