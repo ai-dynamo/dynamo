@@ -79,6 +79,10 @@ impl State {
     pub fn etcd_client(&self) -> Option<&etcd::Client> {
         self.etcd_client.as_ref()
     }
+
+    fn is_tensor_model(&self, model: &String) -> bool {
+        self.manager.list_tensor_models().contains(model)
+    }
 }
 
 #[derive(Clone)]
@@ -180,6 +184,14 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
+        let model = request.get_ref().model_name.clone();
+        if self.state().is_tensor_model(&model) {
+            Err(Status::unimplemented(
+                "[gluo WIP] Model is a tensor model, need inference path",
+            ))?;
+        }
+
+        // Fallback handling by assuming the model is OpenAI Completions model
         let request = request.into_inner();
         let request_id = request.id.clone();
         let mut completion_request: NvCreateCompletionRequest = request
@@ -244,9 +256,7 @@ impl GrpcInferenceService for KserveService {
             // and passing AsyncEngineStream for each request to the response stream
             // which will be collectively polling.
             while let Some(request) = request_stream.next().await {
-                // Must keep track of 'request_id' which will be returned in corresponding response
-                let request_id: String;
-                let mut completion_request: NvCreateCompletionRequest = match request {
+                let request = match request {
                     Err(e) => {
                         tracing::error!("Unexpected gRPC failed to read request: {}", e);
                         yield ModelStreamInferResponse {
@@ -256,12 +266,20 @@ impl GrpcInferenceService for KserveService {
                         continue;
                     }
                     Ok(request) => {
-                        request_id = request.id.clone();
-                        request.try_into().map_err(|e| {
-                            Status::invalid_argument(format!("Failed to parse request: {}", e))
-                        })?
+                        request
                     }
                 };
+
+                let model = request.model_name.clone();
+                if state.is_tensor_model(&model) {
+                    Err(Status::unimplemented("[gluo WIP] Model is a tensor model, need inference path"))?;
+                }
+
+                // Must keep track of 'request_id' which will be returned in corresponding response
+                let request_id = request.id.clone();
+                let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
+                    Status::invalid_argument(format!("Failed to parse request: {}", e))
+                })?;
 
                 // Apply template values if present
                 if let Some(template) = &template {
@@ -332,38 +350,47 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelMetadataRequest>,
     ) -> Result<Response<ModelMetadataResponse>, Status> {
-        let models = self.state.manager().list_completions_models();
+        let entries = self.state.manager().get_model_entries();
         let request_model_name = &request.into_inner().name;
-        if let Some(model_name) = models.into_iter().find(|n| request_model_name == n) {
-            return Ok(Response::new(ModelMetadataResponse {
-                name: model_name,
-                versions: vec!["1".to_string()],
-                platform: "dynamo".to_string(),
-                inputs: vec![
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "text_input".to_string(),
-                        datatype: "BYTES".to_string(),
-                        shape: vec![1],
-                    },
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "streaming".to_string(),
-                        datatype: "BOOL".to_string(),
-                        shape: vec![1],
-                    },
-                ],
-                outputs: vec![
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "text_output".to_string(),
-                        datatype: "BYTES".to_string(),
-                        shape: vec![-1],
-                    },
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "finish_reason".to_string(),
-                        datatype: "BYTES".to_string(),
-                        shape: vec![-1],
-                    },
-                ],
-            }));
+        if let Some(entry) = entries
+            .into_iter()
+            .find(|entry| request_model_name == &entry.name)
+        {
+            if entry.model_type.supports_tensor() {
+                Err(Status::unimplemented(
+                    "[gluo WIP] Model is a tensor model, need metadata path",
+                ))?;
+            } else if entry.model_type.supports_completions() {
+                return Ok(Response::new(ModelMetadataResponse {
+                    name: entry.name,
+                    versions: vec!["1".to_string()],
+                    platform: "dynamo".to_string(),
+                    inputs: vec![
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "text_input".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![1],
+                        },
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "streaming".to_string(),
+                            datatype: "BOOL".to_string(),
+                            shape: vec![1],
+                        },
+                    ],
+                    outputs: vec![
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "text_output".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![-1],
+                        },
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "finish_reason".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![-1],
+                        },
+                    ],
+                }));
+            }
         }
         Err(Status::not_found(format!(
             "Model '{}' not found",
@@ -375,47 +402,56 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelConfigRequest>,
     ) -> Result<Response<ModelConfigResponse>, Status> {
-        let models = self.state.manager().list_completions_models();
+        let entries = self.state.manager().get_model_entries();
         let request_model_name = &request.into_inner().name;
-        if let Some(model_name) = models.into_iter().find(|n| request_model_name == n) {
-            let config = ModelConfig {
-                name: model_name,
-                platform: "dynamo".to_string(),
-                backend: "dynamo".to_string(),
-                input: vec![
-                    ModelInput {
-                        name: "text_input".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![1],
-                        ..Default::default()
-                    },
-                    ModelInput {
-                        name: "streaming".to_string(),
-                        data_type: DataType::TypeBool as i32,
-                        dims: vec![1],
-                        optional: true,
-                        ..Default::default()
-                    },
-                ],
-                output: vec![
-                    ModelOutput {
-                        name: "text_output".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![-1],
-                        ..Default::default()
-                    },
-                    ModelOutput {
-                        name: "finish_reason".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![-1],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            };
-            return Ok(Response::new(ModelConfigResponse {
-                config: Some(config),
-            }));
+        if let Some(entry) = entries
+            .into_iter()
+            .find(|entry| request_model_name == &entry.name)
+        {
+            if entry.model_type.supports_tensor() {
+                Err(Status::unimplemented(
+                    "[gluo WIP] Model is a tensor model, need config path",
+                ))?;
+            } else if entry.model_type.supports_completions() {
+                let config = ModelConfig {
+                    name: entry.name,
+                    platform: "dynamo".to_string(),
+                    backend: "dynamo".to_string(),
+                    input: vec![
+                        ModelInput {
+                            name: "text_input".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![1],
+                            ..Default::default()
+                        },
+                        ModelInput {
+                            name: "streaming".to_string(),
+                            data_type: DataType::TypeBool as i32,
+                            dims: vec![1],
+                            optional: true,
+                            ..Default::default()
+                        },
+                    ],
+                    output: vec![
+                        ModelOutput {
+                            name: "text_output".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![-1],
+                            ..Default::default()
+                        },
+                        ModelOutput {
+                            name: "finish_reason".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![-1],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                };
+                return Ok(Response::new(ModelConfigResponse {
+                    config: Some(config),
+                }));
+            }
         }
         Err(Status::not_found(format!(
             "Model '{}' not found",

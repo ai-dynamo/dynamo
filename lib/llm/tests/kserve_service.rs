@@ -22,6 +22,7 @@ pub mod kserve_test {
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
+        tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     };
     use dynamo_runtime::{
         CancellationToken,
@@ -181,6 +182,24 @@ pub mod kserve_test {
         }
     }
 
+    struct TensorEngine {}
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateTensorRequest>,
+            ManyOut<Annotated<NvCreateTensorResponse>>,
+            Error,
+        > for TensorEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreateTensorRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateTensorResponse>>, Error> {
+            Err(Error::msg("Always fail"))?
+        }
+    }
+
     /// Wait for the HTTP service to be ready by checking its health endpoint
     async fn get_ready_client(port: u16, timeout_secs: u64) -> GrpcInferenceServiceClient<Channel> {
         let start = tokio::time::Instant::now();
@@ -276,6 +295,7 @@ pub mod kserve_test {
         InferCancellation = 8992,
         StreamInferCancellation = 8993,
         ModelInfo = 8994,
+        TensorModel = 8995,
     }
 
     #[rstest]
@@ -1051,5 +1071,91 @@ pub mod kserve_test {
                 _ => panic!("Unexpected output name: {}", io.name),
             }
         }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_tensor_infer(
+        #[with(TestPort::TensorModel as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
+        // add tensor model
+        let tensor = Arc::new(TensorEngine {});
+        service_with_engines
+            .0
+            .model_manager()
+            .add_tensor_model("tensor", tensor.clone())
+            .unwrap();
+
+        // start server
+        let _running = RunningService::spawn(service_with_engines.0);
+
+        let mut client = get_ready_client(TestPort::TensorModel as u16, 5).await;
+
+        let request = tonic::Request::new(ModelMetadataRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+
+        // Failure, model registered as Tensor but does not provide model config
+        let response = client.model_metadata(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for unregistered model, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("Model config is not provided"),
+            "Expected error message to contain 'Model config is not provided', got: {}",
+            err.message()
+        );
+
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+
+        let response = client.model_config(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for unregistered model, get {}",
+            err
+        );
+        assert!(
+            err.message().contains("Model config is not provided"),
+            "Expected error message to contain 'Model config is not provided', got: {}",
+            err.message()
+        );
+
+        let model_name = "tensor";
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: model_name.into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: vec![text_input.clone()],
+            ..Default::default()
+        });
+
+        // [gluo WIP] failure but should hit tensor model handling
+        let response = client.model_infer(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Unimplemented,
+            "Expected Unimplemented error for unregistered model, get {}",
+            err
+        );
     }
 }

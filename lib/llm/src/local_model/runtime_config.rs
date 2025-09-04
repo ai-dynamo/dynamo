@@ -20,6 +20,10 @@ pub struct ModelRuntimeConfig {
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
+
+    // Provide KServe model config in the case where the model type is Tensor
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kserve_model_config: Option<serde_json::Value>,
 }
 
 impl ModelRuntimeConfig {
