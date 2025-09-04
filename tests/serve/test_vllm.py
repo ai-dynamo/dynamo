@@ -3,7 +3,7 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
-    stragglers: list[str] = ["VLLM:EngineCore"]
+    stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
 
 
 vllm_dir = os.environ.get("VLLM_DIR", "/workspace/components/backends/vllm")

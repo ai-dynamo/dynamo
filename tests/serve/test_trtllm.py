@@ -3,7 +3,7 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class TRTLLMConfig(EngineConfig):
     """Configuration for trtllm test scenarios"""
 
-    stragglers: list[str] = ["TRTLLM:EngineCore"]
+    stragglers: list[str] = field(default_factory=lambda: ["TRTLLM:EngineCore"])
 
 
 trtllm_dir = os.environ.get("TRTLLM_DIR", "/workspace/components/backends/trtllm")
