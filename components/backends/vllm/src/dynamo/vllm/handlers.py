@@ -11,7 +11,7 @@ from typing import AsyncGenerator
 
 import msgspec
 from vllm.inputs import TokensPrompt
-from vllm.sampling_params import SamplingParams, GuidedDecodingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.runtime.logging import configure_dynamo_logging

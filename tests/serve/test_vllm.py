@@ -291,3 +291,76 @@ def test_serve_deployment(vllm_config_test, request, runtime_services):
                     url, payload=request_body, timeout=config.timeout - elapsed
                 )
                 server_process.check_response(payload, response, response_handler)
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.vllm
+def test_guided_decoding(request, runtime_services):
+    """
+    Test guided decoding functionality with vLLM using Pydantic model schema.
+    """
+    # runtime_services is used to start nats and etcd
+    logger = logging.getLogger(request.node.name)
+    logger.info("Starting test_guided_decoding")
+
+    from pydantic import BaseModel
+
+    class People(BaseModel):
+        name: str
+        age: int
+
+    config = VLLMConfig(
+        name="guided_decoding_test",
+        directory="/workspace/components/backends/vllm",
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        endpoints=["v1/chat/completions"],
+        response_handlers=[chat_completions_response_handler],
+        model="Qwen/Qwen3-0.6B",
+    )
+
+    with VLLMProcess(config, request) as server_process:
+        url = f"http://localhost:{server_process.port}/v1/chat/completions"
+
+        payload_with_guided_decoding = {
+            "model": config.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Generate a JSON with the name and age of one random person.",
+                }
+            ],
+            "max_tokens": 50,
+            "temperature": 0.0,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "people", "schema": People.model_json_schema()},
+            },
+        }
+
+        response = server_process.send_request(
+            url, payload=payload_with_guided_decoding, timeout=60
+        )
+
+        assert (
+            response.status_code == 200
+        ), f"Request failed with status {response.status_code}"
+        response_json = response.json()
+        assert "choices" in response_json
+        assert len(response_json["choices"]) > 0
+
+        message_content = response_json["choices"][0]["message"]["content"]
+        logger.info(f"Generated text with guided decoding: {message_content}")
+
+        import json
+
+        try:
+            parsed = json.loads(message_content)
+            assert "name" in parsed, "Generated JSON missing 'name' field"
+            assert "age" in parsed, "Generated JSON missing 'age' field"
+            assert isinstance(parsed["name"], str), "'name' field is not a string"
+            assert isinstance(parsed["age"], int), "'age' field is not an integer"
+            logger.info(f"Successfully validated JSON: {parsed}")
+        except json.JSONDecodeError:
+            pytest.fail(f"Generated text is not valid JSON: {message_content}")
