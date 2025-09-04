@@ -4,8 +4,9 @@
 import logging
 
 import numpy as np
-from utils.genai_perf import benchmark_decode
-from utils.plot import plot_decode_3d_surface
+
+from benchmarks.profiler.utils.genai_perf import benchmark_decode
+from benchmarks.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

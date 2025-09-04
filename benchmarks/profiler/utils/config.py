@@ -15,11 +15,14 @@
 
 import logging
 import re
-from typing import Literal, Optional, cast
+from typing import Literal, Optional
 
 from pydantic import BaseModel
-from utils.defaults import DEFAULT_MODEL_NAME, DYNAMO_RUN_DEFAULT_PORT
 
+from benchmarks.profiler.utils.defaults import (
+    DEFAULT_MODEL_NAME,
+    DYNAMO_RUN_DEFAULT_PORT,
+)
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 logger = logging.getLogger(__name__)
@@ -34,27 +37,30 @@ logger.addHandler(console_handler)
 
 
 class Container(BaseModel):
-    args: list[str] = []
+    args: Optional[list[str]] = None
+    model_config = {"extra": "allow"}
 
 
 class PodSpec(BaseModel):
-    mainContainer: Container
+    mainContainer: Optional[Container] = None
+    model_config = {"extra": "allow"}
 
 
 class ServiceResources(BaseModel):
-    requests: dict[str, str]
+    requests: Optional[dict[str, str]] = None
     limits: Optional[dict[str, str]] = None
 
 
 class Service(BaseModel):
-    replicas: int
-    resources: ServiceResources
-    extraPodSpec: PodSpec
+    replicas: Optional[int] = None
+    resources: Optional[ServiceResources] = None
+    extraPodSpec: Optional[PodSpec] = None
+    model_config = {"extra": "allow"}
 
 
 class Services(BaseModel):
     Frontend: Service
-    __root__: dict[str, Service]
+    model_config = {"extra": "allow"}
 
 
 class Spec(BaseModel):
@@ -68,15 +74,19 @@ class Metadata(BaseModel):
 class Config(BaseModel):
     metadata: Metadata
     spec: Spec
+    model_config = {"extra": "allow"}
 
 
-def break_arguments(args: list[str]) -> list[str]:
+def break_arguments(args: list[str] | None) -> list[str]:
     ans = []
+    if args is None:
+        return ans
     if isinstance(args, str):
         ans = re.split(r"[ =]", args)
     else:
         for arg in args:
-            ans.extend(arg.split(" "))
+            if arg is not None:
+                ans.extend(arg.split(" "))
     return ans
 
 
@@ -198,23 +208,23 @@ class VllmV1ConfigModifier:
     def set_config_tp_size(cls, config: dict, tp_size: int):
         cfg = Config.model_validate(config)
 
-        cfg.spec.services[
+        worker_service = cfg.spec.services[
             WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-        ].resources.requests["gpu"] = str(tp_size)
-        if (
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].resources.limits
-            is not None
-        ):
-            # Explicitly cast `limits` as the typecheck cannot determine that
-            # limits is not None here
-            cast(
-                dict[str, str],
-                cfg.spec.services[
-                    WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-                ].resources.limits,
-            )["gpu"] = str(tp_size)
+        ]
+
+        # Ensure resources exists
+        if worker_service.resources is None:
+            worker_service.resources = ServiceResources()
+
+        # Ensure requests exists
+        if worker_service.resources.requests is None:
+            worker_service.resources.requests = {}
+
+        worker_service.resources.requests["gpu"] = str(tp_size)
+
+        # Update limits if they exist
+        if worker_service.resources.limits is not None:
+            worker_service.resources.limits["gpu"] = str(tp_size)
 
         args = cfg.spec.services[
             WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
@@ -253,12 +263,29 @@ class VllmV1ConfigModifier:
     @classmethod
     def get_port(cls, config: dict) -> int:
         cfg = Config.model_validate(config)
-        args = cfg.spec.services["Frontend"].extraPodSpec.mainContainer.args
+        frontend_service = cfg.spec.services.get("Frontend")
+        if (
+            not frontend_service
+            or not frontend_service.extraPodSpec
+            or not frontend_service.extraPodSpec.mainContainer
+        ):
+            logger.warning(
+                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+        args = frontend_service.extraPodSpec.mainContainer.args
+        if not args:
+            logger.warning(
+                f"No args found in Frontend configuration, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
         args = break_arguments(args)
         try:
             idx = args.index("--http-port")
             return int(args[idx + 1])
-        except ValueError:
+        except (ValueError, IndexError):
             logger.warning(
                 f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
             )
@@ -341,10 +368,6 @@ class SGLangConfigModifier:
 
             args = break_arguments(args)
 
-            # call `dynamo.sglang.worker` instead of `dynamo.sglang.decode_worker`
-            idx = args.index("dynamo.sglang.decode_worker")
-            args[idx] = "dynamo.sglang.worker"
-
             # remove `--disaggregation-mode` and `--disaggregation-transfer-backend`
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
@@ -369,23 +392,23 @@ class SGLangConfigModifier:
     def set_config_tp_size(cls, config: dict, tp_size: int):
         cfg = Config.model_validate(config)
 
-        cfg.spec.services[
+        worker_service = cfg.spec.services[
             WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-        ].resources.requests["gpu"] = str(tp_size)
-        if (
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].resources.limits
-            is not None
-        ):
-            # Explicitly cast `limits` as the typecheck cannot determine that
-            # limits is not None here
-            cast(
-                dict[str, str],
-                cfg.spec.services[
-                    WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-                ].resources.limits,
-            )["gpu"] = str(tp_size)
+        ]
+
+        # Ensure resources exists
+        if worker_service.resources is None:
+            worker_service.resources = ServiceResources()
+
+        # Ensure requests exists
+        if worker_service.resources.requests is None:
+            worker_service.resources.requests = {}
+
+        worker_service.resources.requests["gpu"] = str(tp_size)
+
+        # Update limits if they exist
+        if worker_service.resources.limits is not None:
+            worker_service.resources.limits["gpu"] = str(tp_size)
 
         args = cfg.spec.services[
             WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
@@ -424,12 +447,29 @@ class SGLangConfigModifier:
     @classmethod
     def get_port(cls, config: dict) -> int:
         cfg = Config.model_validate(config)
-        args = cfg.spec.services["Frontend"].extraPodSpec.mainContainer.args
+        frontend_service = cfg.spec.services.get("Frontend")
+        if (
+            not frontend_service
+            or not frontend_service.extraPodSpec
+            or not frontend_service.extraPodSpec.mainContainer
+        ):
+            logger.warning(
+                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+        args = frontend_service.extraPodSpec.mainContainer.args
+        if not args:
+            logger.warning(
+                f"No args found in Frontend configuration, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
         args = break_arguments(args)
         try:
             idx = args.index("--http-port")
             return int(args[idx + 1])
-        except ValueError:
+        except (ValueError, IndexError):
             logger.warning(
                 f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
             )
