@@ -280,21 +280,55 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
-#######################################
-########## Local Development #######
-#######################################
+#######################################################################
+########## DEVELOPMENT TARGETS FEATURE MATRIX #########################
+#######################################################################
+# Feature              │ local-dev Target    │ dev Target
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Purpose              │ Dev Container       │ Command-line with
+#                      │ plugin use only     │ run.sh script
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Default User         │ ubuntu user         │ root user
+# ─────────────────────┼─────────────────────┼─────────────────────
+# User Setup           │ Full ubuntu user    │ No user setup
+#                      │ with UID/GID        │
+#                      │ mapping             │
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Permissions          │ ubuntu user with    │ Root-level
+#                      │ sudo privileges     │ permissions
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Home Directory       │ /home/ubuntu        │ /root
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Working Directory    │ /home/ubuntu/dynamo │ /workspace
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Rust Toolchain       │ User's home         │ System locations
+#                      │ (~/.rustup,         │ (/usr/local/rustup,
+#                      │  ~/.cargo)          │  /usr/local/cargo)
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Python Environment   │ User-owned venv     │ System location
+#                      │                     │ (/opt/dynamo/venv)
+# ─────────────────────┼─────────────────────┼─────────────────────
+# File Permissions     │ User-level with     │ Root-level
+#                      │ proper ownership    │ permissions
+# ─────────────────────┼─────────────────────┼─────────────────────
+# Compatibility        │ MS Plug-in: Dev     │ Backward compatibility
+#                      │ Container workflow  │ with existing
+#                      │                     │ workflows
 #
-# PURPOSE: Local development
-#
-# This stage adds development tools, utilities, and dependencies specifically
-# needed for:
-# - Local development and debugging
-# - vscode/cursor development
-#
-# Use this stage when you need a full development environment with additional
-# tooling beyond the base runtime image.
+# USAGE GUIDELINES:
+# • Use local-dev: VS Code/Cursor Dev Container plugin only
+# • Use dev: run.sh script for command-line development
 
-FROM runtime AS dev
+
+#######################################################################
+########## Development (Dev Container only) ###########################
+#######################################################################
+#
+# This stage is for Dev Container plug-in use only.
+# It provides a local development environment with extra tools and dependencies
+# not present in the base runtime image.
+
+FROM runtime AS local-dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
 ENV USERNAME=ubuntu
@@ -392,6 +426,82 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
 RUN mkdir -p /home/$USERNAME/.cache/
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+
+###########################################################
+########## Development (run.sh, runs as root user) ########
+###########################################################
+#
+# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
+#
+# This stage runs as root and provides:
+# - Development tools and utilities for local debugging
+# - Support for vscode/cursor development outside the Dev Container plug-in
+#
+# Use this stage if you need a full-featured development environment with extra tools,
+# but do not use it with the Dev Container plug-in.
+
+FROM runtime AS dev
+
+# Don't want ubuntu to be editable, just change uid and gid.
+ARG WORKSPACE_DIR=/workspace
+
+# Install utilities as root
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    openssh-client \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=runtime /usr/local/bin /usr/local/bin
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+
+# This is a slow operation (~40s on my cpu)
+# Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
+COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+
+# so we can use maturin develop
+RUN uv pip install maturin[patchelf]
+
+# Make sure to sync this with the one specified on README.md.
+# This is a generic PYTHONPATH which works for all the frameworks, so some paths may not be relevant for this particular framework.
+ENV PYTHONPATH=${WORKSPACE_DIR}/components/metrics/src:${WORKSPACE_DIR}/components/frontend/src:${WORKSPACE_DIR}/components/planner/src:${WORKSPACE_DIR}/components/backends/mocker/src:${WORKSPACE_DIR}/components/backends/trtllm/src:${WORKSPACE_DIR}/components/backends/vllm/src:${WORKSPACE_DIR}/components/backends/sglang/src:${WORKSPACE_DIR}/components/backends/llama_cpp/src
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
