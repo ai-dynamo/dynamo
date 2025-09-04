@@ -15,12 +15,10 @@ use crate::discovery::{KV_ROUTERS_ROOT_PATH, ModelEntry};
 use crate::kv_router::{KvRouterConfig, scheduler::DefaultWorkerSelector};
 use crate::{
     kv_router::KvRouter,
+    types::generic::tensor::TensorStreamingEngine,
     types::openai::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-    },
-    types::generic::{
-        tensor::TensorStreamingEngine,
     },
 };
 

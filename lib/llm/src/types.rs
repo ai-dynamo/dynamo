@@ -80,18 +80,13 @@ pub mod generic {
     pub mod tensor {
         use super::*;
 
-        pub use protocols::tensor::{
-            NvCreateTensorRequest, NvCreateTensorResponse,
-        };
+        pub use protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 
         /// A [`UnaryEngine`] implementation for the generic Tensor API
-        pub type TensorUnaryEngine =
-            UnaryEngine<NvCreateTensorRequest, NvCreateTensorResponse>;
+        pub type TensorUnaryEngine = UnaryEngine<NvCreateTensorRequest, NvCreateTensorResponse>;
 
         /// A [`ServerStreamingEngine`] implementation for the generic Tensor API
-        pub type TensorStreamingEngine = ServerStreamingEngine<
-            NvCreateTensorRequest,
-            Annotated<NvCreateTensorResponse>,
-        >;
+        pub type TensorStreamingEngine =
+            ServerStreamingEngine<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>;
     }
 }
