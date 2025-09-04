@@ -302,7 +302,6 @@ ARG USER_UID
 ARG USER_GID
 ARG WORKSPACE_DIR=/workspace
 
-ARG ARCH_ALT
 
 # Install utilities as root
 RUN apt-get update -y && \
