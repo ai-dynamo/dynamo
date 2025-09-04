@@ -18,7 +18,7 @@ TOTAL_NODES=$((PREFILL_NODES + DECODE_NODES))
 GPUS_PER_NODE={{ gpus_per_node }}
 PREFILL_NODES_PER_WORKER=$((PREFILL_NODES / PREFILL_WORKERS))
 DECODE_NODES_PER_WORKER=$((DECODE_NODES / DECODE_WORKERS))
-LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}/"
+LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}"
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
 OUTPUT_DIR="${SLURM_SUBMIT_DIR}/outputs"
 MODEL_DIR="{{ model_dir }}"
@@ -186,14 +186,14 @@ $cmd &
 
 # Launch frontend on master node (node 1) - this will also start NATS/ETCD
 echo "Launching frontend + NATS/ETCD on master node ${MASTER_NODE}"
-cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$MASTER_NODE --output=${LOG_DIR}/${MASTER_NODE}_frontend.out --error=${LOG_DIR}/${MASTER_NODE}_frontend.err python /scripts/worker_setup.py --worker_type frontend --worker_idx 0 ${WORKER_ARGS}"
+cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$MASTER_NODE --output=${LOG_DIR}/${MASTER_NODE}_frontend_0.out --error=${LOG_DIR}/${MASTER_NODE}_frontend_0.err python /scripts/worker_setup.py --worker_type frontend --worker_idx 0 ${WORKER_ARGS}"
 echo "$cmd"
 $cmd &
 
 # Launch additional frontends on designated nodes
 if [ "$ADDITIONAL_FRONTENDS" -gt 0 ]; then
     frontend_idx=1  # Start from 1 since node 1 is frontend 0
-    nodes_per_frontend=$(( (TOTAL_NODES - 1 + ADDITIONAL_FRONTENDS - 1) / ADDITIONAL_FRONTENDS ))
+    nodes_per_frontend=$(( (TOTAL_NODES - 2 + ADDITIONAL_FRONTENDS - 1) / ADDITIONAL_FRONTENDS ))
     frontend_node_idx=2
     
     for i in $(seq 1 $ADDITIONAL_FRONTENDS); do
