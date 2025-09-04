@@ -3,6 +3,7 @@
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::{Component, Instance};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -116,11 +117,21 @@ impl KvScheduler {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
         let ns_clone = component.namespace().clone();
+        let event_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             let mut event_rx = event_rx;
-            while let Some(event) = event_rx.recv().await {
-                if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
-                    tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+            loop {
+                tokio::select! {
+                    _ = event_cancel_token.cancelled() => {
+                        tracing::trace!("KV hit rate event publisher shutting down");
+                        break;
+                    }
+                    Some(event) = event_rx.recv() => {
+                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+                        }
+                    }
+                    else => break,
                 }
             }
         });
@@ -130,7 +141,7 @@ impl KvScheduler {
             .map(|instance| instance.instance_id)
             .collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            component,
+            component.clone(),
             block_size as usize,
             worker_ids,
             replica_sync,
@@ -141,11 +152,16 @@ impl KvScheduler {
         let slots_monitor = slots.clone();
         let mut instances_monitor_rx = instances_rx.clone();
         let mut configs_monitor_rx = runtime_configs_rx.clone();
+        let monitor_cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
             tracing::trace!("workers monitoring task started");
             loop {
                 // Wait for either instances or configs to change
                 tokio::select! {
+                    _ = monitor_cancel_token.cancelled() => {
+                        tracing::trace!("workers monitoring task shutting down");
+                        break;
+                    }
                     result = instances_monitor_rx.changed() => {
                         if result.is_err() {
                             tracing::warn!("endpoint watch sender shutdown in monitor");
@@ -193,6 +209,7 @@ impl KvScheduler {
         let slots_clone = slots.clone();
         let workers_scheduler = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
+        let scheduler_cancel_token = component.drt().primary_token();
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -200,6 +217,12 @@ impl KvScheduler {
             tracing::trace!("scheduler background task started");
 
             loop {
+                // Check for cancellation at beginning of loop
+                if scheduler_cancel_token.is_cancelled() {
+                    tracing::trace!("scheduler background task shutting down");
+                    break;
+                }
+
                 // Wait for a new request
                 let Some(mut request) = request_rx.recv().await else {
                     tracing::warn!("scheduler shutdown");
