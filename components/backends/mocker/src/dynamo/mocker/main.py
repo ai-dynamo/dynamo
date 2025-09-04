@@ -46,6 +46,7 @@ def create_temp_engine_args_file(args) -> Path:
         "watermark": getattr(args, "watermark", None),
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
+        "startup_time": getattr(args, "startup_time", None),
     }
 
     # Remove None values to only include explicitly set arguments
@@ -200,6 +201,12 @@ def cmd_line_args():
         dest="dp_size",
         default=None,
         help="Number of data parallel replicas (default: 1)",
+    )
+    parser.add_argument(
+        "--startup-time",
+        type=float,
+        default=None,
+        help="Simulated engine startup time in seconds (default: None)",
     )
 
     # Legacy support - allow direct JSON file specification
