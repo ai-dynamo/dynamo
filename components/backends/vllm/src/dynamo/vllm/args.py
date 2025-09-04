@@ -153,7 +153,7 @@ def convert_trtllm_speculative_config_to_vllm(trtllm_config: dict) -> Optional[d
         vllm_config = {}
         
         if "speculative_model_dir" in trtllm_config:
-            vllm_config["speculative_model"] = trtllm_config["speculative_model_dir"]
+            vllm_config["draft_model"] = trtllm_config["speculative_model_dir"]
         
         if "max_draft_len" in trtllm_config:
             vllm_config["num_speculative_tokens"] = trtllm_config["max_draft_len"]
@@ -169,7 +169,7 @@ def convert_trtllm_speculative_config_to_vllm(trtllm_config: dict) -> Optional[d
         # MTP (Multi-Token Prediction) doesn't have a direct vLLM equivalent
         # We'll use n-gram lookup as the closest alternative
         vllm_config = {
-            "speculative_model": "[ngram]",
+            "draft_model": "[ngram]",
             "num_speculative_tokens": trtllm_config.get("num_nextn_predict_layers", 1) * 2,  # Rough approximation
             "ngram_prompt_lookup_max": 4,
             "ngram_prompt_lookup_min": 1
