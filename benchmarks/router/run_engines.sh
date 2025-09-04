@@ -117,23 +117,21 @@ for i in $(seq 1 $NUM_WORKERS); do
             done
         fi
 
-        echo "[Worker-$i] Using GPUs: $GPU_DEVICES"
-
         if [ "$USE_MOCKERS" = true ]; then
-            # Run mocker engine
-            CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.mocker \
+            # Run mocker engine (no GPU assignment needed)
+            exec python -m dynamo.mocker \
                 --model-path "$MODEL_PATH" \
                 --endpoint dyn://test.mocker.generate \
                 "${EXTRA_ARGS[@]}"
         else
-            # Run vLLM engine
-            CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
+            echo "[Worker-$i] Using GPUs: $GPU_DEVICES"
+            # Run vLLM engine (exec with env for proper syntax)
+            exec env CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
                 --model "$MODEL_PATH" \
                 --endpoint dyn://test.vllm.generate \
                 --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
                 "${EXTRA_ARGS[@]}"
         fi
-        echo "[Worker-$i] Finished"
     } &
     PIDS+=($!)
     echo "Started worker $i (PID: $!)"
