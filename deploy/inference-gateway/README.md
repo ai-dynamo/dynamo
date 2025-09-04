@@ -303,7 +303,7 @@ Sample inference output:
 ```
 
 ### 7. Deleting the installation ###
-You can delete the installation if needed by running:
+If you need to uninstall run:
 
 ```bash
 kubectl delete dynamoGraphDeployment vllm-agg

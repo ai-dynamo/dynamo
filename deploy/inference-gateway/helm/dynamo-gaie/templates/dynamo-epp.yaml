@@ -60,7 +60,7 @@ spec:
           - -grpcHealthPort
           - "9003"
         {{- if .Values.eppAware.enabled }}
-          - -configFile{{"\n"}}
+          - -configFile
           - "/etc/epp/epp-config-dynamo.yaml"
         {{- end }}
         {{- end }}
