@@ -34,7 +34,7 @@ class BasePayload:
 
     # Connection info
     host: str = "localhost"
-    port: int = 8080
+    port: int = 8000
     endpoint: str = ""
     method: str = "POST"
 

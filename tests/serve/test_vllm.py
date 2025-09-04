@@ -49,9 +49,17 @@ vllm_configs = {
         marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(
+                expected_log=[
+                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
+                    r"Selected worker: \d+, logit: ",
+                ]
+            )
         ],
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+        },
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",

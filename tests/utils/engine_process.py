@@ -45,7 +45,7 @@ class EngineConfig:
     model: str
 
     script_args: Optional[List[str]] = None
-    models_port: int = 8080
+    models_port: int = 8000
     timeout: int = 600
     delayed_start: int = 0
     env: Dict[str, str] = field(default_factory=dict)

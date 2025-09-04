@@ -49,9 +49,6 @@ trtllm_configs = {
             completion_payload_default(),
         ],
     ),
-    # TODO: These are sanity tests that the kv router examples launch
-    # and inference without error, but do not do detailed checks on the
-    # behavior of KV routing.
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory=trtllm_dir,
@@ -60,9 +57,17 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         models_port=8000,
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(
+                expected_log=[
+                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
+                    r"Selected worker: \d+, logit: ",
+                ]
+            )
         ],
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+        },
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",

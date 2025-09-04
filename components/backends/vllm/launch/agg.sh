@@ -5,7 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-python -m dynamo.frontend &
+python -m dynamo.frontend --http-port=8000 &
 
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
