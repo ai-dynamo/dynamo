@@ -27,9 +27,9 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Planner
-/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou
-/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou
-/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou
+/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @peabrane @aphoh
+/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou @peabrane @aphoh
+/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @peabrane @aphoh
 
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops
