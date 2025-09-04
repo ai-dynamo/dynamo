@@ -32,40 +32,40 @@ def create_temp_engine_args_file(args) -> Path:
     Returns the path to the temporary file.
     """
     engine_args = {}
-    
+
     # Only include non-None values that differ from defaults
     # Note: argparse converts hyphens to underscores in attribute names
     # Extract all potential engine arguments, using None as default for missing attributes
     engine_args = {
-        "num_gpu_blocks": args.get('num_gpu_blocks'),
-        "block_size": args.get('block_size'),
-        "max_num_seqs": args.get('max_num_seqs'),
-        "max_num_batched_tokens": args.get('max_num_batched_tokens'),
-        "enable_prefix_caching": args.get('enable_prefix_caching'),
-        "enable_chunked_prefill": args.get('enable_chunked_prefill'),
-        "watermark": args.get('watermark'),
-        "speedup_ratio": args.get('speedup_ratio'),
-        "dp_size": args.get('dp_size'),
+        "num_gpu_blocks": args.get("num_gpu_blocks"),
+        "block_size": args.get("block_size"),
+        "max_num_seqs": args.get("max_num_seqs"),
+        "max_num_batched_tokens": args.get("max_num_batched_tokens"),
+        "enable_prefix_caching": args.get("enable_prefix_caching"),
+        "enable_chunked_prefill": args.get("enable_chunked_prefill"),
+        "watermark": args.get("watermark"),
+        "speedup_ratio": args.get("speedup_ratio"),
+        "dp_size": args.get("dp_size"),
     }
-    
+
     # Remove None values to only include explicitly set arguments
     engine_args = {k: v for k, v in engine_args.items() if v is not None}
-    
+
     # Create temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(engine_args, f, indent=2)
         temp_path = Path(f.name)
-    
+
     logger.debug(f"Created temporary MockEngineArgs file at {temp_path}")
     logger.debug(f"MockEngineArgs: {engine_args}")
-    
+
     return temp_path
 
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     args = cmd_line_args()
-    
+
     # Handle extra_engine_args: either use provided file or create from CLI args
     if args.extra_engine_args:
         # User provided explicit JSON file
@@ -74,7 +74,7 @@ async def worker(runtime: DistributedRuntime):
     else:
         # Create temporary JSON file from CLI arguments
         extra_engine_args_path = create_temp_engine_args_file(args)
-        logger.info(f"Created MockEngineArgs from CLI arguments")
+        logger.info("Created MockEngineArgs from CLI arguments")
 
     try:
         # Create engine configuration
@@ -108,7 +108,7 @@ def cmd_line_args():
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Mocker {__version__}"
     )
-    
+
     # Basic configuration
     parser.add_argument(
         "--model-path",
@@ -127,7 +127,7 @@ def cmd_line_args():
         default=None,
         help="Model name for API responses (default: derived from model-path)",
     )
-    
+
     # MockEngineArgs parameters (similar to vLLM style)
     parser.add_argument(
         "--num-gpu-blocks-override",
@@ -137,7 +137,7 @@ def cmd_line_args():
         help="Number of GPU blocks for KV cache (default: 16384)",
     )
     parser.add_argument(
-        "--block-size", 
+        "--block-size",
         type=int,
         default=None,
         help="Token block size for KV cache blocks (default: 64)",
@@ -201,7 +201,7 @@ def cmd_line_args():
         default=None,
         help="Number of data parallel replicas (default: 1)",
     )
-    
+
     # Legacy support - allow direct JSON file specification
     parser.add_argument(
         "--extra-engine-args",
