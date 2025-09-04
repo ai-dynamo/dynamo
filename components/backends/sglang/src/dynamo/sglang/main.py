@@ -118,7 +118,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown == config.migration_limit <= 0,
+                graceful_shutdown=True,
                 metrics_labels=metrics_labels,
             ),
             register_model(),
