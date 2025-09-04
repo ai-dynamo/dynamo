@@ -102,6 +102,11 @@ cd deploy/inference-gateway
 helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
 ```
 
+You can delete the installation later if needed by running:
+```bash
+helm uninstall dynamo-gaie -n my-model
+```
+
 #### EPP-aware Integration with the custom Dynamo Plugin ####
 
 ##### 1. Build the custom EPP image #####
