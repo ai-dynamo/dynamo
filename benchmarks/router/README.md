@@ -53,10 +53,15 @@ First, start the vLLM worker engines in a terminal.
 
 ```bash
 # Default: 8 vLLM workers with DeepSeek model (explicitly sets --block-size 64)
-./run_engines.sh --num-workers 8 --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+./run_engines.sh \
+    --num-workers 8 \
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 # Example: 4 vLLM workers with larger model using tensor parallelism (2 GPUs per worker)
-./run_engines.sh --num-workers 4 --model-path openai/gpt-oss-120b --tensor-parallel-size 2
+./run_engines.sh \
+    --num-workers 4 \
+    --model-path openai/gpt-oss-120b \
+    --tensor-parallel-size 2
 ```
 
 #### Alternative: Launch vLLM Mock Workers
@@ -67,7 +72,7 @@ We also supports running lightweight mock engines that simulate vLLM behavior wi
 # Example: Running mocker engines for testing (no GPU required)
 ./run_engines.sh --mockers \
     --num-workers 8 \
-    --model-path meta-llama/Llama-3.2-1B \
+    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --block-size 64 \
     --speedup-ratio 2.0
 ```
@@ -82,12 +87,14 @@ In a **new terminal**, launch the Dynamo router using the Python CLI:
 python -m dynamo.frontend \
     --router-mode kv \
     --kv-cache-block-size 64 \
+    --router-reset-states \
     --http-port 8080
 ```
 
 This starts the router with:
 - KV cache routing mode
 - Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
+- `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
 - HTTP port 8080
 
 To see all available router arguments, run:

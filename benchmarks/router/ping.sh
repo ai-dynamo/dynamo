@@ -17,6 +17,5 @@ curl -X POST http://localhost:${PORT}/v1/chat/completions \
     ],
     "stream": true,
     "max_tokens": 10,
-    "ignore_eos": true,
-    "nvext": {"ignore_eos": true}
+    "ignore_eos": true
     }'
