@@ -300,6 +300,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
+                runtime_config=runtime_config,
             )
 
         if config.publish_events_and_metrics and is_first_worker(config):
