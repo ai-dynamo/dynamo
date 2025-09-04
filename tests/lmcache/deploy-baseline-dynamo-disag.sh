@@ -6,7 +6,7 @@
 # i.e. nats and etcd are running
 
 # Overview:
-# This script deploys dynamo disaggregated serving without LMCache on port 8080
+# This script deploys dynamo disaggregated serving without LMCache on port 8000
 # Used as baseline for correctness testing
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -22,7 +22,7 @@ fi
 
 echo "🚀 Starting dynamo disaggregated serving setup without LMCache:"
 echo "   Model: $MODEL_URL"
-echo "   Port: 8080"
+echo "   Port: 8000"
 echo "   Mode: Disaggregated (prefill + decode workers)"
 
 # Kill any existing dynamo processes

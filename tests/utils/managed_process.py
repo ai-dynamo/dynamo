@@ -466,8 +466,8 @@ def main():
         ],
         display_output=True,
         terminate_existing=True,
-        health_check_ports=[8080],
-        health_check_urls=["http://localhost:8080/v1/models"],
+        health_check_ports=[8000],
+        health_check_urls=["http://localhost:8000/v1/models"],
         timeout=10,
     ):
         time.sleep(60)
