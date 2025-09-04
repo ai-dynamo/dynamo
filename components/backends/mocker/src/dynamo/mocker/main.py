@@ -37,15 +37,15 @@ def create_temp_engine_args_file(args) -> Path:
     # Note: argparse converts hyphens to underscores in attribute names
     # Extract all potential engine arguments, using None as default for missing attributes
     engine_args = {
-        "num_gpu_blocks": args.get("num_gpu_blocks"),
-        "block_size": args.get("block_size"),
-        "max_num_seqs": args.get("max_num_seqs"),
-        "max_num_batched_tokens": args.get("max_num_batched_tokens"),
-        "enable_prefix_caching": args.get("enable_prefix_caching"),
-        "enable_chunked_prefill": args.get("enable_chunked_prefill"),
-        "watermark": args.get("watermark"),
-        "speedup_ratio": args.get("speedup_ratio"),
-        "dp_size": args.get("dp_size"),
+        "num_gpu_blocks": getattr(args, "num_gpu_blocks", None),
+        "block_size": getattr(args, "block_size", None),
+        "max_num_seqs": getattr(args, "max_num_seqs", None),
+        "max_num_batched_tokens": getattr(args, "max_num_batched_tokens", None),
+        "enable_prefix_caching": getattr(args, "enable_prefix_caching", None),
+        "enable_chunked_prefill": getattr(args, "enable_chunked_prefill", None),
+        "watermark": getattr(args, "watermark", None),
+        "speedup_ratio": getattr(args, "speedup_ratio", None),
+        "dp_size": getattr(args, "dp_size", None),
     }
 
     # Remove None values to only include explicitly set arguments
