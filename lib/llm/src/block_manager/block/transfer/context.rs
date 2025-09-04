@@ -323,8 +323,8 @@ pub mod v2 {
 
             // Create and immediately drop an event synchronizer
             {
-                let event = ctx.record_event().expect("Failed to record event");
-                // event goes out of scope here without being synchronized
+                let _event = ctx.record_event().expect("Failed to record event");
+                // _event goes out of scope here without being synchronized
             }
 
             // Context should still work after dropping unused events
