@@ -371,11 +371,19 @@ impl ModelDeploymentCard {
     /// Build an in-memory ModelDeploymentCard from either:
     /// - a folder containing config.json, tokenizer.json and token_config.json
     /// - a GGUF file
-    pub async fn load(config_path: impl AsRef<Path>) -> anyhow::Result<ModelDeploymentCard> {
+    ///   With an optional custom template
+    pub async fn load(
+        config_path: impl AsRef<Path>,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<ModelDeploymentCard> {
         let config_path = config_path.as_ref();
         if config_path.is_dir() {
-            Self::from_local_path(config_path).await
+            Self::from_local_path(config_path, custom_template_path).await
         } else {
+            // GGUF files don't support custom templates yet
+            if custom_template_path.is_some() {
+                anyhow::bail!("Custom templates are not supported for GGUF files");
+            }
             Self::from_gguf(config_path).await
         }
     }
@@ -395,7 +403,10 @@ impl ModelDeploymentCard {
     /// - The path doesn't exist or isn't a directory
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
-    async fn from_local_path(local_root_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+    async fn from_local_path(
+        local_root_dir: impl AsRef<Path>,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         let local_root_dir = local_root_dir.as_ref();
         check_valid_local_repo_path(local_root_dir)?;
         let repo_id = local_root_dir
@@ -407,7 +418,8 @@ impl ModelDeploymentCard {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
-        Self::from_repo(&repo_id, model_name).await
+
+        Self::from_repo(&repo_id, model_name, custom_template_path).await
     }
 
     async fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
@@ -456,7 +468,11 @@ impl ModelDeploymentCard {
         ))
     }
 
-    async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
+    async fn from_repo(
+        repo_id: &str,
+        model_name: &str,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         // This is usually the right choice
         let context_length = crate::file_json_field(
             &PathBuf::from(repo_id).join("config.json"),
@@ -472,6 +488,30 @@ impl ModelDeploymentCard {
         // If neither of those are present let the engine default it
         .unwrap_or(0);
 
+        // Load chat template - either custom or from repo
+        let chat_template_file = if let Some(template_path) = custom_template_path {
+            if !template_path.exists() {
+                anyhow::bail!(
+                    "Custom template file does not exist: {}",
+                    template_path.display()
+                );
+            }
+
+            // Verify the file is readable
+            let _template_content = std::fs::read_to_string(template_path).with_context(|| {
+                format!(
+                    "Failed to read custom template file: {}",
+                    template_path.display()
+                )
+            })?;
+
+            Some(PromptFormatterArtifact::HfChatTemplate(
+                template_path.display().to_string(),
+            ))
+        } else {
+            PromptFormatterArtifact::chat_template_from_repo(repo_id).await?
+        };
+
         Ok(Self {
             display_name: model_name.to_string(),
             slug: Slug::from_string(model_name),
@@ -479,7 +519,7 @@ impl ModelDeploymentCard {
             tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
             gen_config: GenerationConfig::from_repo(repo_id).await.ok(), // optional
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
-            chat_template_file: PromptFormatterArtifact::chat_template_from_repo(repo_id).await?,
+            chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,

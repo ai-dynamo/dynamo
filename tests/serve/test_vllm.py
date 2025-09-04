@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
-
     stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
 
 

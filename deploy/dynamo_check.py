@@ -3,57 +3,74 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-dynamo package checker, Python import tester, and usage guide.
+Dynamo System Information Checker
 
-Combines version checking, import testing, and usage examples into a single tool.
-Features dynamic component discovery and comprehensive troubleshooting guidance.
+A comprehensive diagnostic tool that displays system configuration and Dynamo project status
+in a hierarchical tree format. This script checks for:
+
+- System resources (OS, CPU, memory, GPU)
+- Development tools (Cargo/Rust, Maturin, Python)
+- LLM frameworks (vllm, sglang, tensorrt_llm)
+- Dynamo runtime and framework components
+- Installation status and component availability
+
+The output uses status indicators:
+- ✅ Component found and working
+- ❌ Component missing or error
+- ⚠️ Warning condition
+- ❓ Component not found (for optional items)
+
+Exit codes:
+- 0: All critical components are present
+- 1: One or more errors detected (❌ status)
+
+Example output:
+
+System info (hostname=jensen-linux, IP=10.111.122.133)
+├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
+├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
+├─ ✅ Cargo /usr/local/cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
+│  ├─ cargo home directory $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
+│  └─ cargo target directory $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
+│     ├─ Debug $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
+│     ├─ Release $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
+│     └─ Binary $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
+├─ ✅ Maturin /opt/dynamo/venv/bin/maturin, maturin 1.9.3
+├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
+│  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
+│  └─ PYTHONPATH $HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/llama_cpp/src:$HOME/dynamo/components/backends/mocker/src
+├─ 🤖Framework
+│  ├─ ✅ vllm 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
+│  ├─ ❓ sglang -
+│  └─ ❓ tensorrt_llm -
+└─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
+   ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
+   │  ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info created=2025-08-30 19:14:29 PDT
+   │  ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth modified=2025-08-30 19:14:29 PDT
+   │  │  └─ → $HOME/dynamo/lib/bindings/python/src
+   │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-08-30 19:14:29 PDT
+   │  ├─ ✅ dynamo.logits_processing $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
+   │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
+   │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
+   │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
+   └─ ✅ Framework components ai-dynamo (via PYTHONPATH)
+      ├─ ✅ dynamo.frontend  $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
+      ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
+      ├─ ✅ dynamo.mocker    $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
+      ├─ ✅ dynamo.planner   $HOME/dynamo/components/planner/src/dynamo/planner/__init__.py
+      ├─ ✅ dynamo.sglang    $HOME/dynamo/components/backends/sglang/src/dynamo/sglang/__init__.py
+      ├─ ✅ dynamo.trtllm    $HOME/dynamo/components/backends/trtllm/src/dynamo/trtllm/__init__.py
+      └─ ✅ dynamo.vllm      $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
 
 Usage:
-    dynamo_check.py                        # Run all checks
-    dynamo_check.py --import-check-only    # Only test imports
-    dynamo_check.py --examples             # Only show examples
-    dynamo_check.py --try-pythonpath      # Test imports with workspace paths
-    dynamo_check.py --help                 # Show help
+    python dynamo_check.py [--fast]
 
-Outputs:
-System info (hostname: jensen-linux):
-├─ OS: Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64); Memory: 30.9/125.5 GiB; Cores: 32
-├─ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation (driver 570.133.07, CUDA 12.8); Power: 28.20/300.00 W; Memory: 2/49140 MiB
-├─ Cargo (/usr/local/cargo/bin/cargo, cargo 1.87.0 (99624be96 2025-05-06))
-   ├─ Cargo home directory: $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
-   └─ Cargo target directory: $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
-      ├─ Debug:   $HOME/dynamo/.build/target/debug (modified: 2025-08-14 16:47:13 PDT)
-      ├─ Release: $HOME/dynamo/.build/target/release (modified: 2025-08-14 15:38:39 PDT)
-      └─ Binary:  $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so (modified: 2025-08-14 16:45:31 PDT)
-├─ Maturin (/opt/dynamo/venv/bin/maturin, maturin 1.9.3)
-├─ Python: 3.12.3 (/opt/dynamo/venv/bin/python3)
-   ├─ Torch: 2.7.1+cu126 (✅torch.cuda.is_available())
-   └─ PYTHONPATH: /home/ubuntu/dynamo/components/planner/src
-└─ Dynamo ($HOME/dynamo, SHA: b0d4499f2a8c, Date: 2025-08-18 11:55:00 PDT):
-   └─ Runtime components (ai-dynamo-runtime 0.4.0):
-      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.0.dist-info (created: 2025-08-14 16:47:15 PDT)
-      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth (modified: 2025-08-14 16:47:15 PDT)
-         └─ Points to: $HOME/dynamo/lib/bindings/python/src
-      ├─ ✅ dynamo._core        $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so (modified: 2025-08-14 16:47:15 PDT)
-      ├─ ✅ dynamo.nixl_connect $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
-      ├─ ✅ dynamo.llm          $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
-      └─ ✅ dynamo.runtime      $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
-   └─ Framework components (ai-dynamo 0.4.0):
-      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.4.0.dist-info (created: 2025-08-14 16:47:16 PDT)
-      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/_ai_dynamo.pth (modified: 2025-08-14 16:47:16 PDT)
-         └─ Points to: $HOME/dynamo/components/backends/vllm/src
-      ├─ ✅ dynamo.frontend     $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
-      ├─ ✅ dynamo.planner      $HOME/dynamo/components/planner/src/dynamo/planner/__init__.py
-      ├─ ✅ dynamo.mocker       $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
-      ├─ ✅ dynamo.trtllm       $HOME/dynamo/components/backends/trtllm/src/dynamo/trtllm/__init__.py
-      ├─ ✅ dynamo.vllm         $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
-      ├─ ✅ dynamo.sglang       $HOME/dynamo/components/backends/sglang/src/dynamo/sglang/__init__.py
-      └─ ✅ dynamo.llama_cpp    $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
+Options:
+    --fast  Skip directory size calculations for faster output
 """
 
-import argparse
 import datetime
-import importlib.metadata
+import glob
 import json
 import logging
 import os
@@ -61,248 +78,212 @@ import platform
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 
-class NVIDIAGPUDetector:
-    """Handles NVIDIA GPU detection and information gathering."""
+class NodeStatus(Enum):
+    """Status of a tree node"""
 
-    def find_nvidia_smi(self) -> Optional[str]:
-        """Find nvidia-smi executable."""
-        nvsmi = shutil.which("nvidia-smi")
-        if not nvsmi:
-            for candidate in [
-                "/usr/bin/nvidia-smi",
-                "/usr/local/bin/nvidia-smi",
-                "/usr/local/nvidia/bin/nvidia-smi",
-            ]:
-                if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                    return candidate
-        return nvsmi
+    OK = "ok"  # ✅ Success/available
+    ERROR = "error"  # ❌ Error/not found
+    WARNING = "warn"  # ⚠️ Warning
+    INFO = "info"  # No symbol, just information
+    NONE = "none"  # No status indicator
+    UNKNOWN = "unknown"  # ❓ Unknown/not found
 
-    def get_nvidia_gpu_names(self, nvsmi: str) -> Tuple[List[str], bool]:
-        """Get list of NVIDIA GPU names and whether nvidia-smi succeeded.
 
-        Returns:
-            Tuple of (gpu_names_list, nvidia_smi_succeeded)
-        """
-        try:
-            proc = subprocess.run(
-                [nvsmi, "-L"], capture_output=True, text=True, timeout=10
-            )
-            if proc.returncode == 0:
-                names = []
-                if proc.stdout:
-                    for line in proc.stdout.splitlines():
-                        line = line.strip()
-                        # Example: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-...)"
-                        if ":" in line:
-                            part = line.split(":", 1)[1].strip()
-                            # Take up to first parenthesis for clean model name
-                            name_only = part.split("(")[0].strip()
-                            names.append(name_only)
-                return names, True
-            else:
-                # Collect and surface error details (e.g. "Failed to initialize NVML: Unknown Error")
-                errors: List[str] = []
-                if proc.stderr:
-                    for line in proc.stderr.splitlines():
-                        line = line.strip()
-                        if line:
-                            errors.append(line)
-                if not errors and proc.stdout:
-                    for line in proc.stdout.splitlines():
-                        line = line.strip()
-                        if line:
-                            errors.append(line)
+@dataclass
+class NodeInfo:
+    """Base class for all information nodes in the tree structure"""
 
-                if errors:
-                    # Return the first error line to display concisely upstream
-                    return [errors[0]], False
-                return [], False
-        except Exception:
-            return [], False
+    # Core properties
+    label: str  # Main text/description
+    desc: Optional[str] = None  # Primary value/description
+    status: NodeStatus = NodeStatus.NONE  # Status indicator
 
-    def get_nvidia_driver_cuda_versions(self, nvsmi: str) -> Tuple[str, str]:
-        """Get NVIDIA driver and CUDA versions.
+    # Additional metadata as key-value pairs
+    metadata: Dict[str, str] = field(default_factory=dict)
 
-        Returns:
-            Tuple of (driver_version, cuda_version)
-        """
-        driver, cuda = "?", "?"
-        try:
-            # Try query method first
-            proc = subprocess.run(
-                [
-                    nvsmi,
-                    "--query-gpu=driver_version,cuda_version",
-                    "--format=csv,noheader",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                parts = proc.stdout.strip().splitlines()[0].split(",")
-                if len(parts) >= 1:
-                    driver = parts[0].strip()
-                if len(parts) >= 2:
-                    cuda = parts[1].strip()
-            else:
-                # Fallback: parse banner using regex instead of structured query
-                #
-                # Why regex fallback instead of command line query:
-                # 1. Compatibility: Some older nvidia-smi versions don't support
-                #    --query-gpu with cuda_version field
-                # 2. Robustness: The banner output is more stable across different
-                #    nvidia-smi versions and driver releases
-                # 3. Error handling: If the structured query fails (e.g., due to
-                #    driver issues, permission problems, or unsupported fields),
-                #    the banner parsing provides a reliable alternative
-                # 4. Case variations: Different nvidia-smi versions may output
-                #    "Driver Version" vs "driver version" vs "DRIVER VERSION"
-                proc = subprocess.run(
-                    [nvsmi], capture_output=True, text=True, timeout=10
-                )
-                if proc.returncode == 0 and proc.stdout:
-                    import re
+    # Tree structure
+    children: List["NodeInfo"] = field(default_factory=list)
 
-                    m = re.search(
-                        r"Driver Version:\s*([0-9.]+)", proc.stdout, re.IGNORECASE
-                    )
-                    if m:
-                        driver = m.group(1)
-                    m = re.search(
-                        r"CUDA Version:\s*([0-9.]+)", proc.stdout, re.IGNORECASE
-                    )
-                    if m:
-                        cuda = m.group(1)
-        except Exception:
-            pass
-        return driver, cuda
+    # Display control
+    show_symbol: bool = True  # Whether to show status symbol
 
-    def get_nvidia_power_memory_all(self, nvsmi: str, gpu_count: int) -> List[str]:
-        """Get NVIDIA GPU power and memory info for all GPUs.
+    def add_child(self, child: "NodeInfo") -> "NodeInfo":
+        """Add a child node and return it for chaining"""
+        self.children.append(child)
+        return child
 
-        Returns:
-            List of formatted strings for each GPU
-        """
-        try:
-            proc = subprocess.run(
-                [
-                    nvsmi,
-                    "--query-gpu=power.draw,power.limit,memory.used,memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if proc.returncode != 0 or not proc.stdout.strip():
-                return [""] * gpu_count
+    def add_metadata(self, key: str, value: str) -> "NodeInfo":
+        """Add metadata key-value pair"""
+        self.metadata[key] = value
+        return self
 
-            lines = proc.stdout.strip().splitlines()
-            gpu_infos = []
+    def render(
+        self, prefix: str = "", is_last: bool = True, is_root: bool = True
+    ) -> List[str]:
+        """Render the tree node and its children as a list of strings"""
+        lines = []
 
-            for i, line in enumerate(lines[:gpu_count]):  # Limit to expected GPU count
-                parts = line.split(",")
-                if len(parts) < 4:
-                    gpu_infos.append("")
-                    continue
-
-                power_draw = parts[0].strip() if parts[0].strip() else "?"
-                power_limit = parts[1].strip() if parts[1].strip() else "?"
-                mem_used = parts[2].strip() if parts[2].strip() else "?"
-                mem_total = parts[3].strip() if parts[3].strip() else "?"
-
-                info_parts = []
-                if power_draw != "?" or power_limit != "?":
-                    info_parts.append(f"Power: {power_draw}/{power_limit} W")
-
-                if mem_used != "?" and mem_total != "?":
-                    # Add warning symbol if GPU memory usage is 90% or higher
-                    warning_symbol = ""
-                    try:
-                        mem_usage_percent = (float(mem_used) / float(mem_total)) * 100
-                        warning_symbol = " ⚠️" if mem_usage_percent >= 90 else ""
-                    except (ValueError, ZeroDivisionError):
-                        pass
-                    info_parts.append(
-                        f"Memory: {mem_used}/{mem_total} MiB{warning_symbol}"
-                    )
-
-                gpu_infos.append("; " + "; ".join(info_parts) if info_parts else "")
-
-            # Fill remaining slots if we got fewer results than expected
-            while len(gpu_infos) < gpu_count:
-                gpu_infos.append("")
-
-            return gpu_infos
-        except Exception:
-            return [""] * gpu_count
-
-    def get_gpu_info(self) -> Tuple[List[str], Optional[str], Optional[str]]:
-        """Get NVIDIA GPU information.
-
-        Returns:
-            Tuple of (gpu_lines_list, driver_version, cuda_version)
-        """
-        nvsmi = self.find_nvidia_smi()
-        if not nvsmi:
-            return ["❌ NVIDIA GPU: nvidia-smi not found"], None, None
-
-        names_or_errors, nvsmi_succeeded = self.get_nvidia_gpu_names(nvsmi)
-        if not nvsmi_succeeded:
-            # If error details were captured, display them directly
-            if names_or_errors:
-                return [f"❌ NVIDIA GPU: {names_or_errors[0]}"], None, None
-            return ["❌ NVIDIA GPU: nvidia-smi failed"], None, None
-
-        driver, cuda = self.get_nvidia_driver_cuda_versions(nvsmi)
-
-        # Format GPU lines
-        names = names_or_errors
-        if not names:
-            # Treat zero GPUs as an error condition
-            return (
-                [f"❌ NVIDIA GPU: not detected (driver {driver}, CUDA {cuda})"],
-                driver,
-                cuda,
-            )
-
-        if len(names) == 1:
-            # Single GPU - keep compact format
-            power_mem_infos = self.get_nvidia_power_memory_all(nvsmi, 1)
-            gpu_line = f"NVIDIA GPU: {names[0]} (driver {driver}, CUDA {cuda}){power_mem_infos[0]}"
-            return [gpu_line], driver, cuda
+        # Determine the connector
+        if not is_root:
+            connector = "└─" if is_last else "├─"
+            current_prefix = prefix + connector + " "
         else:
-            # Multiple GPUs - show each individually
-            power_mem_infos = self.get_nvidia_power_memory_all(nvsmi, len(names))
-            gpu_lines = []
-            for i, name in enumerate(names):
-                power_mem_info = power_mem_infos[i] if i < len(power_mem_infos) else ""
-                gpu_line = f"NVIDIA GPU {i}: {name} (driver {driver}, CUDA {cuda}){power_mem_info}"
-                gpu_lines.append(gpu_line)
-            return gpu_lines, driver, cuda
+            current_prefix = ""
+
+        # Build the line content
+        line_parts = []
+
+        # Add status symbol
+        if self.show_symbol and self.status != NodeStatus.NONE:
+            if self.status == NodeStatus.OK:
+                line_parts.append("✅")
+            elif self.status == NodeStatus.ERROR:
+                line_parts.append("❌")
+            elif self.status == NodeStatus.WARNING:
+                line_parts.append("⚠️")
+            elif self.status == NodeStatus.UNKNOWN:
+                line_parts.append("❓")
+
+        # Add label and value
+        if self.desc:
+            line_parts.append(f"{self.label} {self.desc}")
+        else:
+            line_parts.append(self.label)
+
+        # Add metadata inline - consistent format for all
+        if self.metadata:
+            metadata_items = []
+            for k, v in self.metadata.items():
+                # Format all metadata consistently as "key=value"
+                metadata_items.append(f"{k}={v}")
+
+            if metadata_items:
+                # Use consistent separator (comma) for all metadata
+                metadata_str = ", ".join(metadata_items)
+                line_parts[-1] += f", {metadata_str}"
+
+        # Construct the full line
+        line_content = " ".join(line_parts)
+        if current_prefix or line_content:
+            lines.append(current_prefix + line_content)
+
+        # Render children
+        for i, child in enumerate(self.children):
+            is_last_child = i == len(self.children) - 1
+            if is_root:
+                child_prefix = ""
+            else:
+                child_prefix = prefix + ("   " if is_last else "│  ")
+            lines.extend(child.render(child_prefix, is_last_child, False))
+
+        return lines
+
+    def print_tree(self) -> None:
+        """Print the tree to console"""
+        for line in self.render():
+            print(line)
+
+    def has_errors(self) -> bool:
+        """Check if this node or any of its children have errors"""
+        # Check if this node has an error
+        if self.status == NodeStatus.ERROR:
+            return True
+
+        # Recursively check all children
+        for child in self.children:
+            if child.has_errors():
+                return True
+
+        return False
+
+    def _replace_home_with_var(self, path: str) -> str:
+        """Replace home directory with $HOME in path."""
+        home = os.path.expanduser("~")
+        if path.startswith(home):
+            return path.replace(home, "$HOME", 1)
+        return path
+
+    def _format_timestamp_pdt(self, timestamp: float) -> str:
+        """Format timestamp as PDT time string."""
+        dt_utc = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+        # Convert to PDT (UTC-7)
+        dt_pdt = dt_utc - datetime.timedelta(hours=7)
+        return dt_pdt.strftime("%Y-%m-%d %H:%M:%S PDT")
 
 
-class DynamoChecker:
-    """Comprehensive dynamo package checker."""
+class SystemInfo(NodeInfo):
+    """Root node for system information"""
 
-    def __init__(self, workspace_dir: Optional[str] = None) -> None:
-        # If a path is provided, use it directly; otherwise discover
-        self.workspace_dir = (
-            os.path.abspath(workspace_dir) if workspace_dir else self._find_workspace()
-        )
-        self.results: Dict[str, Any] = {}
+    def __init__(self, hostname: Optional[str] = None, fast_mode: bool = False):
+        self.fast_mode = fast_mode
+        if hostname is None:
+            hostname = platform.node()
+
+        # Get IP address
+        ip_address = self._get_ip_address()
+
+        # Format label with hostname and IP
+        if ip_address:
+            label = f"System info (hostname={hostname}, IP={ip_address})"
+        else:
+            label = f"System info (hostname={hostname})"
+
+        super().__init__(label=label, status=NodeStatus.INFO)
+
+        # Suppress Prometheus endpoint warnings from planner module
         self._suppress_planner_warnings()
-        # Collect warnings that should be printed later (after specific headers)
-        self._deferred_messages: List[str] = []
-        # Initialize NVIDIA GPU detector
-        self.gpu_detector = NVIDIAGPUDetector()
-        # Track whether GPU issues were detected (nvidia-smi failure or zero GPUs)
-        self._gpu_error: bool = False
+
+        # Collect and add all system information
+        # Add OS info
+        self.add_child(OSInfo())
+
+        # Add GPU info
+        gpu_info = GPUInfo()
+        # Always add GPU info so we can see errors like "nvidia-smi not found"
+        self.add_child(gpu_info)
+
+        # Add Cargo (always show, even if not found)
+        self.add_child(CargoInfo(fast_mode=self.fast_mode))
+
+        # Add Maturin (Python-Rust build tool)
+        self.add_child(MaturinInfo())
+
+        # Add Python info
+        self.add_child(PythonInfo())
+
+        # Add Framework info (vllm, sglang, tensorrt_llm)
+        self.add_child(FrameworkInfo())
+
+        # Add Dynamo workspace info (always show, even if not found)
+        self.add_child(DynamoInfo(fast_mode=self.fast_mode))
+
+    def _get_ip_address(self) -> Optional[str]:
+        """Get the primary IP address of the system."""
+        try:
+            import socket
+
+            # Get hostname
+            hostname = socket.gethostname()
+            # Get IP address
+            ip_address = socket.gethostbyname(hostname)
+            # Filter out localhost
+            if ip_address.startswith("127."):
+                # Try to get external IP by connecting to a public DNS
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    # Connect to Google DNS (doesn't actually send data)
+                    s.connect(("8.8.8.8", 80))
+                    ip_address = s.getsockname()[0]
+                finally:
+                    s.close()
+            return ip_address
+        except Exception:
+            return None
 
     def _suppress_planner_warnings(self) -> None:
         """Suppress Prometheus endpoint warnings from planner module during import testing."""
@@ -310,65 +291,903 @@ class DynamoChecker:
         # outside of a Kubernetes cluster. Suppress this for cleaner output.
         planner_logger = logging.getLogger("dynamo.planner.defaults")
         planner_logger.setLevel(logging.ERROR)
+        # Also suppress the defaults._get_default_prometheus_endpoint logger
+        defaults_logger = logging.getLogger("defaults._get_default_prometheus_endpoint")
+        defaults_logger.setLevel(logging.ERROR)
 
-    # ====================================================================
-    # WORKSPACE AND COMPONENT DISCOVERY
-    # ====================================================================
 
-    def _find_workspace(self) -> str:
-        """Find dynamo workspace directory.
+class OSInfo(NodeInfo):
+    """Operating system information"""
 
-        Returns:
-            Path to workspace directory or empty string if not found
-            Example: '.' (if current dir), '/home/ubuntu/dynamo', '/workspace', or ''
+    def __init__(self):
+        # Collect OS information
+        uname = platform.uname()
 
-        Note: Checks local path first, then common locations. Validates by looking for README.md file.
-        """
-        candidates = [
-            ".",  # Current directory (local path)
-            os.path.expanduser("~/dynamo"),
-            "/workspace",
-            "/home/ubuntu/dynamo",
+        # Try to get distribution info
+        distro = ""
+        version = ""
+        try:
+            if os.path.exists("/etc/os-release"):
+                with open("/etc/os-release", "r") as f:
+                    for line in f:
+                        if line.startswith("NAME="):
+                            distro = line.split("=", 1)[1].strip().strip('"')
+                        elif line.startswith("VERSION="):
+                            version = line.split("=", 1)[1].strip().strip('"')
+        except Exception:
+            pass
+
+        # Get memory info
+        mem_used_gb = None
+        mem_total_gb = None
+        try:
+            with open("/proc/meminfo", "r") as f:
+                meminfo = {}
+                for line in f:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meminfo[k.strip()] = v.strip()
+
+                if "MemTotal" in meminfo and "MemAvailable" in meminfo:
+                    total_kb = float(meminfo["MemTotal"].split()[0])
+                    avail_kb = float(meminfo["MemAvailable"].split()[0])
+                    mem_used_gb = (total_kb - avail_kb) / (1024 * 1024)
+                    mem_total_gb = total_kb / (1024 * 1024)
+        except Exception:
+            pass
+
+        # Get CPU cores
+        cores = os.cpu_count()
+
+        # Build the value string
+        if distro:
+            value = f"{distro} {version} ({uname.system} {uname.release} {uname.machine})".strip()
+        else:
+            value = f"{uname.system} {uname.release} {uname.machine}"
+
+        super().__init__(label="OS", desc=value, status=NodeStatus.INFO)
+
+        # Add memory and cores as metadata
+        if mem_used_gb is not None and mem_total_gb is not None:
+            self.add_metadata("Memory", f"{mem_used_gb:.1f}/{mem_total_gb:.1f} GiB")
+            if mem_total_gb > 0 and (mem_used_gb / mem_total_gb) >= 0.9:
+                self.status = NodeStatus.WARNING
+        if cores:
+            self.add_metadata("Cores", str(cores))
+
+
+class GPUInfo(NodeInfo):
+    """NVIDIA GPU information"""
+
+    def __init__(self):
+        # Find nvidia-smi executable (check multiple paths)
+        nvidia_smi = shutil.which("nvidia-smi")
+        if not nvidia_smi:
+            # Check common paths if `which` fails
+            for candidate in [
+                "/usr/bin/nvidia-smi",
+                "/usr/local/bin/nvidia-smi",
+                "/usr/local/nvidia/bin/nvidia-smi",
+            ]:
+                if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                    nvidia_smi = candidate
+                    break
+
+        if not nvidia_smi:
+            super().__init__(
+                label="NVIDIA GPU", desc="nvidia-smi not found", status=NodeStatus.ERROR
+            )
+            return
+
+        try:
+            # Get GPU list
+            result = subprocess.run(
+                [nvidia_smi, "-L"], capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode != 0:
+                # Capture error details from stderr or stdout
+                error_msg = "nvidia-smi failed"
+                if result.stderr and result.stderr.strip():
+                    # Get first line of error for concise display
+                    error_lines = result.stderr.strip().splitlines()
+                    if error_lines:
+                        error_msg = error_lines[0].strip()
+                        # Make NVML error more user-friendly
+                        if "Failed to initialize NVML" in error_msg:
+                            error_msg = (
+                                "No NVIDIA GPU detected (NVML initialization failed)"
+                            )
+                elif result.stdout and result.stdout.strip():
+                    error_lines = result.stdout.strip().splitlines()
+                    if error_lines:
+                        error_msg = error_lines[0].strip()
+                        # Make NVML error more user-friendly
+                        if "Failed to initialize NVML" in error_msg:
+                            error_msg = (
+                                "No NVIDIA GPU detected (NVML initialization failed)"
+                            )
+                super().__init__(
+                    label="NVIDIA GPU", desc=error_msg, status=NodeStatus.ERROR
+                )
+                return
+
+            # Parse GPU names
+            gpu_names = []
+            lines = result.stdout.strip().splitlines()
+            for line in lines:
+                # Example: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-...)"
+                if ":" in line:
+                    gpu_name = line.split(":", 1)[1].split("(")[0].strip()
+                    gpu_names.append(gpu_name)
+
+            # Check for zero GPUs
+            if not gpu_names:
+                # Get driver and CUDA even for zero GPUs
+                driver, cuda = self._get_driver_cuda_versions(nvidia_smi)
+                driver_cuda_str = ""
+                if driver or cuda:
+                    parts = []
+                    if driver:
+                        parts.append(f"driver {driver}")
+                    if cuda:
+                        parts.append(f"CUDA {cuda}")
+                    driver_cuda_str = f", {', '.join(parts)}"
+                super().__init__(
+                    label="NVIDIA GPU",
+                    desc=f"not detected{driver_cuda_str}",
+                    status=NodeStatus.ERROR,
+                )
+                return
+
+            # Get driver and CUDA versions
+            driver, cuda = self._get_driver_cuda_versions(nvidia_smi)
+
+            # Handle single vs multiple GPUs
+            if len(gpu_names) == 1:
+                # Single GPU - compact format
+                value = gpu_names[0]
+                if driver or cuda:
+                    driver_cuda = []
+                    if driver:
+                        driver_cuda.append(f"driver {driver}")
+                    if cuda:
+                        driver_cuda.append(f"CUDA {cuda}")
+                    value += f", {', '.join(driver_cuda)}"
+
+                super().__init__(label="NVIDIA GPU", desc=value, status=NodeStatus.OK)
+
+                # Add power and memory metadata for single GPU
+                self._add_power_memory_info(nvidia_smi, 0)
+            else:
+                # Multiple GPUs - show count in main label
+                value = f"{len(gpu_names)} GPUs"
+                if driver or cuda:
+                    driver_cuda = []
+                    if driver:
+                        driver_cuda.append(f"driver {driver}")
+                    if cuda:
+                        driver_cuda.append(f"CUDA {cuda}")
+                    value += f", {', '.join(driver_cuda)}"
+
+                super().__init__(label="NVIDIA GPU", desc=value, status=NodeStatus.OK)
+
+                # Add each GPU as a child node
+                for i, name in enumerate(gpu_names):
+                    gpu_child = NodeInfo(
+                        label=f"GPU {i}", desc=name, status=NodeStatus.OK
+                    )
+                    # Add power and memory for this specific GPU
+                    power_mem = self._get_power_memory_string(nvidia_smi, i)
+                    if power_mem:
+                        gpu_child.add_metadata("Stats", power_mem)
+                    self.add_child(gpu_child)
+
+        except Exception:
+            super().__init__(
+                label="NVIDIA GPU", desc="detection failed", status=NodeStatus.ERROR
+            )
+
+    def _get_driver_cuda_versions(
+        self, nvidia_smi: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Get NVIDIA driver and CUDA versions using query method."""
+        driver, cuda = None, None
+        try:
+            # Use query method for more reliable detection
+            result = subprocess.run(
+                [nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                driver = result.stdout.strip().splitlines()[0].strip()
+
+            # Try to get CUDA version from nvidia-smi output
+            result = subprocess.run(
+                [nvidia_smi], capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                import re
+
+                m = re.search(r"CUDA Version:\s*([0-9.]+)", result.stdout)
+                if m:
+                    cuda = m.group(1)
+        except Exception:
+            pass
+        return driver, cuda
+
+    def _add_power_memory_info(self, nvidia_smi: str, gpu_index: int = 0):
+        """Add power and memory metadata for a specific GPU."""
+        power_mem = self._get_power_memory_string(nvidia_smi, gpu_index)
+        if power_mem:
+            # Split into Power and Memory parts
+            if "; " in power_mem:
+                parts = power_mem.split("; ")
+                for part in parts:
+                    if part.startswith("Power:"):
+                        self.add_metadata("Power", part.replace("Power: ", ""))
+                    elif part.startswith("Memory:"):
+                        self.add_metadata("Memory", part.replace("Memory: ", ""))
+
+    def _get_power_memory_string(
+        self, nvidia_smi: str, gpu_index: int = 0
+    ) -> Optional[str]:
+        """Get power and memory info string for a specific GPU."""
+        try:
+            result = subprocess.run(
+                [
+                    nvidia_smi,
+                    "--query-gpu=power.draw,power.limit,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().splitlines()
+                if gpu_index < len(lines):
+                    parts = lines[gpu_index].split(",")
+                    if len(parts) >= 4:
+                        power_draw = parts[0].strip()
+                        power_limit = parts[1].strip()
+                        mem_used = parts[2].strip()
+                        mem_total = parts[3].strip()
+
+                        info_parts = []
+                        if power_draw and power_limit:
+                            info_parts.append(f"Power: {power_draw}/{power_limit} W")
+
+                        if mem_used and mem_total:
+                            # Add warning if memory usage is 90% or higher
+                            warning = ""
+                            try:
+                                if float(mem_used) / float(mem_total) >= 0.9:
+                                    warning = " ⚠️"
+                            except Exception:
+                                pass
+                            info_parts.append(
+                                f"Memory: {mem_used}/{mem_total} MiB{warning}"
+                            )
+
+                        if info_parts:
+                            return "; ".join(info_parts)
+        except Exception:
+            pass
+        return None
+
+
+class CargoInfo(NodeInfo):
+    """Cargo tool information"""
+
+    def __init__(self, fast_mode: bool = False):
+        self.fast_mode = fast_mode
+        cargo_path = shutil.which("cargo")
+        cargo_version = None
+
+        # Get cargo version
+        if cargo_path:
+            try:
+                result = subprocess.run(
+                    ["cargo", "--version"], capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    cargo_version = result.stdout.strip()
+            except Exception:
+                pass
+
+        if not cargo_path and not cargo_version:
+            super().__init__(
+                label="Cargo",
+                desc="not found, install Rust toolchain to see cargo target directory",
+                status=NodeStatus.ERROR,
+            )
+            return
+
+        # Initialize with cargo path and version
+        value = ""
+        if cargo_path:
+            value = cargo_path
+        if cargo_version:
+            value += f", {cargo_version}" if value else cargo_version
+
+        super().__init__(label="Cargo", desc=value, status=NodeStatus.OK)
+
+        # Get cargo home directory
+        cargo_home = os.environ.get("CARGO_HOME")
+        if not cargo_home:
+            cargo_home = os.path.expanduser("~/.cargo")
+
+        if cargo_home and os.path.exists(cargo_home):
+            cargo_home_env = os.environ.get("CARGO_HOME")
+            display_cargo_home = self._replace_home_with_var(cargo_home)
+            home_value = display_cargo_home
+            if cargo_home_env:
+                home_value += " (CARGO_HOME is set)"
+
+            home_node = NodeInfo(
+                label="cargo home directory", desc=home_value, status=NodeStatus.INFO
+            )
+            self.add_child(home_node)
+
+        # Get cargo target directory
+        cargo_target = self._get_cargo_target_directory()
+        if cargo_target and os.path.exists(cargo_target):
+            cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
+            display_cargo_target = self._replace_home_with_var(cargo_target)
+
+            # Calculate total directory size (skip if fast mode)
+            size_str = ""
+            if not self.fast_mode:
+                total_size_gb = self._get_directory_size_gb(cargo_target)
+                size_str = (
+                    f", {total_size_gb:.1f} GB" if total_size_gb is not None else ""
+                )
+
+            target_value = display_cargo_target + size_str
+            if cargo_target_env:
+                target_value += " (CARGO_TARGET_DIR is set)"
+
+            target_node = NodeInfo(
+                label="cargo target directory",
+                desc=target_value,
+                status=NodeStatus.INFO,
+            )
+            self.add_child(target_node)
+
+            # Add debug/release/binary info as children of target directory
+            self._add_build_info(target_node, cargo_target)
+
+    def _get_directory_size_gb(self, directory: str) -> Optional[float]:
+        """Get the size of a directory in GB."""
+        try:
+            # Use du command to get directory size in bytes
+            result = subprocess.run(
+                ["du", "-sb", directory], capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                # Parse output: "size_in_bytes\tdirectory_path"
+                size_bytes = int(result.stdout.split()[0])
+                # Convert to GB
+                size_gb = size_bytes / (1024**3)
+                return size_gb
+        except Exception:
+            pass
+        return None
+
+    def _get_cargo_target_directory(self) -> Optional[str]:
+        """Get cargo target directory using cargo metadata."""
+        try:
+            # Use DynamoInfo's static method to find workspace
+            workspace_dir = DynamoInfo.find_workspace()
+
+            # Run cargo metadata command to get target directory
+            cmd_args = ["cargo", "metadata", "--format-version=1", "--no-deps"]
+            kwargs: Dict[str, Any] = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 10,
+            }
+
+            # Add cwd if workspace_dir was found
+            if workspace_dir and os.path.isdir(workspace_dir):
+                kwargs["cwd"] = workspace_dir
+
+            result = subprocess.run(cmd_args, **kwargs)
+
+            if result.returncode == 0:
+                # Parse JSON output to extract target_directory
+                metadata = json.loads(result.stdout)
+                return metadata.get("target_directory")
+        except Exception:
+            pass
+        return None
+
+    def _add_build_info(self, parent_node: NodeInfo, cargo_target: str):
+        """Add debug/release/binary information as children of target directory."""
+        debug_dir = os.path.join(cargo_target, "debug")
+        release_dir = os.path.join(cargo_target, "release")
+
+        # Check debug directory
+        if os.path.exists(debug_dir):
+            display_debug = self._replace_home_with_var(debug_dir)
+            debug_value = display_debug
+
+            # Add size (skip if fast mode)
+            if not self.fast_mode:
+                debug_size_gb = self._get_directory_size_gb(debug_dir)
+                if debug_size_gb is not None:
+                    debug_value += f", {debug_size_gb:.1f} GB"
+
+            try:
+                debug_mtime = os.path.getmtime(debug_dir)
+                debug_time = self._format_timestamp_pdt(debug_mtime)
+                debug_value += f", modified={debug_time}"
+            except Exception:
+                debug_value += " (unable to read timestamp)"
+
+            debug_node = NodeInfo(
+                label="Debug", desc=debug_value, status=NodeStatus.INFO
+            )
+            parent_node.add_child(debug_node)
+
+        # Check release directory
+        if os.path.exists(release_dir):
+            display_release = self._replace_home_with_var(release_dir)
+            release_value = display_release
+
+            # Add size (skip if fast mode)
+            if not self.fast_mode:
+                release_size_gb = self._get_directory_size_gb(release_dir)
+                if release_size_gb is not None:
+                    release_value += f", {release_size_gb:.1f} GB"
+
+            try:
+                release_mtime = os.path.getmtime(release_dir)
+                release_time = self._format_timestamp_pdt(release_mtime)
+                release_value += f", modified={release_time}"
+            except Exception:
+                release_value += " (unable to read timestamp)"
+
+            release_node = NodeInfo(
+                label="Release", desc=release_value, status=NodeStatus.INFO
+            )
+            parent_node.add_child(release_node)
+
+        # Find *.so file
+        so_file = self._find_so_file(cargo_target)
+        if so_file:
+            display_so = self._replace_home_with_var(so_file)
+            so_value = display_so
+
+            # Add file size (skip if fast mode)
+            if not self.fast_mode:
+                try:
+                    file_size_bytes = os.path.getsize(so_file)
+                    file_size_mb = file_size_bytes / (1024**2)
+                    so_value += f", {file_size_mb:.1f} MB"
+                except Exception:
+                    pass
+
+            try:
+                so_mtime = os.path.getmtime(so_file)
+                so_time = self._format_timestamp_pdt(so_mtime)
+                so_value += f", modified={so_time}"
+            except Exception:
+                so_value += " (unable to read timestamp)"
+
+            binary_node = NodeInfo(
+                label="Binary", desc=so_value, status=NodeStatus.INFO
+            )
+            parent_node.add_child(binary_node)
+
+    def _find_so_file(self, target_directory: str) -> Optional[str]:
+        """Find the compiled *.so file in target directory."""
+        # Check common locations for .so files
+        search_dirs = [
+            os.path.join(target_directory, "debug"),
+            os.path.join(target_directory, "release"),
+            target_directory,
         ]
 
-        for candidate in candidates:
-            if self._is_dynamo_workspace(candidate):
-                # Always return absolute path for consistent $HOME replacement
-                return os.path.abspath(candidate)
-        return ""
+        for search_dir in search_dirs:
+            if not os.path.exists(search_dir):
+                continue
 
-    def _is_dynamo_workspace(self, path: str) -> bool:
-        """Check if a directory is a dynamo workspace by looking for characteristic files/directories.
+            # Walk through directory looking for .so files
+            try:
+                for root, dirs, files in os.walk(search_dir):
+                    for file in files:
+                        if file.endswith(".so"):
+                            return os.path.join(root, file)
+                    # Don't recurse too deep
+                    if root.count(os.sep) - search_dir.count(os.sep) > 2:
+                        dirs[:] = []  # Stop recursion
+            except Exception:
+                pass
 
-        Args:
-            path: Directory path to check
+        return None
 
-        Returns:
-            True if directory appears to be a dynamo workspace
 
-        Note: Checks for multiple indicators like README.md, components/, lib/bindings/, lib/runtime/, Cargo.toml, etc.
-        """
-        if not os.path.exists(path):
-            return False
+class MaturinInfo(NodeInfo):
+    """Maturin tool information (Python-Rust build tool)"""
 
-        # Check for characteristic dynamo workspace files and directories
-        indicators = [
-            "README.md",
-            "components",
-            "lib/bindings/python",
-            "lib/runtime",
-            "Cargo.toml",
+    def __init__(self):
+        maturin_path = shutil.which("maturin")
+        if not maturin_path:
+            super().__init__(label="Maturin", desc="not found", status=NodeStatus.ERROR)
+            # Add installation hint as a child node
+            install_hint = NodeInfo(
+                label="Install with",
+                desc="uv pip install maturin[patchelf]",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(install_hint)
+            return
+
+        try:
+            result = subprocess.run(
+                ["maturin", "--version"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                version = result.stdout.strip()
+                # Include the maturin binary path like Cargo and Git do
+                display_maturin_path = self._replace_home_with_var(maturin_path)
+                super().__init__(
+                    label="Maturin",
+                    desc=f"{display_maturin_path}, {version}",
+                    status=NodeStatus.OK,
+                )
+                return
+        except Exception:
+            pass
+
+        super().__init__(label="Maturin", desc="not found", status=NodeStatus.ERROR)
+
+
+class PythonInfo(NodeInfo):
+    """Python installation information"""
+
+    def __init__(self):
+        py_version = platform.python_version()
+        py_exec = sys.executable or "python"
+        display_py_exec = self._replace_home_with_var(py_exec)
+
+        super().__init__(
+            label="Python",
+            desc=f"{py_version}, {display_py_exec}",
+            status=NodeStatus.OK if os.path.exists(py_exec) else NodeStatus.ERROR,
+        )
+
+        # Check for PyTorch (optional)
+        try:
+            torch = __import__("torch")
+            version = getattr(torch, "__version__", "installed")
+
+            # Check CUDA availability
+            cuda_status = None
+            if hasattr(torch, "cuda"):
+                try:
+                    cuda_available = torch.cuda.is_available()
+                    cuda_status = (
+                        "✅torch.cuda.is_available"
+                        if cuda_available
+                        else "❌torch.cuda.is_available"
+                    )
+                except Exception:
+                    pass
+
+            # Get installation path
+            install_path = None
+            if hasattr(torch, "__file__") and torch.__file__:
+                file_path = torch.__file__
+                if "site-packages" in file_path:
+                    parts = file_path.split(os.sep)
+                    for i, part in enumerate(parts):
+                        if part == "site-packages":
+                            install_path = os.sep.join(parts[: i + 1])
+                            break
+                elif file_path:
+                    install_path = os.path.dirname(file_path)
+
+                if install_path:
+                    install_path = self._replace_home_with_var(install_path)
+
+            package_info = PythonPackageInfo(
+                package_name="PyTorch",
+                version=version,
+                cuda_status=cuda_status,
+                install_path=install_path,
+                is_framework=False,
+            )
+            self.add_child(package_info)
+        except ImportError:
+            pass  # PyTorch is optional, don't show if not installed
+
+        # Add PYTHONPATH
+        pythonpath = os.environ.get("PYTHONPATH", "")
+        self.add_child(PythonPathInfo(pythonpath))
+
+
+class FrameworkInfo(NodeInfo):
+    """LLM Framework information"""
+
+    def __init__(self):
+        super().__init__(label="🤖Framework", status=NodeStatus.INFO)
+
+        # Check for framework packages (mandatory to show)
+        frameworks_to_check = [
+            ("vllm", "vLLM"),
+            ("sglang", "Sglang"),
+            ("tensorrt_llm", "tensorRT LLM"),
         ]
 
-        # Require at least 3 indicators to be confident it's a dynamo workspace
-        found_indicators = 0
-        for indicator in indicators:
-            if os.path.exists(os.path.join(path, indicator)):
-                found_indicators += 1
+        for module_name, display_name in frameworks_to_check:
+            # Special handling for TensorRT-LLM to avoid NVML crashes
+            if module_name == "tensorrt_llm":
+                # Check if it's installed in system packages first
+                python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+                system_packages = [
+                    f"/usr/local/lib/python{python_version}/dist-packages",
+                    f"/usr/lib/python{python_version}/dist-packages",
+                ]
 
-        return found_indicators >= 4
+                found_in_system = False
+                for pkg_path in system_packages:
+                    if os.path.exists(pkg_path):
+                        tensorrt_dirs = [
+                            d for d in os.listdir(pkg_path) if "tensorrt_llm" in d
+                        ]
+                        if tensorrt_dirs:
+                            found_in_system = True
+                            # Try to get version safely
+                            try:
+                                result = subprocess.run(
+                                    [
+                                        sys.executable,
+                                        "-c",
+                                        "import tensorrt_llm; print(tensorrt_llm.__version__)",
+                                    ],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,
+                                )
+                                if result.returncode == 0:
+                                    version = result.stdout.strip()
+                                    package_info = PythonPackageInfo(
+                                        package_name=display_name,
+                                        version=version,
+                                        module_path=f"{pkg_path}/tensorrt_llm/__init__.py",
+                                        is_framework=True,
+                                        is_installed=True,
+                                    )
+                                else:
+                                    package_info = PythonPackageInfo(
+                                        package_name=display_name,
+                                        version=f"Found in {pkg_path} but not importable",
+                                        is_framework=True,
+                                        is_installed=True,
+                                    )
+                                self.add_child(package_info)
+                                break
+                            except (
+                                subprocess.TimeoutExpired,
+                                subprocess.CalledProcessError,
+                            ):
+                                package_info = PythonPackageInfo(
+                                    package_name=display_name,
+                                    version=f"Found in {pkg_path} but not importable",
+                                    is_framework=True,
+                                    is_installed=True,
+                                )
+                                self.add_child(package_info)
+                                break
 
-    def _discover_runtime_components(self) -> List[str]:
+                if not found_in_system:
+                    package_info = PythonPackageInfo(
+                        package_name=display_name,
+                        version="-",
+                        is_framework=True,
+                        is_installed=False,
+                    )
+                    self.add_child(package_info)
+                continue
+
+            # Regular import for other frameworks
+            try:
+                module = __import__(module_name)
+                version = getattr(module, "__version__", "installed")
+
+                # Get module path
+                module_path = None
+                if hasattr(module, "__file__") and module.__file__:
+                    module_path = self._replace_home_with_var(module.__file__)
+
+                # Get executable path
+                exec_path = None
+                exec_path_raw = shutil.which(module_name)
+                if exec_path_raw:
+                    exec_path = self._replace_home_with_var(exec_path_raw)
+
+                package_info = PythonPackageInfo(
+                    package_name=display_name,
+                    version=version,
+                    module_path=module_path,
+                    exec_path=exec_path,
+                    is_framework=True,
+                    is_installed=True,
+                )
+                self.add_child(package_info)
+            except (ImportError, Exception):
+                # Framework not installed - show with "-"
+                package_info = PythonPackageInfo(
+                    package_name=display_name,
+                    version="-",
+                    is_framework=True,
+                    is_installed=False,
+                )
+                self.add_child(package_info)
+
+
+class PythonPackageInfo(NodeInfo):
+    """Python package information"""
+
+    def __init__(
+        self,
+        package_name: str,
+        version: str,
+        cuda_status: Optional[str] = None,
+        module_path: Optional[str] = None,
+        exec_path: Optional[str] = None,
+        install_path: Optional[str] = None,
+        is_framework: bool = False,
+        is_installed: bool = True,
+    ):
+        # Build display value
+        display_value = version
+
+        # Determine status based on whether package is installed
+        if not is_installed or version == "-":
+            # Framework not found - show with "-" and use UNKNOWN status for ❓ symbol
+            display_value = "-"
+            status = NodeStatus.UNKNOWN  # Show ❓ for not found frameworks
+        else:
+            status = NodeStatus.OK
+
+            # Add CUDA status for PyTorch
+            if cuda_status:
+                display_value = f"{version}, {cuda_status}"
+                # Don't add install path for PyTorch with CUDA status
+            # For frameworks, add module and exec paths
+            elif is_framework and (module_path or exec_path):
+                parts = [version]
+                if module_path:
+                    parts.append(f"module={module_path}")
+                if exec_path:
+                    parts.append(f"exec={exec_path}")
+                display_value = ", ".join(parts)
+            # For regular packages, add install path
+            elif install_path:
+                display_value = f"{version} ({install_path})"
+
+        super().__init__(label=package_name, desc=display_value, status=status)
+
+
+class PythonPathInfo(NodeInfo):
+    """PYTHONPATH environment variable information"""
+
+    def __init__(self, pythonpath: str):
+        if pythonpath:
+            # Split by colon and replace home in each path
+            paths = pythonpath.split(":")
+            display_paths = [self._replace_home_with_var(p) for p in paths]
+            display_pythonpath = ":".join(display_paths)
+            status = NodeStatus.INFO
+        else:
+            display_pythonpath = "not set"
+            status = NodeStatus.WARNING  # Show warning when PYTHONPATH is not set
+
+        super().__init__(label="PYTHONPATH", desc=display_pythonpath, status=status)
+
+
+class DynamoRuntimeInfo(NodeInfo):
+    """Dynamo runtime components information"""
+
+    def __init__(self, workspace_dir: str, fast_mode: bool = False):
+        self.fast_mode = fast_mode
+        # Try to get package version
+        import importlib.metadata
+
+        try:
+            version = importlib.metadata.version("ai-dynamo-runtime")
+            runtime_value = f"ai-dynamo-runtime {version}"
+            is_installed = True
+        except Exception:
+            runtime_value = "ai-dynamo-runtime - Not installed"
+            is_installed = False
+
+        super().__init__(
+            label="Runtime components",
+            desc=runtime_value,
+            status=NodeStatus.INFO,  # Will update based on components found
+        )
+
+        # Add package info if installed
+        if is_installed:
+            # Add dist-info directory
+            dist_info = self._find_dist_info()
+            if dist_info:
+                self.add_child(dist_info)
+
+            # Add .pth file
+            pth_file = self._find_pth_file()
+            if pth_file:
+                self.add_child(pth_file)
+
+        # Discover runtime components from source
+        components = self._discover_runtime_components(workspace_dir)
+
+        # Find where each component actually is and add them
+        if components:
+            # Calculate max width for alignment
+            max_len = max(len(comp) for comp in components)
+
+            components_found = False
+            for component in components:
+                try:
+                    # Try to import to find actual location
+                    module = __import__(component, fromlist=[""])
+                    module_path = getattr(module, "__file__", None)
+
+                    if module_path:
+                        # Add timestamp for .so files
+                        timestamp_str = ""
+                        if module_path.endswith(".so"):
+                            try:
+                                stat = os.stat(module_path)
+                                timestamp = self._format_timestamp_pdt(stat.st_mtime)
+                                timestamp_str = f", modified={timestamp}"
+                            except Exception:
+                                pass
+
+                        display_path = self._replace_home_with_var(module_path)
+                        padded_name = f"{component:<{max_len}}"
+                        module_node = NodeInfo(
+                            label=f"✅ {padded_name}",
+                            desc=f"{display_path}{timestamp_str}",
+                            status=NodeStatus.NONE,
+                        )
+                        self.add_child(module_node)
+                        components_found = True
+                except ImportError as e:
+                    # Module not importable - show as error
+                    padded_name = f"{component:<{max_len}}"
+                    error_msg = str(e) if str(e) else "Import failed"
+                    module_node = NodeInfo(
+                        label=padded_name, desc=error_msg, status=NodeStatus.ERROR
+                    )
+                    self.add_child(module_node)
+                    # Don't set components_found to True for failed imports
+
+            # Update status and value based on whether we found components
+            if components_found:
+                self.status = NodeStatus.OK
+                # If not installed but components work via PYTHONPATH, update the message
+                if not is_installed:
+                    self.desc = "ai-dynamo-runtime (via PYTHONPATH)"
+            else:
+                self.status = NodeStatus.ERROR
+        else:
+            # No components discovered at all
+            self.status = NodeStatus.ERROR
+
+        # Final check: if no children at all (no components found), ensure it's an error
+        if not self.children:
+            self.status = NodeStatus.ERROR
+
+    def _discover_runtime_components(self, workspace_dir: str) -> list:
         """Discover ai-dynamo-runtime components from filesystem.
 
         Returns:
@@ -380,26 +1199,177 @@ class DynamoChecker:
         """
         components = ["dynamo._core"]  # Always include compiled Rust module
 
-        if not self.workspace_dir:
+        if not workspace_dir:
             return components
 
         # Scan runtime components (llm, runtime, nixl_connect, etc.)
-        # Examples: lib/bindings/python/src/dynamo/{llm,runtime,nixl_connect}/__init__.py
-        runtime_path = f"{self.workspace_dir}/lib/bindings/python/src/dynamo"
+        runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src/dynamo")
         if not os.path.exists(runtime_path):
-            print(
-                f"⚠️  Warning: Runtime components directory not found: {runtime_path}"
-            )
             return components
 
         for item in os.listdir(runtime_path):
             item_path = os.path.join(runtime_path, item)
-            if os.path.isdir(item_path) and os.path.exists(f"{item_path}/__init__.py"):
+            if os.path.isdir(item_path) and os.path.exists(
+                os.path.join(item_path, "__init__.py")
+            ):
                 components.append(f"dynamo.{item}")
 
         return components
 
-    def _discover_framework_components(self) -> List[str]:
+    def _find_dist_info(self) -> Optional[NodeInfo]:
+        """Find the dist-info directory for ai-dynamo-runtime."""
+        import site
+
+        for site_dir in site.getsitepackages():
+            pattern = os.path.join(site_dir, "ai_dynamo_runtime*.dist-info")
+            matches = glob.glob(pattern)
+            if matches:
+                path = matches[0]
+                display_path = self._replace_home_with_var(path)
+                try:
+                    stat = os.stat(path)
+                    timestamp = self._format_timestamp_pdt(stat.st_ctime)
+                    return NodeInfo(
+                        label=display_path,
+                        desc=f"created={timestamp}",
+                        status=NodeStatus.INFO,
+                    )
+                except Exception:
+                    return NodeInfo(label=display_path, status=NodeStatus.INFO)
+        return None
+
+    def _find_pth_file(self) -> Optional[NodeInfo]:
+        """Find the .pth file for ai-dynamo-runtime."""
+        import site
+
+        for site_dir in site.getsitepackages():
+            pth_path = os.path.join(site_dir, "ai_dynamo_runtime.pth")
+            if os.path.exists(pth_path):
+                display_path = self._replace_home_with_var(pth_path)
+                try:
+                    stat = os.stat(pth_path)
+                    timestamp = self._format_timestamp_pdt(stat.st_mtime)
+                    node = NodeInfo(
+                        label=display_path,
+                        desc=f"modified={timestamp}",
+                        status=NodeStatus.INFO,
+                    )
+
+                    # Read where it points to
+                    with open(pth_path, "r") as f:
+                        content = f.read().strip()
+                        if content:
+                            display_content = self._replace_home_with_var(content)
+                            points_to = NodeInfo(
+                                label="→", desc=display_content, status=NodeStatus.INFO
+                            )
+                            node.add_child(points_to)
+
+                    return node
+                except Exception:
+                    return NodeInfo(label=display_path, status=NodeStatus.INFO)
+        return None
+
+
+class DynamoFrameworkInfo(NodeInfo):
+    """Dynamo framework components information"""
+
+    def __init__(self, workspace_dir: str, fast_mode: bool = False):
+        self.fast_mode = fast_mode
+        # Try to get package version
+        import importlib.metadata
+
+        try:
+            version = importlib.metadata.version("ai-dynamo")
+            framework_value = f"ai-dynamo {version}"
+            is_installed = True
+        except Exception:
+            framework_value = "ai-dynamo - Not installed"
+            is_installed = False
+
+        super().__init__(
+            label="Framework components",
+            desc=framework_value,
+            status=NodeStatus.INFO,  # Will update based on components found
+        )
+
+        # Add package info if installed
+        if is_installed:
+            import glob
+            import site
+
+            for site_dir in site.getsitepackages():
+                # Look specifically for ai_dynamo (not ai_dynamo_runtime)
+                dist_pattern = os.path.join(site_dir, "ai_dynamo-*.dist-info")
+                matches = glob.glob(dist_pattern)
+                if matches:
+                    path = matches[0]
+                    display_path = self._replace_home_with_var(path)
+                    try:
+                        stat = os.stat(path)
+                        timestamp = self._format_timestamp_pdt(stat.st_ctime)
+                        dist_node = NodeInfo(
+                            label=display_path,
+                            desc=f"created={timestamp}",
+                            status=NodeStatus.INFO,
+                        )
+                        self.add_child(dist_node)
+                    except Exception:
+                        dist_node = NodeInfo(label=display_path, status=NodeStatus.INFO)
+                        self.add_child(dist_node)
+                    break
+
+        # Discover framework components from source
+        components = self._discover_framework_components(workspace_dir)
+
+        # Find where each component actually is and add them
+        if components:
+            # Sort components for consistent output
+            components.sort()
+
+            # Calculate max width for alignment
+            max_len = max(len(comp) for comp in components)
+
+            components_found = False
+            for component in components:
+                try:
+                    # Try to import to find actual location
+                    module = __import__(component, fromlist=[""])
+                    module_path = getattr(module, "__file__", None)
+
+                    if module_path:
+                        display_path = self._replace_home_with_var(module_path)
+                        padded_name = f"{component:<{max_len}}"
+                        component_node = NodeInfo(
+                            label=f"✅ {padded_name}",
+                            desc=display_path,
+                            status=NodeStatus.NONE,
+                        )
+                        self.add_child(component_node)
+                        components_found = True
+                except ImportError as e:
+                    # Module not importable - show as error
+                    padded_name = f"{component:<{max_len}}"
+                    error_msg = str(e) if str(e) else "Import failed"
+                    component_node = NodeInfo(
+                        label=padded_name, desc=error_msg, status=NodeStatus.ERROR
+                    )
+                    self.add_child(component_node)
+                    # Don't set components_found to True for failed imports
+
+            # Update status and value based on whether we found components
+            if components_found:
+                self.status = NodeStatus.OK
+                # If not installed but components work via PYTHONPATH, update the message
+                if not is_installed:
+                    self.desc = "ai-dynamo (via PYTHONPATH)"
+            else:
+                self.status = NodeStatus.ERROR
+        else:
+            # No components discovered at all
+            self.status = NodeStatus.ERROR
+
+    def _discover_framework_components(self, workspace_dir: str) -> list:
         """Discover ai-dynamo framework components from filesystem.
 
         Returns:
@@ -410,1216 +1380,282 @@ class DynamoChecker:
         """
         components: List[str] = []
 
-        if not self.workspace_dir:
+        if not workspace_dir:
             return components
 
-        # Scan direct components (frontend, planner, etc.)
-        # Examples: components/{frontend,planner}/src/dynamo/{frontend,planner}/__init__.py
-        comp_path = f"{self.workspace_dir}/components"
-        if os.path.exists(comp_path):
-            for item in os.listdir(comp_path):
-                item_path = os.path.join(comp_path, item)
-                if os.path.isdir(item_path) and os.path.exists(
-                    f"{item_path}/src/dynamo/{item}/__init__.py"
-                ):
-                    components.append(f"dynamo.{item}")
-        else:
-            # Defer this message to print under the Dynamo header for alignment
-            self._deferred_messages.append(
-                f"⚠️  Warning: Components directory not found: {self._replace_home_with_var(comp_path)}"
-            )
+        # Scan components directory (frontend, planner, etc.)
+        components_path = os.path.join(workspace_dir, "components")
+        if os.path.exists(components_path):
+            for item in os.listdir(components_path):
+                item_path = os.path.join(components_path, item)
+                if os.path.isdir(item_path):
+                    # Check for dynamo module in src
+                    module_path = os.path.join(
+                        item_path, "src", "dynamo", item, "__init__.py"
+                    )
+                    if os.path.exists(module_path):
+                        components.append(f"dynamo.{item}")
 
-        # Scan backend components (vllm, sglang, etc.)
-        # Examples: components/backends/{vllm,sglang,llama_cpp}/src/dynamo/{vllm,sglang,llama_cpp}/__init__.py
-        backend_path = f"{self.workspace_dir}/components/backends"
-        if os.path.exists(backend_path):
-            for item in os.listdir(backend_path):
-                item_path = os.path.join(backend_path, item)
-                if os.path.isdir(item_path) and os.path.exists(
-                    f"{item_path}/src/dynamo/{item}/__init__.py"
-                ):
-                    components.append(f"dynamo.{item}")
-        else:
-            # Defer this message to print under the Dynamo header for alignment
-            self._deferred_messages.append(
-                f"⚠️  Warning: Backend components directory not found: {self._replace_home_with_var(backend_path)}"
-            )
+        # Scan backends directory (vllm, sglang, trtllm, etc.)
+        backends_path = os.path.join(workspace_dir, "components", "backends")
+        if os.path.exists(backends_path):
+            for item in os.listdir(backends_path):
+                item_path = os.path.join(backends_path, item)
+                if os.path.isdir(item_path):
+                    # Check for dynamo module in src
+                    module_path = os.path.join(
+                        item_path, "src", "dynamo", item, "__init__.py"
+                    )
+                    if os.path.exists(module_path):
+                        components.append(f"dynamo.{item}")
 
         return components
 
-    def _replace_home_with_var(self, path: str) -> str:
-        """Replace user's home directory in path with $HOME.
 
-        Args:
-            path: File system path or colon-separated paths (for PYTHONPATH)
+class DynamoInfo(NodeInfo):
+    """Dynamo workspace information"""
 
-        Returns:
-            Path with home directory replaced by $HOME if applicable
-            Example: '/home/ubuntu/dynamo/...' -> '$HOME/dynamo/...'
-            Example: '/home/ubuntu/dynamo/a:/home/ubuntu/dynamo/b' -> '$HOME/dynamo/a:$HOME/dynamo/b'
-        """
-        home_dir = os.path.expanduser("~")
-        try:
-            # Replace all occurrences for colon-separated paths like PYTHONPATH
-            return path.replace(home_dir, "$HOME")
-        except Exception:
-            return path
+    def __init__(self, fast_mode: bool = False):
+        self.fast_mode = fast_mode
 
-    def _format_timestamp_pdt(self, timestamp: float) -> str:
-        """Format a timestamp in PDT timezone.
+        # Find workspace directory
+        workspace_dir = DynamoInfo.find_workspace()
 
-        Args:
-            timestamp: Unix timestamp
-
-        Returns:
-            Formatted timestamp string in PDT or local timezone
-            Example: '2025-08-10 22:22:52 PDT'
-        """
-        try:
-            # Use zoneinfo (standard library in Python 3.9+)
-            pdt = ZoneInfo("America/Los_Angeles")
-            dt = datetime.datetime.fromtimestamp(timestamp, tz=pdt)
-            return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-        except Exception:
-            # Fallback to manual PDT offset approximation
-            # PDT is UTC-7, so subtract 7 hours from UTC
-            dt_utc = datetime.datetime.utcfromtimestamp(timestamp)
-            dt_pdt = dt_utc - datetime.timedelta(hours=7)
-            return dt_pdt.strftime("%Y-%m-%d %H:%M:%S PDT")
-
-    def _get_cargo_info(self) -> Tuple[Optional[str], Optional[str]]:
-        """Get cargo target directory and cargo home directory.
-
-        Returns:
-            Tuple of (target_directory, cargo_home) or (None, None) if cargo not available
-            Example: ('/home/ubuntu/dynamo/.build/target', '/home/ubuntu/.cargo')
-        """
-        # First check if cargo is available
-        try:
-            subprocess.run(
-                ["cargo", "--version"], capture_output=True, text=True, timeout=5
+        if not workspace_dir:
+            # Show error when workspace is not found
+            super().__init__(
+                label="Dynamo",
+                desc="workspace not found - cannot detect Runtime and Framework components",
+                status=NodeStatus.ERROR,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            # Do not print here; caller will render a nicely aligned warning
-            return None, None
-
-        # Get cargo home directory
-        cargo_home = os.environ.get("CARGO_HOME")
-        if not cargo_home:
-            cargo_home = os.path.expanduser("~/.cargo")
-
-        # Get cargo target directory
-        target_directory = None
-        try:
-            # Run cargo metadata command to get target directory
-            result = subprocess.run(
-                ["cargo", "metadata", "--format-version=1", "--no-deps"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                cwd=self.workspace_dir
-                if (self.workspace_dir and os.path.isdir(self.workspace_dir))
-                else None,
+            # Add helpful information about where we looked
+            search_paths = NodeInfo(
+                label="Searched in",
+                desc="current dir, ~/dynamo, DYNAMO_HOME, /workspace",
+                status=NodeStatus.INFO,
             )
-
-            if result.returncode == 0:
-                # Parse JSON output to extract target_directory
-                metadata = json.loads(result.stdout)
-                target_directory = metadata.get("target_directory")
-        except (
-            subprocess.TimeoutExpired,
-            subprocess.CalledProcessError,
-            FileNotFoundError,
-            json.JSONDecodeError,
-        ):
-            # cargo metadata failed or JSON parsing failed
-            pass
-
-        return target_directory, cargo_home
-
-    def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
-        """Get git commit SHA and date for the workspace.
-
-        Args:
-            workspace_dir: Path to the workspace directory
-
-        Returns:
-            Tuple of (short_sha, commit_date) or (None, None) if not a git repo
-            Example: ('a1b2c3d4e5f6', '2025-08-14 16:45:31 PDT')
-        """
-        if not workspace_dir or not os.path.exists(workspace_dir):
-            return None, None
-
-        try:
-            # Get the longer SHA (12 characters)
-            sha_result = subprocess.run(
-                ["git", "rev-parse", "--short=12", "HEAD"],
-                cwd=workspace_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
+            self.add_child(search_paths)
+            hint = NodeInfo(
+                label="Hint",
+                desc="Run from a Dynamo workspace directory or set DYNAMO_HOME",
+                status=NodeStatus.INFO,
             )
-            if sha_result.returncode != 0:
-                return None, None
-            short_sha = sha_result.stdout.strip()
-
-            # Get the commit timestamp
-            date_result = subprocess.run(
-                ["git", "show", "-s", "--format=%ct", "HEAD"],
-                cwd=workspace_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if date_result.returncode != 0:
-                return None, None
-
-            # Convert timestamp to PST/PDT
-            timestamp = int(date_result.stdout.strip())
-            commit_date = self._format_timestamp_pdt(timestamp)
-
-            return short_sha, commit_date
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-            return None, None
-
-    def _print_system_info(self) -> bool:
-        """Print concise system information as a top-level section.
-
-        Tree structure:
-        System info (hostname: ...):
-        ├─ OS: ...
-        ├─ NVIDIA GPU: ...
-        ├─ Cargo: ...
-        ├─ Maturin: ...
-        └─ Python: ...
-           ├─ Torch: ...
-           └─ PYTHONPATH: ...
-        """
-        # OS info
-        distro = ""
-        version = ""
-        try:
-            os_release_path = "/etc/os-release"
-            if os.path.exists(os_release_path):
-                with open(os_release_path, "r") as f:
-                    data = f.read()
-                name = ""
-                ver = ""
-                for line in data.splitlines():
-                    if line.startswith("NAME=") and not name:
-                        name = line.split("=", 1)[1].strip().strip('"')
-                    elif line.startswith("VERSION=") and not ver:
-                        ver = line.split("=", 1)[1].strip().strip('"')
-                distro = name
-                version = ver
-        except Exception:
-            pass
-
-        uname = platform.uname()
-        # Memory (used/total) and CPU cores
-        mem_used_gib = None
-        mem_total_gib = None
-        try:
-            meminfo = {}
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        meminfo[k.strip()] = v.strip()
-            if "MemTotal" in meminfo and "MemAvailable" in meminfo:
-                # Values are in kB
-                total_kib = float(meminfo["MemTotal"].split()[0])
-                avail_kib = float(meminfo["MemAvailable"].split()[0])
-                used_kib = max(total_kib - avail_kib, 0.0)
-                mem_total_gib = total_kib / (1024.0 * 1024.0)
-                mem_used_gib = used_kib / (1024.0 * 1024.0)
-        except Exception:
-            pass
-
-        cores = os.cpu_count() or 0
-
-        if distro:
-            base_linux = f"OS: {distro} {version} ({uname.system} {uname.release} {uname.machine})".strip()
-        else:
-            base_linux = (
-                f"OS: {uname.system} {uname.release} {uname.version} ({uname.machine})"
-            )
-
-        extras = []
-        if mem_used_gib is not None and mem_total_gib is not None:
-            if mem_total_gib > 0:
-                mem_usage_percent = (mem_used_gib / mem_total_gib) * 100
-                warning_symbol = " ⚠️" if mem_usage_percent >= 90 else ""
-            else:
-                warning_symbol = ""
-            extras.append(
-                f"Memory: {mem_used_gib:.1f}/{mem_total_gib:.1f} GiB{warning_symbol}"
-            )
-        if cores:
-            extras.append(f"Cores: {cores}")
-        linux_line = base_linux if not extras else base_linux + "; " + "; ".join(extras)
-        # Defer printing until we have all three lines; we print as a tree below
-
-        # GPU info
-        (
-            gpu_lines,
-            gpu_driver_version,
-            gpu_cuda_version,
-        ) = self.gpu_detector.get_gpu_info()
-        # Python info
-        py_ver = platform.python_version()
-        py_exec = sys.executable or "python"
-        py_path_env = os.environ.get("PYTHONPATH")
-        py_path_str = py_path_env if py_path_env else "unset"
-        python_line = f"Python: {py_ver} ({py_exec})"
-        if not os.path.exists(py_exec):
-            python_line = "❌ Python: not found"
-
-        # PyTorch info
-        torch_version: Optional[str] = None
-        torch_cuda_available: Optional[bool] = None
-        try:
-            import importlib
-
-            torch = importlib.import_module("torch")  # type: ignore
-            try:
-                torch_version = getattr(torch, "__version__", None)  # type: ignore[attr-defined]
-                # Check CUDA availability through PyTorch
-                if hasattr(torch, "cuda"):
-                    torch_cuda_available = torch.cuda.is_available()  # type: ignore[attr-defined]
-            except Exception:
-                torch_version = None
-                torch_cuda_available = None
-        except Exception:
-            # torch not installed
-            pass
-
-        # Extra lines for additional system info
-        extra_lines: List[str] = []
-
-        # Detect cargo binary path and version for heading
-        cargo_path = shutil.which("cargo")
-        cargo_version = None
-        try:
-            proc = subprocess.run(
-                ["cargo", "--version"], capture_output=True, text=True, timeout=5
-            )
-            if proc.returncode == 0 and proc.stdout:
-                cargo_version = proc.stdout.strip()
-        except Exception:
-            pass
-
-        cargo_target, cargo_home = self._get_cargo_info()
-        has_cargo = bool(cargo_path or cargo_home or cargo_target)
-
-        # Build system info output
-        hostname = platform.node()
-        system_output = [f"System info (hostname: {hostname}):", f"├─ {linux_line}"]
-
-        # Add GPU lines - handle single or multiple GPUs
-        if len(gpu_lines) == 1:
-            system_output.append(f"├─ {gpu_lines[0]}")
-        else:
-            for i, gpu_line in enumerate(gpu_lines):
-                # All GPUs use ├─ (more system info follows)
-                system_output.append(f"├─ {gpu_line}")
-
-        print("\n".join(system_output))
-
-        # CUDA line removed - driver/CUDA versions already shown in NVIDIA GPU line
-        # Extra lines (e.g., CUDA memory clear status)
-        for i, line in enumerate(extra_lines):
-            # If cargo follows after extra lines, use mid symbol; else close on last
-            is_last_extra = i == len(extra_lines) - 1
-            symbol = "├─" if (has_cargo or not is_last_extra) else "└─"
-            print(f"{symbol} {line}")
-
-        # If no extra lines, and no cargo, close the system info section
-        if not extra_lines and not has_cargo:
-            # System info is complete, Dynamo Environment follows
-            pass
-
-        # Cargo Info block
-        if has_cargo:
-            cargo_heading = "Cargo ("
-            if cargo_path:
-                cargo_heading += f"{cargo_path}"
-            else:
-                cargo_heading += "cargo not found"
-            if cargo_version:
-                cargo_heading += f", {cargo_version}"
-            cargo_heading += ")"
-
-            # Cargo heading is not the last top-level child (Dynamo Environment follows)
-            print(f"├─ {cargo_heading}")
-
-            # Under cargo heading, indent nested details
-            if cargo_home:
-                cargo_home_env = os.environ.get("CARGO_HOME")
-                display_cargo_home = self._replace_home_with_var(cargo_home)
-                if cargo_home_env:
-                    print(
-                        f"   ├─ Cargo home directory: {display_cargo_home} (CARGO_HOME is set)"
-                    )
-                else:
-                    # If there's also a target below, keep mid connector, else close
-                    print(
-                        f"   {'├─' if cargo_target else '└─'} Cargo home directory: {display_cargo_home}"
-                    )
-
-            if cargo_target:
-                cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
-                display_cargo_target = self._replace_home_with_var(cargo_target)
-                target_msg = (
-                    f"   └─ Cargo target directory: {display_cargo_target} (CARGO_TARGET_DIR is set)"
-                    if cargo_target_env
-                    else f"   └─ Cargo target directory: {display_cargo_target}"
-                )
-                print(target_msg)
-
-                # Nested details under Cargo target directory
-                debug_dir = os.path.join(cargo_target, "debug")
-                release_dir = os.path.join(cargo_target, "release")
-
-                debug_exists = os.path.exists(debug_dir)
-                release_exists = os.path.exists(release_dir)
-
-                # Find *.so file
-                so_file = self._find_so_file(cargo_target)
-                has_so_file = so_file is not None
-
-                if debug_exists:
-                    symbol = "├─" if release_exists or has_so_file else "└─"
-                    display_debug_dir = self._replace_home_with_var(debug_dir)
-                    try:
-                        debug_mtime = os.path.getmtime(debug_dir)
-                        debug_time = self._format_timestamp_pdt(debug_mtime)
-                        print(
-                            f"      {symbol} Debug:   {display_debug_dir} (modified: {debug_time})"
-                        )
-                    except OSError:
-                        print(
-                            f"      {symbol} Debug:   {display_debug_dir} (unable to read timestamp)"
-                        )
-
-                if release_exists:
-                    symbol = "├─" if has_so_file else "└─"
-                    display_release_dir = self._replace_home_with_var(release_dir)
-                    try:
-                        release_mtime = os.path.getmtime(release_dir)
-                        release_time = self._format_timestamp_pdt(release_mtime)
-                        print(
-                            f"      {symbol} Release: {display_release_dir} (modified: {release_time})"
-                        )
-                    except OSError:
-                        print(
-                            f"      {symbol} Release: {display_release_dir} (unable to read timestamp)"
-                        )
-
-                if has_so_file and so_file is not None:
-                    display_so_file = self._replace_home_with_var(so_file)
-                    try:
-                        so_mtime = os.path.getmtime(so_file)
-                        so_time = self._format_timestamp_pdt(so_mtime)
-                        print(
-                            f"      └─ Binary:  {display_so_file} (modified: {so_time})"
-                        )
-                    except OSError:
-                        print(
-                            f"      └─ Binary:  {display_so_file} (unable to read timestamp)"
-                        )
-        else:
-            # Cargo not found: show as a top-level sibling; Dynamo follows, so use mid connector
-            print(
-                "├─ ❌ Cargo: not found (install Rust toolchain to see cargo target directory)"
-            )
-
-        # Maturin check (Python-Rust build tool)
-        maturin_path = shutil.which("maturin")
-        maturin_version = None
-        try:
-            proc = subprocess.run(
-                ["maturin", "--version"], capture_output=True, text=True, timeout=5
-            )
-            if proc.returncode == 0 and proc.stdout:
-                maturin_version = proc.stdout.strip()
-        except Exception:
-            pass
-
-        has_maturin = bool(maturin_path or maturin_version)
-
-        if has_maturin:
-            maturin_heading = "Maturin ("
-            if maturin_path:
-                maturin_heading += f"{maturin_path}"
-            else:
-                maturin_heading += "maturin not found"
-            if maturin_version:
-                maturin_heading += f", {maturin_version}"
-            maturin_heading += ")"
-            print(f"├─ {maturin_heading}")
-        else:
-            print("├─ ❌ Maturin: not found")
-            print("   Install with: uv pip install maturin[patchelf]")
-
-        # Python line (moved here to appear after Maturin, before Dynamo)
-        # Determine if more top-level entries come after Python
-        more_after_python = bool(has_cargo)
-        print(f"{'├─' if more_after_python else '└─'} {python_line}")
-
-        # Torch version as a child under Python (before PYTHONPATH)
-        if torch_version:
-            cuda_status = ""
-            if torch_cuda_available is not None:
-                cuda_status = (
-                    " (✅torch.cuda.is_available())"
-                    if torch_cuda_available
-                    else " (❌torch.cuda.is_available())"
-                )
-            print("   ├─ Torch: " + str(torch_version) + cuda_status)
-        else:
-            # Show as a child under Python
-            print("   ├─ ❌ Torch: not installed")
-
-        # PYTHONPATH as the last child under Python
-        print(f"   └─ PYTHONPATH: {py_path_str}")
-        # Determine if any errors were printed in system info
-        system_errors_found = False
-        if isinstance(python_line, str) and python_line.startswith("❌"):
-            system_errors_found = True
-        if not has_cargo:
-            system_errors_found = True
-        # Mark GPU error based on lines printed; treat as error for overall status as well
-        try:
-            self._gpu_error = any(
-                isinstance(line, str) and line.startswith("❌") for line in gpu_lines
-            )
-            if self._gpu_error:
-                system_errors_found = True
-        except Exception:
-            pass
-        return system_errors_found
-
-    def _find_so_file(self, target_directory: str) -> Optional[str]:
-        """Find the compiled *.so file in target directory or Python bindings.
-
-        Args:
-            target_directory: Path to cargo target directory
-
-        Returns:
-            Path to *.so file or None if not found
-            Example: '/home/ubuntu/dynamo/target/debug/libdynamo_core.so'
-        """
-        if not target_directory or not os.path.exists(target_directory):
-            return None
-
-        # Look for *.so files in debug and release directories
-        for profile in ["debug", "release"]:
-            profile_dir = os.path.join(target_directory, profile)
-            if os.path.exists(profile_dir):
-                try:
-                    for root, dirs, files in os.walk(profile_dir):
-                        for file in files:
-                            if file.endswith(".so"):
-                                return os.path.join(root, file)
-                except OSError:
-                    continue
-
-        # Also check Python bindings directory for installed *.so
-        if self.workspace_dir:
-            bindings_dir = f"{self.workspace_dir}/lib/bindings/python/src/dynamo"
-            if os.path.exists(bindings_dir):
-                try:
-                    for root, dirs, files in os.walk(bindings_dir):
-                        for file in files:
-                            if file.endswith(".so") and "_core" in file:
-                                return os.path.join(root, file)
-                except OSError:
-                    pass
-
-        return None
-
-    def _get_cargo_build_profile(self, target_directory: str) -> Optional[str]:
-        """Determine which cargo build profile (debug/release) was used most recently.
-
-        Args:
-            target_directory: Path to cargo target directory
-
-        Returns:
-            'debug', 'release', 'debug/release', or None if cannot determine
-            Example: 'debug'
-        """
-        # First check environment variables that indicate current build profile
-        profile_env = os.environ.get("PROFILE")
-        if profile_env:
-            if profile_env == "dev":
-                return "debug"
-            elif profile_env == "release":
-                return "release"
-
-        # Check OPT_LEVEL as secondary indicator
-        opt_level = os.environ.get("OPT_LEVEL")
-        if opt_level:
-            if opt_level == "0":
-                return "debug"
-            elif opt_level in ["2", "3"]:
-                return "release"
-
-        # Fall back to filesystem inspection
-        if not target_directory or not os.path.exists(target_directory):
-            return None
-
-        debug_dir = os.path.join(target_directory, "debug")
-        release_dir = os.path.join(target_directory, "release")
-
-        debug_exists = os.path.exists(debug_dir)
-        release_exists = os.path.exists(release_dir)
-
-        if not debug_exists and not release_exists:
-            return None
-        elif debug_exists and not release_exists:
-            return "debug"
-        elif release_exists and not debug_exists:
-            return "release"
-        else:
-            # Both exist, check which was modified more recently
-            try:
-                debug_mtime = os.path.getmtime(debug_dir)
-                release_mtime = os.path.getmtime(release_dir)
-
-                if (
-                    abs(debug_mtime - release_mtime) < 1.0
-                ):  # Same timestamp (within 1 second)
-                    return "debug/release"  # Both available, runtime choice depends on invocation
-                else:
-                    return "release" if release_mtime > debug_mtime else "debug"
-            except OSError:
-                return None
-
-    def _setup_pythonpath(self) -> None:
-        """Set up PYTHONPATH for component imports."""
-        if not self.workspace_dir:
+            self.add_child(hint)
             return
 
-        paths = []
+        # Get git info
+        sha, date = self._get_git_info(workspace_dir)
 
-        # Collect component source paths
-        comp_path = f"{self.workspace_dir}/components"
-        if os.path.exists(comp_path):
-            for item in os.listdir(comp_path):
-                src_path = f"{comp_path}/{item}/src"
-                if os.path.exists(src_path):
-                    paths.append(src_path)
+        # Build main label
+        display_workspace = self._replace_home_with_var(workspace_dir)
+        if sha and date:
+            value = f"{display_workspace}, SHA: {sha}, Date: {date}"
         else:
-            print(
-                f"⚠️  Warning: Components directory not found for PYTHONPATH setup: {comp_path}"
-            )
+            value = display_workspace
 
-        # Collect backend source paths
-        backend_path = f"{self.workspace_dir}/components/backends"
-        if os.path.exists(backend_path):
-            for item in os.listdir(backend_path):
-                src_path = f"{backend_path}/{item}/src"
-                if os.path.exists(src_path):
-                    paths.append(src_path)
-        else:
-            print(
-                f"⚠️  Warning: Backend components directory not found for PYTHONPATH setup: {backend_path}"
-            )
+        super().__init__(label="Dynamo", desc=value, status=NodeStatus.INFO)
 
-        # Update sys.path for current process
-        if paths:
-            # Add paths to sys.path for immediate effect on imports
-            for path in paths:
-                if path not in sys.path:
-                    sys.path.insert(0, path)  # Insert at beginning for priority
+        # Always add runtime components
+        runtime_info = DynamoRuntimeInfo(workspace_dir, fast_mode=self.fast_mode)
+        self.add_child(runtime_info)
 
-            # Show what PYTHONPATH would be (for manual shell setup)
-            pythonpath_value = ":".join(paths)
-            current_path = os.environ.get("PYTHONPATH", "")
-            if current_path:
-                pythonpath_value = f"{pythonpath_value}:{current_path}"
+        # Always add framework components
+        framework_info = DynamoFrameworkInfo(workspace_dir, fast_mode=self.fast_mode)
+        self.add_child(framework_info)
 
-            print(
-                f"""Below are the results if you export PYTHONPATH="{pythonpath_value}":
-   ({len(paths)} workspace component paths found)"""
-            )
-            for path in paths:
-                print(f"   • {path}")
-            print()
-        else:
-            print("⚠️  Warning: No component source paths found for PYTHONPATH setup")
-
-    # ====================================================================
-    # IMPORT TESTING
-    # ====================================================================
-
-    def _test_component_group(
-        self,
-        components: List[str],
-        package_name: str,
-        group_name: str,
-        max_width: int,
-        site_packages: str,
-        collect_failures: bool = False,
-        package_info: Optional[Dict[str, Any]] = None,
-        sub_indent: str = "   ",
-    ) -> Tuple[Dict[str, str], List[str]]:
-        """Test a group of components for a given package.
-
-        Args:
-            components: List of component names to test
-                Example: ['dynamo._core', 'dynamo.llm', 'dynamo.runtime']
-            package_name: Name of the package to get version from
-                Example: 'ai-dynamo-runtime'
-            group_name: Display name for the group
-                Example: 'Runtime components'
-            max_width: Maximum width for component name alignment
-                Example: 20
-            site_packages: Path to site-packages directory
-                Example: '/opt/dynamo/venv/lib/python3.12/site-packages'
-            collect_failures: Whether to collect failed component names
-                Example: True (for framework components), False (for runtime)
-
-        Returns:
-            Tuple of (results dict, list of failed components)
-            Example: ({'dynamo._core': '✅ Success', 'dynamo.llm': '❌ Failed: No module named dynamo.llm'},
-                     ['dynamo.llm'])
-
-        Output printed to console:
-            Dynamo Environment ($HOME/dynamo):
-            └─ Runtime components (ai-dynamo-runtime 0.4.0):
-               ├─ /opt/dynamo/venv/lib/.../ai_dynamo_runtime-0.4.0.dist-info (created: 2025-08-12 14:17:34 PDT)
-               ├─ ✅ dynamo._core        /opt/dynamo/venv/lib/.../dynamo/_core.cpython-312-x86_64-linux-gnu.so
-               └─ ❌ dynamo.llm          No module named 'dynamo.llm'
-        """
-        results = {}
-        failures = []
-
-        # Print header with version info
+    def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
+        """Get git SHA and date for the workspace."""
         try:
-            version = importlib.metadata.version(package_name)
-            header = f"{group_name} ({package_name} {version}):"
-        except importlib.metadata.PackageNotFoundError:
-            header = f"{group_name} ({package_name} - Not installed):"
-        except Exception:
-            header = f"{group_name} ({package_name}):"
-
-        print(header)
-
-        # Determine if package info should use ├─ or └─ based on whether there are components
-        has_components = len(components) > 0
-        package_symbol = "├─" if has_components else "└─"
-
-        # Print package info as subitem of component group (only if found)
-        if package_info:
-            package_path = package_info.get("path", "")
-            package_created = package_info.get("created", "")
-            display_path = self._replace_home_with_var(package_path)
-            if package_created:
-                print(
-                    f"{sub_indent}{package_symbol} {display_path} (created: {package_created})"
-                )
-            else:
-                print(f"{sub_indent}{package_symbol} {display_path}")
-
-            # Show .pth files if they exist (editable installs) - at same level as package info
-            pth_files = package_info.get("pth_files", [])
-            for i, pth_file in enumerate(pth_files):
-                is_last_pth = i == len(pth_files) - 1
-                pth_symbol = "└─" if (is_last_pth and not has_components) else "├─"
-                display_pth_path = self._replace_home_with_var(pth_file["path"])
-                display_points_to = self._replace_home_with_var(pth_file["points_to"])
-                print(
-                    f"{sub_indent}{pth_symbol} {display_pth_path} (modified: {pth_file['modified']})"
-                )
-                print(f"{sub_indent}   └─ Points to: {display_points_to}")
-        # Don't print anything for "Not found" - just skip it
-
-        # Test each component as subitems of the package
-        for i, component in enumerate(components):
-            # Determine tree symbol - last component gets └─, others get ├─, with proper indentation (deeper nesting)
-            is_last = i == len(components) - 1
-            tree_symbol = f"{sub_indent}{'└─' if is_last else '├─'}"
-
-            try:
-                module = __import__(component, fromlist=[""])
-                results[component] = "✅ Success"
-                # Get module path for location info
-                module_path = getattr(module, "__file__", "built-in")
-                if module_path and module_path != "built-in":
-                    # Only show timestamps for generated files (*.so, *.pth, etc.), not __init__.py
-                    timestamp_str = ""
-                    show_timestamp = False
-
-                    # Check if this is a generated file we want to show timestamps for
-                    if any(
-                        module_path.endswith(ext)
-                        for ext in [".so", ".pth", ".dll", ".dylib"]
-                    ):
-                        show_timestamp = True
-
-                    if show_timestamp:
-                        try:
-                            if os.path.exists(module_path):
-                                mtime = os.path.getmtime(module_path)
-                                timestamp_str = (
-                                    f" (modified: {self._format_timestamp_pdt(mtime)})"
-                                )
-                        except OSError:
-                            pass
-
-                    if self.workspace_dir and module_path.startswith(
-                        self.workspace_dir
-                    ):
-                        # From workspace source - show absolute path with $HOME replacement
-                        display_path = self._replace_home_with_var(module_path)
-                        if show_timestamp:
-                            print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}{timestamp_str}"
-                            )
-                        else:
-                            print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}"
-                            )
-                    elif site_packages and module_path.startswith(site_packages):
-                        # From installed package - show path with $HOME replacement
-                        display_path = self._replace_home_with_var(module_path)
-                        if show_timestamp:
-                            print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}{timestamp_str}"
-                            )
-                        else:
-                            print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}"
-                            )
-                    else:
-                        # Other location - show path with $HOME replacement
-                        display_path = self._replace_home_with_var(module_path)
-                        if show_timestamp:
-                            print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}{timestamp_str}"
-                            )
-                        else:
-                            print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}"
-                            )
-                else:
-                    built_in_suffix = (
-                        " (built-in)"
-                        if group_name.lower().startswith("framework")
-                        else " built-in"
-                    )
-                    print(f"{tree_symbol} ✅ {component:<{max_width}}{built_in_suffix}")
-            except ImportError as e:
-                results[component] = f"❌ Failed: {e}"
-                print(f"{tree_symbol} ❌ {component:<{max_width}} {e}")
-                if collect_failures:
-                    failures.append(component)
-
-        return results, failures
-
-    def _get_package_info(self, package_name: str) -> Dict[str, Any]:
-        """Get package installation information including .pth files.
-
-        Args:
-            package_name: Name of the package (e.g., 'ai-dynamo-runtime')
-
-        Returns:
-            Dict with 'path', 'created', and optionally 'pth_files' keys
-        """
-        import site
-
-        site_packages_dirs = site.getsitepackages()
-        if hasattr(site, "getusersitepackages"):
-            site_packages_dirs.append(site.getusersitepackages())
-
-        result: Dict[str, Any] = {}
-        pth_files: List[Dict[str, str]] = []
-
-        for site_dir in site_packages_dirs:
-            if not os.path.exists(site_dir):
-                continue
-
-            try:
-                for file in os.listdir(site_dir):
-                    # Look for .dist-info directories that exactly match the package name
-                    if file.endswith(".dist-info"):
-                        # Extract package name from .dist-info directory name
-                        dist_name = file.replace(".dist-info", "")
-                        # Handle version suffixes (e.g., ai_dynamo_runtime-0.4.0 -> ai_dynamo_runtime)
-                        base_name = (
-                            dist_name.split("-")[0] if "-" in dist_name else dist_name
-                        )
-                        expected_name = package_name.replace("-", "_")
-
-                        if base_name == expected_name:
-                            dist_info_path = os.path.join(site_dir, file)
-                            if os.path.isdir(dist_info_path):
-                                try:
-                                    ctime = os.path.getctime(dist_info_path)
-                                    created_time = self._format_timestamp_pdt(ctime)
-                                    result.update(
-                                        {
-                                            "path": dist_info_path,
-                                            "created": created_time,
-                                        }
-                                    )
-                                except OSError:
-                                    result.update({"path": dist_info_path})
-
-                    # Look for .pth files that match this specific package
-                    if file.endswith(".pth"):
-                        # Match .pth files to specific packages
-                        pth_matches_package = False
-                        if package_name == "ai-dynamo-runtime":
-                            # Look for ai_dynamo_runtime.pth or similar
-                            if (
-                                "ai_dynamo_runtime" in file.lower()
-                                or file.lower().startswith("ai_dynamo_runtime")
-                            ):
-                                pth_matches_package = True
-                        elif package_name == "ai-dynamo":
-                            # Look for _ai_dynamo.pth or ai_dynamo.pth (but not ai_dynamo_runtime.pth)
-                            if (
-                                "ai_dynamo" in file.lower()
-                                or "_ai_dynamo" in file.lower()
-                            ) and "runtime" not in file.lower():
-                                pth_matches_package = True
-
-                        if pth_matches_package:
-                            pth_path = os.path.join(site_dir, file)
-                            try:
-                                mtime = os.path.getmtime(pth_path)
-                                # Read the content to see what path it adds
-                                with open(pth_path, "r") as f:
-                                    content = f.read().strip()
-                                pth_files.append(
-                                    {
-                                        "path": pth_path,
-                                        "modified": self._format_timestamp_pdt(mtime),
-                                        "points_to": content,
-                                    }
-                                )
-                            except OSError:
-                                pass
-            except OSError:
-                continue
-
-        if pth_files:
-            result["pth_files"] = pth_files
-
-        return result
-
-    def test_imports(self) -> Dict[str, str]:
-        """Test imports for all discovered components.
-
-        Returns:
-            Dictionary mapping component names to their import status
-            Example: {
-                'dynamo._core': '✅ Success',
-                'dynamo.llm': '✅ Success',
-                'dynamo.runtime': '✅ Success',
-                'dynamo.frontend': '❌ Failed: No module named dynamo.frontend',
-                'dynamo.planner': '✅ Success'
-            }
-
-        Console output example:
-            Dynamo Environment ($HOME/dynamo):
-            └─ Runtime components (ai-dynamo-runtime 0.4.0):
-               ├─ /opt/dynamo/venv/lib/.../ai_dynamo_runtime-0.4.0.dist-info (created: 2025-08-12 14:17:34 PDT)
-               ├─ /opt/dynamo/venv/lib/.../ai_dynamo_runtime.pth (modified: 2025-08-12 14:17:34 PDT)
-                  └─ Points to: $HOME/dynamo/lib/bindings/python/src
-               ├─ ✅ dynamo._core        /opt/dynamo/venv/lib/.../dynamo/_core.cpython-312-x86_64-linux-gnu.so
-               └─ ✅ dynamo.llm          /opt/dynamo/venv/lib/.../dynamo/llm/__init__.py
-
-            └─ Framework components (ai-dynamo - Not installed):
-               ├─ ✅ dynamo.frontend     /opt/dynamo/venv/lib/.../dynamo/frontend/__init__.py
-               └─ ❌ dynamo.missing      No module named 'dynamo.missing'
-        """
-        results = {}
-
-        # Print system info at top-level, before Dynamo Environment
-        system_errors = self._print_system_info()
-
-        # Then print main environment header as a subtree under System info
-        if (
-            self.workspace_dir
-            and os.path.exists(self.workspace_dir)
-            and self._is_dynamo_workspace(self.workspace_dir)
-        ):
-            workspace_path = os.path.abspath(self.workspace_dir)
-            display_workspace = self._replace_home_with_var(workspace_path)
-
-            # Get git info
-            sha, date = self._get_git_info(self.workspace_dir)
-            if sha and date:
-                print(f"└─ Dynamo ({display_workspace}, SHA: {sha}, Date: {date}):")
-            else:
-                print(f"└─ Dynamo ({display_workspace}):")
-            # Backend components directory warning after the Dynamo line
-            backend_path = f"{self.workspace_dir}/components/backends"
-            if not os.path.exists(backend_path):
-                print(
-                    f"   ⚠️  Warning: Backend components directory not found: {self._replace_home_with_var(backend_path)}"
-                )
-            # If there were deferred messages (e.g., invalid --path), show them here under Dynamo
-            for message in self._deferred_messages:
-                print(f"   {message}")
-        else:
-            # If a user provided an invalid --path, reflect that, otherwise generic not found
-            if self.workspace_dir and not os.path.exists(self.workspace_dir):
-                print(f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}):")
-                print("   ❌ Workspace path does not exist")
-            elif self.workspace_dir and not self._is_dynamo_workspace(
-                self.workspace_dir
-            ):
-                # Still try to get git info even if it's not a valid workspace
-                sha, date = self._get_git_info(self.workspace_dir)
-                if sha and date:
-                    print(
-                        f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}, SHA: {sha}, Date: {date}):"
-                    )
-                else:
-                    print(
-                        f"└─ Dynamo ({self._replace_home_with_var(self.workspace_dir)}):"
-                    )
-                print("   ❌ Invalid dynamo workspace (missing expected files)")
-            else:
-                print("└─ Dynamo (workspace not found):")
-
-        # Discover all components
-        runtime_components = self._discover_runtime_components()
-        framework_components = self._discover_framework_components()
-
-        # Calculate max width for alignment across ALL components
-        all_components = runtime_components + framework_components
-        max_width = max(len(comp) for comp in all_components) if all_components else 0
-
-        # Get site-packages path for comparison
-        import site
-
-        site_packages = site.getsitepackages()[0] if site.getsitepackages() else ""
-
-        # Get package information for headers
-        runtime_package_info = self._get_package_info("ai-dynamo-runtime")
-        framework_package_info = self._get_package_info("ai-dynamo")
-
-        # Test runtime components (as subitem of Dynamo Environment, indented; components printed below group header)
-        runtime_results, _ = self._test_component_group(
-            runtime_components,
-            "ai-dynamo-runtime",
-            "   └─ Runtime components",
-            max_width,
-            site_packages,
-            collect_failures=False,
-            package_info=runtime_package_info,
-            sub_indent="      ",
-        )
-        results.update(runtime_results)
-
-        # Test framework components (as subitem of Dynamo Environment, indented; components printed below group header)
-        framework_results, framework_failures = self._test_component_group(
-            framework_components,
-            "ai-dynamo",
-            "   └─ Framework components",
-            max_width,
-            site_packages,
-            collect_failures=True,
-            package_info=framework_package_info,
-            sub_indent="      ",
-        )
-        results.update(framework_results)
-
-        # Cargo information is printed under System info
-
-        # Show PYTHONPATH recommendation if any framework components failed (moved to end)
-        if framework_failures and self.workspace_dir:
-            pythonpath = self._get_pythonpath()
-            if pythonpath:
-                # Apply $HOME replacement to PYTHONPATH for consistency
-                display_pythonpath = self._replace_home_with_var(pythonpath)
-                self._show_build_options(display_pythonpath)
-
-        # Exit with non-zero status if any errors detected
-        # Treat Python or Cargo failures from system info, and invalid path, as failures.
-        any_failures = (
-            system_errors
-            or any(msg.startswith("❌ Error:") for msg in self._deferred_messages)
-            or bool(framework_failures)
-        )
-        # Store whether errors occurred for overall run
-        self.results["had_errors"] = any_failures
-
-        return results
-
-    def _show_build_options(self, display_pythonpath: Optional[str] = None) -> None:
-        """Show usage/build guidance including PYTHONPATH export.
-
-        Args:
-            display_pythonpath: Optional precomputed PYTHONPATH string with $HOME replacement
-        """
-        # Compute display_pythonpath if not provided
-        if not display_pythonpath:
-            if self.workspace_dir:
-                pythonpath = self._get_pythonpath()
-                display_pythonpath = (
-                    self._replace_home_with_var(pythonpath)
-                    if pythonpath
-                    else "$HOME/dynamo/components/*/src"
-                )
-            else:
-                display_pythonpath = "$HOME/dynamo/components/*/src"
-
-        # Single source of truth for the export command
-        print(
-            f'\nSet PYTHONPATH for development:\nexport PYTHONPATH="{display_pythonpath}"\n'
-        )
-
-    # ====================================================================
-    # USAGE EXAMPLES AND GUIDANCE
-    # ====================================================================
-
-    def _get_pythonpath(self) -> str:
-        """Generate PYTHONPATH recommendation string.
-
-        Returns:
-            Colon-separated string of component source paths
-            Example: '/home/ubuntu/dynamo/components/frontend/src:/home/ubuntu/dynamo/components/planner/src:/home/ubuntu/dynamo/components/backends/vllm/src'
-
-        Note: Scans workspace for all component src directories and joins them for PYTHONPATH usage.
-        """
-        paths = []
-        if not self.workspace_dir:
-            return ""
-
-        # Collect all component source paths
-        comp_path = f"{self.workspace_dir}/components"
-        if os.path.exists(comp_path):
-            for item in os.listdir(comp_path):
-                src_path = f"{comp_path}/{item}/src"
-                if os.path.exists(src_path):
-                    paths.append(src_path)
-
-        # Collect all backend source paths
-        backend_path = f"{self.workspace_dir}/components/backends"
-        if os.path.exists(backend_path):
-            for item in os.listdir(backend_path):
-                src_path = f"{backend_path}/{item}/src"
-                if os.path.exists(src_path):
-                    paths.append(src_path)
-
-        return ":".join(paths)
-
-    # ====================================================================
-    # MAIN ORCHESTRATION
-    # ====================================================================
-
-    def run_all(self):
-        """Run comprehensive check with all functionality.
-
-        Performs complete dynamo package validation including:
-        - Component discovery and import testing
-        - Usage examples and troubleshooting guidance
-        - Summary of results
-
-        Console output: terse, tree-formatted sections
-        """
-        # Terse mode: no banner or separators
-
-        # Execute all checks (package versions now shown in import testing headers)
-        self.results["imports"] = self.test_imports()
-
-        # Check if there were any import failures
-        import_results = self.results.get("imports", {})
-        has_failures = any(result.startswith("❌") for result in import_results.values())
-
-        # Provide guidance (show only if all checks succeed and no errors flagged)
-        had_errors_flag = bool(self.results.get("had_errors"))
-        if not has_failures and not had_errors_flag:
-            self._show_build_options()
-        # If any errors found, exit with status 1
-        had_errors = bool(self.results.get("had_errors"))
-        if had_errors:
-            sys.exit(1)
-
-
-def main() -> None:
-    """Main function with command line argument parsing."""
-    parser = argparse.ArgumentParser(description="Comprehensive dynamo package checker")
-    parser.add_argument(
-        "--import-check-only", action="store_true", help="Only test imports"
-    )
-    parser.add_argument("--examples", action="store_true", help="Only show examples")
-    parser.add_argument(
-        "--build-options",
-        action="store_true",
-        help="Show build options for missing framework components",
-    )
-    parser.add_argument(
-        "--try-pythonpath",
-        action="store_true",
-        help="Test imports with workspace component source directories in sys.path",
-    )
-    parser.add_argument(
-        "--path",
-        type=str,
-        default=None,
-        help="Explicit path to dynamo workspace; if set, bypass workspace auto-discovery",
-    )
-
-    args = parser.parse_args()
-    checker = DynamoChecker(workspace_dir=args.path)
-    # If --path is provided, validate it; do not exit early, but record error to display and for exit code
-    if args.path:
-        abs_path = os.path.abspath(args.path)
-        if (not os.path.exists(abs_path)) or (
-            not checker._is_dynamo_workspace(abs_path)
-        ):
-            checker._deferred_messages.append(
-                f"❌ Error: invalid workspace path: {abs_path}"
+            # Get short SHA
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=workspace_dir,
+                timeout=5,
             )
+            sha = result.stdout.strip() if result.returncode == 0 else None
 
-    # Set up sys.path if requested
-    if args.try_pythonpath:
-        checker._setup_pythonpath()
+            # Get commit date
+            result = subprocess.run(
+                ["git", "show", "-s", "--format=%ci", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=workspace_dir,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Convert to PDT format
+                date_str = result.stdout.strip()
+                # Parse and format as PDT
+                try:
+                    # Parse the git date (format: 2025-08-30 23:22:29 +0000)
+                    import datetime as dt_module
 
-    if args.import_check_only:
-        checker.test_imports()
-        # Exit code handled inside run; reflect errors if set
-        had_errors = bool(checker.results.get("had_errors"))
-        if had_errors:
-            sys.exit(1)
-        # If examples are also requested and imports succeeded, show them
-        if args.examples:
-            checker._show_build_options()
-        # If build options are also requested, show them
-        if args.build_options:
-            if checker.workspace_dir:
-                pythonpath = checker._get_pythonpath()
-                if pythonpath:
-                    display_pythonpath = checker._replace_home_with_var(pythonpath)
-                    checker._show_build_options(display_pythonpath)
-                else:
-                    print("❌ Error: Could not determine PYTHONPATH for build options")
+                    # Split off timezone info
+                    date_part = date_str.rsplit(" ", 1)[0]
+                    dt = dt_module.datetime.strptime(date_part, "%Y-%m-%d %H:%M:%S")
+                    # Convert to PDT (UTC-7)
+                    dt_pdt = dt - dt_module.timedelta(hours=7)
+                    date = dt_pdt.strftime("%Y-%m-%d %H:%M:%S PDT")
+                except Exception:
+                    date = date_str
             else:
-                print("❌ Error: No dynamo workspace found for build options")
-    elif args.build_options:
-        # Show build options directly
-        if checker.workspace_dir:
-            pythonpath = checker._get_pythonpath()
-            if pythonpath:
-                display_pythonpath = checker._replace_home_with_var(pythonpath)
-                checker._show_build_options(display_pythonpath)
-            else:
-                print("❌ Error: Could not determine PYTHONPATH for build options")
-        else:
-            print("❌ Error: No dynamo workspace found for build options")
-    elif args.examples:
-        # Only show examples, no system info or environment header
-        checker._show_build_options()
+                date = None
+
+            return sha, date
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def find_workspace() -> Optional[str]:
+        """Find dynamo workspace directory."""
+        candidates = []
+
+        # Check DYNAMO_HOME environment variable first
+        dynamo_home = os.environ.get("DYNAMO_HOME")
+        if dynamo_home:
+            candidates.append(dynamo_home)
+
+        # Then check common locations
+        candidates.extend(
+            [
+                ".",  # Current directory
+                os.path.expanduser("~/dynamo"),
+                "/workspace",
+            ]
+        )
+
+        for candidate in candidates:
+            if DynamoInfo.is_dynamo_workspace(candidate):
+                return os.path.abspath(candidate)
+        return None
+
+    @staticmethod
+    def is_dynamo_workspace(path: str) -> bool:
+        """Check if directory is a dynamo workspace."""
+        if not os.path.exists(path):
+            return False
+
+        # Check for indicators of a dynamo workspace
+        indicators = [
+            "README.md",
+            "components",
+            "lib/bindings/python",
+            "lib/runtime",
+            "Cargo.toml",
+        ]
+
+        # Require at least 3 indicators to be confident
+        found = 0
+        for indicator in indicators:
+            check_path = os.path.join(path, indicator)
+            if os.path.exists(check_path):
+                found += 1
+
+        return found >= 3
+
+
+def has_framework_errors(tree: NodeInfo) -> bool:
+    """Check if there are framework component errors in the tree"""
+    # Find the Dynamo node
+    for child in tree.children:
+        if child.label and "Dynamo" in child.label:
+            # Find the Framework components node
+            for dynamo_child in child.children:
+                if dynamo_child.label and "Framework components" in dynamo_child.label:
+                    # Use the has_errors() method to check the entire subtree
+                    return dynamo_child.has_errors()
+    return False
+
+
+def show_pythonpath_recommendation():
+    """Show PYTHONPATH recommendation for fixing import errors.
+
+    Generates and displays the recommended PYTHONPATH based on discovered
+    component source paths in the workspace.
+    """
+    paths = []
+
+    # Try to find workspace directory
+    workspace_dir = None
+    candidates = [
+        os.getcwd(),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.environ.get("DYNAMO_HOME", ""),
+        os.path.expanduser("~/dynamo"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(os.path.join(candidate, "lib/bindings/python/src/dynamo")):
+            workspace_dir = os.path.abspath(candidate)
+            break
+
+    if not workspace_dir:
+        return
+
+    # Collect all component source paths
+    comp_path = os.path.join(workspace_dir, "components")
+    if os.path.exists(comp_path):
+        for item in os.listdir(comp_path):
+            if item == "backends":
+                continue  # Handle backends separately
+            src_path = os.path.join(comp_path, item, "src")
+            if os.path.exists(src_path):
+                paths.append(src_path)
+
+    # Collect all backend source paths
+    backend_path = os.path.join(workspace_dir, "components", "backends")
+    if os.path.exists(backend_path):
+        for item in os.listdir(backend_path):
+            src_path = os.path.join(backend_path, item, "src")
+            if os.path.exists(src_path):
+                paths.append(src_path)
+
+    # Also add runtime path
+    runtime_path = os.path.join(workspace_dir, "lib/bindings/python/src")
+    if os.path.exists(runtime_path):
+        paths.insert(0, runtime_path)  # Add at beginning for priority
+
+    if paths:
+        pythonpath = ":".join(paths)
+        # Replace home directory with $HOME
+        home = os.path.expanduser("~")
+        if home in pythonpath:
+            pythonpath = pythonpath.replace(home, "$HOME")
+
+        print(f'\nSet PYTHONPATH for development:\nexport PYTHONPATH="{pythonpath}"\n')
+
+
+def main():
+    """Main function - collect and display system information"""
+    import argparse
+    import sys
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Display system information for Dynamo project"
+    )
+    parser.add_argument(
+        "-f",
+        "--fast",
+        action="store_true",
+        help="Skip size calculations for faster output",
+    )
+    args = parser.parse_args()
+
+    # Simply create a SystemInfo instance - it collects everything in its constructor
+    tree = SystemInfo(fast_mode=args.fast)
+    tree.print_tree()
+
+    # Check if there are framework component errors and show PYTHONPATH recommendation
+    if has_framework_errors(tree):
+        show_pythonpath_recommendation()
+
+    # Exit with non-zero status if there are any errors
+    if tree.has_errors():
+        sys.exit(1)
     else:
-        checker.run_all()
+        sys.exit(0)
 
 
 if __name__ == "__main__":

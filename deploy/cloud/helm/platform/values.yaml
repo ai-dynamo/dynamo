@@ -125,15 +125,15 @@ kai-scheduler:
 # etcd configuration - distributed key-value store for operator state
 # For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd
 etcd:
-  global:
-    security:
-      allowInsecureImages: true
 
   # -- Whether to enable etcd deployment, disable if you want to use an external etcd instance
   enabled: true
 
   image:
+    # -- following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog
+    # -- we need to use the legacy repository until we migrate to the new "secure" repository
     repository: bitnamilegacy/etcd
+    tag: 3.5.18-debian-12-r5
 
   # Persistent storage configuration for etcd data
   persistence:

@@ -6,7 +6,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use crate::{
     backend::Backend,
     engines::StreamingEngineAdapter,
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
     preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
         Annotated,
@@ -55,7 +55,9 @@ pub async fn run(
             >::for_engine(engine)?;
 
             if !is_static {
-                model.attach(&endpoint, ModelType::Chat).await?;
+                model
+                    .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                    .await?;
             }
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
@@ -83,8 +85,13 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                model.attach(&endpoint, ModelType::Backend).await?;
+                // Default to supporting both Chat and Completions endpoints
+                let model_type = ModelType::Chat | ModelType::Completions;
+                model
+                    .attach(&endpoint, model_type, ModelInput::Tokens)
+                    .await?;
             }
+
             let fut = endpoint.endpoint_builder().handler(ingress).start();
 
             (Box::pin(fut), Some(model.card().clone()))

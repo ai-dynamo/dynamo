@@ -89,6 +89,7 @@ xxhash-rust = { workspace = true }
 # model_express_common = { version = "0.1.0", optional = true }
 
 akin = "0.4.0"
+bitflags = { version = "2.4", features = ["serde"] }
 blake3 = "1"
 bytemuck = "1.22"
 candle-core = { version = "0.9.1" }

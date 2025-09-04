@@ -175,7 +175,7 @@ if __name__ == "__main__":
     parser.add_argument("--result-file", type=str, required=False)
     parser.add_argument("--number-of-subjects", type=int, required=True)
     parser.add_argument("--host", type=str, default="localhost", help="Dynamo host")
-    parser.add_argument("--port", type=int, default=8080, help="Dynamo port")
+    parser.add_argument("--port", type=int, default=8000, help="Dynamo port")
 
     args = parser.parse_args()
     if args.result_file is None:

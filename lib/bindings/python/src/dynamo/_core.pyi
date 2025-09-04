@@ -843,8 +843,12 @@ class HttpAsyncEngine:
 
     ...
 
+class ModelInput:
+    """What type of request this model needs: Text or Tokens"""
+    ...
+
 class ModelType:
-    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    """What type of request this model needs: Chat, Completions or Embedding"""
     ...
 
 class RouterMode:
@@ -859,7 +863,19 @@ class KvRouterConfig:
     """Values for KV router"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
+async def register_llm(
+    model_input: ModelInput,
+    model_type: ModelType,
+    endpoint: Endpoint,
+    model_path: str,
+    model_name: Optional[str] = None,
+    context_length: Optional[int] = None,
+    kv_cache_block_size: Optional[int] = None,
+    migration_limit: int = 0,
+    router_mode: Optional[RouterMode] = None,
+    user_data: Optional[Dict[str, Any]] = None,
+    custom_template_path: Optional[str] = None,
+) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 

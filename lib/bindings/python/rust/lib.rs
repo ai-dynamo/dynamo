@@ -109,6 +109,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<context::Context>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
+    m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;
     m.add_class::<llm::kv::WorkerStats>()?;
     m.add_class::<llm::kv::KvStats>()?;
@@ -141,10 +142,11 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
+    model_input: ModelInput,
     model_type: ModelType,
     endpoint: Endpoint,
     model_path: &str,
@@ -155,18 +157,32 @@ fn register_llm<'p>(
     migration_limit: u32,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
+    custom_template_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    let model_type_obj = match model_type {
-        ModelType::Chat => llm_rs::model_type::ModelType::Chat,
-        ModelType::Completion => llm_rs::model_type::ModelType::Completion,
-        ModelType::Backend => llm_rs::model_type::ModelType::Backend,
-        ModelType::Embedding => llm_rs::model_type::ModelType::Embedding,
+    let model_input = match model_input {
+        ModelInput::Text => llm_rs::model_type::ModelInput::Text,
+        ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
     };
+
+    let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
+
+    // Early validation of custom template path
+    let custom_template_path_owned = custom_template_path
+        .map(|s| {
+            let path = PathBuf::from(s);
+            if !path.exists() {
+                return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
+                    format!("Custom template file does not exist: {}", path.display()),
+                ));
+            }
+            Ok(path)
+        })
+        .transpose()?;
 
     let user_data_json = user_data
         .map(|dict| pythonize::depythonize(dict))
@@ -185,12 +201,13 @@ fn register_llm<'p>(
             .router_config(Some(router_config))
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
-            .user_data(user_data_json);
+            .user_data(user_data_json)
+            .custom_template_path(custom_template_path_owned);
         // Download from HF, load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
         local_model
-            .attach(&endpoint.inner, model_type_obj)
+            .attach(&endpoint.inner, model_type_obj, model_input)
             .await
             .map_err(to_pyerr)?;
 
@@ -257,14 +274,44 @@ struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
 }
 
+#[pyclass]
+#[derive(Clone, PartialEq)]
+struct ModelType {
+    inner: llm_rs::model_type::ModelType,
+}
+
+#[pymethods]
+#[allow(non_upper_case_globals)]
+impl ModelType {
+    #[classattr]
+    const Chat: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Chat,
+    };
+    #[classattr]
+    const Completions: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Completions,
+    };
+    #[classattr]
+    const Embedding: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Embedding,
+    };
+
+    fn __or__(&self, other: &Self) -> Self {
+        ModelType {
+            inner: self.inner | other.inner,
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+}
+
 #[pyclass(eq, eq_int)]
 #[derive(Clone, PartialEq)]
-#[repr(i32)]
-enum ModelType {
-    Chat = 1,
-    Completion = 2,
-    Backend = 3,
-    Embedding = 4,
+enum ModelInput {
+    Text = 1,
+    Tokens = 2,
 }
 
 #[pymethods]
