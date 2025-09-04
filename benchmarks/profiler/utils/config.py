@@ -15,7 +15,7 @@
 
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal, Optional, Protocol
 
 from pydantic import BaseModel
 
@@ -78,7 +78,7 @@ class Config(BaseModel):
 
 
 def break_arguments(args: list[str] | None) -> list[str]:
-    ans = []
+    ans: list[str] = []
     if args is None:
         return ans
     if isinstance(args, str):
@@ -132,6 +132,28 @@ def find_arg_index(args: list[str]) -> int:
     return idx
 
 
+class ConfigModifierProtocol(Protocol):
+    @classmethod
+    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
+        ...
+
+    @classmethod
+    def set_config_tp_size(cls, config: dict, tp_size: int) -> dict:
+        ...
+
+    @classmethod
+    def get_model_name(cls, config: dict) -> str:
+        ...
+
+    @classmethod
+    def get_port(cls, config: dict) -> int:
+        ...
+
+    @classmethod
+    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+        ...
+
+
 class VllmV1ConfigModifier:
     @classmethod
     def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
@@ -155,9 +177,17 @@ class VllmV1ConfigModifier:
                 WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
             ]
 
-            args = cfg.spec.services[
+            worker_service = cfg.spec.services[
                 WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args
+            ]
+            if (
+                not worker_service.extraPodSpec
+                or not worker_service.extraPodSpec.mainContainer
+            ):
+                raise ValueError(
+                    "Missing extraPodSpec or mainContainer in worker service"
+                )
+            args = worker_service.extraPodSpec.mainContainer.args
 
             args = break_arguments(args)
 
@@ -170,9 +200,7 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" not in args:
                 args = append_argument(args, "--no-enable-prefix-caching")
 
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         elif target == "decode":
             # delete prefill worker
@@ -180,9 +208,17 @@ class VllmV1ConfigModifier:
                 WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
             ]
 
-            args = cfg.spec.services[
+            worker_service = cfg.spec.services[
                 WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args
+            ]
+            if (
+                not worker_service.extraPodSpec
+                or not worker_service.extraPodSpec.mainContainer
+            ):
+                raise ValueError(
+                    "Missing extraPodSpec or mainContainer in worker service"
+                )
+            args = worker_service.extraPodSpec.mainContainer.args
 
             args = break_arguments(args)
 
@@ -192,9 +228,7 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" in args:
                 args.remove("--no-enable-prefix-caching")
 
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         # set num workers to 1
         decode_worker_config = cfg.spec.services[
@@ -226,9 +260,12 @@ class VllmV1ConfigModifier:
         if worker_service.resources.limits is not None:
             worker_service.resources.limits["gpu"] = str(tp_size)
 
-        args = cfg.spec.services[
-            WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-        ].extraPodSpec.mainContainer.args
+        if (
+            not worker_service.extraPodSpec
+            or not worker_service.extraPodSpec.mainContainer
+        ):
+            raise ValueError("Missing extraPodSpec or mainContainer in worker service")
+        args = worker_service.extraPodSpec.mainContainer.args
 
         args = break_arguments(args)
 
@@ -238,9 +275,7 @@ class VllmV1ConfigModifier:
         except ValueError:
             args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
 
-        cfg.spec.services[
-            WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-        ].extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         return cfg.model_dump()
 
@@ -248,7 +283,16 @@ class VllmV1ConfigModifier:
     def get_model_name(cls, config: dict) -> str:
         cfg = Config.model_validate(config)
         worker_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-        args = cfg.spec.services[worker_name].extraPodSpec.mainContainer.args
+        worker_service = cfg.spec.services[worker_name]
+        if (
+            not worker_service.extraPodSpec
+            or not worker_service.extraPodSpec.mainContainer
+        ):
+            logger.warning(
+                f"Worker service missing extraPodSpec or mainContainer, using default model name: {DEFAULT_MODEL_NAME}"
+            )
+            return DEFAULT_MODEL_NAME
+        args = worker_service.extraPodSpec.mainContainer.args
 
         args = break_arguments(args)
         for i, arg in enumerate(args):
@@ -338,9 +382,17 @@ class SGLangConfigModifier:
                 WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
             ]
 
-            args = cfg.spec.services[
+            worker_service = cfg.spec.services[
                 WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args
+            ]
+            if (
+                not worker_service.extraPodSpec
+                or not worker_service.extraPodSpec.mainContainer
+            ):
+                raise ValueError(
+                    "Missing extraPodSpec or mainContainer in worker service"
+                )
+            args = worker_service.extraPodSpec.mainContainer.args
 
             args = break_arguments(args)
 
@@ -352,9 +404,7 @@ class SGLangConfigModifier:
             if "--disable-radix-cache" not in args:
                 args = append_argument(args, "--disable-radix-cache")
 
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         elif target == "decode":
             # delete prefill worker
@@ -362,9 +412,17 @@ class SGLangConfigModifier:
                 WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
             ]
 
-            args = cfg.spec.services[
+            worker_service = cfg.spec.services[
                 WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args
+            ]
+            if (
+                not worker_service.extraPodSpec
+                or not worker_service.extraPodSpec.mainContainer
+            ):
+                raise ValueError(
+                    "Missing extraPodSpec or mainContainer in worker service"
+                )
+            args = worker_service.extraPodSpec.mainContainer.args
 
             args = break_arguments(args)
 
@@ -376,9 +434,7 @@ class SGLangConfigModifier:
             if "--disable-radix-cache" in args:
                 args.remove("--disable-radix-cache")
 
-            cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-            ].extraPodSpec.mainContainer.args = join_arguments(args)
+            worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         # set num workers to 1
         decode_worker_config = config["spec"]["services"][
@@ -410,9 +466,12 @@ class SGLangConfigModifier:
         if worker_service.resources.limits is not None:
             worker_service.resources.limits["gpu"] = str(tp_size)
 
-        args = cfg.spec.services[
-            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-        ].extraPodSpec.mainContainer.args
+        if (
+            not worker_service.extraPodSpec
+            or not worker_service.extraPodSpec.mainContainer
+        ):
+            raise ValueError("Missing extraPodSpec or mainContainer in worker service")
+        args = worker_service.extraPodSpec.mainContainer.args
 
         args = break_arguments(args)
 
@@ -422,9 +481,7 @@ class SGLangConfigModifier:
         except ValueError:
             args = append_argument(args, ["--tp", str(tp_size)])
 
-        cfg.spec.services[
-            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-        ].extraPodSpec.mainContainer.args = join_arguments(args)
+        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         return cfg.model_dump()
 
@@ -432,7 +489,16 @@ class SGLangConfigModifier:
     def get_model_name(cls, config: dict) -> str:
         cfg = Config.model_validate(config)
         worker_name = WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-        args = cfg.spec.services[worker_name].extraPodSpec.mainContainer.args
+        worker_service = cfg.spec.services[worker_name]
+        if (
+            not worker_service.extraPodSpec
+            or not worker_service.extraPodSpec.mainContainer
+        ):
+            logger.warning(
+                f"Worker service missing extraPodSpec or mainContainer, using default model name: {DEFAULT_MODEL_NAME}"
+            )
+            return DEFAULT_MODEL_NAME
+        args = worker_service.extraPodSpec.mainContainer.args
 
         args = break_arguments(args)
         for i, arg in enumerate(args):
@@ -491,7 +557,10 @@ class SGLangConfigModifier:
         return 0
 
 
-CONFIG_MODIFIERS = {
+CONFIG_MODIFIERS: dict[str, type[ConfigModifierProtocol]] = {
     "vllm": VllmV1ConfigModifier,
     "sglang": SGLangConfigModifier,
 }
+
+# Re-export WORKER_COMPONENT_NAMES for profile_sla.py
+__all__ = ["CONFIG_MODIFIERS", "WORKER_COMPONENT_NAMES"]
