@@ -251,12 +251,21 @@ pub mod v2 {
             let ctx_clone = ctx.clone();
 
             // Both contexts should work independently
-            let event1 = ctx.record_event().expect("Failed to record event on original");
-            let event2 = ctx_clone.record_event().expect("Failed to record event on clone");
+            let event1 = ctx
+                .record_event()
+                .expect("Failed to record event on original");
+            let event2 = ctx_clone
+                .record_event()
+                .expect("Failed to record event on clone");
 
             // Both should synchronize successfully
-            event1.synchronize_blocking().expect("Original context sync failed");
-            event2.synchronize().await.expect("Cloned context sync failed");
+            event1
+                .synchronize_blocking()
+                .expect("Original context sync failed");
+            event2
+                .synchronize()
+                .await
+                .expect("Cloned context sync failed");
         }
 
         #[tokio::test]
@@ -268,9 +277,12 @@ pub mod v2 {
             for i in 0..5 {
                 let ctx_clone = ctx.clone();
                 tracker.spawn(async move {
-                    let event = ctx_clone.record_event()
+                    let event = ctx_clone
+                        .record_event()
                         .expect(&format!("Failed to record event {}", i));
-                    event.synchronize().await
+                    event
+                        .synchronize()
+                        .await
                         .expect(&format!("Failed to sync event {}", i));
                 });
             }
@@ -292,8 +304,11 @@ pub mod v2 {
 
             let duration = start.elapsed();
             // Should complete 10 synchronizations in reasonable time (< 1ms total)
-            assert!(duration < std::time::Duration::from_millis(1),
-                   "Performance regression: took {:?} for 10 syncs", duration);
+            assert!(
+                duration < std::time::Duration::from_millis(1),
+                "Performance regression: took {:?} for 10 syncs",
+                duration
+            );
         }
 
         #[tokio::test]
@@ -310,8 +325,8 @@ pub mod v2 {
             // In normal conditions this should succeed, but if it fails,
             // it should return a TransferError
             match result {
-                Ok(_) => {}, // Expected in normal conditions
-                Err(TransferError::ExecutionError(_)) => {}, // Expected error type
+                Ok(_) => {}                                 // Expected in normal conditions
+                Err(TransferError::ExecutionError(_)) => {} // Expected error type
                 Err(other) => panic!("Unexpected error type: {:?}", other),
             }
         }
@@ -328,8 +343,13 @@ pub mod v2 {
             }
 
             // Context should still work after dropping unused events
-            let event = ctx.record_event().expect("Failed to record event after cleanup");
-            event.synchronize().await.expect("Sync after cleanup failed");
+            let event = ctx
+                .record_event()
+                .expect("Failed to record event after cleanup");
+            event
+                .synchronize()
+                .await
+                .expect("Sync after cleanup failed");
         }
     }
 }
