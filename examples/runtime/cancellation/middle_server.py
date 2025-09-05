@@ -32,6 +32,8 @@ class MiddleServer:
         """Forward request to backend using round_robin and pass context"""
         print("Middle server: Received request, forwarding to backend")
 
+        assert self.backend_client is not None, "Did you call initialize()?"
+
         # Forward request to backend using round_robin with the same context
         # This passes the cancellation context through to the backend
         stream = await self.backend_client.generate(request, context=context)
