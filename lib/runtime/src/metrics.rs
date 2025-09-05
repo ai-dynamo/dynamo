@@ -880,7 +880,7 @@ mod test_metricsregistry_prefixes {
         assert_eq!(endpoint.parent_hierarchy().len(), 3);
 
         // Invalid namespace behavior - sanitizes to "_123" and succeeds
-        // Ryan Olson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
+        // @ryanolson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
         // so invalid characters are sanitized in MetricsRegistry rather than rejected.
         let invalid_namespace = drt.namespace("@@123").unwrap();
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
