@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: gpu-l40-runners
+    runs-on: gpu-l40-amd64
     strategy:
       matrix:
         framework: [vllm]
@@ -45,16 +45,13 @@ jobs:
         if: always()
         run: |
           docker system prune -af
-      - name: Debug
-        run: |
-          lsmod | grep nvidia
-          sudo dmesg | grep -i nvrm || true
-          nvidia-smi
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           ./container/build.sh --tag ${{ matrix.framework }}:latest \
             --target ${{ matrix.target }} \
@@ -64,7 +61,8 @@ jobs:
             --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
         run: |
-          docker run --rm --gpus all -w /workspace \
+          docker run --runtime=nvidia --rm --gpus all -w /workspace \
+            --network host \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ matrix.framework }}:latest \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
