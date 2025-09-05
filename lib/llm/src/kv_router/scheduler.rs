@@ -107,8 +107,8 @@ impl KvScheduler {
             for instance in &instances {
                 let worker_id = instance.instance_id;
                 let config = runtime_configs.get(&worker_id).cloned();
-                if config.is_none() {
-                    tracing::warn!("Runtime config not found for worker_id: {}", worker_id);
+                if config.is_some() {
+                    tracing::info!("Runtime config found for worker_id: {}", worker_id);
                 }
                 initial_map.insert(worker_id, config);
             }
@@ -193,8 +193,8 @@ impl KvScheduler {
                 for instance in &new_instances {
                     let worker_id = instance.instance_id;
                     let config = new_configs.get(&worker_id).cloned();
-                    if config.is_none() {
-                        tracing::warn!("Runtime config not found for worker_id: {}", worker_id);
+                    if config.is_some() {
+                        tracing::info!("Runtime config found for worker_id: {}", worker_id);
                     }
                     workers_map.insert(worker_id, config);
                 }
