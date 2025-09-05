@@ -62,13 +62,13 @@ python3 summarize_scores_dynamo.py
 
 ### Baseline Architecture (deploy-baseline-dynamo.sh)
 ```
-HTTP Request → Dynamo Ingress(8080) → Dynamo Worker → Direct Inference
+HTTP Request → Dynamo Ingress(8000) → Dynamo Worker → Direct Inference
 Environment: ENABLE_LMCACHE=0
 ```
 
 ### LMCache Architecture (deploy-lmcache_enabled-dynamo.sh)
 ```
-HTTP Request → Dynamo Ingress(8080) → Dynamo Worker → LMCache-enabled Inference
+HTTP Request → Dynamo Ingress(8000) → Dynamo Worker → LMCache-enabled Inference
 Environment: ENABLE_LMCACHE=1
             LMCACHE_CHUNK_SIZE=256
             LMCACHE_LOCAL_CPU=True
@@ -80,7 +80,7 @@ Environment: ENABLE_LMCACHE=1
 Test scripts use Dynamo's Chat Completions API:
 
 ```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": Qwen/Qwen3-0.6B,
