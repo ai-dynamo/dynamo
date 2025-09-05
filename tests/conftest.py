@@ -22,7 +22,6 @@ import pytest
 
 from tests.utils.managed_process import ManagedProcess
 
-# Custom format inspired by your example
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
