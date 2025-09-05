@@ -706,7 +706,7 @@ async fn chat_completions(
         // NEW: emit JSONL once for non-streaming + store=true, but only if env is on
         if let Some(req_copy) = request_for_audit {
             let resp_json = serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
-            audit::log_stored_completion(&request_id, &req_copy, resp_json);
+            audit::log_stored_completion("/v1/chat/completions", &request_id, &req_copy, resp_json);
         }
 
         inflight_guard.mark_ok();
