@@ -21,6 +21,9 @@ trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true
 
+moe_config:
+  backend: TRITON
+
 kv_cache_config:
   free_gpu_memory_fraction: 0.85
 

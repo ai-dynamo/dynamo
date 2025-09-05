@@ -251,6 +251,10 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.tool_call_parser = config.tool_call_parser
         runtime_config.reasoning_parser = config.reasoning_parser
 
+        print("--------------------------------")
+        print(runtime_config)
+        print("--------------------------------")
+
         await register_llm(
             ModelInput.Tokens,
             ModelType.Chat | ModelType.Completions,

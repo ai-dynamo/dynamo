@@ -505,6 +505,26 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::chat_template_from_repo(repo_id)?
         };
 
+        let gen_config = GenerationConfig::from_repo(repo_id).ok();
+
+        // Debug breakpoint
+        #[cfg(debug_assertions)]
+        {
+            println!("=== DEBUG BREAKPOINT ===");
+            println!("repo_id: {}", repo_id);
+            println!("gen_config: {:?}", gen_config);
+        }
+
+        if let Some(ref config) = gen_config {
+            println!("Generation config loaded: {:?}", config);
+            // Also print the actual content of the generation_config.json file
+            if let Ok(contents) =
+                std::fs::read_to_string(format!("{}/generation_config.json", repo_id))
+            {
+                println!("Generation config content: {}", contents);
+            }
+        }
+
         Ok(Self {
             display_name: model_name.to_string(),
             slug: Slug::from_string(model_name),
@@ -899,6 +919,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::HFConfig;
+    use super::ModelDeploymentCard;
     use std::path::Path;
 
     #[test]
@@ -916,6 +937,18 @@ mod tests {
             .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
         let config = HFConfig::from_json_file(&config_file.display().to_string())?;
         assert_eq!(config.bos_token_id(), 200000);
+        Ok(())
+    }
+
+    #[tokio::test]
+    pub async fn test_generation_config_print() -> anyhow::Result<()> {
+        let repo_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let card =
+            ModelDeploymentCard::from_repo(&repo_path.display().to_string(), "test-model", None)
+                .await?;
+        // The print statement should have been executed during card creation
+        assert!(card.gen_config.is_some());
         Ok(())
     }
 }

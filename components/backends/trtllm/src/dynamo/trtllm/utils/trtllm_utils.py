@@ -56,6 +56,8 @@ class Config:
         self.reasoning_parser: Optional[str] = None
         self.tool_call_parser: Optional[str] = None
 
+        self.response_style: Optional[str] = None
+
     def __str__(self) -> str:
         return (
             f"Config(namespace={self.namespace}, "
@@ -85,6 +87,9 @@ class Config:
             f"max_file_size_mb={self.max_file_size_mb}, "
             f"reasoning_parser={self.reasoning_parser}, "
             f"tool_call_parser={self.tool_call_parser}"
+            f"modality={self.modality}, "
+            f"response_style={self.response_style})"
+            f"tool_call_parser={self.tool_call_parser})"
         )
 
 
@@ -285,6 +290,12 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model.",
     )
+    parser.add_argument(
+        "--response_style",
+        type=str,
+        default="harmony",
+        help="Response style to use for the model. Available options: 'harmony'.",
+    )
 
     args = parser.parse_args()
 
@@ -354,5 +365,7 @@ def cmd_line_args():
 
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
+    config.response_style = args.response_style
 
     return config
+

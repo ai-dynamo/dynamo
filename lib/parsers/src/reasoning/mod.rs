@@ -111,6 +111,8 @@ impl ReasoningParser for ReasoningParserWrapper {
 
 impl ReasoningParserType {
     pub fn get_reasoning_parser(self) -> ReasoningParserWrapper {
+        eprintln!("Successfully created GptOssReasoningParser [++---++++]");
+
         let basic_parser =
             BasicReasoningParser::new("<think>".into(), "</think>".into(), false, true);
         let force_reasoning_basic_parser =
@@ -148,9 +150,13 @@ impl ReasoningParserType {
                 )),
             },
             ReasoningParserType::GptOss => match GptOssReasoningParser::new() {
-                Ok(parser) => ReasoningParserWrapper {
-                    parser: Box::new(parser),
-                },
+
+                Ok(parser) => {
+                    eprintln!("Successfully created GptOssReasoningParser [++++++]");
+                    ReasoningParserWrapper {
+                        parser: Box::new(parser),
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(
                         "GptOssReasoningParser could not be initialized, falling back to Basic Reasoning Parser: {e}"
@@ -181,7 +187,7 @@ impl ReasoningParserType {
                     parser_name = name,
                     "Unknown reasoning parser type, falling back to Basic Reasoning Parser",
                 );
-                Self::Basic.get_reasoning_parser()
+                Self::GptOss.get_reasoning_parser()
             }
         }
     }

@@ -100,6 +100,26 @@ impl DeltaGenerator {
         // TODO: Make parser type configurable once front-end integration is determined
         // Change to GptOss to test GptOSS parser
         // Reasoning parser wrapper
+
+        // Debug: Print options information
+        eprintln!("=====================================");
+        eprintln!("=== DEBUG: DeltaGenerator Options ===");
+        eprintln!("enable_usage: {:?}", options.enable_usage);
+        eprintln!("enable_logprobs: {:?}", options.enable_logprobs);
+        eprintln!(
+            "reasoning_parser: {:?}",
+            options.runtime_config.reasoning_parser
+        );
+        eprintln!(
+            "tool_call_parser: {:?}",
+            options.runtime_config.tool_call_parser
+        );
+        eprintln!(
+            "runtime_data size: {}",
+            options.runtime_config.runtime_data.len()
+        );
+        eprintln!("=====================================");
+
         let reasoning_parser = ReasoningParserType::get_reasoning_parser_from_name(
             options
                 .runtime_config
@@ -109,6 +129,10 @@ impl DeltaGenerator {
         );
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
+        eprintln!("chatcmpl_id: {:?}", chatcmpl_id);
+        eprintln!("reasoning_parser: {:?}", reasoning_parser);
+        eprintln!("reasoning_parser: {:?}", options.runtime_config.reasoning_parser);
+        eprintln!("options: {:?}", options);
 
         Self {
             id: chatcmpl_id,
