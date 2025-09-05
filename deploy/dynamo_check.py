@@ -163,7 +163,7 @@ class NodeInfo:
 
         # Add label and value
         if self.desc:
-            line_parts.append(f"{self.label} {self.desc}")
+            line_parts.append(f"{self.label}: {self.desc}")
         else:
             line_parts.append(self.label)
 
@@ -291,6 +291,9 @@ class SystemInfo(NodeInfo):
         # Always add GPU info so we can see errors like "nvidia-smi not found"
         self.add_child(gpu_info)
 
+        # Add user info
+        self.add_child(UserInfo())
+
         # Add file permissions check
         self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
 
@@ -341,6 +344,35 @@ class SystemInfo(NodeInfo):
         # Also suppress the defaults._get_default_prometheus_endpoint logger
         defaults_logger = logging.getLogger("defaults._get_default_prometheus_endpoint")
         defaults_logger.setLevel(logging.ERROR)
+
+
+class UserInfo(NodeInfo):
+    """User information"""
+
+    def __init__(self):
+        # Get user info
+        username = os.getenv("USER") or os.getenv("LOGNAME") or "unknown"
+        if username == "unknown":
+            try:
+                import pwd
+
+                username = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                try:
+                    import subprocess
+
+                    result = subprocess.run(
+                        ["whoami"], capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        username = result.stdout.strip()
+                except Exception:
+                    pass
+        uid = os.getuid()
+        gid = os.getgid()
+
+        desc = f"user={username}, uid={uid}, gid={gid}"
+        super().__init__(label="User info", desc=desc, status=NodeStatus.INFO)
 
 
 class OSInfo(NodeInfo):
@@ -717,10 +749,34 @@ class FilePermissionsInfo(NodeInfo):
 
             if not recursive:
                 # Just check directory writability
+                # Check if running as root but directory is not owned by root
+                is_root = os.getuid() == 0
+                is_root_owned = False
+                warning_symbol = ""
+                desc_text = "writable"
+                owner_name = None
+
+                if is_root:
+                    try:
+                        stat_info = os.stat(selected_path)
+                        is_root_owned = stat_info.st_uid == 0
+                        if not is_root_owned:
+                            warning_symbol = " ⚠️"
+                            # Get the owner name
+                            try:
+                                import pwd
+
+                                owner_name = pwd.getpwuid(stat_info.st_uid).pw_name
+                            except Exception:
+                                owner_name = f"uid={stat_info.st_uid}"
+                        desc_text = f"writable (owned by {owner_name or 'root'})"
+                    except Exception:
+                        desc_text = "writable (owned by unknown)"
+
                 results.append(
                     NodeInfo(
-                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
-                        desc="writable",
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)}){warning_symbol}",
+                        desc=desc_text,
                         status=NodeStatus.OK,
                     )
                 )
@@ -739,9 +795,41 @@ class FilePermissionsInfo(NodeInfo):
                     total_files, non_writable_files, "files"
                 )
 
+                # Check if running as root but directory is not owned by root
+                is_root = os.getuid() == 0
+                is_root_owned = False
+                warning_symbol = ""
+                owner_name = None
+
+                if is_root:
+                    try:
+                        stat_info = os.stat(selected_path)
+                        is_root_owned = stat_info.st_uid == 0
+                        if not is_root_owned:
+                            warning_symbol = " ⚠️"
+                            # Get the owner name
+                            try:
+                                import pwd
+
+                                owner_name = pwd.getpwuid(stat_info.st_uid).pw_name
+                            except Exception:
+                                owner_name = f"uid={stat_info.st_uid}"
+                        # Modify description to indicate ownership
+                        if "writable" in desc:
+                            desc = desc.replace(
+                                "writable",
+                                f"writable (owned by {owner_name or 'root'})",
+                            )
+                    except Exception:
+                        # Modify description to indicate ownership
+                        if "writable" in desc:
+                            desc = desc.replace(
+                                "writable", "writable (owned by unknown)"
+                            )
+
                 results.append(
                     NodeInfo(
-                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)}){warning_symbol}",
                         desc=desc,
                         status=status,
                     )
