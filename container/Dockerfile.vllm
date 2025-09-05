@@ -365,6 +365,14 @@ RUN apt-get update -y && \
     protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 
+
+ARG ARCH
+RUN wget -qO - https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub | gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-get update && \
+    apt-get install -y nsight-systems-2025.5.1 && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=runtime /usr/local/bin /usr/local/bin
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
