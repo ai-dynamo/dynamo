@@ -28,7 +28,7 @@ pub struct Migration {
 }
 
 impl Migration {
-    pub fn from_mdc(mdc: ModelDeploymentCard) -> Arc<Self> {
+    pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
         tracing::debug!(
             "model {} migration limit {}",
             mdc.display_name,
