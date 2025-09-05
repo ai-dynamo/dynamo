@@ -176,13 +176,13 @@ impl ModelWatcher {
                 }
                 WatchEvent::Delete(kv) => match self.handle_delete(&kv).await {
                     Ok(Some(model_name)) => {
-                        tracing::info!("removed model {}", model_name);
+                        tracing::info!(model_name, "removed model");
                     }
                     Ok(None) => {
                         // There are other instances running this model, nothing to do
                     }
                     Err(e) => {
-                        tracing::error!("error removing model: {}", e);
+                        tracing::error!(error = %e, "error removing model");
                     }
                 },
             }
@@ -271,7 +271,7 @@ impl ModelWatcher {
                 Some(card)
             }
             Err(err) => {
-                tracing::info!(%err, "load_mdc did not complete");
+                tracing::info!(error = %err, "load_mdc did not complete");
                 None
             }
         };
@@ -308,6 +308,9 @@ impl ModelWatcher {
                 None
             };
 
+            // This is expensive, we are loading ~10MiB JSON, so only do it once
+            let tokenizer_hf = card.tokenizer_hf()?;
+
             // Add chat engine only if the model supports chat
             if model_entry.model_type.supports_chat() {
                 let chat_engine = entrypoint::build_routed_pipeline::<
@@ -319,18 +322,23 @@ impl ModelWatcher {
                     self.router_mode,
                     self.busy_threshold,
                     kv_chooser.clone(),
+                    tokenizer_hf.clone(),
                 )
                 .await?;
                 self.manager
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                tracing::info!("Chat completions is ready");
             }
 
             // Add completions engine only if the model supports completions
             if model_entry.model_type.supports_completions() {
                 let formatter = PromptFormatter::no_op();
                 let PromptFormatter::OAI(formatter) = formatter;
-                let preprocessor =
-                    OpenAIPreprocessor::new_with_formatter(card.clone(), formatter).await?;
+                let preprocessor = OpenAIPreprocessor::new_with_parts(
+                    card.clone(),
+                    formatter,
+                    tokenizer_hf.clone(),
+                )?;
                 let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
@@ -341,10 +349,12 @@ impl ModelWatcher {
                     self.busy_threshold,
                     kv_chooser,
                     preprocessor,
+                    tokenizer_hf,
                 )
                 .await?;
                 self.manager
                     .add_completions_model(&model_entry.name, completions_engine)?;
+                tracing::info!("Completions is ready");
             }
         } else if model_entry.model_input == ModelInput::Text
             && model_entry.model_type.supports_chat()
@@ -391,8 +401,8 @@ impl ModelWatcher {
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
             >::new();
 
-            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+            let preprocessor = OpenAIPreprocessor::new(card.clone())?.into_operator();
+            let backend = Backend::from_mdc(&card).into_operator();
 
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,

@@ -34,6 +34,14 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `TRTLLMDecodeWorker`: Specialized decode-only worker
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
 
+### 5. **Aggregated Deployment with Config** (`agg-with-config.yaml`)
+Aggregated deployment with custom configuration.
+
+**Architecture:**
+- `nvidia-config`: ConfigMap containing a custom trtllm configuration
+- `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `TRTLLMWorker`: Single worker handling both prefill and decode with custom configuration mounted from the configmap
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:

@@ -14,12 +14,12 @@ The Dynamo KV Router intelligently routes requests by evaluating their computati
 To launch the Dynamo frontend with the KV Router:
 
 ```bash
-python -m dynamo.frontend --router-mode kv --http-port 8080
+python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
 This command:
 - Launches the Dynamo frontend service with KV routing enabled
-- Exposes the service on port 8080 (configurable)
+- Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
 Backend workers register themselves using the `register_llm` API, after which the KV Router automatically:

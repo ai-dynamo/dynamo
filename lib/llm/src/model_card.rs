@@ -372,19 +372,19 @@ impl ModelDeploymentCard {
     /// - a folder containing config.json, tokenizer.json and token_config.json
     /// - a GGUF file
     ///   With an optional custom template
-    pub async fn load(
+    pub fn load(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<ModelDeploymentCard> {
         let config_path = config_path.as_ref();
         if config_path.is_dir() {
-            Self::from_local_path(config_path, custom_template_path).await
+            Self::from_local_path(config_path, custom_template_path)
         } else {
             // GGUF files don't support custom templates yet
             if custom_template_path.is_some() {
                 anyhow::bail!("Custom templates are not supported for GGUF files");
             }
-            Self::from_gguf(config_path).await
+            Self::from_gguf(config_path)
         }
     }
 
@@ -403,7 +403,7 @@ impl ModelDeploymentCard {
     /// - The path doesn't exist or isn't a directory
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
-    async fn from_local_path(
+    fn from_local_path(
         local_root_dir: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
@@ -419,10 +419,10 @@ impl ModelDeploymentCard {
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
 
-        Self::from_repo(&repo_id, model_name, custom_template_path).await
+        Self::from_repo(&repo_id, model_name, custom_template_path)
     }
 
-    async fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
+    fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
         let model_name = gguf_file
             .iter()
             .next_back()
@@ -461,14 +461,7 @@ impl ModelDeploymentCard {
         })
     }
 
-    #[allow(dead_code)]
-    async fn from_ngc_repo(_: &str) -> anyhow::Result<Self> {
-        Err(anyhow::anyhow!(
-            "ModelDeploymentCard::from_ngc_repo is not implemented"
-        ))
-    }
-
-    async fn from_repo(
+    fn from_repo(
         repo_id: &str,
         model_name: &str,
         custom_template_path: Option<&Path>,
@@ -509,16 +502,16 @@ impl ModelDeploymentCard {
                 template_path.display().to_string(),
             ))
         } else {
-            PromptFormatterArtifact::chat_template_from_repo(repo_id).await?
+            PromptFormatterArtifact::chat_template_from_repo(repo_id)?
         };
 
         Ok(Self {
             display_name: model_name.to_string(),
             slug: Slug::from_string(model_name),
-            model_info: Some(ModelInfoType::from_repo(repo_id).await?),
-            tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
-            gen_config: GenerationConfig::from_repo(repo_id).await.ok(), // optional
-            prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
+            model_info: Some(ModelInfoType::from_repo(repo_id)?),
+            tokenizer: Some(TokenizerKind::from_repo(repo_id)?),
+            gen_config: GenerationConfig::from_repo(repo_id).ok(), // optional
+            prompt_formatter: PromptFormatterArtifact::from_repo(repo_id)?,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
@@ -568,9 +561,9 @@ pub trait ModelInfo: Send + Sync {
 }
 
 impl ModelInfoType {
-    pub async fn get_model_info(&self) -> Result<Arc<dyn ModelInfo>> {
+    pub fn get_model_info(&self) -> Result<Arc<dyn ModelInfo>> {
         match self {
-            Self::HfConfigJson(info) => HFConfig::from_json_file(info).await,
+            Self::HfConfigJson(info) => HFConfig::from_json_file(info),
             Self::GGUF(path) => HFConfig::from_gguf(path),
         }
     }
@@ -622,7 +615,7 @@ struct HFTextConfig {
 }
 
 impl HFConfig {
-    async fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
+    fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
         let file_pathbuf = PathBuf::from(file);
         let contents = std::fs::read_to_string(file)?;
         let mut config: Self = serde_json::from_str(&contents)?;
@@ -800,79 +793,76 @@ fn capitalize(s: &str) -> String {
 }
 
 impl ModelInfoType {
-    pub async fn from_repo(repo_id: &str) -> Result<Self> {
+    pub fn from_repo(repo_id: &str) -> Result<Self> {
         Self::try_is_hf_repo(repo_id)
-            .await
             .with_context(|| format!("unable to extract model info from repo {}", repo_id))
     }
 
-    async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfConfigJson(
-            check_for_file(repo, "config.json").await?,
-        ))
+    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfConfigJson(check_for_file(repo, "config.json")?))
     }
 }
 
 impl PromptFormatterArtifact {
-    pub async fn from_repo(repo_id: &str) -> Result<Option<Self>> {
+    pub fn from_repo(repo_id: &str) -> Result<Option<Self>> {
         // we should only error if we expect a prompt formatter and it's not found
         // right now, we don't know when to expect it, so we just return Ok(Some/None)
         Ok(Self::try_is_hf_repo(repo_id)
-            .await
             .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
             .ok())
     }
 
-    pub async fn chat_template_from_repo(repo_id: &str) -> Result<Option<Self>> {
+    pub fn chat_template_from_repo(repo_id: &str) -> Result<Option<Self>> {
         Ok(Self::chat_template_try_is_hf_repo(repo_id)
-            .await
             .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
             .ok())
     }
 
-    async fn chat_template_try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfChatTemplate(
-            check_for_file(repo, "chat_template.jinja").await?,
-        ))
+    fn chat_template_try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfChatTemplate(check_for_file(
+            repo,
+            "chat_template.jinja",
+        )?))
     }
 
-    async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfTokenizerConfigJson(
-            check_for_file(repo, "tokenizer_config.json").await?,
-        ))
+    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfTokenizerConfigJson(check_for_file(
+            repo,
+            "tokenizer_config.json",
+        )?))
     }
 }
 
 impl TokenizerKind {
-    pub async fn from_repo(repo_id: &str) -> Result<Self> {
+    pub fn from_repo(repo_id: &str) -> Result<Self> {
         Self::try_is_hf_repo(repo_id)
-            .await
             .with_context(|| format!("unable to extract tokenizer kind from repo {}", repo_id))
     }
 
-    async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfTokenizerJson(
-            check_for_file(repo, "tokenizer.json").await?,
-        ))
+    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfTokenizerJson(check_for_file(
+            repo,
+            "tokenizer.json",
+        )?))
     }
 }
 
 impl GenerationConfig {
-    pub async fn from_repo(repo_id: &str) -> Result<Self> {
+    pub fn from_repo(repo_id: &str) -> Result<Self> {
         Self::try_is_hf_repo(repo_id)
-            .await
             .with_context(|| format!("unable to extract generation config from repo {repo_id}"))
     }
 
-    async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfGenerationConfigJson(
-            check_for_file(repo, "generation_config.json").await?,
-        ))
+    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfGenerationConfigJson(check_for_file(
+            repo,
+            "generation_config.json",
+        )?))
     }
 }
 
 /// Checks if the provided path contains the expected file.
-async fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<String> {
+fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<String> {
     let p = PathBuf::from(repo_id).join(file);
     let name = p.display().to_string();
     if !p.exists() {
@@ -911,20 +901,20 @@ mod tests {
     use super::HFConfig;
     use std::path::Path;
 
-    #[tokio::test]
-    pub async fn test_config_json_llama3() -> anyhow::Result<()> {
+    #[test]
+    pub fn test_config_json_llama3() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
-        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        let config = HFConfig::from_json_file(&config_file.display().to_string())?;
         assert_eq!(config.bos_token_id(), 128000);
         Ok(())
     }
 
-    #[tokio::test]
-    pub async fn test_config_json_llama4() -> anyhow::Result<()> {
+    #[test]
+    pub fn test_config_json_llama4() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
-        let config = HFConfig::from_json_file(&config_file.display().to_string()).await?;
+        let config = HFConfig::from_json_file(&config_file.display().to_string())?;
         assert_eq!(config.bos_token_id(), 200000);
         Ok(())
     }
