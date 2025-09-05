@@ -107,6 +107,9 @@ spec:
         {{- if .Values.modelExpressURL }}
           - --model-express-url={{ .Values.modelExpressURL }}
         {{- end }}
+        {{- if .Values.dynamo.metrics.prometheusEndpoint }}
+          - --prometheus-endpoint={{ .Values.dynamo.metrics.prometheusEndpoint }}
+        {{- end }}
         command:
         - /manager
         env:

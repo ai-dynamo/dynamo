@@ -111,6 +111,11 @@ dynamo-operator:
     # -- Whether VirtualServices should support HTTPS routing
     virtualServiceSupportsHTTPS: false
 
+    # Metrics configuration
+    metrics:
+      # -- Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables
+      prometheusEndpoint: ""
+
 
 # Grove component - distributed inference orchestration
 grove:
@@ -130,8 +135,7 @@ etcd:
   enabled: true
 
   image:
-    # -- following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog
-    # -- we need to use the legacy repository until we migrate to the new "secure" repository
+    # -- following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository
     repository: bitnamilegacy/etcd
     tag: 3.5.18-debian-12-r5
 
