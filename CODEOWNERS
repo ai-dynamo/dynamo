@@ -8,7 +8,7 @@
 Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane @hhzhang16
+*.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
