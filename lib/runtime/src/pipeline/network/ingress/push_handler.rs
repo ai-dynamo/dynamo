@@ -101,17 +101,12 @@ struct RequestMetricsGuard {
     inflight_requests: prometheus::IntGauge,
     request_duration: prometheus::Histogram,
     start_time: Instant,
-    health_check_notifier: Option<Arc<tokio::sync::Notify>>,
 }
 impl Drop for RequestMetricsGuard {
     fn drop(&mut self) {
         self.inflight_requests.dec();
         self.request_duration
             .observe(self.start_time.elapsed().as_secs_f64());
-        // Notify health check manager that inflight requests decreased
-        if let Some(notifier) = &self.health_check_notifier {
-            notifier.notify_one();
-        }
     }
 }
 
@@ -151,7 +146,6 @@ where
                 inflight_requests: m.inflight_requests.clone(),
                 request_duration: m.request_duration.clone(),
                 start_time,
-                health_check_notifier: self.health_check_notifier.get().cloned(),
             }
         });
 
@@ -320,7 +314,8 @@ where
                         .inc();
                 }
             }
-            // Notify health check manager that we're actively processing
+            // Notify the health check manager that the stream has finished.
+            // This resets the timer, delaying the next canary health check.
             if let Some(notifier) = self.health_check_notifier.get() {
                 notifier.notify_one();
             }
