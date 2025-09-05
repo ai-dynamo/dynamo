@@ -132,6 +132,7 @@ func main() {
 	var ingressHostSuffix string
 	var groveTerminationDelay time.Duration
 	var modelExpressURL string
+	var prometheusEndpoint string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -161,6 +162,8 @@ func main() {
 		"The termination delay for Grove PodGangSets")
 	flag.StringVar(&modelExpressURL, "model-express-url", "",
 		"URL of the Model Express server to inject into all pods")
+	flag.StringVar(&prometheusEndpoint, "prometheus-endpoint", "",
+		"URL of the Prometheus endpoint to use for metrics")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -196,7 +199,8 @@ func main() {
 			IngressControllerTLSSecret: ingressControllerTLSSecretName,
 			IngressHostSuffix:          ingressHostSuffix,
 		},
-		ModelExpressURL: modelExpressURL,
+		ModelExpressURL:    modelExpressURL,
+		PrometheusEndpoint: prometheusEndpoint,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()

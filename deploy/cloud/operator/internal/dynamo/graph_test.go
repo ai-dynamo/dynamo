@@ -1071,6 +1071,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					Grove: controller_common.GroveConfig{
 						TerminationDelay: 15 * time.Minute,
 					},
+					PrometheusEndpoint: "http://localhost:9090",
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1348,6 +1349,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "MODEL_EXPRESS_URL",
 														Value: "model-express-url",
 													},
+													{
+														Name:  "PROMETHEUS_ENDPOINT",
+														Value: "http://localhost:9090",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1482,6 +1487,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "MODEL_EXPRESS_URL",
 														Value: "model-express-url",
+													},
+													{
+														Name:  "PROMETHEUS_ENDPOINT",
+														Value: "http://localhost:9090",
 													},
 												},
 												Resources: corev1.ResourceRequirements{
