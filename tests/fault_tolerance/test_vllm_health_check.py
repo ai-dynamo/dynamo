@@ -10,8 +10,9 @@ import pytest
 import requests
 from huggingface_hub import snapshot_download
 
-from tests.utils.deployment_graph import completions_response_handler
+from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.payloads import check_models_api, completions_response_handler
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +88,15 @@ class DynamoWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[("http://localhost:9345/health", self.is_ready)],
+            health_check_urls=[
+                (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+                ("http://localhost:9345/health", self.is_ready),
+            ],
             timeout=300,
             display_output=True,
             terminate_existing=False,
+            stragglers=["VLLM::EngineCore"],
+            straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
 

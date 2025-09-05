@@ -5,7 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-python -m dynamo.frontend &
+python -m dynamo.frontend --http-port=8000 &
 
 # run worker with LMCache enabled
 ENABLE_LMCACHE=1 \
