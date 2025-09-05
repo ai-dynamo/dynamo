@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-config
+data:
+  agg.yaml: |
+    tensor_parallel_size: 1
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    max_num_tokens: 8192
+    max_batch_size: 16
+    trust_remote_code: true
+    backend: pytorch
+    enable_chunked_prefill: true
+    disable_overlap_scheduler: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.95
+    cuda_graph_config:
+      max_batch_size: 16
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-agg
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: trtllm-agg
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: jmancuso768/dynamo:4cbd4f38810f152c81f15f1cc7cc600c354587aa-32804297-tensorrtllm-amd64
+    TRTLLMWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: trtllm-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        volumes:
+        - name: nvidia-config
+          configMap:
+            name: nvidia-config
+        mainContainer:
+          image: jmancuso768/dynamo:4cbd4f38810f152c81f15f1cc7cc600c354587aa-32804297-tensorrtllm-amd64
+          workingDir: /workspace/components/backends/trtllm
+          volumeMounts:
+          - name: nvidia-config
+            mountPath: /workspace/components/backends/trtllm/engine_configs
+            readOnly: true
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m dynamo.trtllm
+              --model-path Qwen/Qwen3-0.6B
+              --served-model-name Qwen/Qwen3-0.6B
+              --extra-engine-args engine_configs/agg.yaml
