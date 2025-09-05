@@ -12,6 +12,7 @@ in a hierarchical tree format. This script checks for:
 - Development tools (Cargo/Rust, Maturin, Python)
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
+- File permissions (directory-level by default, detailed with --thorough-check)
 - Installation status and component availability
 
 The output uses status indicators:
@@ -20,15 +21,26 @@ The output uses status indicators:
 - ⚠️ Warning condition
 - ❓ Component not found (for optional items)
 
+By default, the tool runs quickly by checking only directory permissions and skipping
+size calculations. Use --thorough-check for detailed file-level permission analysis
+and directory size information.
+
 Exit codes:
 - 0: All critical components are present
 - 1: One or more errors detected (❌ status)
 
-Example output:
+Example output (default mode):
 
 System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
+├─ File Permissions
+│  ├─ ✅ dynamo root ($HOME/dynamo) writable
+│  ├─ ✅ .git directory writable
+│  ├─ ✅ RUSTUP_HOME ($HOME/.rustup) writable
+│  ├─ ✅ CARGO_HOME ($HOME/.cargo) writable
+│  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
+│  └─ ✅ site-packages (/opt/dynamo/venv/lib/python3.12/site-packages) writable
 ├─ ✅ Cargo /usr/local/cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
 │  ├─ cargo home directory $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
 │  └─ cargo target directory $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
@@ -63,10 +75,10 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
 
 Usage:
-    python dynamo_check.py [--fast]
+    python dynamo_check.py [--thorough-check]
 
 Options:
-    --fast  Skip directory size calculations for faster output
+    --thorough-check  Enable thorough checking (file permissions, directory sizes, etc.)
 """
 
 import datetime
@@ -219,8 +231,8 @@ class NodeInfo:
 class SystemInfo(NodeInfo):
     """Root node for system information"""
 
-    def __init__(self, hostname: Optional[str] = None, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, hostname: Optional[str] = None, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         if hostname is None:
             hostname = platform.node()
 
@@ -247,8 +259,11 @@ class SystemInfo(NodeInfo):
         # Always add GPU info so we can see errors like "nvidia-smi not found"
         self.add_child(gpu_info)
 
+        # Add file permissions check
+        self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
+
         # Add Cargo (always show, even if not found)
-        self.add_child(CargoInfo(fast_mode=self.fast_mode))
+        self.add_child(CargoInfo(thorough_check=self.thorough_check))
 
         # Add Maturin (Python-Rust build tool)
         self.add_child(MaturinInfo())
@@ -260,7 +275,7 @@ class SystemInfo(NodeInfo):
         self.add_child(FrameworkInfo())
 
         # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(fast_mode=self.fast_mode))
+        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -579,11 +594,410 @@ class GPUInfo(NodeInfo):
         return None
 
 
+class FilePermissionsInfo(NodeInfo):
+    """File permissions check for development environment directories
+
+    Checks writability of critical directories needed for:
+    - Dynamo development (top-level dynamo directory)
+    - Rust development (Cargo target directory + all files, RUSTUP_HOME, CARGO_HOME)
+    - Python development (site-packages)
+
+    In fast mode, skips recursive file checking in Cargo target directory
+    for improved performance on large target directories.
+    """
+
+    def __init__(self, thorough_check: bool = False):
+        super().__init__(label="File Permissions", status=NodeStatus.INFO)
+        self.thorough_check = thorough_check
+
+        # Check top-level dynamo directory
+        self._check_dynamo_directory_permissions()
+
+        # Check Rust toolchain directories (RUSTUP_HOME and CARGO_HOME)
+        self._check_rust_toolchain_permissions()
+
+        # Check Cargo target directory (with optional recursive file checking)
+        self._check_cargo_target_permissions()
+
+        # Check Python site-packages directory
+        self._check_site_packages_permissions()
+
+    def _check_permissions_unified(
+        self,
+        candidate_paths: List[str],
+        label_prefix: str,
+        recursive: bool = False,
+        exclude_files: Optional[List[str]] = None,
+    ) -> List[NodeInfo]:
+        """Unified permission checking function
+
+        Args:
+            candidate_paths: List of paths to check, uses first available one
+            label_prefix: Prefix for the node label
+            recursive: If True, check all files recursively; if False, check directory only
+            exclude_files: List of filenames to exclude from file checking (e.g., ['.git'])
+
+        Returns:
+            List of NodeInfo objects for the results
+        """
+        exclude_files = exclude_files or []
+        results = []
+
+        # Find first available path
+        selected_path = None
+        for path in candidate_paths:
+            expanded_path = os.path.expanduser(path)
+            if os.path.exists(expanded_path):
+                selected_path = expanded_path
+                break
+
+        if not selected_path:
+            # No paths exist
+            path_list = ", ".join(candidate_paths)
+            results.append(
+                NodeInfo(
+                    label=f"{label_prefix} (tried: {path_list})",
+                    desc="No candidate paths exist",
+                    status=NodeStatus.ERROR,
+                )
+            )
+            return results
+
+        try:
+            # Check if it's actually a directory
+            if not os.path.isdir(selected_path):
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({selected_path})",
+                        desc="Path is not a directory",
+                        status=NodeStatus.ERROR,
+                    )
+                )
+                return results
+
+            # Check if directory is effectively writable
+            if not self._is_effectively_writable(selected_path):
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({selected_path})",
+                        desc="Directory not writable",
+                        status=NodeStatus.ERROR,
+                    )
+                )
+                return results
+
+            if not recursive:
+                # Just check directory writability
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({selected_path})",
+                        desc="writable",
+                        status=NodeStatus.OK,
+                    )
+                )
+            else:
+                # Check files recursively
+                (
+                    total_files,
+                    non_writable_files,
+                    non_writable_list,
+                ) = self._count_writable_files(
+                    selected_path, recursive=True, exclude_files=exclude_files
+                )
+
+                # Create description based on results
+                desc, status = self._create_file_count_description(
+                    total_files, non_writable_files, "files"
+                )
+
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({selected_path})",
+                        desc=desc,
+                        status=status,
+                    )
+                )
+
+                # Add details for non-writable files if there are any (limit to first 10)
+                if non_writable_files > 0:
+                    details_label = (
+                        f"Non-writable files (showing first 10 of {non_writable_files})"
+                    )
+                    if non_writable_files <= 10:
+                        details_label = f"Non-writable files ({non_writable_files})"
+
+                    details_node = NodeInfo(
+                        label=details_label,
+                        desc="; ".join(non_writable_list[:10]),
+                        status=NodeStatus.WARNING,
+                    )
+                    results.append(details_node)
+
+        except Exception as e:
+            results.append(
+                NodeInfo(
+                    label=f"{label_prefix} ({selected_path})",
+                    desc=f"Permission check failed: {str(e)}",
+                    status=NodeStatus.ERROR,
+                )
+            )
+
+        return results
+
+    def _is_effectively_writable(self, file_path: str) -> bool:
+        """Check if a file is effectively writable
+
+        A file is considered effectively writable if:
+        1. It's already writable (os.access check)
+        2. We own the file (can chmod it)
+        3. We are root (can do anything)
+        """
+        try:
+            # First check if it's already writable
+            if os.access(file_path, os.W_OK):
+                return True
+
+            # Check if we're root
+            if os.getuid() == 0:
+                return True
+
+            # Check if we own the file (and can therefore chmod it)
+            stat_info = os.stat(file_path)
+            if stat_info.st_uid == os.getuid():
+                return True
+
+            return False
+        except Exception:
+            # If we can't stat the file, assume it's not writable
+            return False
+
+    def _count_writable_files(
+        self,
+        directory: str,
+        recursive: bool = False,
+        exclude_files: Optional[List[str]] = None,
+    ) -> Tuple[int, int, List[str]]:
+        """Count total files and non-writable files in directory
+
+        Returns:
+            Tuple of (total_files, non_writable_files, non_writable_list)
+        """
+        exclude_files = exclude_files or []
+        total_files = 0
+        non_writable_files = 0
+        non_writable_list = []
+
+        if recursive:
+            # Walk through all files in the directory tree recursively
+            for root, dirs, files in os.walk(directory):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Skip symbolic links
+                    if os.path.islink(file_path):
+                        continue
+                    total_files += 1
+                    if not self._is_effectively_writable(file_path):
+                        non_writable_files += 1
+                        rel_path = os.path.relpath(file_path, directory)
+                        non_writable_list.append(rel_path)
+        else:
+            # Only check files in the immediate directory (non-recursive)
+            for item in os.listdir(directory):
+                if item in exclude_files:
+                    continue
+                item_path = os.path.join(directory, item)
+                # Skip symbolic links and only check regular files
+                if os.path.isfile(item_path) and not os.path.islink(item_path):
+                    total_files += 1
+                    try:
+                        if not self._is_effectively_writable(item_path):
+                            non_writable_files += 1
+                            non_writable_list.append(item)
+                    except Exception:
+                        non_writable_files += 1
+                        non_writable_list.append(item)
+
+        return total_files, non_writable_files, non_writable_list
+
+    def _create_file_count_description(
+        self, total_files: int, non_writable_files: int, context: str = "files"
+    ) -> Tuple[str, NodeStatus]:
+        """Create description and status for file count results"""
+        if total_files == 0:
+            return f"writable, no {context} found", NodeStatus.INFO
+        elif non_writable_files == 0:
+            return f"writable, all {total_files} {context} writable", NodeStatus.OK
+        else:
+            return (
+                f"writable, {non_writable_files} of {total_files} {context} not writable",
+                NodeStatus.WARNING,
+            )
+
+    def _get_cargo_target_path_candidates(self) -> List[str]:
+        """Get candidate paths for cargo target directory"""
+        candidates = []
+
+        # Try to get target directory from cargo metadata (most accurate)
+        try:
+            result = subprocess.run(
+                ["cargo", "metadata", "--format-version=1", "--no-deps"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=".",
+            )
+            if result.returncode == 0:
+                import json
+
+                metadata = json.loads(result.stdout)
+                target_path = metadata.get("target_directory")
+                if target_path:
+                    candidates.append(target_path)
+        except Exception:
+            pass
+
+        # Add fallback candidates
+        cargo_target = os.environ.get("CARGO_TARGET_DIR")
+        if cargo_target:
+            candidates.append(cargo_target)
+
+        candidates.append("~/.cargo/target")
+        return candidates
+
+    def _check_dynamo_directory_permissions(self):
+        """Check top-level dynamo directory and key files writability"""
+        # Use the existing workspace detection logic
+        dynamo_root = DynamoInfo.find_workspace()
+
+        if not dynamo_root:
+            self.add_child(
+                NodeInfo(
+                    label="dynamo root",
+                    desc="workspace not found",
+                    status=NodeStatus.ERROR,
+                )
+            )
+            return
+
+        if not DynamoInfo.is_dynamo_workspace(dynamo_root):
+            self.add_child(
+                NodeInfo(
+                    label="dynamo root",
+                    desc="not a valid dynamo workspace",
+                    status=NodeStatus.ERROR,
+                )
+            )
+            return
+
+        # Check dynamo root directory and files (exclude .git)
+        recursive = self.thorough_check
+        results = self._check_permissions_unified(
+            [dynamo_root], "dynamo root", recursive=recursive, exclude_files=[".git"]
+        )
+        for result in results:
+            self.add_child(result)
+
+        # Check .git directory separately if it exists
+        git_dir = os.path.join(dynamo_root, ".git")
+        if os.path.exists(git_dir):
+            git_results = self._check_permissions_unified(
+                [git_dir], ".git directory", recursive=recursive
+            )
+            for result in git_results:
+                self.add_child(result)
+
+    def _check_site_packages_permissions(self):
+        """Check site-packages directory writability"""
+        try:
+            import site
+
+            # Get all candidate site-packages directories
+            site_packages_dirs = site.getsitepackages()
+            user_site = site.getusersitepackages()
+            if user_site:
+                site_packages_dirs.append(user_site)
+
+            # Check each existing site-packages directory
+            recursive = self.thorough_check
+            for site_dir in site_packages_dirs:
+                if os.path.exists(site_dir):
+                    results = self._check_permissions_unified(
+                        [site_dir], "site-packages", recursive=recursive
+                    )
+                    for result in results:
+                        self.add_child(result)
+
+        except Exception as e:
+            self.add_child(
+                NodeInfo(
+                    label="site-packages",
+                    desc=f"Permission check failed: {str(e)}",
+                    status=NodeStatus.ERROR,
+                )
+            )
+
+    def _check_cargo_target_permissions(self):
+        """Check Cargo target directory writability and file permissions"""
+        candidates = self._get_cargo_target_path_candidates()
+        recursive = self.thorough_check
+        results = self._check_permissions_unified(
+            candidates, "Cargo target", recursive=recursive
+        )
+
+        if not results or (
+            len(results) == 1
+            and results[0].status == NodeStatus.ERROR
+            and results[0].desc is not None
+            and "No candidate paths exist" in results[0].desc
+        ):
+            # No paths exist - show warning instead of error
+            self.add_child(
+                NodeInfo(
+                    label="Cargo target",
+                    desc="Path does not exist",
+                    status=NodeStatus.WARNING,
+                )
+            )
+        else:
+            for result in results:
+                self.add_child(result)
+
+    def _check_rust_toolchain_permissions(self):
+        """Check RUSTUP_HOME and CARGO_HOME directory writability
+
+        These directories need recursive checking because:
+        - RUSTUP_HOME: rustup needs to write toolchain files, documentation, etc.
+        - CARGO_HOME: cargo needs to write registry cache, git repos, binaries, etc.
+        """
+        # Check RUSTUP_HOME
+        rustup_env = os.environ.get("RUSTUP_HOME")
+        rustup_candidates = [rustup_env] if rustup_env is not None else []
+        rustup_candidates.append("~/.rustup")
+
+        recursive = self.thorough_check
+        rustup_results = self._check_permissions_unified(
+            rustup_candidates, "RUSTUP_HOME", recursive=recursive
+        )
+        for result in rustup_results:
+            self.add_child(result)
+
+        # Check CARGO_HOME
+        cargo_env = os.environ.get("CARGO_HOME")
+        cargo_candidates = [cargo_env] if cargo_env is not None else []
+        cargo_candidates.append("~/.cargo")
+
+        cargo_results = self._check_permissions_unified(
+            cargo_candidates, "CARGO_HOME", recursive=recursive
+        )
+        for result in cargo_results:
+            self.add_child(result)
+
+
 class CargoInfo(NodeInfo):
     """Cargo tool information"""
 
-    def __init__(self, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         cargo_path = shutil.which("cargo")
         cargo_version = None
 
@@ -638,9 +1052,9 @@ class CargoInfo(NodeInfo):
             cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
             display_cargo_target = self._replace_home_with_var(cargo_target)
 
-            # Calculate total directory size (skip if fast mode)
+            # Calculate total directory size (only if thorough check)
             size_str = ""
-            if not self.fast_mode:
+            if self.thorough_check:
                 total_size_gb = self._get_directory_size_gb(cargo_target)
                 size_str = (
                     f", {total_size_gb:.1f} GB" if total_size_gb is not None else ""
@@ -715,8 +1129,8 @@ class CargoInfo(NodeInfo):
             display_debug = self._replace_home_with_var(debug_dir)
             debug_value = display_debug
 
-            # Add size (skip if fast mode)
-            if not self.fast_mode:
+            # Add size (only if thorough check)
+            if self.thorough_check:
                 debug_size_gb = self._get_directory_size_gb(debug_dir)
                 if debug_size_gb is not None:
                     debug_value += f", {debug_size_gb:.1f} GB"
@@ -738,8 +1152,8 @@ class CargoInfo(NodeInfo):
             display_release = self._replace_home_with_var(release_dir)
             release_value = display_release
 
-            # Add size (skip if fast mode)
-            if not self.fast_mode:
+            # Add size (only if thorough check)
+            if self.thorough_check:
                 release_size_gb = self._get_directory_size_gb(release_dir)
                 if release_size_gb is not None:
                     release_value += f", {release_size_gb:.1f} GB"
@@ -762,8 +1176,8 @@ class CargoInfo(NodeInfo):
             display_so = self._replace_home_with_var(so_file)
             so_value = display_so
 
-            # Add file size (skip if fast mode)
-            if not self.fast_mode:
+            # Add file size (only if thorough check)
+            if self.thorough_check:
                 try:
                     file_size_bytes = os.path.getsize(so_file)
                     file_size_mb = file_size_bytes / (1024**2)
@@ -1095,8 +1509,8 @@ class PythonPathInfo(NodeInfo):
 class DynamoRuntimeInfo(NodeInfo):
     """Dynamo runtime components information"""
 
-    def __init__(self, workspace_dir: str, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         # Try to get package version
         import importlib.metadata
 
@@ -1274,8 +1688,8 @@ class DynamoRuntimeInfo(NodeInfo):
 class DynamoFrameworkInfo(NodeInfo):
     """Dynamo framework components information"""
 
-    def __init__(self, workspace_dir: str, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         # Try to get package version
         import importlib.metadata
 
@@ -1415,8 +1829,8 @@ class DynamoFrameworkInfo(NodeInfo):
 class DynamoInfo(NodeInfo):
     """Dynamo workspace information"""
 
-    def __init__(self, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, thorough_check: bool = False):
+        self.thorough_check = thorough_check
 
         # Find workspace directory
         workspace_dir = DynamoInfo.find_workspace()
@@ -1456,11 +1870,15 @@ class DynamoInfo(NodeInfo):
         super().__init__(label="Dynamo", desc=value, status=NodeStatus.INFO)
 
         # Always add runtime components
-        runtime_info = DynamoRuntimeInfo(workspace_dir, fast_mode=self.fast_mode)
+        runtime_info = DynamoRuntimeInfo(
+            workspace_dir, thorough_check=self.thorough_check
+        )
         self.add_child(runtime_info)
 
         # Always add framework components
-        framework_info = DynamoFrameworkInfo(workspace_dir, fast_mode=self.fast_mode)
+        framework_info = DynamoFrameworkInfo(
+            workspace_dir, thorough_check=self.thorough_check
+        )
         self.add_child(framework_info)
 
     def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1636,15 +2054,14 @@ def main():
         description="Display system information for Dynamo project"
     )
     parser.add_argument(
-        "-f",
-        "--fast",
+        "--thorough-check",
         action="store_true",
-        help="Skip size calculations for faster output",
+        help="Enable thorough checking (file permissions, directory sizes, etc.)",
     )
     args = parser.parse_args()
 
     # Simply create a SystemInfo instance - it collects everything in its constructor
-    tree = SystemInfo(fast_mode=args.fast)
+    tree = SystemInfo(thorough_check=args.thorough_check)
     tree.print_tree()
 
     # Check if there are framework component errors and show PYTHONPATH recommendation
