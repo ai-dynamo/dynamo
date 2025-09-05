@@ -49,6 +49,7 @@ use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
+use super::audit;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -588,6 +589,10 @@ async fn chat_completions(
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
+    let store = request.inner.store.unwrap_or(false);
+
+    let do_audit = audit::should_audit_flags(store, streaming);
+    let request_for_audit = if do_audit { Some(request.content().clone()) } else { None };
 
     // update the request to always stream
     let request = request.map(|mut req| {
@@ -697,6 +702,12 @@ async fn chat_completions(
                         e
                     ))
                 })?;
+
+        // NEW: emit JSONL once for non-streaming + store=true, but only if env is on
+        if let Some(req_copy) = request_for_audit {
+            let resp_json = serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
+            audit::log_stored_completion(&request_id, &req_copy, resp_json);
+        }
 
         inflight_guard.mark_ok();
         Ok(Json(response).into_response())
