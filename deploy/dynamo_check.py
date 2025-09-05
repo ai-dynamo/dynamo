@@ -35,15 +35,15 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
 ├─ File Permissions
-│  ├─ ✅ Dynamo home ($HOME/dynamo) writable
-│  ├─ ✅ .git directory writable
-│  ├─ ✅ RUSTUP_HOME ($HOME/.rustup) writable
-│  ├─ ✅ CARGO_HOME ($HOME/.cargo) writable
+│  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable
+│  ├─ ✅ Dynamo .git directory writable
+│  ├─ ✅ Rustup home ($HOME/.rustup) writable
+│  ├─ ✅ Cargo home ($HOME/.cargo) writable
 │  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
-│  └─ ✅ site-packages (/opt/dynamo/venv/lib/python3.12/site-packages) writable
-├─ ✅ Cargo /usr/local/cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
-│  ├─ cargo home directory $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
-│  └─ cargo target directory $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
+│  └─ ✅ Python site-packages ($HOME/dynamo/venv/lib/python3.12/site-packages) writable
+├─ ✅ Cargo $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
+│  ├─ Cargo home directory CARGO_HOME=$HOME/.cargo
+│  └─ Cargo target directory CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 │     ├─ Debug $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
 │     ├─ Release $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
 │     └─ Binary $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
