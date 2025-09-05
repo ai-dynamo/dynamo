@@ -478,11 +478,6 @@ mod integration_tests {
             .unwrap()
             .update_last_response_time(endpoint);
 
-        // Check that response was recorded
-        let response_times = drt.system_health.lock().unwrap().get_response_times();
-        let times = response_times.lock().unwrap();
-        assert!(times.contains_key(endpoint));
-
         // Status should be Ready
         let status = drt
             .system_health

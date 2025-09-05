@@ -262,12 +262,6 @@ impl SystemHealth {
         payloads.get(endpoint).cloned()
     }
 
-    /// Remove health check payload for an endpoint
-    pub fn remove_health_check_payload(&self, endpoint: &str) {
-        let mut payloads = self.health_check_payloads.write().unwrap();
-        payloads.remove(endpoint);
-    }
-
     /// Get the endpoint health status (Ready/NotReady)
     pub fn get_endpoint_health_status(&self, endpoint: &str) -> Option<HealthStatus> {
         let endpoint_health = self.endpoint_health.read().unwrap();
@@ -290,19 +284,6 @@ impl SystemHealth {
     /// Get the health check notifier
     pub fn get_health_check_notifier(&self) -> Option<Arc<tokio::sync::Notify>> {
         self.health_check_notifier.get().cloned()
-    }
-
-    /// Get the response times map (for testing)
-    pub fn get_response_times(&self) -> Arc<std::sync::Mutex<HashMap<String, Instant>>> {
-        // Create a new map with current response times
-        let endpoint_health = self.endpoint_health.read().unwrap();
-        let mut times = HashMap::new();
-        for (endpoint, info) in endpoint_health.iter() {
-            if let Some(time) = info.last_response_time {
-                times.insert(endpoint.clone(), time);
-            }
-        }
-        Arc::new(std::sync::Mutex::new(times))
     }
 
     /// Initialize the uptime gauge using the provided metrics registry

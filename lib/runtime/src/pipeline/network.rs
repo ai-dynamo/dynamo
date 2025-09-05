@@ -273,10 +273,6 @@ struct RequestControlMessage {
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
-    /// Endpoint subject for health tracking
-    endpoint_subject: OnceLock<String>,
-    /// System health for tracking response times
-    system_health: OnceLock<Arc<std::sync::Mutex<SystemHealth>>>,
     /// Notifier for health check timer resets
     health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
@@ -286,8 +282,6 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
-            endpoint_subject: OnceLock::new(),
-            system_health: OnceLock::new(),
             health_check_notifier: OnceLock::new(),
         })
     }
@@ -352,16 +346,6 @@ pub trait PushWorkHandler: Send + Sync {
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
-
-    /// Set endpoint subject and system health for tracking
-    fn set_health_tracking(
-        &self,
-        _endpoint_subject: String,
-        _system_health: Arc<std::sync::Mutex<SystemHealth>>,
-    ) -> Result<()> {
-        // Default implementation for backwards compatibility
-        Ok(())
-    }
 
     /// Set the health check notifier for timer resets
     fn set_health_check_notifier(&self, _notifier: Arc<tokio::sync::Notify>) -> Result<()> {

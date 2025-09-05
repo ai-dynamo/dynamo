@@ -87,12 +87,6 @@ impl EndpointConfigBuilder {
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
-        // Set health tracking information on the handler
-        handler.set_health_tracking(
-            endpoint.subject_to(lease_id),
-            endpoint.drt().system_health.clone(),
-        )?;
-
         // Set health check notifier if available
         if let Some(notifier) = endpoint
             .drt()

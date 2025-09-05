@@ -131,21 +131,6 @@ where
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
-    fn set_health_tracking(
-        &self,
-        endpoint_subject: String,
-        system_health: Arc<std::sync::Mutex<crate::SystemHealth>>,
-    ) -> Result<()> {
-        use crate::pipeline::network::Ingress;
-        self.endpoint_subject
-            .set(endpoint_subject)
-            .map_err(|_| anyhow::anyhow!("Endpoint subject already set"))?;
-        self.system_health
-            .set(system_health)
-            .map_err(|_| anyhow::anyhow!("System health already set"))?;
-        Ok(())
-    }
-
     fn set_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
         use crate::pipeline::network::Ingress;
         self.health_check_notifier
