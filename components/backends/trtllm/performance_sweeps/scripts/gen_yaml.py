@@ -218,7 +218,7 @@ def gen_config_file(
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "default",
+            "backend": "DEFAULT",
         },
     }
 
@@ -245,7 +245,7 @@ def gen_config_file(
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
-            "backend": "default",
+            "backend": "DEFAULT",
         },
         "stream_interval": 20,
     }
@@ -257,6 +257,8 @@ def gen_config_file(
         moe_load_balancer_file = os.path.join(
             os.path.dirname(config_path), "moe_load_balancer.yaml"
         )
+        # Ensure the directory exists before writing the file
+        os.makedirs(os.path.dirname(moe_load_balancer_file), exist_ok=True)
         moe_load_balancer_config = {
             "num_slots": eplb_num_slots,
             "layer_updates_per_iter": 1,
