@@ -32,7 +32,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: jmancuso768/dynamo:4cbd4f38810f152c81f15f1cc7cc600c354587aa-32804297-tensorrtllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg
@@ -47,7 +47,7 @@ spec:
           configMap:
             name: nvidia-config
         mainContainer:
-          image: jmancuso768/dynamo:4cbd4f38810f152c81f15f1cc7cc600c354587aa-32804297-tensorrtllm-amd64
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1
           workingDir: /workspace/components/backends/trtllm
           volumeMounts:
           - name: nvidia-config
