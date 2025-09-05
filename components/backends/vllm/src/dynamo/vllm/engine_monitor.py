@@ -49,13 +49,14 @@ class VllmEngineMonitor:
         """
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
+
         # Has timeout protection via SIGALRM
         def timeout_handler(signum, frame):
             raise TimeoutError("Engine shutdown timed out")
-        
+
         signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(ENGINE_SHUTDOWN_TIMEOUT)
-        
+
         try:
             self.engine_client.shutdown()
         except Exception as e:
