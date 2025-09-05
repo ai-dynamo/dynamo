@@ -33,6 +33,7 @@ Example output (default mode):
 
 System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
+├─ User info: user=ubuntu, uid=1000, gid=1000
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
 ├─ File Permissions
 │  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable
@@ -52,20 +53,20 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
 │  └─ PYTHONPATH $HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/llama_cpp/src:$HOME/dynamo/components/backends/mocker/src
 ├─ 🤖Framework
-│  ├─ ✅ vllm 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
-│  ├─ ❓ sglang -
-│  └─ ❓ tensorrt_llm -
+│  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
+│  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
 └─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
    ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
-   │  ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info created=2025-08-30 19:14:29 PDT
-   │  ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth modified=2025-08-30 19:14:29 PDT
-   │  │  └─ → $HOME/dynamo/lib/bindings/python/src
+   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
+   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-08-30 19:14:29 PDT
+   │  │  └─ →: $HOME/dynamo/lib/bindings/python/src
    │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-08-30 19:14:29 PDT
    │  ├─ ✅ dynamo.logits_processing $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
    │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
    │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
    │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
    └─ ✅ Framework components ai-dynamo (via PYTHONPATH)
+      │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.0.dist-info: created=2025-09-05 16:20:35 PDT
       ├─ ✅ dynamo.frontend  $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
       ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
       ├─ ✅ dynamo.mocker    $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
@@ -116,7 +117,7 @@ class NodeInfo:
     status: NodeStatus = NodeStatus.NONE  # Status indicator
 
     # Additional metadata as key-value pairs
-    metadata: Dict[str, str] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Tree structure
     children: List["NodeInfo"] = field(default_factory=list)
@@ -142,7 +143,11 @@ class NodeInfo:
 
         # Determine the connector
         if not is_root:
-            connector = "└─" if is_last else "├─"
+            # Check if this is a sub-category item
+            if self.metadata and self.metadata.get("part_of_previous"):
+                connector = "│"
+            else:
+                connector = "└─" if is_last else "├─"
             current_prefix = prefix + connector + " "
         else:
             current_prefix = ""
@@ -171,8 +176,10 @@ class NodeInfo:
         if self.metadata:
             metadata_items = []
             for k, v in self.metadata.items():
-                # Format all metadata consistently as "key=value"
-                metadata_items.append(f"{k}={v}")
+                # Skip internal metadata that shouldn't be displayed
+                if k != "part_of_previous":
+                    # Format all metadata consistently as "key=value"
+                    metadata_items.append(f"{k}={v}")
 
             if metadata_items:
                 # Use consistent separator (comma) for all metadata
@@ -286,13 +293,13 @@ class SystemInfo(NodeInfo):
         # Add OS info
         self.add_child(OSInfo())
 
+        # Add user info
+        self.add_child(UserInfo())
+
         # Add GPU info
         gpu_info = GPUInfo()
         # Always add GPU info so we can see errors like "nvidia-smi not found"
         self.add_child(gpu_info)
-
-        # Add user info
-        self.add_child(UserInfo())
 
         # Add file permissions check
         self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
@@ -1488,6 +1495,8 @@ class FrameworkInfo(NodeInfo):
             ("tensorrt_llm", "tensorRT LLM"),
         ]
 
+        frameworks_found = 0
+
         for module_name, display_name in frameworks_to_check:
             # Special handling for TensorRT-LLM to avoid NVML crashes
             if module_name == "tensorrt_llm":
@@ -1498,14 +1507,13 @@ class FrameworkInfo(NodeInfo):
                     f"/usr/lib/python{python_version}/dist-packages",
                 ]
 
-                found_in_system = False
                 for pkg_path in system_packages:
                     if os.path.exists(pkg_path):
                         tensorrt_dirs = [
                             d for d in os.listdir(pkg_path) if "tensorrt_llm" in d
                         ]
                         if tensorrt_dirs:
-                            found_in_system = True
+                            frameworks_found += 1
                             # Try to get version safely
                             try:
                                 result = subprocess.run(
@@ -1549,20 +1557,14 @@ class FrameworkInfo(NodeInfo):
                                 self.add_child(package_info)
                                 break
 
-                if not found_in_system:
-                    package_info = PythonPackageInfo(
-                        package_name=display_name,
-                        version="-",
-                        is_framework=True,
-                        is_installed=False,
-                    )
-                    self.add_child(package_info)
+                # Don't add anything if not found in system
                 continue
 
             # Regular import for other frameworks
             try:
                 module = __import__(module_name)
                 version = getattr(module, "__version__", "installed")
+                frameworks_found += 1
 
                 # Get module path
                 module_path = None
@@ -1585,14 +1587,18 @@ class FrameworkInfo(NodeInfo):
                 )
                 self.add_child(package_info)
             except (ImportError, Exception):
-                # Framework not installed - show with "-"
-                package_info = PythonPackageInfo(
-                    package_name=display_name,
-                    version="-",
-                    is_framework=True,
-                    is_installed=False,
-                )
-                self.add_child(package_info)
+                # Framework not installed - don't add it
+                pass
+
+        # If no frameworks found, set status to ERROR (X) and show what's missing
+        if frameworks_found == 0:
+            self.status = NodeStatus.ERROR
+            # List all the frameworks that were checked but not found
+            missing_frameworks = []
+            for module_name, display_name in frameworks_to_check:
+                missing_frameworks.append(f"no {module_name}")
+            missing_text = ", ".join(missing_frameworks)
+            self.desc = missing_text
 
 
 class PythonPackageInfo(NodeInfo):
@@ -1646,9 +1652,22 @@ class PythonPathInfo(NodeInfo):
         if pythonpath:
             # Split by colon and replace home in each path
             paths = pythonpath.split(":")
-            display_paths = [self._replace_home_with_var(p) for p in paths]
+            display_paths = []
+            has_invalid_paths = False
+
+            for p in paths:
+                display_path = self._replace_home_with_var(p)
+                # Check if path exists and is accessible
+                if not os.path.exists(p) or not os.access(p, os.R_OK):
+                    display_paths.append(
+                        f"\033[38;5;196m{display_path}\033[0m"
+                    )  # Bright red path
+                    has_invalid_paths = True
+                else:
+                    display_paths.append(display_path)
+
             display_pythonpath = ":".join(display_paths)
-            status = NodeStatus.INFO
+            status = NodeStatus.WARNING if has_invalid_paths else NodeStatus.INFO
         else:
             display_pythonpath = "not set"
             status = NodeStatus.WARNING  # Show warning when PYTHONPATH is not set
@@ -1794,12 +1813,17 @@ class DynamoRuntimeInfo(NodeInfo):
                     stat = os.stat(path)
                     timestamp = self._format_timestamp_pdt(stat.st_ctime)
                     return NodeInfo(
-                        label=display_path,
+                        label=f" {display_path}",
                         desc=f"created={timestamp}",
                         status=NodeStatus.INFO,
+                        metadata={"part_of_previous": True},
                     )
                 except Exception:
-                    return NodeInfo(label=display_path, status=NodeStatus.INFO)
+                    return NodeInfo(
+                        label=f" {display_path}",
+                        status=NodeStatus.INFO,
+                        metadata={"part_of_previous": True},
+                    )
         return None
 
     def _find_pth_file(self) -> Optional[NodeInfo]:
@@ -1814,9 +1838,10 @@ class DynamoRuntimeInfo(NodeInfo):
                     stat = os.stat(pth_path)
                     timestamp = self._format_timestamp_pdt(stat.st_mtime)
                     node = NodeInfo(
-                        label=display_path,
+                        label=f" {display_path}",
                         desc=f"modified={timestamp}",
                         status=NodeStatus.INFO,
+                        metadata={"part_of_previous": True},
                     )
 
                     # Read where it points to
@@ -1873,13 +1898,18 @@ class DynamoFrameworkInfo(NodeInfo):
                         stat = os.stat(path)
                         timestamp = self._format_timestamp_pdt(stat.st_ctime)
                         dist_node = NodeInfo(
-                            label=display_path,
+                            label=f" {display_path}",
                             desc=f"created={timestamp}",
                             status=NodeStatus.INFO,
+                            metadata={"part_of_previous": True},
                         )
                         self.add_child(dist_node)
                     except Exception:
-                        dist_node = NodeInfo(label=display_path, status=NodeStatus.INFO)
+                        dist_node = NodeInfo(
+                            label=f" {display_path}",
+                            status=NodeStatus.INFO,
+                            metadata={"part_of_previous": True},
+                        )
                         self.add_child(dist_node)
                     break
 
