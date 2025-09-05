@@ -4,21 +4,21 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{ModelManager, ModelUpdate, ModelWatcher, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{self, input::common, EngineConfig},
+    entrypoint::{self, EngineConfig, input::common},
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
-    model_type::ModelType,
+    namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::transports::etcd;
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
@@ -62,6 +62,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
+                    // Check if we should filter by namespace (based on the local model's namespace)
+                    // Get namespace from the model, fallback to endpoint_id namespace if not set
+                    let namespace = engine_config.local_model().namespace().unwrap_or("");
+                    let target_namespace = if is_global_namespace(namespace) {
+                        None
+                    } else {
+                        Some(namespace.to_string())
+                    };
                     run_watcher(
                         distributed_runtime,
                         http_service.state().manager_clone(),
@@ -70,6 +78,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         router_config.busy_threshold,
+                        target_namespace,
                         Arc::new(http_service.clone()),
                     )
                     .await?;
@@ -125,9 +134,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
 
             for endpoint_type in EndpointType::all() {
-                http_service
-                    .enable_model_endpoint(endpoint_type, true)
-                    .await;
+                http_service.enable_model_endpoint(endpoint_type, true);
             }
 
             http_service
@@ -141,9 +148,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
-                http_service
-                    .enable_model_endpoint(endpoint_type, true)
-                    .await;
+                http_service.enable_model_endpoint(endpoint_type, true);
             }
             http_service
         }
@@ -170,9 +175,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
             // Enable all endpoints
             for endpoint_type in EndpointType::all() {
-                http_service
-                    .enable_model_endpoint(endpoint_type, true)
-                    .await;
+                http_service.enable_model_endpoint(endpoint_type, true);
             }
             http_service
         }
@@ -201,6 +204,7 @@ async fn run_watcher(
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
+    target_namespace: Option<String>,
     http_service: Arc<HttpService>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
@@ -223,54 +227,36 @@ async fn run_watcher(
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_type) = rx.recv().await {
             tracing::debug!("Received model type update: {:?}", model_type);
-            update_http_endpoints(http_service.clone(), model_type).await;
+            update_http_endpoints(http_service.clone(), model_type);
         }
     });
 
     // Pass the sender to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver).await;
+        watch_obj.watch(receiver, target_namespace.as_deref()).await;
     });
 
     Ok(())
 }
 
 /// Updates HTTP service endpoints based on available model types
-async fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
+fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
     tracing::debug!(
         "Updating HTTP service endpoints for model type: {:?}",
         model_type
     );
     match model_type {
-        ModelUpdate::Added(model_type) => match model_type {
-            ModelType::Backend => {
-                service
-                    .enable_model_endpoint(EndpointType::Chat, true)
-                    .await;
-                service
-                    .enable_model_endpoint(EndpointType::Completion, true)
-                    .await;
+        ModelUpdate::Added(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, true);
             }
-            _ => {
-                service
-                    .enable_model_endpoint(model_type.as_endpoint_type(), true)
-                    .await;
+        }
+        ModelUpdate::Removed(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, false);
             }
-        },
-        ModelUpdate::Removed(model_type) => match model_type {
-            ModelType::Backend => {
-                service
-                    .enable_model_endpoint(EndpointType::Chat, false)
-                    .await;
-                service
-                    .enable_model_endpoint(EndpointType::Completion, false)
-                    .await;
-            }
-            _ => {
-                service
-                    .enable_model_endpoint(model_type.as_endpoint_type(), false)
-                    .await;
-            }
-        },
+        }
     }
 }

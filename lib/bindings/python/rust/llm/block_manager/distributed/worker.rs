@@ -4,7 +4,7 @@
 use super::*;
 
 use std::sync::Arc;
-use utils::get_barrier_id;
+use utils::get_barrier_id_prefix;
 
 use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
@@ -107,7 +107,7 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
@@ -115,6 +115,7 @@ impl KvbmWorker {
         device_id: usize,
         dtype_width_bytes: usize,
         drt: Option<DistributedRuntime>,
+        layout_blocking: bool,
     ) -> PyResult<Self> {
         let py_drt = drt.ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("DistributedRuntime (drt) must be provided")
@@ -131,7 +132,7 @@ impl KvbmWorker {
             vllm_tensors.push(Arc::new(vllm_tensor));
         }
 
-        let barrier_id = get_barrier_id();
+        let barrier_id_prefix = get_barrier_id_prefix();
 
         let config = KvbmWorkerConfig::builder()
             .drt(drt)
@@ -140,13 +141,13 @@ impl KvbmWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id(barrier_id)
+            .barrier_id_prefix(barrier_id_prefix)
             .build()
             .map_err(to_pyerr)?;
 
         let worker = rt
             .block_on(async move {
-                let kvbm_worker = KvbmWorkerImpl::new(config).await?;
+                let kvbm_worker = KvbmWorkerImpl::new(config, layout_blocking).await?;
                 anyhow::Ok(kvbm_worker)
             })
             .map_err(to_pyerr)?;

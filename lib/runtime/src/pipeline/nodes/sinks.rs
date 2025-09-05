@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use super::{
-    async_trait, private::Token, Arc, Edge, OnceLock, PipelineError, Service, Sink, Source,
+    Arc, Edge, OnceLock, PipelineError, Service, Sink, Source, async_trait, private::Token,
 };
 use crate::pipeline::{PipelineIO, ServiceEngine};
 

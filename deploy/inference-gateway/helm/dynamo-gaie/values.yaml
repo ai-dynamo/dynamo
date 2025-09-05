@@ -66,7 +66,7 @@ epp:
 eppAware:
   enabled: false
   # Optional: override EPP image when epp-aware=true
-  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:1.0.0
+  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
 
   # Sidecar (frontend-router)
   sidecar:

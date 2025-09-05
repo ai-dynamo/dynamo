@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-agg
@@ -24,7 +24,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

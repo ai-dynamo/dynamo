@@ -21,19 +21,17 @@ max_num_tokens: 8192
 max_seq_len: 8192
 print_iter_log: true
 disable_overlap_scheduler: true
-enable_autotuner: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
   decoding_type: Eagle
-  max_draft_len: 1
+  max_draft_len: 3
   speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: false
+  eagle3_one_model: true
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
   enable_block_reuse: false
-  dtype: fp8
 
 cache_transceiver_config:
   backend: default

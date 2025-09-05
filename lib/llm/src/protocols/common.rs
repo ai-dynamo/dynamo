@@ -257,6 +257,10 @@ pub struct StopConditions {
     /// tokens after the EOS token is generated.
     // TODO(ignore_eos) - improve this my masking the EOS token with logit bias
     pub ignore_eos: Option<bool>,
+
+    /// Maximum number of thinking tokens allowed
+    /// NOTE: Currently a passthrough - no enforcement logic implemented
+    pub max_thinking_tokens: Option<u32>,
 }
 
 impl StopConditions {
@@ -336,6 +340,9 @@ pub struct SamplingOptions {
 
     /// The seed to use when sampling
     pub seed: Option<i64>,
+
+    /// Whether to include the stop string in the output.
+    pub include_stop_str_in_output: Option<bool>,
 
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,

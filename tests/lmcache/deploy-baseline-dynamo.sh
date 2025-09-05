@@ -6,7 +6,7 @@
 # i.e. nats and etcd are running
 
 # Overview:
-# This script deploys dynamo without LMCache on port 8080
+# This script deploys dynamo without LMCache on port 8000
 # Used as baseline for correctness testing
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -21,7 +21,7 @@ fi
 
 echo "🚀 Starting dynamo setup without LMCache:"
 echo "   Model: $MODEL_URL"
-echo "   Port: 8080"
+echo "   Port: 8000"
 
 # Kill any existing dynamo processes
 echo "🧹 Cleaning up any existing dynamo processes..."

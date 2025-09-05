@@ -48,7 +48,7 @@ pub enum DynamoLlmResult {
 
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     let wk = match WK.get() {
         Some(wk) => wk,
@@ -123,7 +123,7 @@ pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     DynamoLlmResult::OK
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
     DynamoLlmResult::OK
 }
@@ -191,11 +191,7 @@ fn kv_event_create_stored_from_parts(
         if num_toks != (kv_block_size as usize) {
             if WARN_COUNT
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
-                    if c < 3 {
-                        Some(c + 1)
-                    } else {
-                        None
-                    }
+                    if c < 3 { Some(c + 1) } else { None }
                 })
                 .is_ok()
             {
@@ -256,7 +252,7 @@ pub struct DynamoKvStoredEventParams {
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
 /// has a parent hash or not. nullptr is used to represent no parent hash
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     event_id: u64,
     token_ids: *const u32,
@@ -293,7 +289,7 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn dynamo_kv_event_publish_removed(
     event_id: u64,
     block_ids: *const u64,

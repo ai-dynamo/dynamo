@@ -22,8 +22,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::slug::Slug;
 use crate::CancellationToken;
+use crate::slug::Slug;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -278,7 +278,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use futures::{pin_mut, StreamExt};
+    use futures::{StreamExt, pin_mut};
 
     const BUCKET_NAME: &str = "mdc";
 

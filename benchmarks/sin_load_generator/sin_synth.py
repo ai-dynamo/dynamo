@@ -51,7 +51,7 @@ def main(args):
             isl, osl = get_isl_osl(t_req)
             output_data.append(
                 {
-                    "timestamp": t_req * 1000,  # in ms
+                    "timestamp": int(t_req * 1000),  # in ms, integer
                     "input_length": isl,
                     "output_length": osl,
                     "hash_ids": np.random.choice(

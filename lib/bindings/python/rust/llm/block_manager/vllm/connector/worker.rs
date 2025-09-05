@@ -5,16 +5,18 @@ use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
+use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
-use crate::llm::block_manager::distributed::get_barrier_id;
+use crate::llm::block_manager::distributed::get_barrier_id_prefix;
 use crate::{
     llm::block_manager::distributed::VllmTensor, to_pyerr,
     DistributedRuntime as PyDistributedRuntime,
 };
+use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use anyhow;
 use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
@@ -68,6 +70,8 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    kvbm_metrics: KvbmMetrics,
 }
 
 impl KvConnectorWorker {
@@ -88,6 +92,11 @@ impl KvConnectorWorker {
         )?
         .detach();
 
+        let kvbm_metrics = KvbmMetrics::new(
+            &drt.namespace(kvbm_connector::KVBM_CONNECTOR_WORKER)
+                .unwrap(),
+        );
+
         tracing::info!(
             "KvConnectorWorker initialized with worker_id: {}",
             vllm_worker_id
@@ -106,6 +115,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            kvbm_metrics,
         })
     }
 }
@@ -156,12 +166,12 @@ impl Worker for KvConnectorWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .barrier_id(get_barrier_id())
+            .barrier_id_prefix(get_barrier_id_prefix())
             .scheduler_client(Some(self.transfer_client.clone()))
             .build()?;
 
         let worker = self.drt.runtime().primary().block_on(async move {
-            let worker = KvbmWorker::new(config).await?;
+            let worker = KvbmWorker::new(config, false).await?;
             anyhow::Ok(worker)
         })?;
 
@@ -267,6 +277,7 @@ impl Worker for KvConnectorWorker {
                 self.connector.enqueue_request(operation);
             }
         }
+        self.kvbm_metrics.save_kv_layer_requests.inc();
         Ok(())
     }
 
@@ -466,7 +477,7 @@ fn _get_current_context() -> CUcontext {
     ctx
 }
 
-fn event_sync_blocking(event: u64) {
+pub fn event_sync_blocking(event: u64) {
     let status = unsafe { cuEventSynchronize(event as CUevent) };
     assert_eq!(
         status,

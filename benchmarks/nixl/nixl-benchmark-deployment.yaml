@@ -15,7 +15,7 @@ spec:
         app: nixl-benchmark
     spec:
       imagePullSecrets:
-        - name: nvcrimagepullsecret
+        - name: nvcr-imagepullsecret
       containers:
       - name: nixl-benchmark
         image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:nixlbench-e42c07a8

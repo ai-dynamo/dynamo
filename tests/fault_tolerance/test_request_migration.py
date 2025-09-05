@@ -165,7 +165,7 @@ def send_completion_request(
 
     try:
         response = requests.post(
-            "http://localhost:8080/v1/completions",
+            "http://localhost:8000/v1/completions",
             headers=headers,
             json=payload,
             timeout=timeout,

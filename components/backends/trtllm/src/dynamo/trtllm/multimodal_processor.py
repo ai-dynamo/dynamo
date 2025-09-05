@@ -13,11 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import time
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import torch
 from tensorrt_llm.inputs import default_multimodal_input_loader
+
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
 
 
 class TokenizerProtocol(Protocol):
@@ -39,12 +48,80 @@ class MultimodalRequestProcessor:
         self,
         model_type: str,
         model_dir: str,
+        max_file_size_mb: int,
         tokenizer: Optional[TokenizerProtocol] = None,
+        allowed_local_media_path: str = "",
     ):
         self.model_type = model_type
         self.model_dir = model_dir
         self.tokenizer = tokenizer
         self.modality = ""
+        self.allowed_local_media_path = allowed_local_media_path
+        self.max_file_size_mb = max_file_size_mb
+        self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+
+    def is_url(self, path: str) -> bool:
+        """Check if a path is a URL."""
+        parsed = urlparse(path)
+        return bool(parsed.scheme and parsed.netloc)
+
+    def load_tensor_from_path_or_url(self, path: str) -> torch.Tensor:
+        """Load a tensor from either a local file path or a URL."""
+        if self.is_url(path):
+            # Download directly to memory using BytesIO (no filesystem ops)
+            try:
+                with urlopen(path) as response:
+                    # Read at most max_size + 1 bytes to detect if file exceeds limit
+                    data = response.read(self.max_file_size_bytes + 1)
+                    if len(data) > self.max_file_size_bytes:
+                        raise RuntimeError(
+                            f"File size exceeds limit: {len(data) // (1024*1024)}MB > "
+                            f"{self.max_file_size_mb}MB "
+                        )
+                    tensor_stream = BytesIO(data)
+                    tensor = torch.load(
+                        tensor_stream, map_location="cpu", weights_only=True
+                    )
+                    return tensor
+            except Exception as e:
+                # Log actual error for debugging, return generic error to user
+                logging.error(f"Failed to download or load tensor from URL: {e}")
+                raise RuntimeError("Failed to load tensor")
+        else:
+            # Restrict local file access to configured directory only
+            try:
+                # Check if local media path is configured
+                if not self.allowed_local_media_path:
+                    logging.warning(
+                        "Local file access attempted but no allowed path configured"
+                    )
+                    raise RuntimeError("Failed to load tensor")
+
+                resolved_path = Path(path).resolve()
+                allowed_path = Path(self.allowed_local_media_path).resolve()
+
+                # Secure path validation: Check if the resolved path is actually within allowed directory
+                try:
+                    resolved_path.relative_to(allowed_path)
+                except ValueError:
+                    logging.warning(
+                        f"Blocked access to file outside {self.allowed_local_media_path}: {path}"
+                    )
+                    raise RuntimeError("Failed to load tensor")
+
+                # Check file size before loading
+                if resolved_path.exists():
+                    file_size = resolved_path.stat().st_size
+                    if file_size > self.max_file_size_bytes:
+                        raise RuntimeError(
+                            f"File size ({file_size // (1024*1024)}MB) exceeds "
+                            f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)"
+                        )
+                return torch.load(resolved_path, map_location="cpu", weights_only=True)
+            except Exception as e:
+                # Log actual error for debugging, return generic error to user
+                logging.error(f"Failed to load tensor from local path: {e}")
+                raise RuntimeError("Failed to load tensor")
 
     def extract_prompt_and_media(
         self, messages: List[Dict]
@@ -70,7 +147,9 @@ class MultimodalRequestProcessor:
 
         return " ".join(text_parts), image_urls, embedding_paths
 
-    async def process_openai_request(self, request: Dict) -> Optional[Any]:
+    async def process_openai_request(
+        self, request: Dict, embeddings: Any
+    ) -> Optional[Any]:
         """Process OpenAI request and return with multimodal data."""
         # Normalize the request to handle OpenAI format
         if "stop_conditions" not in request:
@@ -92,15 +171,23 @@ class MultimodalRequestProcessor:
         )
 
         if not image_urls and not embedding_paths:
-            # No multimodal content, return None
+            logging.warning("No multimodal content, returning None")
             return None
 
         loader_kwargs = {}
-        if embedding_paths:
-            mm_embeds = [torch.load(path) for path in embedding_paths]
-            loader_kwargs["mm_embeddings"] = mm_embeds
+        if embeddings is not None:
+            # EPD flow
+            loader_kwargs["mm_embeddings"] = [embeddings]
+            logging.debug(f"Using NIXL embeddings in prefill worker: {embeddings}")
         elif image_urls:
+            # Image-only flow
             loader_kwargs["media"] = [image_urls]
+        elif embedding_paths:
+            # PD flow with no NIXL and no encoder
+            loader_kwargs["mm_embeddings"] = [
+                self.load_tensor_from_path_or_url(path) for path in embedding_paths
+            ]
+            logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
 
         # Process with default_multimodal_input_loader
         processed_inputs = default_multimodal_input_loader(

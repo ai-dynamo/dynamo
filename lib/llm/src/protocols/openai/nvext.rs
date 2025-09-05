@@ -34,13 +34,13 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))] // NIM LLM might default to -1
     #[validate(custom(function = "validate_top_k"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<i64>,
+    pub top_k: Option<i32>,
 
     /// How much to penalize tokens based on how frequently they occur in the text.
     /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
     #[builder(default, setter(strip_option))]
     #[validate(range(exclusive_min = 0.0, max = 2.0))]
-    pub repetition_penalty: Option<f64>,
+    pub repetition_penalty: Option<f32>,
 
     /// If true, sampling will be forced to be greedy.
     /// The backend is responsible for selecting the correct backend-specific options to
@@ -68,6 +68,13 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance_id: Option<i64>,
+
+    /// Pre-tokenized data to use instead of tokenizing the prompt
+    /// If provided along with backend_instance_id, these tokens will be used directly
+    /// and tokenization will be skipped.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_data: Option<Vec<u32>>,
     /// Guided Decoding Options
     /// If specified, the output will be a JSON object. Can be a string, an object, or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +100,12 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guided_decoding_backend: Option<String>,
+
+    /// Maximum number of thinking tokens allowed
+    /// NOTE: Currently passed through to backends as a no-op for future implementation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub max_thinking_tokens: Option<u32>,
 }
 
 impl Default for NvExt {
@@ -111,7 +124,7 @@ fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_top_k(top_k: i64) -> Result<(), ValidationError> {
+pub fn validate_top_k(top_k: i32) -> Result<(), ValidationError> {
     if top_k == -1 || (top_k >= 1) {
         return Ok(());
     }
@@ -150,6 +163,7 @@ mod tests {
         assert_eq!(nv_ext.guided_regex, None);
         assert_eq!(nv_ext.guided_grammar, None);
         assert_eq!(nv_ext.guided_choice, None);
+        assert_eq!(nv_ext.max_thinking_tokens, None);
     }
 
     // Test valid builder configurations
@@ -165,6 +179,7 @@ mod tests {
             .guided_grammar("S -> 'a' S 'b' | 'c'".to_string())
             .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
             .guided_decoding_backend("xgrammar".to_string())
+            .max_thinking_tokens(1024)
             .build()
             .unwrap();
 
@@ -186,6 +201,7 @@ mod tests {
             Some(vec!["choice1".to_string(), "choice2".to_string()])
         );
         assert_eq!(nv_ext.guided_decoding_backend, Some("xgrammar".to_string()));
+        assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
     }
@@ -193,7 +209,7 @@ mod tests {
     // Test invalid `top_k` validation using proptest
     proptest! {
         #[test]
-        fn test_invalid_top_k_value(top_k in any::<i64>().prop_filter("Invalid top_k", |&k| k < -1 || (k > 0 && k < 1))) {
+        fn test_invalid_top_k_value(top_k in any::<i32>().prop_filter("Invalid top_k", |&k| k < -1 || (k > 0 && k < 1))) {
             let nv_ext = NvExt::builder()
                 .top_k(top_k)
                 .build()
@@ -220,7 +236,7 @@ mod tests {
     // Test valid repetition_penalty values
     proptest! {
         #[test]
-        fn test_valid_repetition_penalty_values(repetition_penalty in 0.01f64..=2.0f64) {
+        fn test_valid_repetition_penalty_values(repetition_penalty in 0.01f32..=2.0f32) {
             let nv_ext = NvExt::builder()
                 .repetition_penalty(repetition_penalty)
                 .build()
@@ -234,7 +250,7 @@ mod tests {
     // Test invalid repetition_penalty values
     proptest! {
         #[test]
-        fn test_invalid_repetition_penalty_values(repetition_penalty in -10.0f64..0.0f64) {
+        fn test_invalid_repetition_penalty_values(repetition_penalty in -10.0f32..0.0f32) {
             let nv_ext = NvExt::builder()
                 .repetition_penalty(repetition_penalty)
                 .build()

@@ -18,7 +18,9 @@ impl ModelDeploymentCard {
     #[staticmethod]
     fn load(path: String, model_name: String, py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut card = RsModelDeploymentCard::load(&path).await.map_err(to_pyerr)?;
+            let mut card = RsModelDeploymentCard::load(&path, None)
+                .await
+                .map_err(to_pyerr)?;
             card.set_name(&model_name);
             Ok(ModelDeploymentCard { inner: card })
         })

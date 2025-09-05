@@ -48,10 +48,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
-    locality::LocalityProvider,
-    transfer::{TransferContext, WriteTo, WriteToStrategy},
     BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
     MutableBlock, ReadableBlock, WritableBlock,
+    locality::LocalityProvider,
+    transfer::{TransferContext, WriteTo, WriteToStrategy},
 };
 use crate::block_manager::metrics::PoolMetrics;
 use crate::block_manager::pool::{BlockPool, BlockPoolError};
@@ -59,7 +59,7 @@ use crate::block_manager::storage::{Local, Storage};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::{StreamExt, stream::FuturesUnordered};
 
 use super::BlockResult;
 

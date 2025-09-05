@@ -24,7 +24,7 @@ RUN_PREFIX=
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["KVBM"]=5)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
 
 DEFAULT_FRAMEWORK=VLLM
 
@@ -277,7 +277,6 @@ get_options() {
     if [ -n "$USE_NIXL_GDS" ]; then
         VOLUME_MOUNTS+=" -v /run/udev:/run/udev:ro "
         NIXL_GDS_CAPS="--cap-add=IPC_LOCK"
-
         # NOTE(jthomson04): In the KVBM disk pools, we currently allocate our files in /tmp.
         # For some arcane reason, GDS requires that /tmp be mounted.
         # This is already handled for us if we set --mount-workspace
@@ -291,6 +290,7 @@ get_options() {
     if [[ "$GPUS" == "none" || "$GPUS" == "NONE" ]]; then
             RUNTIME=""
     fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -298,7 +298,7 @@ show_help() {
     echo "usage: run.sh"
     echo "  [--image image]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
-    echo "  [--name name for launched container, default NONE] "
+    echo "  [--name name for launched container, default NONE]"
     echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-cache directory to volume mount as the hf cache, default is NONE unless mounting workspace]"
@@ -310,6 +310,8 @@ show_help() {
     echo "  [-- stop processing and pass remaining args as command to docker run]"
     echo "  [--workdir set the working directory inside the container]"
     echo "  [--runtime add runtime variables]"
+    echo "  [--entrypoint override container entrypoint]"
+    echo "  [-h, --help show this help]"
     exit 0
 }
 
@@ -325,7 +327,6 @@ error() {
 get_options "$@"
 
 # RUN the image
-
 if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi

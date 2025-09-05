@@ -1,1 +1,1 @@
-../../docs/architecture/pre_deployment_profiling.md
+../../docs/benchmarks/pre_deployment_profiling.md

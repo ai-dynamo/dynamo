@@ -4,8 +4,9 @@
 import logging
 
 import numpy as np
-from utils.genai_perf import benchmark_decode
-from utils.plot import plot_decode_3d_surface
+
+from benchmarks.profiler.utils.genai_perf import benchmark_decode
+from benchmarks.profiler.utils.plot import plot_decode_3d_surface
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -42,18 +43,25 @@ def profile_decode(
         (max_context_length - osl) // interpolation_granularity,
     ):
         max_concurrency = max_kv_tokens // (isl + osl)
-        if max_concurrency // interpolation_granularity == 0:
+        if max_concurrency == 0:
+            logger.warning(
+                f"max_kv_tokens {max_kv_tokens} is too small for"
+                f" isl {isl} + osl {osl}, skipping."
+            )
+            break
+        elif max_concurrency < interpolation_granularity:
             logger.warning(
                 f"max_concurrency {max_concurrency} is too small for"
                 f" interpolation granularity {interpolation_granularity}."
                 f" max_kv_tokens {max_kv_tokens}, isl {isl}, osl {osl}"
             )
-            break
-        sweep_num_request = range(
-            1,
-            max_concurrency,
-            max_concurrency // interpolation_granularity,
-        )
+            sweep_num_request = range(1, max_concurrency + 1)
+        else:
+            sweep_num_request = range(
+                1,
+                max_concurrency,
+                max_concurrency // interpolation_granularity,
+            )
         for num_request in sweep_num_request:
             genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
             gap_result = benchmark_decode(

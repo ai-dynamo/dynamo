@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{self, EngineConfig},
     kv_router::{KvPushRouter, KvRouter},
@@ -15,15 +15,16 @@ use crate::{
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     types::{
+        Annotated,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             OpenAIChatCompletionsStreamingEngine,
         },
-        Annotated,
     },
 };
 
 use dynamo_runtime::{
+    DistributedRuntime, Runtime,
     component::Client,
     distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
@@ -31,7 +32,6 @@ use dynamo_runtime::{
         Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
         ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
-    DistributedRuntime, Runtime,
 };
 use std::sync::Arc;
 
@@ -78,7 +78,7 @@ pub async fn prepare_engine(
 
             let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
-                inner_watch_obj.watch(receiver).await;
+                inner_watch_obj.watch(receiver, None).await;
             });
             tracing::info!("Waiting for remote model..");
 
@@ -191,11 +191,11 @@ where
     Req: Data,
     Resp: Data,
     OpenAIPreprocessor: Operator<
-        Context<Req>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-        Context<PreprocessedRequest>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-    >,
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
 {
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor = OpenAIPreprocessor::new((*card).clone())
@@ -224,14 +224,44 @@ where
     Req: Data,
     Resp: Data,
     OpenAIPreprocessor: Operator<
-        Context<Req>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-        Context<PreprocessedRequest>,
-        Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-    >,
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
+{
+    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?;
+    build_routed_pipeline_with_preprocessor(
+        card,
+        client,
+        router_mode,
+        busy_threshold,
+        chooser,
+        preprocessor,
+    )
+    .await
+}
+
+pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    router_mode: RouterMode,
+    busy_threshold: Option<f64>,
+    chooser: Option<Arc<KvRouter>>,
+    preprocessor: Arc<OpenAIPreprocessor>,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
 {
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
-    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+    let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_mdc(card.clone()).await?.into_operator();
     let migration = Migration::from_mdc(card.clone()).await?.into_operator();
     let router =
@@ -255,13 +285,13 @@ where
     };
 
     let engine = frontend
-        .link(preprocessor.forward_edge())?
+        .link(preprocessor_op.forward_edge())?
         .link(backend.forward_edge())?
         .link(migration.forward_edge())?
         .link(service_backend)?
         .link(migration.backward_edge())?
         .link(backend.backward_edge())?
-        .link(preprocessor.backward_edge())?
+        .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
     Ok(engine)
 }
@@ -282,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH).await?;
+        let card = ModelDeploymentCard::load(HF_PATH, None).await?;
         let engine = crate::engines::make_engine_core();
 
         // Build pipeline for chat completions
@@ -301,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
-        let card = ModelDeploymentCard::load(HF_PATH).await?;
+        let card = ModelDeploymentCard::load(HF_PATH, None).await?;
         let engine = crate::engines::make_engine_core();
 
         // Build pipeline for completions

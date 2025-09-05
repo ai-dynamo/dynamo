@@ -21,7 +21,7 @@ use chrono::{DateTime, Local};
 use either::Either;
 use ggus::{GGufMetaKV, GGufReader};
 use memmap2::Mmap;
-use minijinja::{value::Kwargs, Error, ErrorKind, Value};
+use minijinja::{Error, ErrorKind, Value, value::Kwargs};
 use serde::{Deserialize, Serialize};
 
 #[allow(dead_code)]

@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use super::*;
+use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
@@ -218,5 +219,115 @@ impl BlockManager {
     #[inline(always)]
     pub fn get_block_manager(&self) -> &VllmBlockManager {
         &self.inner
+    }
+}
+
+#[derive(Default)]
+pub struct BlockManagerBuilder {
+    worker_id: u64,
+    leader: Option<distributed::KvbmLeader>,
+    page_size: usize,
+    disable_device_pool: bool,
+}
+
+impl BlockManagerBuilder {
+    pub fn new() -> Self {
+        Self {
+            page_size: 32, // default consistent with BlockManager::new
+            ..Default::default()
+        }
+    }
+
+    pub fn worker_id(mut self, id: u64) -> Self {
+        self.worker_id = id;
+        self
+    }
+    pub fn page_size(mut self, ps: usize) -> Self {
+        self.page_size = ps;
+        self
+    }
+    pub fn leader(mut self, l: distributed::KvbmLeader) -> Self {
+        self.leader = Some(l);
+        self
+    }
+    pub fn disable_device_pool(mut self, yes: bool) -> Self {
+        self.disable_device_pool = yes;
+        self
+    }
+
+    /// Async build (call from an async context).
+    pub async fn build(self) -> Result<BlockManager> {
+        let worker_id = self.worker_id;
+        let leader = self.leader.ok_or_else(|| {
+            anyhow::anyhow!("leader is required (runtime is always taken from leader)")
+        })?;
+
+        // Get (inner leader handle, runtime) from the provided leader.
+        let (leader_inner, drt) = leader.dissolve();
+
+        let cancel_token = CancellationToken::new();
+
+        // Runtime & model config
+        let runtime_config = dynamo_llm::block_manager::KvManagerRuntimeConfig::builder()
+            .worker_id(worker_id)
+            .cancellation_token(cancel_token.clone())
+            .build()?;
+
+        let mut config =
+            dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(runtime_config);
+
+        let model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
+            .num_layers(1)
+            .outer_dim(1)
+            .page_size(self.page_size)
+            .inner_dim(1)
+            .build()?;
+
+        config = config.model(model_config);
+
+        // Layouts derived from leader’s counts
+        if !self.disable_device_pool {
+            config = config.device_layout(
+                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                    .num_blocks(leader_inner.num_device_blocks())
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            );
+        }
+
+        if leader_inner.num_host_blocks() > 0 {
+            config = config.host_layout(
+                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                    .num_blocks(leader_inner.num_host_blocks())
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            );
+        }
+
+        if leader_inner.num_disk_blocks() > 0 {
+            config = config.disk_layout(
+                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                    .num_blocks(leader_inner.num_disk_blocks())
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            );
+        }
+
+        let config = config.build()?;
+
+        let resources =
+            DistributedLeaderWorkerResources::new(Some(leader_inner), cancel_token.child_token())?;
+
+        let inner = dynamo_llm::block_manager::KvBlockManager::<
+            Logical<DistributedLeaderWorkerResources>,
+            BasicMetadata,
+        >::new(config, resources)
+        .await?;
+
+        Ok(BlockManager {
+            inner,
+            drt,
+            _controller: None,
+        })
     }
 }

@@ -1,26 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
+    common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::protocols::openai::common_ext::CommonExtProvider;
+use crate::protocols::openai::common_ext::{CommonExtProvider, choose_with_deprecation};
 
 pub mod chat_completions;
 pub mod common_ext;
@@ -32,7 +20,7 @@ pub mod responses;
 pub mod validate;
 
 use validate::{
-    validate_range, FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE,
+    FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -73,9 +61,17 @@ trait OpenAIStopConditionsProvider {
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
     /// CommonExt (root-level) takes precedence over NvExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        // Check common first (takes precedence), then fall back to nvext
-        self.get_common_ignore_eos()
-            .or_else(|| self.nvext().and_then(|nv| nv.ignore_eos))
+        choose_with_deprecation(
+            "ignore_eos",
+            self.get_common_ignore_eos().as_ref(),
+            self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
+        )
+    }
+
+    /// Get max_thinking_tokens from nvext
+    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    fn get_max_thinking_tokens(&self) -> Option<u32> {
+        self.nvext().and_then(|nv| nv.max_thinking_tokens)
     }
 }
 
@@ -105,6 +101,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 .map_err(|e| anyhow::anyhow!("Error validating frequency_penalty: {}", e))?;
         let presence_penalty = validate_range(self.get_presence_penalty(), &PRESENCE_PENALTY_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating presence_penalty: {}", e))?;
+        let top_k = CommonExtProvider::get_top_k(self);
+        let repetition_penalty = CommonExtProvider::get_repetition_penalty(self);
+        let include_stop_str_in_output = CommonExtProvider::get_include_stop_str_in_output(self);
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -140,15 +139,16 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             best_of: None,
             frequency_penalty,
             presence_penalty,
-            repetition_penalty: None,
+            repetition_penalty,
             temperature,
             top_p,
-            top_k: None,
+            top_k,
             min_p: None,
             seed: None,
             use_beam_search: None,
             length_penalty: None,
             guided_decoding,
+            include_stop_str_in_output,
         })
     }
 }
@@ -158,11 +158,12 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let max_thinking_tokens = self.get_max_thinking_tokens();
 
-        if let Some(stop) = &stop {
-            if stop.len() > 4 {
-                anyhow::bail!("stop conditions must be less than 4")
-            }
+        if let Some(stop) = &stop
+            && stop.len() > 4
+        {
+            anyhow::bail!("stop conditions must be less than 4")
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -174,6 +175,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             stop,
             stop_token_ids_hidden: None,
             ignore_eos,
+            max_thinking_tokens,
         })
     }
 }
@@ -194,8 +196,8 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
     }
 }
 
-pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debug>:
-    Send + Sync + 'static
+pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
+    Send + 'static
 {
     fn choice_from_postprocessor(
         &mut self,
@@ -204,4 +206,20 @@ pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debu
 
     /// Gets the current prompt token count (Input Sequence Length).
     fn get_isl(&self) -> Option<u32>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ParsingOptions {
+    pub tool_call_parser: Option<String>,
+
+    pub reasoning_parser: Option<String>,
+}
+
+impl ParsingOptions {
+    pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
+        Self {
+            tool_call_parser,
+            reasoning_parser,
+        }
+    }
 }

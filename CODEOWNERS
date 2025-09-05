@@ -14,7 +14,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
 # Dynamo deploy
-/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
+/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab @atchernych
 
 # Examples
 /examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ishandhanani @ai-dynamo/dynamo-rust-codeowners
@@ -25,6 +25,11 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /.github/ @ai-dynamo/Devops @nnshah1
 /.github/workflows/*.ps1 @ai-dynamo/Devops @whoisj
 CODEOWNERS @ai-dynamo/Devops @nnshah1
+
+# Planner
+/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
+/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
+/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
 
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops

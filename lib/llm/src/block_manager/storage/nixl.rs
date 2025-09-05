@@ -342,7 +342,7 @@ impl NixlRegisterableStorage for PinnedStorage {}
 
 impl MemoryRegion for PinnedStorage {
     unsafe fn as_ptr(&self) -> *const u8 {
-        Storage::as_ptr(self)
+        unsafe { Storage::as_ptr(self) }
     }
 
     fn size(&self) -> usize {
@@ -367,7 +367,7 @@ impl NixlRegisterableStorage for DeviceStorage {}
 
 impl MemoryRegion for DeviceStorage {
     unsafe fn as_ptr(&self) -> *const u8 {
-        Storage::as_ptr(self)
+        unsafe { Storage::as_ptr(self) }
     }
 
     fn size(&self) -> usize {
@@ -406,7 +406,7 @@ impl NixlRegisterableStorage for DiskStorage {
 
 impl MemoryRegion for DiskStorage {
     unsafe fn as_ptr(&self) -> *const u8 {
-        Storage::as_ptr(self)
+        unsafe { Storage::as_ptr(self) }
     }
 
     fn size(&self) -> usize {

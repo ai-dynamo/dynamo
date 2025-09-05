@@ -4,13 +4,14 @@
 
 import logging
 import os
-import sys
 from typing import Optional
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
+
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 
 from . import __version__
 from .ports import (
@@ -27,7 +28,6 @@ from .ports import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
@@ -47,6 +47,7 @@ class Config:
     migration_limit: int = 0
     kv_port: Optional[int] = None
     port_range: DynamoPortRange
+    custom_jinja_template: Optional[str] = None
 
     # mirror vLLM
     model: str
@@ -58,6 +59,10 @@ class Config:
     # Connector list from CLI
     connector_list: Optional[list] = None
 
+    # tool and reasoning parser info
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
+
 
 def parse_args() -> Config:
     parser = FlexibleArgumentParser(
@@ -65,12 +70,6 @@ def parse_args() -> Config:
     )
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Backend VLLM {__version__}"
-    )
-    parser.add_argument(
-        "--endpoint",
-        type=str,
-        default=DEFAULT_ENDPOINT,
-        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
     )
     parser.add_argument(
         "--is-prefill-worker",
@@ -102,6 +101,27 @@ def parse_args() -> Config:
         help="List of connectors to use in order (e.g., --connector nixl lmcache). "
         "Options: nixl, lmcache, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
     )
+    # To avoid name conflicts with different backends, adopted prefix "dyn-" for dynamo specific args
+    parser.add_argument(
+        "--dyn-tool-call-parser",
+        type=str,
+        default=None,
+        choices=get_tool_parser_names(),
+        help="Tool call parser name for the model.",
+    )
+    parser.add_argument(
+        "--dyn-reasoning-parser",
+        type=str,
+        default=None,
+        choices=get_reasoning_parser_names(),
+        help="Reasoning parser name for the model.",
+    )
+    parser.add_argument(
+        "--custom-jinja-template",
+        type=str,
+        default=None,
+        help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
@@ -124,34 +144,18 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
-
-    if args.is_prefill_worker:
-        args.endpoint = f"dyn://{namespace}.prefill.generate"
-    else:
-        # For decode workers, also use the provided namespace instead of hardcoded "dynamo"
-        args.endpoint = f"dyn://{namespace}.backend.generate"
-
-    endpoint_str = args.endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        logger.error(
-            f"Invalid endpoint format: '{args.endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        sys.exit(1)
-
-    parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
-
-    config.namespace = parsed_namespace
-    config.component = parsed_component_name
-    config.endpoint = parsed_endpoint_name
+    config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    config.component = "prefill" if args.is_prefill_worker else "backend"
+    config.endpoint = "generate"
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.migration_limit = args.migration_limit
     config.port_range = DynamoPortRange(
         min=args.dynamo_port_min, max=args.dynamo_port_max
     )
-
+    config.tool_call_parser = args.dyn_tool_call_parser
+    config.reasoning_parser = args.dyn_reasoning_parser
+    config.custom_jinja_template = args.custom_jinja_template
     # Check for conflicting flags
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
@@ -254,6 +258,32 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
         set_side_channel_host_and_port(base_side_channel_port)
 
 
+def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
+    """Create KVEventsConfig for prefix caching if needed."""
+    # If prefix caching is not enabled, no events config needed
+    if not config.engine_args.enable_prefix_caching:
+        return None
+
+    # If user provided their own config, use that
+    if getattr(config.engine_args, "kv_events_config"):
+        logger.info("Using user-provided kv_events_config")
+        return None
+
+    # Create default events config for prefix caching
+    logger.info("Creating Dynamo default kv_events_config for prefix caching")
+    if config.kv_port is None:
+        raise ValueError(
+            "config.kv_port is not set; call configure_ports_with_etcd(...) before overwrite_args "
+            "or provide --kv-event-config to supply an explicit endpoint."
+        )
+    dp_rank = config.engine_args.data_parallel_rank or 0
+    return KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+    )
+
+
 def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
     """Create KVTransferConfig based on user config or connector list.
 
@@ -313,24 +343,16 @@ def overwrite_args(config):
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
         "disable_log_requests": True,
-        # KV routing relies on logging KV metrics
         "disable_log_stats": False,
     }
 
-    kv_config = create_kv_transfer_config(config)
-    if kv_config:
-        defaults["kv_transfer_config"] = kv_config
+    kv_transfer_config = create_kv_transfer_config(config)
+    if kv_transfer_config:
+        defaults["kv_transfer_config"] = kv_transfer_config
 
-    if config.engine_args.enable_prefix_caching:
-        dp_rank = config.engine_args.data_parallel_rank or 0
-        defaults |= {
-            # Always setting up kv events if enable prefix cache.
-            "kv_events_config": KVEventsConfig(
-                enable_kv_cache_events=True,
-                publisher="zmq",
-                endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-            )
-        }
+    kv_events_config = create_kv_events_config(config)
+    if kv_events_config:
+        defaults["kv_events_config"] = kv_events_config
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():

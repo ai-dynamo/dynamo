@@ -17,8 +17,8 @@
 //! them within Dynamo.
 
 use cudarc::driver::{
-    sys::{cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cudaError_enum, CUcontext, CUstream},
     CudaContext, CudaStream,
+    sys::{CUcontext, CUstream, cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cudaError_enum},
 };
 use std::pin::Pin;
 use std::{marker::PhantomData, sync::Arc};
