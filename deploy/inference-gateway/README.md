@@ -191,6 +191,7 @@ NAME        HOSTNAMES   AGE
 qwen-route               33m
 ```
 
+
 ### 6. Usage ###
 
 The Inference Gateway provides HTTP endpoints for model inference.
@@ -202,10 +203,11 @@ export GATEWAY_URL=<Gateway-URL>
 
 To test the gateway in minikube, use the following command:
 a. User minikube tunnel to expose the gateway to the host
-   This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternateive (b).
+   This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
 ```bash
 # in first terminal
-minikube tunnel
+ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is not already running.
+minikube tunnel & # start the tunnel
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o yaml -o jsonpath='{.spec.clusterIP}')
@@ -298,4 +300,12 @@ Sample inference output:
     "total_tokens": 225
   }
 }
+```
+
+### 7. Deleting the installation ###
+If you need to uninstall run:
+
+```bash
+kubectl delete dynamoGraphDeployment vllm-agg
+helm uninstall dynamo-gaie -n my-model
 ```

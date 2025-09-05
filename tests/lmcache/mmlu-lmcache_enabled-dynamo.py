@@ -17,7 +17,7 @@
 # Reference: https://github.com/LMCache/LMCache/blob/dev/.buildkite/correctness/2-mmlu.py
 
 # ASSUMPTIONS:
-# 1. dynamo is running (default: localhost:8080) with LMCache enabled
+# 1. dynamo is running (default: localhost:8000) with LMCache enabled
 # 2. the mmlu dataset is in a "data" directory
 # 3. all invocations of this script should be run in the same directory
 #    (for later consolidation)

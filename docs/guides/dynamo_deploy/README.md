@@ -168,3 +168,4 @@ Key customization points include:
 - **[Create Custom Deployments](/docs/guides/dynamo_deploy/create_deployment.md)** - Build your own CRDs
 - **[Operator Documentation](/docs/guides/dynamo_deploy/dynamo_operator.md)** - How the platform works
 - **[Helm Charts](/deploy/helm/README.md)** - For advanced users
+- **[GitOps Deployment with FluxCD](/docs/guides/dynamo_deploy/fluxcd.md)** - For advanced users
