@@ -555,8 +555,9 @@ impl KvIndexerMetrics {
         Ok(Self::new(kv_cache_events_applied))
     }
 
-    /// Creates a new KvIndexerMetrics for testing. It is not registered with a MetricsRegistry.
-    pub fn new_for_tests() -> Self {
+    /// Creates a new KvIndexerMetrics which is not registered with a MetricsRegistry.
+    /// This may be used for tests or as a fallback for when a MetricsRegistry is not available / has errored.
+    pub fn new_unregistered() -> Self {
         Self {
             kv_cache_events_applied: IntCounterVec::new(
                 Opts::new(
@@ -1690,7 +1691,7 @@ mod tests {
         num_shards: usize,
         kv_block_size: u32,
     ) -> Box<dyn KvIndexerInterface> {
-        let metrics = KvIndexerMetrics::new_for_tests();
+        let metrics = KvIndexerMetrics::new_unregistered();
         if num_shards == 1 {
             Box::new(KvIndexer::new(token.clone(), kv_block_size, metrics))
         } else {
@@ -1779,7 +1780,7 @@ mod tests {
         let mut kv_indexer: Box<dyn KvIndexerInterface>;
         let token = CancellationToken::new();
         let expiration = Duration::from_millis(50);
-        let metrics = KvIndexerMetrics::new_for_tests();
+        let metrics = KvIndexerMetrics::new_unregistered();
 
         if num_shards == 1 {
             kv_indexer = Box::new(KvIndexer::new_with_frequency(
@@ -1927,7 +1928,7 @@ mod tests {
         // Configuration
         let kv_block_size = 32;
         let num_shards = 2;
-        let metrics = KvIndexerMetrics::new_for_tests();
+        let metrics = KvIndexerMetrics::new_unregistered();
 
         // Build a non-trivial indexer with events
         let token1 = CancellationToken::new();
@@ -2097,7 +2098,7 @@ mod tests {
 
     #[test]
     fn test_increment_event_applied() {
-        let metrics = KvIndexerMetrics::new_for_tests();
+        let metrics = KvIndexerMetrics::new_unregistered();
 
         metrics.increment_event_applied(0, "stored", Ok(()));
         assert_eq!(

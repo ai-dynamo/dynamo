@@ -129,7 +129,7 @@ mod tests {
         // Part 2: Now create a KvIndexer and load the events from the file
         let indexer_token = CancellationToken::new();
         let kv_block_size = 32; // Default block size for testing
-        let kv_indexer_metrics = KvIndexerMetrics::new_for_tests();
+        let kv_indexer_metrics = KvIndexerMetrics::new_unregistered();
         let indexer = KvIndexer::new(indexer_token.clone(), kv_block_size, kv_indexer_metrics);
         let indexer_event_tx = indexer.event_sender();
 
