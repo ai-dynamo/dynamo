@@ -46,6 +46,16 @@ deployment_specs["disagg-tp-1-dp-2"]["VllmPrefillWorker"].replicas = 2
 
 
 @dataclass
+class Load:
+    num_clients: int
+    requests_per_client: int
+    input_token_length: int
+    output_token_length: int
+    max_retries: int
+    max_request_rate: float
+
+
+@dataclass
 class Failure:
     time: int
     pod_name: str
@@ -57,7 +67,7 @@ class Failure:
 # Each failure scenaro contains a list of failure injections
 # Each failure injection has a time in seconds after the pervious injection and
 # a list of failures to inject including the number of failures for each type.
-# Failures are currently process termination.
+# Failures are currently process termination or pod deletion
 #
 # Example:
 #
@@ -93,3 +103,22 @@ def deployment_spec(request):
     Fixture that provides different deployment graph test configurations.
     """
     return deployment_specs[request.param]
+
+
+@pytest.fixture
+def load(
+    max_request_rate,
+    max_retries,
+    num_clients,
+    input_token_length,
+    output_token_length,
+    requests_per_client,
+):
+    return Load(
+        num_clients,
+        requests_per_client,
+        input_token_length,
+        output_token_length,
+        max_retries,
+        max_request_rate,
+    )

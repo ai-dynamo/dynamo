@@ -121,14 +121,9 @@ async def test_fault_scenario(
     request,
     image,
     namespace,
-    num_clients,
-    requests_per_client,
     model,
     failures,  # noqa: F811
-    input_token_length,
-    output_token_length,
-    max_retries,
-    max_request_rate,
+    load,
 ):
     """
     Test dynamo serve deployments with injected failures
@@ -157,15 +152,15 @@ async def test_fault_scenario(
     ) as deployment:
         with _clients(
             logger,
-            num_clients,
+            load.num_clients,
             request,
             deployment_spec,
             namespace,
             model,
-            requests_per_client,
-            input_token_length,
-            output_token_length,
-            max_retries,
-            max_request_rate,
+            load.requests_per_client,
+            load.input_token_length,
+            load.output_token_length,
+            load.max_retries,
+            load.max_request_rate,
         ):
             _inject_failures(failures, logger, deployment)
