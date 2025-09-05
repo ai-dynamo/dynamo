@@ -43,7 +43,6 @@ INTERACTIVE=
 USE_NIXL_GDS=
 RUNTIME=nvidia
 WORKDIR=/workspace
-USER=
 
 get_options() {
     while :; do
@@ -120,14 +119,6 @@ get_options() {
         --workdir)
             if [ "$2" ]; then
                 WORKDIR="$2"
-                shift
-            else
-                missing_requirement "$1"
-            fi
-            ;;
-        --user)
-            if [ "$2" ]; then
-                USER="$2"
                 shift
             else
                 missing_requirement "$1"
@@ -283,16 +274,9 @@ get_options() {
         RM_STRING=" --rm "
     fi
 
-    if [[ ${USER} == "" ]]; then
-        USER_STRING=""
-    else
-        USER_STRING="--user ${USER}"
-    fi
-
     if [ -n "$USE_NIXL_GDS" ]; then
         VOLUME_MOUNTS+=" -v /run/udev:/run/udev:ro "
         NIXL_GDS_CAPS="--cap-add=IPC_LOCK"
-
         # NOTE(jthomson04): In the KVBM disk pools, we currently allocate our files in /tmp.
         # For some arcane reason, GDS requires that /tmp be mounted.
         # This is already handled for us if we set --mount-workspace
@@ -306,6 +290,7 @@ get_options() {
     if [[ "$GPUS" == "none" || "$GPUS" == "NONE" ]]; then
             RUNTIME=""
     fi
+
     REMAINING_ARGS=("$@")
 }
 
@@ -313,7 +298,7 @@ show_help() {
     echo "usage: run.sh"
     echo "  [--image image]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
-    echo "  [--name name for launched container, default NONE] "
+    echo "  [--name name for launched container, default NONE]"
     echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-cache directory to volume mount as the hf cache, default is NONE unless mounting workspace]"
@@ -325,7 +310,8 @@ show_help() {
     echo "  [-- stop processing and pass remaining args as command to docker run]"
     echo "  [--workdir set the working directory inside the container]"
     echo "  [--runtime add runtime variables]"
-    echo "  [--user override the user for running the container]"
+    echo "  [--entrypoint override container entrypoint]"
+    echo "  [-h, --help show this help]"
     exit 0
 }
 
@@ -341,7 +327,6 @@ error() {
 get_options "$@"
 
 # RUN the image
-
 if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
@@ -363,7 +348,6 @@ ${RUN_PREFIX} docker run \
     ${NIXL_GDS_CAPS} \
     --ipc host \
     ${PRIVILEGED_STRING} \
-    ${USER_STRING} \
     ${NAME_STRING} \
     ${ENTRYPOINT_STRING} \
     ${IMAGE} \

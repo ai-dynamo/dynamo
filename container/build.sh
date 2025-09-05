@@ -443,7 +443,6 @@ error() {
 
 get_options "$@"
 
-
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
@@ -465,7 +464,7 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
-if [[ $TARGET == "dev" ]]; then
+if [[ $TARGET == "local-dev" ]]; then
     BUILD_ARGS+=" --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) "
 fi
 
@@ -599,8 +598,6 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
-
-
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
