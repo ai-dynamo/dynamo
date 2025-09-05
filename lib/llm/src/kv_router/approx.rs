@@ -232,7 +232,7 @@ impl ApproxKvIndexer {
                                 }
                             );
 
-                            trie.apply_event(event);
+                            let _ = trie.apply_event(event);
 
                             timer_manager.insert(result.sequence_hashes.iter().map(|h| TimerEntry {
                                 key: ExternalSequenceBlockHash(*h),
@@ -263,7 +263,7 @@ impl ApproxKvIndexer {
                                     }
                                 );
 
-                                trie.apply_event(event);
+                                let _ = trie.apply_event(event);
                             });
                         }
 

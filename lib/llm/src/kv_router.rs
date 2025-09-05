@@ -235,7 +235,21 @@ impl KvRouter {
         let runtime_configs_rx = runtime_configs_watcher.receiver();
 
         let indexer = if kv_router_config.use_kv_events {
-            Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
+            let kv_indexer_metrics = match indexer::KvIndexerMetrics::from_component(&component) {
+                Ok(metrics) => metrics,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.",
+                        e
+                    );
+                    indexer::KvIndexerMetrics::new_unregistered()
+                }
+            };
+            Indexer::KvIndexer(KvIndexer::new(
+                cancellation_token.clone(),
+                block_size,
+                kv_indexer_metrics,
+            ))
         } else {
             // hard code 120 seconds for now
             Indexer::ApproxKvIndexer(ApproxKvIndexer::new(
