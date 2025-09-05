@@ -22,22 +22,22 @@ pub fn should_audit_flags(store: bool, streaming: bool) -> bool {
 }
 
 // No env/store checks here; call only if should_audit() was true
-pub fn log_stored_completion(
-    request_id: &str,
-    req: &NvCreateChatCompletionRequest,
-    response_json: Value,
-) {
+pub fn log_stored_completion(route: &str, request_id: &str, req: &NvCreateChatCompletionRequest, response_json: Value) {
+    // Build request JSON with nested id (no top-level request_id)
+    let mut request_val = serde_json::to_value(req).unwrap_or_else(|_| json!({}));
+    if let serde_json::Value::Object(ref mut m) = request_val {
+        m.insert("id".to_string(), serde_json::Value::String(request_id.to_string()));
+    }
+
     let ts_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let line = json!({
+        "schema_version": "1.0",
         "log_type": "audit",
         "ts_ms": ts_ms,
-        "request_id": request_id,              // added
         "store_id": format!("store_{}", Uuid::new_v4().simple()),
-        "model": req.inner.model,
-        "store": true,
-        "request": req.inner,
-        "response": response_json,
-        "streaming": false,
+        "route": route,
+        "request": request_val,     // contains model/store/stream/etc + id
+        "response": response_json
     })
     .to_string();
 
