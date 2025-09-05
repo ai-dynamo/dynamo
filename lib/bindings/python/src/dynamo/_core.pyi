@@ -217,7 +217,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -226,6 +226,8 @@ class Endpoint:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
             metrics_labels: Optional list of metrics labels to add to the metrics
+            health_check_payload: Optional dict containing the health check request payload
+                                  that will be used to verify endpoint health
         """
         ...
 

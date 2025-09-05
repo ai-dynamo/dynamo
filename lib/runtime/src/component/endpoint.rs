@@ -37,6 +37,13 @@ pub struct EndpointConfig {
     /// Whether to wait for inflight requests to complete during shutdown
     #[builder(default = "true")]
     graceful_shutdown: bool,
+
+    /// Health check payload for this endpoint
+    /// This payload will be sent to the endpoint during health checks
+    /// to verify it's responding properly
+    #[educe(Debug(ignore))]
+    #[builder(default, setter(into))]
+    health_check_payload: Option<serde_json::Value>,
 }
 
 impl EndpointConfigBuilder {
@@ -52,8 +59,15 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler, metrics_labels, graceful_shutdown) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            lease,
+            handler,
+            stats_handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+        ) = self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
@@ -73,6 +87,23 @@ impl EndpointConfigBuilder {
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
+        // Set health tracking information on the handler
+        handler.set_health_tracking(
+            endpoint.subject_to(lease_id),
+            endpoint.drt().system_health.clone(),
+        )?;
+
+        // Set health check notifier if available
+        if let Some(notifier) = endpoint
+            .drt()
+            .system_health
+            .lock()
+            .unwrap()
+            .get_health_check_notifier()
+        {
+            handler.set_health_check_notifier(notifier)?;
+        }
+
         // get the group
         let group = registry
             .services
@@ -88,6 +119,19 @@ impl EndpointConfigBuilder {
             .expect("no stats handler registry; this is unexpected");
 
         drop(registry);
+
+        // Register health check payload in SystemHealth if provided
+        if let Some(health_check_payload) = &health_check_payload {
+            endpoint
+                .drt()
+                .system_health
+                .lock()
+                .unwrap()
+                .register_health_check_payload(
+                    &endpoint.subject_to(lease_id),
+                    health_check_payload.clone(),
+                );
+        }
 
         // insert the stats handler
         if let Some(stats_handler) = stats_handler {

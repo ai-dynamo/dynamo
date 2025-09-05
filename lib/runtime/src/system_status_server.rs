@@ -156,12 +156,52 @@ pub async fn spawn_system_status_server(
     Ok((actual_address, handle))
 }
 
-/// Health handler
+/// Health handler with optional active health checking
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    // Get basic health status
     let system_health = state.drt().system_health.lock().unwrap();
-    let (healthy, endpoints) = system_health.get_health_status();
+    let (healthy, endpoints_basic) = system_health.get_health_status();
     let uptime = Some(system_health.uptime());
+
+    // Enhanced: Add response time information for endpoints with health check payloads
+    let mut endpoint_details = serde_json::Map::new();
+
+    // Check if we have health check payloads registered
+    let has_health_checks = system_health.has_health_check_payloads();
+
+    if has_health_checks {
+        // Include detailed response time info for monitored endpoints
+        let threshold = std::time::Duration::from_secs(5);
+
+        for (endpoint, status_str) in &endpoints_basic {
+            // Get detailed health info for this endpoint
+            if let Some(health_info) = system_health.get_endpoint_health_info(endpoint) {
+                let mut details = serde_json::Map::new();
+                details.insert("status".to_string(), json!(status_str));
+
+                // Add response time if available
+                if let Some(last_time) = health_info.last_response_time {
+                    let seconds_ago = last_time.elapsed().as_secs();
+                    details.insert("last_response_seconds_ago".to_string(), json!(seconds_ago));
+                    details.insert(
+                        "responding_recently".to_string(),
+                        json!(last_time.elapsed() < threshold),
+                    );
+                }
+
+                endpoint_details.insert(endpoint.clone(), json!(details));
+            } else {
+                // Fallback if no detailed info available
+                endpoint_details.insert(endpoint.clone(), json!(status_str));
+            }
+        }
+    } else {
+        // Simple format for backwards compatibility when no health checks configured
+        for (endpoint, status) in endpoints_basic {
+            endpoint_details.insert(endpoint, json!(status));
+        }
+    }
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -173,7 +213,8 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let response = json!({
         "status": healthy_string,
         "uptime": uptime,
-        "endpoints": endpoints
+        "endpoints": endpoint_details,
+        "has_active_monitoring": has_health_checks
     });
 
     tracing::trace!("Response {}", response.to_string());
@@ -698,6 +739,99 @@ mod integration_tests {
                     );
                 }
                 // DRT handles server cleanup automatically
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn test_health_check_with_payload_and_timeout() {
+        // Test the complete health check flow with the new canary-based system:
+        crate::logging::init();
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_ENABLED", Some("true")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                (
+                    "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    Some("[\"test.endpoint\"]"),
+                ),
+                // Enable health check with short intervals for testing
+                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
+                ("DYN_CANARY_WAIT_TIME", Some("1")), // Send canary after 1 second of inactivity
+                ("DYN_HEALTH_CHECK_RESPOND_STALE_THRESHOLD", Some("1")), // Consider stale after 1 second
+                ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("1")), // Immediately timeout to mimic unresponsiveness
+                ("RUST_LOG", Some("info")),                      // Enable logging for test
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
+
+                // Get system status server info
+                let system_info = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started");
+                let addr = system_info.socket_addr;
+
+                let client = reqwest::Client::new();
+                let health_url = format!("http://{}/health", addr);
+
+                // Register an endpoint with health check payload
+                let endpoint = "test.endpoint";
+                let health_check_payload = serde_json::json!({
+                    "prompt": "health check test",
+                    "_health_check": true
+                });
+
+                // Register the endpoint and its health check payload
+                {
+                    let system_health = drt.system_health.lock().unwrap();
+                    system_health
+                        .register_health_check_payload(endpoint, health_check_payload.clone());
+                }
+
+                // Check initial health - should be ready (default state)
+                let response = client.get(&health_url).send().await.unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+                assert_eq!(status, 503, "Should be unhealthy initially (default state)");
+                assert!(
+                    body.contains("\"status\":\"notready\""),
+                    "Should show notready status initially"
+                );
+
+                // Simulate a recent response
+                drt.system_health
+                    .lock()
+                    .unwrap()
+                    .update_last_response_time(endpoint);
+                // Wait for the response to be recorded
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // Check health again - should now be healthy due to recent response
+                let response = client.get(&health_url).send().await.unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+
+                assert_eq!(status, 200, "Should be healthy due to recent response");
+                assert!(
+                    body.contains("\"status\":\"ready\""),
+                    "Should show ready status after response"
+                );
+
+                // Verify the endpoint status in SystemHealth directly
+                let endpoint_status = drt
+                    .system_health
+                    .lock()
+                    .unwrap()
+                    .get_endpoint_health_status(endpoint);
+                assert_eq!(
+                    endpoint_status,
+                    Some(HealthStatus::Ready),
+                    "SystemHealth should show endpoint as Ready after response"
+                );
             },
         )
         .await;

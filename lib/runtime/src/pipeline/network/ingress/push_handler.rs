@@ -101,12 +101,17 @@ struct RequestMetricsGuard {
     inflight_requests: prometheus::IntGauge,
     request_duration: prometheus::Histogram,
     start_time: Instant,
+    health_check_notifier: Option<Arc<tokio::sync::Notify>>,
 }
 impl Drop for RequestMetricsGuard {
     fn drop(&mut self) {
         self.inflight_requests.dec();
         self.request_duration
             .observe(self.start_time.elapsed().as_secs_f64());
+        // Notify health check manager that inflight requests decreased
+        if let Some(notifier) = &self.health_check_notifier {
+            notifier.notify_one();
+        }
     }
 }
 
@@ -126,6 +131,29 @@ where
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
+    fn set_health_tracking(
+        &self,
+        endpoint_subject: String,
+        system_health: Arc<std::sync::Mutex<crate::SystemHealth>>,
+    ) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.endpoint_subject
+            .set(endpoint_subject)
+            .map_err(|_| anyhow::anyhow!("Endpoint subject already set"))?;
+        self.system_health
+            .set(system_health)
+            .map_err(|_| anyhow::anyhow!("System health already set"))?;
+        Ok(())
+    }
+
+    fn set_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Health check notifier already set"))?;
+        Ok(())
+    }
+
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 
@@ -138,6 +166,7 @@ where
                 inflight_requests: m.inflight_requests.clone(),
                 request_duration: m.request_duration.clone(),
                 start_time,
+                health_check_notifier: self.health_check_notifier.get().cloned(),
             }
         });
 
@@ -305,6 +334,10 @@ where
                         .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
                         .inc();
                 }
+            }
+            // Notify health check manager that we're actively processing
+            if let Some(notifier) = self.health_check_notifier.get() {
+                notifier.notify_one();
             }
         }
 
