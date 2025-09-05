@@ -11,9 +11,46 @@ import pytest
 
 from tests.fault_tolerance.deploy.client import client
 from tests.fault_tolerance.deploy.parse_results import main as parse_results
+from tests.fault_tolerance.deploy.scenarios import (
+    Load,
+    deployment_specs,
+    failure_scenarios,
+)
 from tests.utils.managed_deployment import ManagedDeployment
 
 multiprocessing.set_start_method("spawn")
+
+
+@pytest.fixture(params=failure_scenarios.keys())
+def failures(request):
+    return failure_scenarios[request.param]
+
+
+@pytest.fixture(params=list(deployment_specs.keys()))
+def deployment_spec(request):
+    """
+    Fixture that provides different deployment graph test configurations.
+    """
+    return deployment_specs[request.param]
+
+
+@pytest.fixture
+def load(
+    max_request_rate,
+    max_retries,
+    num_clients,
+    input_token_length,
+    output_token_length,
+    requests_per_client,
+):
+    return Load(
+        num_clients,
+        requests_per_client,
+        input_token_length,
+        output_token_length,
+        max_retries,
+        max_request_rate,
+    )
 
 
 @contextmanager
