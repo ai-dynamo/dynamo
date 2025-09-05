@@ -1527,6 +1527,10 @@ mod test_metricsregistry_nats {
         }
         println!("✓ Sent messages and received responses successfully");
 
+        println!("\n=== Waiting 500ms for metrics to update ===");
+        sleep(Duration::from_millis(500)).await;
+        println!("✓ Wait complete, getting final metrics...");
+
         let final_drt_output = drt.prometheus_metrics_fmt().unwrap();
         println!("\n=== Final Prometheus DRT output ===");
         println!("{}", final_drt_output);
@@ -1541,10 +1545,6 @@ mod test_metricsregistry_nats {
             .iter()
             .filter_map(|line| super::test_helpers::parse_prometheus_metric(line.as_str()))
             .collect();
-
-        println!("\n=== Waiting 1 second for metrics to stabilize ===");
-        sleep(Duration::from_secs(1)).await;
-        println!("✓ Wait complete, checking final metrics...");
 
         let post_expected_metric_values = [
             // DRT NATS metrics
