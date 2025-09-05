@@ -43,6 +43,10 @@ integration   = ["dynamo-runtime/integration"]
 name = "tokenizer"
 harness = false
 
+[[bench]]
+name = "transfer_context_v2"
+harness = false
+required-features = ["block-manager", "testing-cuda"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
