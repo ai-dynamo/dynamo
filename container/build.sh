@@ -24,8 +24,6 @@ set -e
 TAG=
 RUN_PREFIX=
 PLATFORM=linux/amd64
-USER_UID=
-USER_GID=
 
 # Get short commit hash
 commit_id=$(git rev-parse --short HEAD)

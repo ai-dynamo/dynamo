@@ -162,7 +162,6 @@ get_options() {
         --mount-workspace)
             MOUNT_WORKSPACE=TRUE
             ;;
-
         --use-nixl-gds)
             USE_NIXL_GDS=TRUE
             ;;
