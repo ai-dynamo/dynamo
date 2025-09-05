@@ -88,14 +88,14 @@ python -m dynamo.frontend \
     --router-mode kv \
     --kv-cache-block-size 64 \
     --router-reset-states \
-    --http-port 8080
+    --http-port 8000
 ```
 
 This starts the router with:
 - KV cache routing mode
 - Block size of 64 (**Important:** This should match the `--block-size` used by your engines)
 - `--router-reset-states` flag to clear the event cache (JetStream) from previous runs (useful for single router benchmarking)
-- HTTP port 8080
+- HTTP port 8000
 
 To see all available router arguments, run:
 ```bash
@@ -110,7 +110,7 @@ For detailed explanations of router arguments (especially KV cache routing param
 python -m dynamo.frontend \
     --router-mode kv \
     --kv-cache-block-size 64 \
-    --http-port 8080 \
+    --http-port 8000 \
     --no-kv-events
 ```
 
@@ -121,7 +121,7 @@ In another terminal, test that everything is working:
 ```bash
 ./ping.sh
 # Or specify a different port:
-./ping.sh 8080
+./ping.sh 8000
 ```
 
 This sends a simple test request to the router. You should see a streamed response if everything is configured correctly.
@@ -154,7 +154,7 @@ python prefix_ratio_benchmark.py --isl 10000 --osl 500
 python prefix_ratio_benchmark.py --requests 500 --concurrency 50
 
 # Use multiple router endpoints for parallel benchmarking (for testing multiple Router replicas)
-python prefix_ratio_benchmark.py --url http://localhost:8080 http://localhost:8081
+python prefix_ratio_benchmark.py --url http://localhost:8000 http://localhost:8001
 
 # Specify output directory
 python prefix_ratio_benchmark.py --output-dir results/experiment1
