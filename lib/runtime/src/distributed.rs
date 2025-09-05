@@ -24,6 +24,7 @@ use crate::{
     transports::{etcd, nats, tcp},
 };
 
+use super::utils::GracefulShutdownTracker;
 use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
@@ -258,6 +259,10 @@ impl DistributedRuntime {
 
     pub fn child_token(&self) -> CancellationToken {
         self.runtime.child_token()
+    }
+
+    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
+        self.runtime.graceful_shutdown_tracker()
     }
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {

@@ -18,8 +18,11 @@ static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::
     OnceLock::new();
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
-    GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+    GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
+        // Use spawn_blocking to handle the blocking load_harmony_encoding call
+        // This prevents the "Cannot drop a runtime in a context where blocking is not allowed" error
+        tokio::task::block_in_place(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+    })
 }
 
 pub struct GptOssReasoningParser {
@@ -37,6 +40,8 @@ impl Debug for GptOssReasoningParser {
 
 impl GptOssReasoningParser {
     pub fn new() -> anyhow::Result<Self> {
+        eprintln!("Successfully created GptOssReasoningParser [here line40+]");
+
         let parser = match get_harmony_encoding().as_ref() {
             Ok(enc) => match StreamableParser::new(enc.clone(), Some(Role::Assistant)) {
                 Ok(p) => p,

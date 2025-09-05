@@ -843,8 +843,12 @@ class HttpAsyncEngine:
 
     ...
 
+class ModelInput:
+    """What type of request this model needs: Text or Tokens"""
+    ...
+
 class ModelType:
-    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    """What type of request this model needs: Chat, Completions or Embedding"""
     ...
 
 class RouterMode:
@@ -859,7 +863,19 @@ class KvRouterConfig:
     """Values for KV router"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
+async def register_llm(
+    model_input: ModelInput,
+    model_type: ModelType,
+    endpoint: Endpoint,
+    model_path: str,
+    model_name: Optional[str] = None,
+    context_length: Optional[int] = None,
+    kv_cache_block_size: Optional[int] = None,
+    migration_limit: int = 0,
+    router_mode: Optional[RouterMode] = None,
+    user_data: Optional[Dict[str, Any]] = None,
+    custom_template_path: Optional[str] = None,
+) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
@@ -1227,6 +1243,7 @@ class KvPushRouter:
         sampling_options: Optional[JsonLike] = None,
         output_options: Optional[JsonLike] = None,
         router_config_override: Optional[JsonLike] = None,
+        worker_id: Optional[int] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1238,9 +1255,56 @@ class KvPushRouter:
             sampling_options: Optional sampling configuration
             output_options: Optional output configuration
             router_config_override: Optional router configuration override
+            worker_id: Optional worker ID to route to directly. If set, the request
+                      will be sent to this specific worker and router states will be
+                      updated accordingly.
 
         Returns:
             An async iterator yielding generation responses
+
+        Note:
+            - If worker_id is set, the request bypasses KV matching and routes directly
+              to the specified worker while still updating router states.
+            - This is different from query_instance_id which doesn't route the request.
+        """
+        ...
+
+    async def best_worker_id(
+        self,
+        context_id: str,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+    ) -> Tuple[int, int]:
+        """
+        Find the best matching worker for the given tokens without updating states.
+
+        Args:
+            context_id: String identifier for the request
+            token_ids: List of token IDs to find matches for
+            router_config_override: Optional router configuration override
+
+        Returns:
+            A tuple of (worker_id, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - overlap_blocks: The number of overlapping blocks found
+        """
+        ...
+
+    async def get_potential_loads(
+        self,
+        token_ids: List[int],
+    ) -> List[Dict[str, int]]:
+        """
+        Get potential prefill and decode loads for all workers.
+
+        Args:
+            token_ids: List of token IDs to evaluate
+
+        Returns:
+            A list of dictionaries, each containing:
+                - worker_id: The worker ID
+                - potential_prefill_tokens: Number of tokens that would need prefill
+                - potential_decode_blocks: Number of blocks currently in decode phase
         """
         ...
 

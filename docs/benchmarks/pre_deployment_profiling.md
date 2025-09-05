@@ -4,6 +4,9 @@
 
 To ensure Dynamo deployments comply with the SLA, we provide a pre-deployment script to profile the model performance with different parallelization mappings and recommend the parallelization mapping for prefill and decode workers and planner configurations. To use this script, the user needs to provide the target ISL, OSL, TTFT SLA, and ITL SLA.
 
+> [!NOTE]
+> **Time Investment**: This profiling process is comprehensive and typically takes **a few hours** to complete. The script systematically tests multiple tensor parallelism configurations and load conditions to find optimal performance settings. This upfront investment ensures your deployment meets SLA requirements and operates efficiently.
+
 Support matrix:
 | Backends | Model Types | Supported |
 | --- | --- | --- |

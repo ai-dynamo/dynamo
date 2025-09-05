@@ -1,6 +1,6 @@
 # Dynamo frontend node.
 
-Usage: `python -m dynamo.frontend [--http-port 8080]`.
+Usage: `python -m dynamo.frontend [--http-port 8000]`.
 
 This runs an OpenAI compliant HTTP server, a pre-processor, and a router in a single process. Engines / workers are auto-discovered when they call `register_llm`.
 

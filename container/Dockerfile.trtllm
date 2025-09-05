@@ -228,7 +228,8 @@ RUN if [ "$ARCH" = "arm64" ]; then \
     fi && \
     # Install the wheel
     # TODO: Move NIXL wheel install to the wheel_builder stage
-    uv pip install /workspace/wheels/nixl/*.whl
+    uv pip install /workspace/wheels/nixl/*.whl && \
+    pip install /workspace/wheels/nixl/*.whl
 
 ###################################
 ####### WHEEL BUILD STAGE #########

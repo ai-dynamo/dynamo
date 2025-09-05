@@ -9,6 +9,7 @@ use crate::{
     entrypoint::{self, EngineConfig, input::common},
     grpc::service::kserve,
     kv_router::KvRouterConfig,
+    namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -35,6 +36,12 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to gRPC service
+                    let namespace = engine_config.local_model().namespace().unwrap_or("");
+                    let target_namespace = if is_global_namespace(namespace) {
+                        None
+                    } else {
+                        Some(namespace.to_string())
+                    };
                     run_watcher(
                         distributed_runtime,
                         grpc_service.state().manager_clone(),
@@ -43,6 +50,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
                         router_config.busy_threshold,
+                        target_namespace,
                     )
                     .await?;
                 }
@@ -82,18 +90,27 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None
             };
 
+            let tokenizer_hf = card.tokenizer_hf()?;
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, None, kv_chooser.clone())
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser.clone(),
+                tokenizer_hf.clone(),
+            )
             .await?;
             manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
 
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(card, &client, router_mode, None, kv_chooser)
-            .await?;
+            let completions_engine =
+                entrypoint::build_routed_pipeline::<
+                    NvCreateCompletionRequest,
+                    NvCreateCompletionResponse,
+                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
+                .await?;
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
 
             grpc_service
@@ -114,17 +131,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let grpc_service = grpc_service_builder.build()?;
             let manager = grpc_service.model_manager();
 
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone())
-            .await?;
+            let tokenizer_hf = model.card().tokenizer_hf()?;
+            let chat_pipeline =
+                common::build_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
+                .await?;
             manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine)
+            >(model.card(), inner_engine, tokenizer_hf)
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
             grpc_service
@@ -137,6 +156,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
@@ -145,6 +165,7 @@ async fn run_watcher(
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
     busy_threshold: Option<f64>,
+    target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
     let watch_obj = ModelWatcher::new(
         runtime,
@@ -163,7 +184,7 @@ async fn run_watcher(
 
     // Pass the sender to the watcher
     let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver).await;
+        watch_obj.watch(receiver, target_namespace.as_deref()).await;
     });
 
     Ok(())

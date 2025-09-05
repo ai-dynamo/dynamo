@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use derive_getters::Dissolve;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
@@ -114,9 +115,52 @@ impl EndpointConfigBuilder {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
-        let cancel_token = lease
-            .map(|l| l.child_token())
-            .unwrap_or_else(|| endpoint.drt().child_token());
+        // Create a token that responds to both runtime shutdown and lease expiration
+        let runtime_shutdown_token = endpoint.drt().child_token();
+
+        // Extract all values needed from endpoint before any spawns
+        let namespace_name = endpoint.component.namespace.name.clone();
+        let component_name = endpoint.component.name.clone();
+        let endpoint_name = endpoint.name.clone();
+        let system_health = endpoint.drt().system_health.clone();
+        let subject = endpoint.subject_to(lease_id);
+        let etcd_path = endpoint.etcd_path_with_lease_id(lease_id);
+        let etcd_client = endpoint.component.drt.etcd_client.clone();
+
+        let cancel_token = if let Some(lease) = lease.as_ref() {
+            // Create a new token that will be cancelled when EITHER the lease expires OR runtime shutdown occurs
+            let combined_token = CancellationToken::new();
+            let combined_for_select = combined_token.clone();
+            let lease_token = lease.child_token();
+            // Use secondary runtime for this lightweight monitoring task
+            endpoint.drt().runtime().secondary().spawn(async move {
+                tokio::select! {
+                    _ = lease_token.cancelled() => {
+                        tracing::trace!("Lease cancelled, triggering endpoint shutdown");
+                    }
+                    _ = runtime_shutdown_token.cancelled() => {
+                        tracing::trace!("Runtime shutdown triggered, cancelling endpoint");
+                    }
+                }
+                combined_for_select.cancel();
+            });
+            combined_token
+        } else {
+            // No lease, just use runtime shutdown token
+            runtime_shutdown_token
+        };
+
+        // Register with graceful shutdown tracker if needed
+        if graceful_shutdown {
+            tracing::debug!(
+                "Registering endpoint '{}' with graceful shutdown tracker",
+                endpoint.name
+            );
+            let tracker = endpoint.drt().graceful_shutdown_tracker();
+            tracker.register_endpoint();
+        } else {
+            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
+        }
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
@@ -126,35 +170,54 @@ impl EndpointConfigBuilder {
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 
         // launch in primary runtime
-        let task = tokio::spawn(push_endpoint.start(
-            service_endpoint,
-            endpoint.component.namespace.name.clone(),
-            endpoint.component.name.clone(),
-            endpoint.name.clone(),
-            lease_id,
-            endpoint.drt().system_health.clone(),
-        ));
+        let tracker_clone = if graceful_shutdown {
+            Some(endpoint.drt().graceful_shutdown_tracker())
+        } else {
+            None
+        };
+
+        // Create clones for the async closure
+        let namespace_name_for_task = namespace_name.clone();
+        let component_name_for_task = component_name.clone();
+        let endpoint_name_for_task = endpoint_name.clone();
+
+        let task = tokio::spawn(async move {
+            let result = push_endpoint
+                .start(
+                    service_endpoint,
+                    namespace_name_for_task,
+                    component_name_for_task,
+                    endpoint_name_for_task,
+                    lease_id,
+                    system_health,
+                )
+                .await;
+
+            // Unregister from graceful shutdown tracker
+            if let Some(tracker) = tracker_clone {
+                tracing::debug!("Unregistering endpoint from graceful shutdown tracker");
+                tracker.unregister_endpoint();
+            }
+
+            result
+        });
 
         // make the components service endpoint discovery in etcd
 
         // client.register_service()
         let info = Instance {
-            component: endpoint.component.name.clone(),
-            endpoint: endpoint.name.clone(),
-            namespace: endpoint.component.namespace.name.clone(),
+            component: component_name,
+            endpoint: endpoint_name,
+            namespace: namespace_name,
             instance_id: lease_id,
-            transport: TransportType::NatsTcp(endpoint.subject_to(lease_id)),
+            transport: TransportType::NatsTcp(subject),
         };
 
         let info = serde_json::to_vec_pretty(&info)?;
 
-        if let Some(etcd_client) = &endpoint.component.drt.etcd_client
+        if let Some(etcd_client) = &etcd_client
             && let Err(e) = etcd_client
-                .kv_create(
-                    &endpoint.etcd_path_with_lease_id(lease_id),
-                    info,
-                    Some(lease_id),
-                )
+                .kv_create(&etcd_path, info, Some(lease_id))
                 .await
         {
             tracing::error!("Failed to register discoverable service: {:?}", e);

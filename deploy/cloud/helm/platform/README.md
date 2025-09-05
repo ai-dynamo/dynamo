@@ -45,7 +45,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 | Repository | Name | Version |
 |------------|------|---------|
 | file://components/operator | dynamo-operator | 0.5.0 |
-| https://charts.bitnami.com/bitnami | etcd | 11.1.0 |
+| https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.0.0-6e30275 |
 | oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.8.4 |
@@ -101,7 +101,7 @@ For detailed etcd configuration options beyond `etcd.enabled`, please refer to t
 
 ## 📚 Additional Resources
 
-- [Dynamo Cloud Deployment Guide](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/guides/dynamo_deploy/installation_guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)

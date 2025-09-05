@@ -909,7 +909,7 @@ impl KvPushRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -919,6 +919,7 @@ impl KvPushRouter {
         sampling_options: Option<PyObject>,
         output_options: Option<PyObject>,
         router_config_override: Option<PyObject>,
+        worker_id: Option<i64>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let (stop_conditions, sampling_options, output_options, router_config_override) =
@@ -957,15 +958,22 @@ impl KvPushRouter {
             })?;
 
         // Build the PreprocessedRequest
-        let request = llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder()
+        let mut request_builder =
+            llm_rs::protocols::common::preprocessor::PreprocessedRequest::builder();
+        request_builder
             .model(model)
             .token_ids(token_ids)
             .stop_conditions(stop_conditions)
             .sampling_options(sampling_options)
             .output_options(output_options)
-            .router_config_override(router_config_override)
-            .build()
-            .map_err(to_pyerr)?;
+            .router_config_override(router_config_override);
+
+        // Set backend_instance_id if worker_id is provided
+        if let Some(worker_id) = worker_id {
+            request_builder.backend_instance_id(Some(worker_id));
+        }
+
+        let request = request_builder.build().map_err(to_pyerr)?;
 
         let inner = self.inner.clone();
 
@@ -1006,6 +1014,59 @@ impl KvPushRouter {
             // Return a Python async generator wrapper
             Ok(KvPushRouterStream {
                 rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            })
+        })
+    }
+
+    #[pyo3(signature = (context_id, token_ids, router_config_override=None))]
+    fn best_worker_id<'p>(
+        &self,
+        py: Python<'p>,
+        context_id: String,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            Python::with_gil(|py| {
+                let override_config: llm_rs::kv_router::RouterConfigOverride =
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
+                Ok::<_, PyErr>(Some(override_config))
+            })?
+        } else {
+            None
+        };
+
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (worker_id, overlap_blocks) = inner
+                .find_best_match(&context_id, &token_ids, router_config_override.as_ref())
+                .await
+                .map_err(to_pyerr)?;
+
+            // Return a tuple of (worker_id, overlap_blocks)
+            Ok((worker_id, overlap_blocks))
+        })
+    }
+
+    fn get_potential_loads<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let loads = inner
+                .get_potential_loads(&token_ids)
+                .await
+                .map_err(to_pyerr)?;
+
+            // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
+            Python::with_gil(|py| {
+                pythonize(py, &loads)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
             })
         })
     }

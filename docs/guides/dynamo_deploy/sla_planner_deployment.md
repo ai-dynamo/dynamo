@@ -23,10 +23,11 @@ flowchart LR
 
 ## Prerequisites
 - Kubernetes cluster with GPU nodes
-- `hf-token-secret` created in target namespace
-- [Pre-Deployment Profiling](../../benchmarks/pre_deployment_profiling.md) results saved to `dynamo-pvc` PVC.
+- [Pre-Deployment Profiling](../../benchmarks/pre_deployment_profiling.md) completed and its results saved to `dynamo-pvc` PVC.
 - Prefill and decode worker uses the best parallelization mapping suggested by the pre-deployment profiling script.
 
+> [!NOTE]
+> **Important**: The profiling that occurs before Planner deployment requires additional Kubernetes manifests (ServiceAccount, Role, RoleBinding, PVC) that are not included in standard Dynamo deployments. Apply these manifests in the same namespace as `$NAMESPACE`. For a complete setup, start with the [Quick Start guide](../../../deploy/utils/README.md#quick-start), which provides a fully encapsulated deployment including all required manifests.
 ```bash
 export NAMESPACE=your-namespace
 ```

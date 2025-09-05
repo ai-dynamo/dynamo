@@ -66,7 +66,7 @@ impl PushEndpoint {
 
                 // process shutdown
                 _ = self.cancellation_token.cancelled() => {
-                    tracing::info!("Shutting down service");
+                    tracing::info!("PushEndpoint received cancellation signal, shutting down service");
                     if let Err(e) = endpoint.stop().await {
                         tracing::warn!("Failed to stop NATS service: {:?}", e);
                     }

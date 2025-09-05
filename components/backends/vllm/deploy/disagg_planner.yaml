@@ -121,10 +121,12 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
-            - -c
+            - python3
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3"
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -144,7 +146,10 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
-            - -c
+            - python3
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

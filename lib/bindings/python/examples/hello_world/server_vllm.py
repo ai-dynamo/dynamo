@@ -39,7 +39,7 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -114,7 +114,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(ModelType.Backend, endpoint, config.model)
+    await register_llm(
+        ModelInput.Tokens,
+        ModelType.Chat | ModelType.Completions,
+        endpoint,
+        config.model,
+    )
 
     engine_args = AsyncEngineArgs(
         model=config.model,

@@ -42,10 +42,14 @@ class BasePredictor(ABC):
 
     def add_data_point(self, value):
         """Add new data point to the buffer"""
-        if not math.isnan(value):
-            self.data_buffer.append(value)
+        if math.isnan(value):
+            value = 0
+
+        if len(self.data_buffer) == 0 and value == 0:
+            # skip the beginning idle period
+            return
         else:
-            self.data_buffer.append(0)
+            self.data_buffer.append(value)
 
     def get_last_value(self):
         """Get the last value from the buffer"""
@@ -126,6 +130,10 @@ class ProphetPredictor(BasePredictor):
         # Use proper datetime for Prophet
         timestamp = self.start_date + timedelta(seconds=self.curr_step)
         value = 0 if math.isnan(value) else value
+
+        if len(self.data_buffer) == 0 and value == 0:
+            # skip the beginning idle period
+            return
         self.data_buffer.append({"ds": timestamp, "y": value})
         self.curr_step += 1
 

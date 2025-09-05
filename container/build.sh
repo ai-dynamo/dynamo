@@ -443,7 +443,6 @@ error() {
 
 get_options "$@"
 
-
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
@@ -580,6 +579,11 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    echo "Forcing enable_kvbm to true in vLLM image build"
+    ENABLE_KVBM=true
+fi
+
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the ai-dynamo-runtime"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
@@ -594,8 +598,6 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
-
-
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

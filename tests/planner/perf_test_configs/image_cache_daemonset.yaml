@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vllm-runtime-image-cache
+  labels:
+    app: vllm-runtime-image-cache
+spec:
+  selector:
+    matchLabels:
+      app: vllm-runtime-image-cache
+  template:
+    metadata:
+      labels:
+        app: vllm-runtime-image-cache
+    spec:
+      imagePullSecrets:
+      - name: nvcr-imagepullsecret
+      containers:
+      - name: image-cache
+        image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+        command:
+        - /bin/sh
+        - -c
+        - "sleep infinity"
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
