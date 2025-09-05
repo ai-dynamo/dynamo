@@ -115,27 +115,6 @@ impl KvScheduler {
             Arc::new(RwLock::new(initial_map))
         };
 
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
-        let ns_clone = component.namespace().clone();
-        let event_cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            let mut event_rx = event_rx;
-            loop {
-                tokio::select! {
-                    _ = event_cancel_token.cancelled() => {
-                        tracing::trace!("KV hit rate event publisher shutting down");
-                        break;
-                    }
-                    Some(event) = event_rx.recv() => {
-                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
-                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
-                        }
-                    }
-                    else => break,
-                }
-            }
-        });
-
         let worker_ids: Vec<i64> = instances
             .iter()
             .map(|instance| instance.instance_id)
@@ -210,6 +189,7 @@ impl KvScheduler {
         let workers_scheduler = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
+        let ns_clone = component.namespace().clone();
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -245,12 +225,13 @@ impl KvScheduler {
 
                 match selector.select_worker(&workers, &request, block_size) {
                     Ok(selection) => {
-                        if let Err(e) = event_tx.send(KVHitRateEvent {
+                        let event = KVHitRateEvent {
                             worker_id: selection.worker_id,
                             isl_blocks: selection.required_blocks as usize,
                             overlap_blocks: selection.overlap_blocks,
-                        }) {
-                            tracing::warn!("Failed to send KV hit rate event: {:?}", e);
+                        };
+                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                            tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                         }
 
                         let response = SchedulingResponse {
