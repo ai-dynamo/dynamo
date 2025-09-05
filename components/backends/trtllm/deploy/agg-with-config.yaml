@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# configmap that contains the custom trtllm configuration
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,6 +21,7 @@ data:
     cuda_graph_config:
       max_batch_size: 16
 ---
+# dynamo graph deployment which uses the custom configuration contained in the configmap
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -42,6 +44,7 @@ spec:
         limits:
           gpu: "1"
       extraPodSpec:
+        # declare the configmap as a volume
         volumes:
         - name: nvidia-config
           configMap:
@@ -49,6 +52,7 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1
           workingDir: /workspace/components/backends/trtllm
+          # mount the configmap as a volume
           volumeMounts:
           - name: nvidia-config
             mountPath: /workspace/components/backends/trtllm/engine_configs
