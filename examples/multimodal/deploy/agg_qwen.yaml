@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: agg-qwen
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      dynamoNamespace: agg-qwen
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+    EncodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-qwen
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/multimodal
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/encode_worker.py --model Qwen/Qwen2.5-VL-7B-Instruct
+    VLMWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-qwen
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/multimodal
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 components/worker.py --model Qwen/Qwen2.5-VL-7B-Instruct --worker-type prefill
+    Processor:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-qwen
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/multimodal
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - 'python3 components/processor.py --model Qwen/Qwen2.5-VL-7B-Instruct --prompt-template "USER: <image>\n<prompt> ASSISTANT:"'

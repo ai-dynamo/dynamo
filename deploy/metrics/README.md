@@ -23,7 +23,7 @@ graph TD
         PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
         PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
-        PROMETHEUS -->|:8080/metrics| DYNAMOFE[Dynamo HTTP FE :8080]
+        PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
         PROMETHEUS -->|:8081/metrics| DYNAMOBACKEND[Dynamo backend :8081]
         DYNAMOFE --> DYNAMOBACKEND
         GRAFANA -->|:9090/query API| PROMETHEUS

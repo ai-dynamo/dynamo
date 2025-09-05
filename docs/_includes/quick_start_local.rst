@@ -24,7 +24,7 @@ Get started with Dynamo locally in just a few commands:
 
 .. code-block:: bash
 
-   # Start the OpenAI compatible frontend (default port is 8080)
+   # Start the OpenAI compatible frontend (default port is 8000)
    python -m dynamo.frontend
 
    # In another terminal, start an SGLang worker
@@ -34,7 +34,7 @@ Get started with Dynamo locally in just a few commands:
 
 .. code-block:: bash
 
-   curl localhost:8080/v1/chat/completions \
+   curl localhost:8000/v1/chat/completions \
      -H "Content-Type: application/json" \
      -d '{"model": "Qwen/Qwen3-0.6B",
           "messages": [{"role": "user", "content": "Hello!"}],
