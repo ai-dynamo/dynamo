@@ -43,6 +43,17 @@ class VllmEngineMonitor:
     def __del__(self):
         self._monitor_task.cancel()
 
+    def _shutdown_engine(self):
+        """
+        Shutdown the vLLM engine on crash scenarios, in order to free resources.
+        """
+        try:
+            logger.info("Shutting down vLLM engine to free GPU memory...")
+            self.engine_client.shutdown()
+            logger.info("vLLM engine shutdown completed")
+        except Exception as e:
+            logger.warning(f"Engine shutdown method failed: {e}")
+
     async def _check_engine_health(self):
         while True:
             try:
@@ -50,6 +61,8 @@ class VllmEngineMonitor:
                 await asyncio.sleep(HEALTH_CHECK_INTERVAL)
             except EngineDeadError as e:
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
+                logger.warning("Initiating engine cleanup.")
+                self._shutdown_engine()
                 logger.warning("Initiating Dynamo Runtime shutdown.")
                 self.runtime.shutdown()
                 os._exit(1)
