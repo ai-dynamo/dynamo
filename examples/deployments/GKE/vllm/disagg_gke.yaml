@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+  namespace: dynamo-cloud
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-disagg
+      componentType: main
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      resources:
+        requests:
+          cpu: "1"
+          memory: "10Gi"
+        limits:
+          cpu: "1"
+          memory: "10Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+          - |
+            python3 -m dynamo.frontend --http-port 8000
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 1
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
+      resources:
+        requests:
+          cpu: "1"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "1"
+          memory: "20Gi"
+          gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+          - |
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            python3 -m dynamo.vllm --model google/gemma-3-1b-it  2>&1 | tee /tmp/vllm.log
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 1
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
+      resources:
+        requests:
+          cpu: "1"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "1"
+          memory: "20Gi"
+          gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+          - |
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            python3 -m dynamo.vllm --model google/gemma-3-1b-it  --is-prefill-worker 2>&1 | tee /tmp/vllm.log
