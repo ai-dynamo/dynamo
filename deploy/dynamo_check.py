@@ -35,7 +35,7 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
 ├─ File Permissions
-│  ├─ ✅ dynamo root ($HOME/dynamo) writable
+│  ├─ ✅ Dynamo home ($HOME/dynamo) writable
 │  ├─ ✅ .git directory writable
 │  ├─ ✅ RUSTUP_HOME ($HOME/.rustup) writable
 │  ├─ ✅ CARGO_HOME ($HOME/.cargo) writable
@@ -220,6 +220,38 @@ class NodeInfo:
             return path.replace(home, "$HOME", 1)
         return path
 
+    def _is_inside_container(self) -> bool:
+        """Check if we're running inside a container."""
+        # Check for common container indicators
+        container_indicators = [
+            # Docker
+            os.path.exists("/.dockerenv"),
+            # Podman/containerd
+            os.path.exists("/run/.containerenv"),
+            # Check if cgroup contains docker/containerd
+            self._check_cgroup_for_container(),
+            # Check environment variables
+            os.environ.get("container") is not None,
+            os.environ.get("DOCKER_CONTAINER") is not None,
+        ]
+        return any(container_indicators)
+
+    def _check_cgroup_for_container(self) -> bool:
+        """Check cgroup for container indicators."""
+        try:
+            with open("/proc/1/cgroup", "r") as f:
+                content = f.read()
+                return any(
+                    indicator in content.lower()
+                    for indicator in ["docker", "containerd", "podman", "lxc"]
+                )
+        except Exception:
+            return False
+
+    def _get_gpu_container_remedies(self) -> str:
+        """Get remedies for GPU issues when running inside a container."""
+        return "maybe try a docker restart?"
+
     def _format_timestamp_pdt(self, timestamp: float) -> str:
         """Format timestamp as PDT time string."""
         dt_utc = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
@@ -401,27 +433,24 @@ class GPUInfo(NodeInfo):
             )
 
             if result.returncode != 0:
-                # Capture error details from stderr or stdout
+                # Extract and process error message from stderr or stdout
                 error_msg = "nvidia-smi failed"
-                if result.stderr and result.stderr.strip():
-                    # Get first line of error for concise display
-                    error_lines = result.stderr.strip().splitlines()
-                    if error_lines:
-                        error_msg = error_lines[0].strip()
-                        # Make NVML error more user-friendly
-                        if "Failed to initialize NVML" in error_msg:
-                            error_msg = (
-                                "No NVIDIA GPU detected (NVML initialization failed)"
-                            )
-                elif result.stdout and result.stdout.strip():
-                    error_lines = result.stdout.strip().splitlines()
-                    if error_lines:
-                        error_msg = error_lines[0].strip()
-                        # Make NVML error more user-friendly
-                        if "Failed to initialize NVML" in error_msg:
-                            error_msg = (
-                                "No NVIDIA GPU detected (NVML initialization failed)"
-                            )
+
+                # Try stderr first, then stdout
+                for output in [result.stderr, result.stdout]:
+                    if output and output.strip():
+                        error_lines = output.strip().splitlines()
+                        if error_lines:
+                            error_msg = error_lines[0].strip()
+                            break
+
+                # Handle NVML-specific errors
+                if "Failed to initialize NVML" in error_msg:
+                    error_msg = "No NVIDIA GPU detected (NVML initialization failed)"
+                    # Add docker restart suggestion specifically for NVML failures in containers
+                    if self._is_inside_container():
+                        error_msg += " - maybe try a docker restart?"
+
                 super().__init__(
                     label="NVIDIA GPU", desc=error_msg, status=NodeStatus.ERROR
                 )
@@ -668,7 +697,7 @@ class FilePermissionsInfo(NodeInfo):
             if not os.path.isdir(selected_path):
                 results.append(
                     NodeInfo(
-                        label=f"{label_prefix} ({selected_path})",
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
                         desc="Path is not a directory",
                         status=NodeStatus.ERROR,
                     )
@@ -679,7 +708,7 @@ class FilePermissionsInfo(NodeInfo):
             if not self._is_effectively_writable(selected_path):
                 results.append(
                     NodeInfo(
-                        label=f"{label_prefix} ({selected_path})",
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
                         desc="Directory not writable",
                         status=NodeStatus.ERROR,
                     )
@@ -690,7 +719,7 @@ class FilePermissionsInfo(NodeInfo):
                 # Just check directory writability
                 results.append(
                     NodeInfo(
-                        label=f"{label_prefix} ({selected_path})",
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
                         desc="writable",
                         status=NodeStatus.OK,
                     )
@@ -712,7 +741,7 @@ class FilePermissionsInfo(NodeInfo):
 
                 results.append(
                     NodeInfo(
-                        label=f"{label_prefix} ({selected_path})",
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
                         desc=desc,
                         status=status,
                     )
@@ -736,7 +765,7 @@ class FilePermissionsInfo(NodeInfo):
         except Exception as e:
             results.append(
                 NodeInfo(
-                    label=f"{label_prefix} ({selected_path})",
+                    label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
                     desc=f"Permission check failed: {str(e)}",
                     status=NodeStatus.ERROR,
                 )
@@ -750,15 +779,12 @@ class FilePermissionsInfo(NodeInfo):
         A file is considered effectively writable if:
         1. It's already writable (os.access check)
         2. We own the file (can chmod it)
-        3. We are root (can do anything)
+        3. We are root (can do anything) - but only if os.access confirms write access
+           Note: Root may still be denied write access on NFS mounts due to root squashing
         """
         try:
-            # First check if it's already writable
+            # First check if it's already writable - this works for all cases including NFS
             if os.access(file_path, os.W_OK):
-                return True
-
-            # Check if we're root
-            if os.getuid() == 0:
                 return True
 
             # Check if we own the file (and can therefore chmod it)
@@ -766,6 +792,9 @@ class FilePermissionsInfo(NodeInfo):
             if stat_info.st_uid == os.getuid():
                 return True
 
+            # For root, we still need to respect the os.access result
+            # Root privileges don't guarantee write access on NFS mounts
+            # If os.access(W_OK) returned False above, respect that even for root
             return False
         except Exception:
             # If we can't stat the file, assume it's not writable
@@ -872,7 +901,7 @@ class FilePermissionsInfo(NodeInfo):
         if not dynamo_root:
             self.add_child(
                 NodeInfo(
-                    label="dynamo root",
+                    label="Dynamo workspace",
                     desc="workspace not found",
                     status=NodeStatus.ERROR,
                 )
@@ -882,7 +911,7 @@ class FilePermissionsInfo(NodeInfo):
         if not DynamoInfo.is_dynamo_workspace(dynamo_root):
             self.add_child(
                 NodeInfo(
-                    label="dynamo root",
+                    label="Dynamo workspace",
                     desc="not a valid dynamo workspace",
                     status=NodeStatus.ERROR,
                 )
@@ -892,19 +921,30 @@ class FilePermissionsInfo(NodeInfo):
         # Check dynamo root directory and files (exclude .git)
         recursive = self.thorough_check
         results = self._check_permissions_unified(
-            [dynamo_root], "dynamo root", recursive=recursive, exclude_files=[".git"]
+            [dynamo_root],
+            "Dynamo workspace",
+            recursive=recursive,
+            exclude_files=[".git"],
         )
         for result in results:
             self.add_child(result)
 
-        # Check .git directory separately if it exists
+        # Check .git directory separately
         git_dir = os.path.join(dynamo_root, ".git")
         if os.path.exists(git_dir):
             git_results = self._check_permissions_unified(
-                [git_dir], ".git directory", recursive=recursive
+                [git_dir], "Dynamo .git directory", recursive=recursive
             )
             for result in git_results:
                 self.add_child(result)
+        else:
+            self.add_child(
+                NodeInfo(
+                    label="Dynamo .git directory",
+                    desc="not available",
+                    status=NodeStatus.WARNING,
+                )
+            )
 
     def _check_site_packages_permissions(self):
         """Check site-packages directory writability"""
@@ -930,7 +970,7 @@ class FilePermissionsInfo(NodeInfo):
         except Exception as e:
             self.add_child(
                 NodeInfo(
-                    label="site-packages",
+                    label="Python site-packages",
                     desc=f"Permission check failed: {str(e)}",
                     status=NodeStatus.ERROR,
                 )
@@ -976,7 +1016,7 @@ class FilePermissionsInfo(NodeInfo):
 
         recursive = self.thorough_check
         rustup_results = self._check_permissions_unified(
-            rustup_candidates, "RUSTUP_HOME", recursive=recursive
+            rustup_candidates, "Rustup home", recursive=recursive
         )
         for result in rustup_results:
             self.add_child(result)
@@ -987,7 +1027,7 @@ class FilePermissionsInfo(NodeInfo):
         cargo_candidates.append("~/.cargo")
 
         cargo_results = self._check_permissions_unified(
-            cargo_candidates, "CARGO_HOME", recursive=recursive
+            cargo_candidates, "Cargo home", recursive=recursive
         )
         for result in cargo_results:
             self.add_child(result)
@@ -1023,56 +1063,78 @@ class CargoInfo(NodeInfo):
         # Initialize with cargo path and version
         value = ""
         if cargo_path:
-            value = cargo_path
+            value = self._replace_home_with_var(cargo_path)
         if cargo_version:
             value += f", {cargo_version}" if value else cargo_version
 
         super().__init__(label="Cargo", desc=value, status=NodeStatus.OK)
 
-        # Get cargo home directory
-        cargo_home = os.environ.get("CARGO_HOME")
-        if not cargo_home:
+        # Get cargo home directory from the environment (may not exist, which is OK)
+        cargo_home_env = os.environ.get("CARGO_HOME")
+        if cargo_home_env:
+            cargo_home = cargo_home_env
+            home_value = f"CARGO_HOME={self._replace_home_with_var(cargo_home)}"
+        else:
             cargo_home = os.path.expanduser("~/.cargo")
+            home_value = (
+                f"CARGO_HOME=<not set>, using {self._replace_home_with_var(cargo_home)}"
+            )
 
         if cargo_home and os.path.exists(cargo_home):
-            cargo_home_env = os.environ.get("CARGO_HOME")
-            display_cargo_home = self._replace_home_with_var(cargo_home)
-            home_value = display_cargo_home
-            if cargo_home_env:
-                home_value += " (CARGO_HOME is set)"
+            status = NodeStatus.INFO
+        else:
+            home_value += " (directory does not exist)"
+            status = NodeStatus.WARNING
 
-            home_node = NodeInfo(
-                label="cargo home directory", desc=home_value, status=NodeStatus.INFO
-            )
-            self.add_child(home_node)
+        home_node = NodeInfo(
+            label="Cargo home directory", desc=home_value, status=status
+        )
+        self.add_child(home_node)
 
         # Get cargo target directory
+        cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
         cargo_target = self._get_cargo_target_directory()
+
+        # Calculate total directory size (only if thorough check and directory exists)
+        size_str = ""
+        if cargo_target and os.path.exists(cargo_target) and self.thorough_check:
+            total_size_gb = self._get_directory_size_gb(cargo_target)
+            size_str = f", {total_size_gb:.1f} GB" if total_size_gb is not None else ""
+
+        # Format the display value
+        if cargo_target_env:
+            display_cargo_target = (
+                self._replace_home_with_var(cargo_target) if cargo_target else "unknown"
+            )
+            target_value = f"CARGO_TARGET_DIR={display_cargo_target}{size_str}"
+        else:
+            display_cargo_target = (
+                self._replace_home_with_var(cargo_target) if cargo_target else "unknown"
+            )
+            target_value = (
+                f"CARGO_TARGET_DIR=<not set>, using {display_cargo_target}{size_str}"
+            )
+
+        # Check directory existence and set status
         if cargo_target and os.path.exists(cargo_target):
-            cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
-            display_cargo_target = self._replace_home_with_var(cargo_target)
-
-            # Calculate total directory size (only if thorough check)
-            size_str = ""
-            if self.thorough_check:
-                total_size_gb = self._get_directory_size_gb(cargo_target)
-                size_str = (
-                    f", {total_size_gb:.1f} GB" if total_size_gb is not None else ""
-                )
-
-            target_value = display_cargo_target + size_str
-            if cargo_target_env:
-                target_value += " (CARGO_TARGET_DIR is set)"
-
+            status = NodeStatus.INFO
             target_node = NodeInfo(
-                label="cargo target directory",
+                label="Cargo target directory",
                 desc=target_value,
-                status=NodeStatus.INFO,
+                status=status,
             )
             self.add_child(target_node)
-
             # Add debug/release/binary info as children of target directory
             self._add_build_info(target_node, cargo_target)
+        else:
+            target_value += " (directory does not exist)"
+            status = NodeStatus.WARNING if cargo_target_env else NodeStatus.INFO
+            target_node = NodeInfo(
+                label="Cargo target directory",
+                desc=target_value,
+                status=status,
+            )
+            self.add_child(target_node)
 
     def _get_directory_size_gb(self, directory: str) -> Optional[float]:
         """Get the size of a directory in GB."""
