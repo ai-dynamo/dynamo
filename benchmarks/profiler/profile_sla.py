@@ -21,19 +21,22 @@ import os
 
 import numpy as np
 import yaml
-from utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
-from utils.defaults import DECODE_NUM_REQUESTS_RANGE
-from utils.genai_perf import benchmark_decode, benchmark_prefill
-from utils.plot import plot_decode_performance, plot_prefill_performance
-from utils.profile_cache import (
+
+from benchmarks.profiler.utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
+from benchmarks.profiler.utils.defaults import DECODE_NUM_REQUESTS_RANGE
+from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
+from benchmarks.profiler.utils.plot import (
+    plot_decode_performance,
+    plot_prefill_performance,
+)
+from benchmarks.profiler.utils.profile_cache import (
     check_decode_results_exist,
     check_prefill_results_exist,
     load_existing_decode_results,
     load_existing_prefill_results,
 )
-from utils.profile_decode import profile_decode
-from utils.profile_prefill import profile_prefill
-
+from benchmarks.profiler.utils.profile_decode import profile_decode
+from benchmarks.profiler.utils.profile_prefill import profile_prefill
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
@@ -56,18 +59,6 @@ async def run_profile(args):
 
     try:
         config_modifier = CONFIG_MODIFIERS[args.backend]
-
-        if args.example_dir is None:
-            logger.info(
-                "Example directory not provided, inferring from config file location..."
-            )
-            try:
-                args.example_dir = os.path.dirname(os.path.dirname(args.config))
-            except Exception:
-                logger.error(
-                    "Failed to infer example directory, please provide explicitly using --example-dir <path-to-example-dir>"
-                )
-                exit(1)
 
         with open(args.config, "r") as f:
             config = yaml.safe_load(f)
@@ -134,47 +125,50 @@ async def run_profile(args):
             with open(prefill_config_fn, "w") as f:
                 yaml.dump(prefill_config, f)
 
-            client = DynamoDeploymentClient(
-                namespace=args.namespace,
-                base_log_dir=work_dir,
-                model_name=model_name,
-                service_name=args.service_name,
-                frontend_port=frontend_port,
-                deployment_name=prefill_config["metadata"]["name"],
-            )
-            logger.info(f"Created client with service_name: {client.service_name}")
-            deployment_clients.append(client)  # Track for cleanup
-            await client.create_deployment(prefill_config_fn)
-            logger.info("Waiting for deployment to be ready...")
-            await client.wait_for_deployment_ready()
-            logger.info("Deployment is ready")
+            if args.dry_run:
+                logger.info("Skipping deployment creation in dry run mode")
+            else:
+                client = DynamoDeploymentClient(
+                    namespace=args.namespace,
+                    base_log_dir=work_dir,
+                    model_name=model_name,
+                    service_name=args.service_name,
+                    frontend_port=frontend_port,
+                    deployment_name=prefill_config["metadata"]["name"],
+                )
+                logger.info(f"Created client with service_name: {client.service_name}")
+                deployment_clients.append(client)  # Track for cleanup
+                await client.create_deployment(prefill_config_fn)
+                logger.info("Waiting for deployment to be ready...")
+                await client.wait_for_deployment_ready()
+                logger.info("Deployment is ready")
 
-            logger.info("Getting deployment logs...")
-            await client.get_deployment_logs()
-            logger.info(
-                f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-            )
+                logger.info("Getting deployment logs...")
+                await client.get_deployment_logs()
+                logger.info(
+                    f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+                )
 
-            # run genai-perf
-            base_url = client.get_service_url()
-            genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
-            gap_result = benchmark_prefill(
-                args.isl,
-                genai_perf_artifact_dir,
-                model_name,
-                model_name,
-                base_url=base_url,
-            )
-            if gap_result is not None:
-                ttft = gap_result["time_to_first_token"]["avg"]
-                prefill_tp_size.append(tp_size)
-                prefill_ttft.append(ttft)
-                prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
+                # run genai-perf
+                base_url = client.get_service_url()
+                genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
+                gap_result = benchmark_prefill(
+                    args.isl,
+                    genai_perf_artifact_dir,
+                    model_name,
+                    model_name,
+                    base_url=base_url,
+                )
+                if gap_result is not None:
+                    ttft = gap_result["time_to_first_token"]["avg"]
+                    prefill_tp_size.append(tp_size)
+                    prefill_ttft.append(ttft)
+                    prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
 
-            logger.info("Cleaning up deployment...")
-            await client.delete_deployment()
-            deployment_clients.remove(client)
-            logger.info("Deployment deleted")
+                logger.info("Cleaning up deployment...")
+                await client.delete_deployment()
+                deployment_clients.remove(client)
+                logger.info("Deployment deleted")
 
         # Plot the results as a 2D scatter plot
         if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
@@ -246,6 +240,248 @@ async def run_profile(args):
             with open(decode_config_fn, "w") as f:
                 yaml.dump(decode_config, f)
 
+            if args.dry_run:
+                logger.info("Skipping deployment creation in dry run mode")
+            else:
+                client = DynamoDeploymentClient(
+                    namespace=args.namespace,
+                    base_log_dir=work_dir,
+                    model_name=model_name,
+                    service_name=args.service_name,
+                    frontend_port=frontend_port,
+                    deployment_name=decode_config["metadata"]["name"],
+                )
+                deployment_clients.append(client)  # Track for cleanup
+                await client.create_deployment(decode_config_fn)
+                logger.info("Waiting for deployment to be ready...")
+                await client.wait_for_deployment_ready()
+                logger.info("Deployment is ready")
+
+                logger.info("Getting deployment logs...")
+                await client.get_deployment_logs()
+                logger.info(
+                    f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+                )
+
+                max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+                    f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
+                )
+                max_concurrency = max_kv_tokens // (args.isl + args.osl)
+                sweep_num_request = [
+                    num for num in DECODE_NUM_REQUESTS_RANGE if num <= max_concurrency
+                ]
+                logger.info(
+                    f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
+                )
+
+                engine_decode_itl = []
+                engine_decode_thpt_per_gpu = []
+                base_url = client.get_service_url()
+                for num_request in sweep_num_request:
+                    genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
+                    gap_result = benchmark_decode(
+                        args.isl,
+                        args.osl,
+                        num_request,
+                        genai_perf_artifact_dir,
+                        model_name,
+                        model_name,
+                        base_url=base_url,
+                    )
+                    if gap_result is not None:
+                        itl = gap_result["inter_token_latency"]["avg"]
+                        thpt_per_gpu = (
+                            gap_result["output_token_throughput"]["avg"] / tp_size
+                        )
+                        engine_decode_itl.append(itl)
+                        engine_decode_thpt_per_gpu.append(thpt_per_gpu)
+                        decode_tp_size.append(tp_size)
+                        decode_itl.append(itl)
+                        decode_thpt_per_gpu.append(thpt_per_gpu)
+                        decode_concurrency.append(num_request)
+                        decode_kv_cache_size.append(max_kv_tokens)
+
+                logger.info("Cleaning up deployment...")
+                await client.delete_deployment()
+                deployment_clients.remove(client)
+                logger.info("Deployment deleted")
+
+                # Store partial results for plotting later
+                decode_results.append(
+                    (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
+                )
+
+        # Plot all decode results after profiling is complete
+        if decode_results:
+            plot_decode_performance(decode_results, args.itl, args.output_dir)
+
+        if args.dry_run:
+            logger.info("Skipping recommendations in dry run mode")
+        else:
+            logger.info("Analyzing results and generate recommendations...")
+            # Safety guards: no results → exit early with a clear message
+            if not (prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu):
+                logger.error("No prefill results produced; skipping recommendations.")
+
+            # select best tp size for prefill
+            if min(prefill_ttft) > args.ttft:
+                logger.info(
+                    "No TP size satisfies the TTFT requirement, please try a smaller model or a more powerful GPU SKU"
+                )
+                selected_prefill_idx = int(np.argmin(np.array(prefill_ttft)))
+            else:
+                valid_indices = [
+                    i for i, ttft in enumerate(prefill_ttft) if ttft <= args.ttft
+                ]
+                # Among valid TP sizes, select the one with highest throughput per GPU
+                valid_thpts = [prefill_thpt_per_gpu[i] for i in valid_indices]
+                max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
+                selected_prefill_idx = max_thpt_idx
+            logger.info(
+                f"Suggested prefill TP:{prefill_tp_size[selected_prefill_idx]} (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
+            )
+
+            # scale up if estimated TTFT is 120% of target TTFT
+            prefill_queue_size_upper_bound = max(
+                0.1, args.ttft * 1.2 / prefill_ttft[selected_prefill_idx] - 1
+            )
+            # scale down if estimated TTFT is 80% of target TTFT
+            prefill_queue_size_lower_bound = max(
+                0.1, args.ttft * 0.8 / prefill_ttft[selected_prefill_idx] - 1
+            )
+            logger.info(
+                f"Suggested planner upper/lower bound for prefill queue size: {prefill_queue_size_upper_bound:.2f}/{prefill_queue_size_lower_bound:.2f}"
+            )
+
+            # select best tp size for decode
+            if not (
+                decode_tp_size
+                and decode_itl
+                and decode_thpt_per_gpu
+                and decode_concurrency
+                and decode_kv_cache_size
+            ):
+                logger.error("No decode results produced; skipping recommendations.")
+                return
+            if min(decode_itl) > args.itl:
+                logger.info(
+                    "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
+                )
+                selected_decode_idx = int(np.argmin(np.array(decode_itl)))
+            else:
+                valid_indices = [
+                    i for i, itl in enumerate(decode_itl) if itl <= args.itl
+                ]
+                # Among valid TP sizes, select the one with highest throughput per GPU
+                valid_thpts = [decode_thpt_per_gpu[i] for i in valid_indices]
+                max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
+                selected_decode_idx = max_thpt_idx
+            logger.info(
+                f"Suggested decode TP:{decode_tp_size[selected_decode_idx]} (ITL {decode_itl[selected_decode_idx]:.2f} ms, throughput {decode_thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
+            )
+
+            # calculate kv cache utlization for the selected TP and concurrency
+            selected_decode_kv_cache_utilization = (
+                decode_concurrency[selected_decode_idx]
+                * (args.isl + (args.osl / 2))
+                / decode_kv_cache_size[selected_decode_idx]
+            )
+            # set a +- 20% range for the kv cache utilization
+            logger.info(
+                f"Suggested planner upper/lower bound for decode kv cache utilization: {min(1, selected_decode_kv_cache_utilization + 0.2):.2f}/{max(0.1, selected_decode_kv_cache_utilization - 0.2):.2f}"
+            )
+
+        if args.dry_run:
+            # use min value for prefill and decode TP sizes
+            prefill_tp_size = [args.min_num_gpus_per_engine]
+            decode_tp_size = [args.min_num_gpus_per_engine]
+            selected_prefill_idx = 0
+            selected_decode_idx = 0
+
+        # interpolate ISL - TTFT with best prefill TP
+        best_prefill_tp = prefill_tp_size[selected_prefill_idx]
+        logger.info(
+            f"Profiling prefill under best TP {best_prefill_tp} with different ISL..."
+        )
+        prefill_config = config_modifier.convert_config(config, "prefill")
+        prefill_config = config_modifier.set_config_tp_size(
+            prefill_config, best_prefill_tp
+        )
+        logger.info(f"Dynamo config: {prefill_config}")
+
+        work_dir = f"{args.output_dir}/selected_prefill_interpolation"
+        os.makedirs(work_dir, exist_ok=True)
+
+        prefill_config_fn = f"{work_dir}/config.yaml"
+        with open(prefill_config_fn, "w") as f:
+            yaml.dump(prefill_config, f)
+
+        if args.dry_run:
+            logger.info("Skipping deployment creation in dry run mode")
+        else:
+            client = DynamoDeploymentClient(
+                namespace=args.namespace,
+                base_log_dir=work_dir,
+                model_name=model_name,
+                service_name=args.service_name,
+                frontend_port=frontend_port,
+                deployment_name=prefill_config["metadata"]["name"],
+            )
+            deployment_clients.append(client)  # Track for cleanup
+            await client.create_deployment(prefill_config_fn)
+            logger.info("Waiting for deployment to be ready...")
+            try:
+                await client.wait_for_deployment_ready()
+                logger.info("Deployment is ready")
+                skip_profile = False
+            except TimeoutError:
+                logger.error(
+                    "Deployment failed to become ready within timeout, skipping profiling"
+                )
+                skip_profile = True
+
+            if not skip_profile:
+                logger.info("Getting deployment logs...")
+                await client.get_deployment_logs()
+                logger.info(
+                    f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+                )
+
+            base_url = client.get_service_url()
+
+            profile_prefill(
+                work_dir,
+                model_name,
+                model_name,
+                base_url,
+                best_prefill_tp,
+                args.max_context_length,
+                args.prefill_interpolation_granularity,
+            )
+
+            logger.info("Cleaning up deployment...")
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            logger.info("Deployment deleted")
+
+        # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode TP
+        best_decode_tp = decode_tp_size[selected_decode_idx]
+        logger.info(f"Profiling decode with TP size {best_decode_tp}...")
+        decode_config = config_modifier.set_config_tp_size(
+            decode_config, best_decode_tp
+        )
+        logger.info(f"Dynamo config: {decode_config}")
+
+        work_dir = f"{args.output_dir}/selected_decode_interpolation"
+        os.makedirs(work_dir, exist_ok=True)
+
+        decode_config_fn = f"{work_dir}/config.yaml"
+        with open(decode_config_fn, "w") as f:
+            yaml.dump(decode_config, f)
+
+        if args.dry_run:
+            logger.info("Skipping deployment creation in dry run mode")
+        else:
             client = DynamoDeploymentClient(
                 namespace=args.namespace,
                 base_log_dir=work_dir,
@@ -269,246 +505,24 @@ async def run_profile(args):
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                 f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
             )
-            max_concurrency = max_kv_tokens // (args.isl + args.osl)
-            sweep_num_request = [
-                num for num in DECODE_NUM_REQUESTS_RANGE if num <= max_concurrency
-            ]
-            logger.info(
-                f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
-            )
 
-            engine_decode_itl = []
-            engine_decode_thpt_per_gpu = []
             base_url = client.get_service_url()
-            for num_request in sweep_num_request:
-                genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                gap_result = benchmark_decode(
-                    args.isl,
-                    args.osl,
-                    num_request,
-                    genai_perf_artifact_dir,
-                    model_name,
-                    model_name,
-                    base_url=base_url,
-                )
-                if gap_result is not None:
-                    itl = gap_result["inter_token_latency"]["avg"]
-                    thpt_per_gpu = (
-                        gap_result["output_token_throughput"]["avg"] / tp_size
-                    )
-                    engine_decode_itl.append(itl)
-                    engine_decode_thpt_per_gpu.append(thpt_per_gpu)
-                    decode_tp_size.append(tp_size)
-                    decode_itl.append(itl)
-                    decode_thpt_per_gpu.append(thpt_per_gpu)
-                    decode_concurrency.append(num_request)
-                    decode_kv_cache_size.append(max_kv_tokens)
+
+            profile_decode(
+                work_dir,
+                model_name,
+                model_name,
+                base_url,
+                best_decode_tp,
+                max_kv_tokens,
+                args.max_context_length,
+                args.decode_interpolation_granularity,
+            )
 
             logger.info("Cleaning up deployment...")
             await client.delete_deployment()
             deployment_clients.remove(client)
             logger.info("Deployment deleted")
-
-            # Store partial results for plotting later
-            decode_results.append(
-                (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
-            )
-
-        # Plot all decode results after profiling is complete
-        if decode_results:
-            plot_decode_performance(decode_results, args.itl, args.output_dir)
-
-        logger.info("Analyzing results and generate recommendations...")
-        # Safety guards: no results → exit early with a clear message
-        if not (prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu):
-            logger.error("No prefill results produced; skipping recommendations.")
-            return
-
-        # select best tp size for prefill
-        if min(prefill_ttft) > args.ttft:
-            logger.info(
-                "No TP size satisfies the TTFT requirement, please try a smaller model or a more powerful GPU SKU"
-            )
-            selected_prefill_idx = int(np.argmin(np.array(prefill_ttft)))
-        else:
-            valid_indices = [
-                i for i, ttft in enumerate(prefill_ttft) if ttft <= args.ttft
-            ]
-            # Among valid TP sizes, select the one with highest throughput per GPU
-            valid_thpts = [prefill_thpt_per_gpu[i] for i in valid_indices]
-            max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
-            selected_prefill_idx = max_thpt_idx
-        logger.info(
-            f"Suggested prefill TP:{prefill_tp_size[selected_prefill_idx]} (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
-        )
-
-        # scale up if estimated TTFT is 120% of target TTFT
-        prefill_queue_size_upper_bound = max(
-            0.1, args.ttft * 1.2 / prefill_ttft[selected_prefill_idx] - 1
-        )
-        # scale down if estimated TTFT is 80% of target TTFT
-        prefill_queue_size_lower_bound = max(
-            0.1, args.ttft * 0.8 / prefill_ttft[selected_prefill_idx] - 1
-        )
-        logger.info(
-            f"Suggested planner upper/lower bound for prefill queue size: {prefill_queue_size_upper_bound:.2f}/{prefill_queue_size_lower_bound:.2f}"
-        )
-
-        # select best tp size for decode
-        if not (
-            decode_tp_size
-            and decode_itl
-            and decode_thpt_per_gpu
-            and decode_concurrency
-            and decode_kv_cache_size
-        ):
-            logger.error("No decode results produced; skipping recommendations.")
-            return
-        if min(decode_itl) > args.itl:
-            logger.info(
-                "No TP size satisfies the ITL requirement, please try a smaller model or a more powerful GPU SKU"
-            )
-            selected_decode_idx = int(np.argmin(np.array(decode_itl)))
-        else:
-            valid_indices = [i for i, itl in enumerate(decode_itl) if itl <= args.itl]
-            # Among valid TP sizes, select the one with highest throughput per GPU
-            valid_thpts = [decode_thpt_per_gpu[i] for i in valid_indices]
-            max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
-            selected_decode_idx = max_thpt_idx
-        logger.info(
-            f"Suggested decode TP:{decode_tp_size[selected_decode_idx]} (ITL {decode_itl[selected_decode_idx]:.2f} ms, throughput {decode_thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
-        )
-
-        # calculate kv cache utlization for the selected TP and concurrency
-        selected_decode_kv_cache_utilization = (
-            decode_concurrency[selected_decode_idx]
-            * (args.isl + (args.osl / 2))
-            / decode_kv_cache_size[selected_decode_idx]
-        )
-        # set a +- 20% range for the kv cache utilization
-        logger.info(
-            f"Suggested planner upper/lower bound for decode kv cache utilization: {min(1, selected_decode_kv_cache_utilization + 0.2):.2f}/{max(0.1, selected_decode_kv_cache_utilization - 0.2):.2f}"
-        )
-
-        # interpolate ISL - TTFT with best prefill TP
-        best_prefill_tp = prefill_tp_size[selected_prefill_idx]
-        logger.info(
-            f"Profiling prefill under best TP {best_prefill_tp} with different ISL..."
-        )
-        prefill_config = config_modifier.convert_config(config, "prefill")
-        prefill_config = config_modifier.set_config_tp_size(
-            prefill_config, best_prefill_tp
-        )
-        logger.info(f"Dynamo config: {prefill_config}")
-
-        work_dir = f"{args.output_dir}/selected_prefill_interpolation"
-        os.makedirs(work_dir, exist_ok=True)
-
-        prefill_config_fn = f"{work_dir}/config.yaml"
-        with open(prefill_config_fn, "w") as f:
-            yaml.dump(prefill_config, f)
-
-        client = DynamoDeploymentClient(
-            namespace=args.namespace,
-            base_log_dir=work_dir,
-            model_name=model_name,
-            service_name=args.service_name,
-            frontend_port=frontend_port,
-            deployment_name=prefill_config["metadata"]["name"],
-        )
-        deployment_clients.append(client)  # Track for cleanup
-        await client.create_deployment(prefill_config_fn)
-        logger.info("Waiting for deployment to be ready...")
-        try:
-            await client.wait_for_deployment_ready()
-            logger.info("Deployment is ready")
-            skip_profile = False
-        except TimeoutError:
-            logger.error(
-                "Deployment failed to become ready within timeout, skipping profiling"
-            )
-            skip_profile = True
-
-        if not skip_profile:
-            logger.info("Getting deployment logs...")
-            await client.get_deployment_logs()
-            logger.info(
-                f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-            )
-
-        base_url = client.get_service_url()
-
-        profile_prefill(
-            work_dir,
-            model_name,
-            model_name,
-            base_url,
-            best_prefill_tp,
-            args.max_context_length,
-            args.prefill_interpolation_granularity,
-        )
-
-        logger.info("Cleaning up deployment...")
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-        logger.info("Deployment deleted")
-
-        # interpolate ITL - Active_KV_Cache - Decode_Context_Length with best decode TP
-        best_decode_tp = decode_tp_size[selected_decode_idx]
-        logger.info(f"Profiling decode with TP size {best_decode_tp}...")
-        decode_config = config_modifier.set_config_tp_size(
-            decode_config, best_decode_tp
-        )
-        logger.info(f"Dynamo config: {decode_config}")
-
-        work_dir = f"{args.output_dir}/selected_decode_interpolation"
-        os.makedirs(work_dir, exist_ok=True)
-
-        decode_config_fn = f"{work_dir}/config.yaml"
-        with open(decode_config_fn, "w") as f:
-            yaml.dump(decode_config, f)
-
-        client = DynamoDeploymentClient(
-            namespace=args.namespace,
-            base_log_dir=work_dir,
-            model_name=model_name,
-            service_name=args.service_name,
-            frontend_port=frontend_port,
-            deployment_name=decode_config["metadata"]["name"],
-        )
-        deployment_clients.append(client)  # Track for cleanup
-        await client.create_deployment(decode_config_fn)
-        logger.info("Waiting for deployment to be ready...")
-        await client.wait_for_deployment_ready()
-        logger.info("Deployment is ready")
-
-        logger.info("Getting deployment logs...")
-        await client.get_deployment_logs()
-        logger.info(
-            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-        )
-
-        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-            f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
-        )
-
-        base_url = client.get_service_url()
-
-        profile_decode(
-            work_dir,
-            model_name,
-            model_name,
-            base_url,
-            best_decode_tp,
-            max_kv_tokens,
-            args.max_context_length,
-            args.decode_interpolation_granularity,
-        )
-
-        logger.info("Cleaning up deployment...")
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-        logger.info("Deployment deleted")
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")
@@ -542,12 +556,6 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Path to the DynamoGraphDeployment config file",
-    )
-    parser.add_argument(
-        "--example-dir",
-        type=str,
-        default=None,
-        help="path to the example directory, if not provided, will try to infer from config file location",
     )
     parser.add_argument(
         "--output-dir",
@@ -613,6 +621,11 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Service name for port forwarding (default: {deployment_name}-frontend)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run the profile job",
     )
     args = parser.parse_args()
 

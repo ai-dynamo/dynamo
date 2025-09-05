@@ -73,7 +73,7 @@ bash launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct
 
 In another terminal:
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -146,7 +146,7 @@ bash launch/disagg.sh --model llava-hf/llava-1.5-7b-hf
 
 In another terminal:
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -223,7 +223,7 @@ bash launch/agg_llama.sh
 
 In another terminal:
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
@@ -295,7 +295,7 @@ bash launch/disagg_llama.sh
 
 In another terminal:
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
@@ -366,7 +366,7 @@ bash launch/video_agg.sh
 
 In another terminal:
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -455,7 +455,7 @@ bash launch/video_disagg.sh
 
 In another terminal:
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",

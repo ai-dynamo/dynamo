@@ -73,9 +73,7 @@ pub async fn run(
                 SingleIn<PreprocessedRequest>,
                 ManyOut<Annotated<BackendOutput>>,
             >::new();
-            let backend = Backend::from_mdc(model.card().clone())
-                .await?
-                .into_operator();
+            let backend = Backend::from_mdc(model.card()).into_operator();
             let engine = ServiceBackend::from_engine(inner_engine);
             let pipeline = frontend
                 .link(backend.forward_edge())?

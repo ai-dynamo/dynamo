@@ -37,7 +37,7 @@ python -m dynamo.mocker \
   --enable-prefix-caching
 
 # Start frontend server
-python -m dynamo.frontend --http-port 8080
+python -m dynamo.frontend --http-port 8000
 ```
 
 ### Legacy JSON file support:

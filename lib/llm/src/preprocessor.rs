@@ -22,7 +22,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
+use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
 use crate::tokenizers::Encoding;
@@ -98,38 +98,27 @@ pub struct OpenAIPreprocessor {
 }
 
 impl OpenAIPreprocessor {
-    pub async fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
+    pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        let formatter = PromptFormatter::from_mdc(&mdc)?;
+        let tokenizer = mdc.tokenizer_hf()?;
         match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_formatter(mdc, formatter).await,
+            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
         }
     }
 
-    pub async fn new_with_formatter(
+    pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
+        hf_tokenizer: tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum();
-
-        let tokenizer = match &mdc.tokenizer {
-            Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
-            Some(TokenizerKind::GGUF(tokenizer)) => {
-                HuggingFaceTokenizer::from_tokenizer(*tokenizer.clone())
-            }
-            None => {
-                anyhow::bail!(
-                    "Blank ModelDeploymentCard cannot be used for pre-processing, no tokenizer"
-                );
-            }
-        };
-        let tokenizer = Arc::new(tokenizer);
-
+        let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
         let Some(model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
-        let model_info = model_info.get_model_info().await?;
+        let model_info = model_info.get_model_info()?;
 
         Ok(Arc::new(Self {
             formatter,
