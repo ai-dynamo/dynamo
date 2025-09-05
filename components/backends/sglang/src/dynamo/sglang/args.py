@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from sglang.srt.server_args import ServerArgs
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.sglang import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -33,13 +34,15 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
         "default": None,
-        "help": "Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic', 'harmony'.",
+        "choices": get_tool_parser_names(),
+        "help": "Tool call parser name for the model.",
     },
     "reasoning-parser": {
         "flags": ["--dyn-reasoning-parser"],
         "type": str,
         "default": None,
-        "help": "Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss', 'kimi', 'step3', 'qwen3', 'nemotron_deci', 'mistral'.",
+        "choices": get_reasoning_parser_names(),
+        "help": "Reasoning parser name for the model.",
     },
 }
 
@@ -94,6 +97,7 @@ def parse_args(args: list[str]) -> Config:
             type=info["type"],
             default=info["default"] if "default" in info else None,
             help=info["help"],
+            choices=info.get("choices", None),
         )
 
     # SGLang args
