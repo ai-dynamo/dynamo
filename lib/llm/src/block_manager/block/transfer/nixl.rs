@@ -17,13 +17,88 @@ use super::*;
 
 use anyhow::Result;
 use nixl_sys::{MemoryRegion, NixlDescriptor, XferDescList};
+use std::collections::HashMap;
 use std::future::Future;
+
+type DeviceId = u64;
+type LayerDim = usize;
+type OuterDim = usize;
+type Addr = usize;
+type Size = usize;
+
+#[derive(Debug)]
+struct XferAggr {
+    descriptors: HashMap<(DeviceId, LayerDim, OuterDim), Vec<(Addr, Size)>>,
+}
+
+impl XferAggr {
+    fn new() -> Self {
+        Self {
+            descriptors: HashMap::new(),
+        }
+    }
+
+    fn can_extend(
+        &self,
+        addr: Addr,
+        device_id: DeviceId,
+        layer_dim: LayerDim,
+        outer_dim: OuterDim,
+    ) -> bool {
+        if let Some(device_descs) = self.descriptors.get(&(device_id, layer_dim, outer_dim)) {
+            if let Some(last) = device_descs.last() {
+                return last.0 + last.1 == addr;
+            }
+        }
+        false
+    }
+
+    fn add_desc(
+        &mut self,
+        addr: Addr,
+        size: Size,
+        device_id: DeviceId,
+        layer_dim: LayerDim,
+        outer_dim: OuterDim,
+        extend: bool,
+    ) {
+        let device_descs = self
+            .descriptors
+            .entry((device_id, layer_dim, outer_dim))
+            .or_insert_with(Vec::new);
+
+        if extend && let Some(last) = device_descs.last_mut() {
+            last.1 += size;
+        } else {
+            device_descs.push((addr, size));
+        }
+    }
+
+    fn populate_xfer_desc_list(&self, xfer_desc_list: &mut XferDescList) -> Result<()> {
+        for (&(device_id, layer_dim, outer_dim), descs) in &self.descriptors {
+            for &(addr, size) in descs {
+                tracing::info!(
+                    "tid {}<{:x}, {}, {}, {}, {}>",
+                    nix::unistd::gettid(),
+                    addr,
+                    size,
+                    device_id,
+                    layer_dim,
+                    outer_dim
+                );
+                xfer_desc_list.add_desc(addr, size, device_id)?;
+            }
+        }
+
+        Ok(())
+    }
+}
 
 fn append_xfer_request<Source, Destination>(
     src: &Source,
     dst: &mut Destination,
-    src_dl: &mut XferDescList,
-    dst_dl: &mut XferDescList,
+    src_aggr: &mut XferAggr,
+    dst_aggr: &mut XferAggr,
 ) -> Result<()>
 where
     Source: BlockDataProvider,
@@ -39,17 +114,21 @@ where
         let dst_desc = dst_data.block_view_mut()?.as_nixl_descriptor_mut();
 
         unsafe {
-            src_dl.add_desc(
-                src_desc.as_ptr() as usize,
-                src_desc.size(),
-                src_desc.device_id(),
-            )?;
+            let src_addr = src_desc.as_ptr() as usize;
+            let src_size = src_desc.size();
+            let src_device_id = src_desc.device_id();
 
-            dst_dl.add_desc(
-                dst_desc.as_ptr() as usize,
-                dst_desc.size(),
-                dst_desc.device_id(),
-            )?;
+            let dst_addr = dst_desc.as_ptr() as usize;
+            let dst_size = dst_desc.size();
+            let dst_device_id = dst_desc.device_id();
+
+            // Check if both can be extended (use outer_dim = 0 for fully contiguous case)
+            let src_can_extend = src_aggr.can_extend(src_addr, src_device_id, 0, 0);
+            let dst_can_extend = dst_aggr.can_extend(dst_addr, dst_device_id, 0, 0);
+            let extend_both = src_can_extend && dst_can_extend;
+
+            src_aggr.add_desc(src_addr, src_size, src_device_id, 0, 0, extend_both);
+            dst_aggr.add_desc(dst_addr, dst_size, dst_device_id, 0, 0, extend_both);
         }
 
         Ok(())
@@ -66,17 +145,37 @@ where
                 let dst_desc = dst_view.as_nixl_descriptor_mut();
 
                 unsafe {
-                    src_dl.add_desc(
-                        src_desc.as_ptr() as usize,
-                        src_desc.size(),
-                        src_desc.device_id(),
-                    )?;
+                    let src_addr = src_desc.as_ptr() as usize;
+                    let src_size = src_desc.size();
+                    let src_device_id = src_desc.device_id();
 
-                    dst_dl.add_desc(
-                        dst_desc.as_ptr() as usize,
-                        dst_desc.size(),
-                        dst_desc.device_id(),
-                    )?;
+                    let dst_addr = dst_desc.as_ptr() as usize;
+                    let dst_size = dst_desc.size();
+                    let dst_device_id = dst_desc.device_id();
+
+                    // Check if both can be extended (use actual outer_idx for layered case)
+                    let src_can_extend =
+                        src_aggr.can_extend(src_addr, src_device_id, layer_idx, outer_idx);
+                    let dst_can_extend =
+                        dst_aggr.can_extend(dst_addr, dst_device_id, layer_idx, outer_idx);
+                    let extend_both = src_can_extend && dst_can_extend;
+
+                    src_aggr.add_desc(
+                        src_addr,
+                        src_size,
+                        src_device_id,
+                        layer_idx,
+                        outer_idx,
+                        extend_both,
+                    );
+                    dst_aggr.add_desc(
+                        dst_addr,
+                        dst_size,
+                        dst_device_id,
+                        layer_idx,
+                        outer_idx,
+                        extend_both,
+                    );
                 }
             }
         }
@@ -121,12 +220,18 @@ where
         .storage_type()
         .nixl_mem_type();
 
+    let mut src_aggr = XferAggr::new();
+    let mut dst_aggr = XferAggr::new();
+
+    for (src, dst) in src.iter().zip(dst.iter_mut()) {
+        append_xfer_request(src, dst, &mut src_aggr, &mut dst_aggr)?;
+    }
+
     let mut src_dl = XferDescList::new(src_mem_type, false)?;
     let mut dst_dl = XferDescList::new(dst_mem_type, false)?;
 
-    for (src, dst) in src.iter().zip(dst.iter_mut()) {
-        append_xfer_request(src, dst, &mut src_dl, &mut dst_dl)?;
-    }
+    src_aggr.populate_xfer_desc_list(&mut src_dl)?;
+    dst_aggr.populate_xfer_desc_list(&mut dst_dl)?;
 
     debug_assert!(!src_dl.has_overlaps()? && !dst_dl.has_overlaps()?);
 
