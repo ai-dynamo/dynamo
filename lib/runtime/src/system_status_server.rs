@@ -167,34 +167,16 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Enhanced: Add response time information for endpoints with health check payloads
     let mut endpoint_details = serde_json::Map::new();
 
-    // Check if we have health check payloads registered
-    let has_health_checks = system_health.has_health_check_payloads();
+    // Check if we have health check targets registered
+    let has_health_checks = system_health.has_health_check_targets();
 
     if has_health_checks {
         // Include detailed response time info for monitored endpoints
-        let threshold = std::time::Duration::from_secs(5);
-
         for (endpoint, status_str) in &endpoints_basic {
-            // Get detailed health info for this endpoint
-            if let Some(health_info) = system_health.get_endpoint_health_info(endpoint) {
-                let mut details = serde_json::Map::new();
-                details.insert("status".to_string(), json!(status_str));
-
-                // Add response time if available
-                if let Some(last_time) = health_info.last_response_time {
-                    let seconds_ago = last_time.elapsed().as_secs();
-                    details.insert("last_response_seconds_ago".to_string(), json!(seconds_ago));
-                    details.insert(
-                        "responding_recently".to_string(),
-                        json!(last_time.elapsed() < threshold),
-                    );
-                }
-
-                endpoint_details.insert(endpoint.clone(), json!(details));
-            } else {
-                // Fallback if no detailed info available
-                endpoint_details.insert(endpoint.clone(), json!(status_str));
-            }
+            // Create endpoint detail with status
+            let mut details = serde_json::Map::new();
+            details.insert("status".to_string(), json!(status_str));
+            endpoint_details.insert(endpoint.clone(), json!(details));
         }
     } else {
         // Simple format for backwards compatibility when no health checks configured
@@ -788,8 +770,19 @@ mod integration_tests {
                 // Register the endpoint and its health check payload
                 {
                     let system_health = drt.system_health.lock().unwrap();
-                    system_health
-                        .register_health_check_payload(endpoint, health_check_payload.clone());
+                    system_health.register_health_check_target(
+                        endpoint,
+                        crate::component::Instance {
+                            component: "test_component".to_string(),
+                            endpoint: "health".to_string(),
+                            namespace: "test_namespace".to_string(),
+                            instance_id: 1,
+                            transport: crate::component::TransportType::NatsTcp(
+                                endpoint.to_string(),
+                            ),
+                        },
+                        health_check_payload.clone(),
+                    );
                 }
 
                 // Check initial health - should be ready (default state)
@@ -802,15 +795,13 @@ mod integration_tests {
                     "Should show notready status initially"
                 );
 
-                // Simulate a recent response
+                // Set endpoint to healthy state
                 drt.system_health
                     .lock()
                     .unwrap()
-                    .update_last_response_time(endpoint);
-                // Wait for the response to be recorded
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                    .set_endpoint_health_status(endpoint, HealthStatus::Ready);
 
-                // Check health again - should now be healthy due to recent response
+                // Check health again - should now be healthy
                 let response = client.get(&health_url).send().await.unwrap();
                 let status = response.status();
                 let body = response.text().await.unwrap();

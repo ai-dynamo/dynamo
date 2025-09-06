@@ -126,11 +126,11 @@ where
         Ingress::add_metrics(self, endpoint, metrics_labels)
     }
 
-    fn set_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
         use crate::pipeline::network::Ingress;
-        self.health_check_notifier
+        self.endpoint_health_check_notifier
             .set(notifier)
-            .map_err(|_| anyhow::anyhow!("Health check notifier already set"))?;
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
         Ok(())
     }
 
@@ -316,7 +316,7 @@ where
             }
             // Notify the health check manager that the stream has finished.
             // This resets the timer, delaying the next canary health check.
-            if let Some(notifier) = self.health_check_notifier.get() {
+            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }
         }

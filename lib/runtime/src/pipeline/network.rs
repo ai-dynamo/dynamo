@@ -273,8 +273,8 @@ struct RequestControlMessage {
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
-    /// Notifier for health check timer resets
-    health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Endpoint-specific notifier for health check timer resets
+    endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -282,7 +282,7 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
-            health_check_notifier: OnceLock::new(),
+            endpoint_health_check_notifier: OnceLock::new(),
         })
     }
 
@@ -347,8 +347,11 @@ pub trait PushWorkHandler: Send + Sync {
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
 
-    /// Set the health check notifier for timer resets
-    fn set_health_check_notifier(&self, _notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+    /// Set the endpoint-specific notifier for health check timer resets
+    fn set_endpoint_health_check_notifier(
+        &self,
+        _notifier: Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
         // Default implementation for backwards compatibility
         Ok(())
     }

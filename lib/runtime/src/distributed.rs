@@ -159,32 +159,22 @@ impl DistributedRuntime {
         if config.health_check_enabled {
             let health_check_config = crate::health_check::HealthCheckConfig {
                 canary_wait_time: std::time::Duration::from_secs(config.canary_wait_time_secs),
-                respond_stale_threshold: std::time::Duration::from_secs(
-                    config.health_check_respond_stale_threshold_secs,
-                ),
                 request_timeout: std::time::Duration::from_secs(
                     config.health_check_request_timeout_secs,
                 ),
             };
 
-            let (_health_check_handle, activity_notifier) =
-                crate::health_check::start_health_check_manager(
-                    distributed_runtime.clone(),
-                    Some(health_check_config),
-                );
-
-            // Store the notifier in SystemHealth for PushWorkHandler to access
-            distributed_runtime
-                .system_health
-                .lock()
-                .unwrap()
-                .set_health_check_notifier(activity_notifier)
-                .expect("Failed to set health check notifier");
+            // Start the health check manager (spawns per-endpoint monitoring tasks)
+            crate::health_check::start_health_check_manager(
+                distributed_runtime.clone(),
+                Some(health_check_config),
+            )
+            .await
+            .expect("Failed to start health check manager");
 
             tracing::info!(
-                "Health check manager started (canary_wait_time: {}s, respond_stale_threshold: {}s, request_timeout: {}s)",
+                "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
                 config.canary_wait_time_secs,
-                config.health_check_respond_stale_threshold_secs,
                 config.health_check_request_timeout_secs
             );
         }

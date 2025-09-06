@@ -87,17 +87,6 @@ impl EndpointConfigBuilder {
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
-        // Set health check notifier if available
-        if let Some(notifier) = endpoint
-            .drt()
-            .system_health
-            .lock()
-            .unwrap()
-            .get_health_check_notifier()
-        {
-            handler.set_health_check_notifier(notifier)?;
-        }
-
         // get the group
         let group = registry
             .services
@@ -113,19 +102,6 @@ impl EndpointConfigBuilder {
             .expect("no stats handler registry; this is unexpected");
 
         drop(registry);
-
-        // Register health check payload in SystemHealth if provided
-        if let Some(health_check_payload) = &health_check_payload {
-            endpoint
-                .drt()
-                .system_health
-                .lock()
-                .unwrap()
-                .register_health_check_payload(
-                    &endpoint.subject_to(lease_id),
-                    health_check_payload.clone(),
-                );
-        }
 
         // insert the stats handler
         if let Some(stats_handler) = stats_handler {
@@ -152,6 +128,31 @@ impl EndpointConfigBuilder {
         let subject = endpoint.subject_to(lease_id);
         let etcd_path = endpoint.etcd_path_with_lease_id(lease_id);
         let etcd_client = endpoint.component.drt.etcd_client.clone();
+
+        // Register health check target in SystemHealth if provided
+        if let Some(health_check_payload) = &health_check_payload {
+            let instance = Instance {
+                component: component_name.clone(),
+                endpoint: endpoint_name.clone(),
+                namespace: namespace_name.clone(),
+                instance_id: lease_id,
+                transport: TransportType::NatsTcp(subject.clone()),
+            };
+            system_health.lock().unwrap().register_health_check_target(
+                &subject,
+                instance,
+                health_check_payload.clone(),
+            );
+
+            // Get the endpoint-specific notifier and set it on the handler
+            if let Some(notifier) = system_health
+                .lock()
+                .unwrap()
+                .get_endpoint_health_check_notifier(&subject)
+            {
+                handler.set_endpoint_health_check_notifier(notifier)?;
+            }
+        }
 
         let cancel_token = if let Some(lease) = lease.as_ref() {
             // Create a new token that will be cancelled when EITHER the lease expires OR runtime shutdown occurs
