@@ -36,6 +36,7 @@ pub use config::RuntimeConfig;
 pub mod component;
 pub mod discovery;
 pub mod engine;
+pub mod health_check;
 pub mod system_status_server;
 pub use system_status_server::SystemStatusServerInfo;
 pub mod instances;
@@ -85,6 +86,13 @@ pub struct Runtime {
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
 }
 
+/// Health check target containing instance info and payload
+#[derive(Clone, Debug)]
+pub struct HealthCheckTarget {
+    pub instance: component::Instance,
+    pub payload: serde_json::Value,
+}
+
 /// Current Health Status
 /// If use_endpoint_health_status is set then
 /// initialize the endpoint_health hashmap to the
@@ -92,7 +100,11 @@ pub struct Runtime {
 #[derive(Clone)]
 pub struct SystemHealth {
     system_health: HealthStatus,
-    endpoint_health: HashMap<String, HealthStatus>,
+    endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
+    /// Maps endpoint subject to health check target (instance + payload)
+    health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
+    /// Maps endpoint subject to its specific health check notifier
+    health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
     use_endpoint_health_status: Vec<String>,
     health_path: String,
     live_path: String,
@@ -113,7 +125,9 @@ impl SystemHealth {
         }
         SystemHealth {
             system_health: starting_health_status,
-            endpoint_health,
+            endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
+            health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             use_endpoint_health_status,
             health_path,
             live_path,
@@ -125,17 +139,20 @@ impl SystemHealth {
         self.system_health = status;
     }
 
-    pub fn set_endpoint_health_status(&mut self, endpoint: &str, status: HealthStatus) {
-        self.endpoint_health.insert(endpoint.to_string(), status);
+    pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
+        let mut endpoint_health = self.endpoint_health.write().unwrap();
+        endpoint_health.insert(endpoint.to_string(), status);
     }
 
     /// Returns the overall health status and endpoint health statuses
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
+        let endpoint_health = self.endpoint_health.read().unwrap();
         let mut endpoints: HashMap<String, String> = HashMap::new();
-        for (endpoint, ready) in &self.endpoint_health {
+
+        for (endpoint, status) in endpoint_health.iter() {
             endpoints.insert(
                 endpoint.clone(),
-                if *ready == HealthStatus::Ready {
+                if *status == HealthStatus::Ready {
                     "ready".to_string()
                 } else {
                     "notready".to_string()
@@ -145,7 +162,7 @@ impl SystemHealth {
 
         let healthy = if !self.use_endpoint_health_status.is_empty() {
             self.use_endpoint_health_status.iter().all(|endpoint| {
-                self.endpoint_health
+                endpoint_health
                     .get(endpoint)
                     .is_some_and(|status| *status == HealthStatus::Ready)
             })
@@ -154,6 +171,75 @@ impl SystemHealth {
         };
 
         (healthy, endpoints)
+    }
+
+    /// Register a health check target for an endpoint
+    pub fn register_health_check_target(
+        &self,
+        endpoint_subject: &str,
+        instance: component::Instance,
+        payload: serde_json::Value,
+    ) {
+        let mut targets = self.health_check_targets.write().unwrap();
+        targets.insert(
+            endpoint_subject.to_string(),
+            HealthCheckTarget { instance, payload },
+        );
+
+        // Create and store a unique notifier for this endpoint
+        let mut notifiers = self.health_check_notifiers.write().unwrap();
+        notifiers.insert(
+            endpoint_subject.to_string(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+
+        // Also initialize endpoint health status if needed
+        let mut endpoint_health = self.endpoint_health.write().unwrap();
+        endpoint_health
+            .entry(endpoint_subject.to_string())
+            .or_insert(HealthStatus::Ready);
+    }
+
+    /// Get all health check targets
+    pub fn get_health_check_targets(&self) -> Vec<(String, HealthCheckTarget)> {
+        let targets = self.health_check_targets.read().unwrap();
+        targets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Check if any health check targets are registered
+    pub fn has_health_check_targets(&self) -> bool {
+        let targets = self.health_check_targets.read().unwrap();
+        !targets.is_empty()
+    }
+
+    /// Get list of endpoints with health check targets
+    pub fn get_health_check_endpoints(&self) -> Vec<String> {
+        let targets = self.health_check_targets.read().unwrap();
+        targets.keys().cloned().collect()
+    }
+
+    /// Get health check target for a specific endpoint
+    pub fn get_health_check_target(&self, endpoint: &str) -> Option<HealthCheckTarget> {
+        let targets = self.health_check_targets.read().unwrap();
+        targets.get(endpoint).cloned()
+    }
+
+    /// Get the endpoint health status (Ready/NotReady)
+    pub fn get_endpoint_health_status(&self, endpoint: &str) -> Option<HealthStatus> {
+        let endpoint_health = self.endpoint_health.read().unwrap();
+        endpoint_health.get(endpoint).cloned()
+    }
+
+    /// Get the endpoint-specific health check notifier
+    pub fn get_endpoint_health_check_notifier(
+        &self,
+        endpoint_subject: &str,
+    ) -> Option<Arc<tokio::sync::Notify>> {
+        let notifiers = self.health_check_notifiers.read().unwrap();
+        notifiers.get(endpoint_subject).cloned()
     }
 
     /// Initialize the uptime gauge using the provided metrics registry
