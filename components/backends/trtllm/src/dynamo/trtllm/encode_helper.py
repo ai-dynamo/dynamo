@@ -5,6 +5,8 @@ import logging
 from typing import Any, Dict, Union
 
 import torch
+from tensorrt_llm._torch.shared_tensor import SharedTensorContainer
+from tensorrt_llm.inputs import default_multimodal_input_loader
 
 import dynamo.nixl_connect as nixl_connect
 
@@ -189,6 +191,10 @@ class EncodeHelper:
         request: Dict[str, Any],
         multimodal_processor,
         connector: nixl_connect.Connector,
+        tokenizer=None,
+        model_dir=None,
+        model_type=None,
+        engine=None,
     ):
         """
         Process embedding request by loading embeddings and creating NIXL readable operation.
@@ -203,21 +209,36 @@ class EncodeHelper:
         """
         # Load embeddings first to get the actual shape
         messages = request.get("messages", [])
-        _, _, embedding_paths = multimodal_processor.extract_prompt_and_media(messages)
-
-        if not embedding_paths:
-            # Placeholder for TRTLLM Encoder to be called
-            # TRTLLM Encoder will return a memory handler on the encoder GPU with the encodings
-            logging.warning(
-                "No embedding paths found, NIXL transfer for image urls not supported by TRTLLM Encoder yet"
+        (
+            text_prompts,
+            image_urls,
+            embedding_paths,
+        ) = multimodal_processor.extract_prompt_and_media(messages)
+        if embedding_paths:
+            logging.info(f"Embedding paths: {embedding_paths}")
+            loaded_data = multimodal_processor.load_tensor_from_path_or_url(
+                embedding_paths[0]
             )
-            yield {"error": "No embedding paths found"}
-            return
-
-        # Load the embeddings data
-        loaded_data = multimodal_processor.load_tensor_from_path_or_url(
-            embedding_paths[0]
-        )
+        else:
+            logging.info("Encoding llm with MultimodalEncoder")
+            inputs = default_multimodal_input_loader(
+                tokenizer=tokenizer,
+                model_dir=model_dir,
+                model_type=model_type,
+                modality="image",
+                prompts=text_prompts[0],
+                media=image_urls[0],
+            )
+            encoder_outputs = engine.llm.generate(inputs)
+            encoder_embeddings = [
+                SharedTensorContainer.from_dict(
+                    output.mm_embedding_handle
+                ).get_local_view()
+                for output in encoder_outputs
+            ]
+            # Currently we only support one embedding/image per request
+            loaded_data = encoder_embeddings[0]
+            logging.info(f"Loaded data: {loaded_data}")
 
         # Handle both tensor and dictionary formats
         if isinstance(loaded_data, dict):
@@ -235,9 +256,13 @@ class EncodeHelper:
             # Tensor format (e.g., llava_next_mm_embed_seashore.pt)
             encodings = loaded_data
             auxiliary_data = {}
-
+        # Workaround: Create fresh GPU buffer to avoid UCX memory allocation issues
+        transfer_tensor = encodings
+        if hasattr(encodings, "is_cuda") and encodings.is_cuda:
+            transfer_tensor = torch.empty_like(encodings, device=encodings.device)
+            transfer_tensor.copy_(encodings)
         # Create readable operation with main embeddings tensor (works for both formats)
-        descriptor = nixl_connect.Descriptor(encodings)
+        descriptor = nixl_connect.Descriptor(transfer_tensor)
         with connector.create_readable(descriptor) as readable_op:
             # Get the metadata for the readable operation
             op_metadata = readable_op.metadata()

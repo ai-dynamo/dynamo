@@ -256,7 +256,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     connector = nixl_connect.Connector()
     await connector.initialize()
 
-    async with get_llm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args, config.disaggregation_mode) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         # should ideally call get_engine_runtime_config

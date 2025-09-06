@@ -151,6 +151,7 @@ class MultimodalRequestProcessor:
         self, request: Dict, embeddings: Any
     ) -> Optional[Any]:
         """Process OpenAI request and return with multimodal data."""
+        self.previous_decoded_text = ""
         # Normalize the request to handle OpenAI format
         if "stop_conditions" not in request:
             request["stop_conditions"] = {}
@@ -218,10 +219,25 @@ class MultimodalRequestProcessor:
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided for creating response chunks.")
 
-        new_tokens = output.token_ids[num_output_tokens_so_far:]
-        # Decode the new token IDs into a string. This is the incremental piece
-        # of text to be sent to the client.
-        delta_text = self.tokenizer.decode(new_tokens)
+        # Optimized: Cache previous decoded text to avoid redundant decoding
+        all_tokens = output.token_ids
+
+        # Decode all tokens with proper BPE context
+        current_text = self.tokenizer.decode(
+            all_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True
+        )
+
+        if num_output_tokens_so_far == 0:
+            # First chunk: use all decoded text
+            delta_text = current_text
+            # Store for next iteration
+            self.previous_decoded_text = current_text
+        else:
+            # Incremental chunk: extract delta using cached previous text
+            delta_text = current_text[len(self.previous_decoded_text) :]
+            # Update cache for next iteration
+            self.previous_decoded_text = current_text
+
         # Assemble the delta payload for the response chunk.
         delta = {"content": delta_text if delta_text else ""}
         if num_output_tokens_so_far == 0:

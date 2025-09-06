@@ -5,10 +5,9 @@ import copy
 import logging
 
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.constants import DisaggregationMode, DisaggregationStrategy
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.request_handlers.handler_base import (
-    DisaggregationMode,
-    DisaggregationStrategy,
     HandlerBase,
     RequestHandlerConfig,
 )
@@ -79,12 +78,22 @@ class EncodeHandler(HandlerBase):
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
+        if self.multimodal_processor:
+            self.model_dir = self.multimodal_processor.model_dir
+            self.model_type = self.multimodal_processor.model_type
+            self.tokenizer = self.multimodal_processor.tokenizer
 
     async def generate(self, request: dict):
         if self.connector:
             # Use helper method to process embedding request
             async for response in EncodeHelper.process_embedding_request(
-                request, self.multimodal_processor, self.connector
+                request,
+                self.multimodal_processor,
+                self.connector,
+                self.tokenizer,
+                self.model_dir,
+                self.model_type,
+                self.engine,
             ):
                 yield response
             return
