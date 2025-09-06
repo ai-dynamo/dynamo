@@ -152,6 +152,8 @@ impl Cuda {
         // Create a new context for this device
         let ctx = CudaContext::new(device_id)?;
 
+        unsafe { ctx.disable_event_tracking() };
+
         // Store the context
         self.contexts.insert(device_id, ctx.clone());
 

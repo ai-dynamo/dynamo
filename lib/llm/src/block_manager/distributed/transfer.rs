@@ -35,6 +35,8 @@ pub struct BlockTransferHandler {
     host: Option<LocalBlockDataList<PinnedStorage>>,
     disk: Option<LocalBlockDataList<DiskStorage>>,
     context: Arc<TransferContext>,
+    h2d: Arc<TransferContext>,
+    d2h: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     // add worker-connector scheduler client here
 }
@@ -48,11 +50,15 @@ impl BlockTransferHandler {
         scheduler_client: Option<TransferSchedulerClient>,
         // add worker-connector scheduler client here
     ) -> Result<Self> {
+        let h2d = Arc::new(context.clone_with_new_stream()?);
+        let d2h = Arc::new(context.clone_with_new_stream()?);
         Ok(Self {
             device: Self::get_local_data(device_blocks),
             host: Self::get_local_data(host_blocks),
             disk: Self::get_local_data(disk_blocks),
             context,
+            h2d,
+            d2h,
             scheduler_client,
         })
     }
@@ -81,6 +87,7 @@ impl BlockTransferHandler {
         source_pool_list: &Option<LocalBlockDataList<Source>>,
         target_pool_list: &Option<LocalBlockDataList<Target>>,
         request: BlockTransferRequest,
+        context: Arc<TransferContext>,
     ) -> Result<tokio::sync::oneshot::Receiver<()>>
     where
         Source: Storage + NixlDescriptor,
@@ -113,7 +120,7 @@ impl BlockTransferHandler {
             .collect();
 
         // Perform the transfer, and return the notifying channel.
-        match sources.write_to(&mut targets, self.context.clone()) {
+        match sources.write_to(&mut targets, context) {
             Ok(channel) => Ok(channel),
             Err(e) => {
                 tracing::error!("Failed to write to blocks: {:?}", e);
@@ -133,10 +140,24 @@ impl BlockTransferHandler {
         tracing::debug!("request: {request:#?}");
 
         let notify = match (request.from_pool(), request.to_pool()) {
-            (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
-            (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
-            (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request).await,
-            (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request).await,
+            (Device, Host) => {
+                let d2h = self.d2h.clone();
+                self.begin_transfer(&self.device, &self.host, request, d2h)
+                    .await
+            }
+            (Host, Device) => {
+                let h2d = self.h2d.clone();
+                self.begin_transfer(&self.host, &self.device, request, h2d)
+                    .await
+            }
+            (Host, Disk) => {
+                self.begin_transfer(&self.host, &self.disk, request, self.context.clone())
+                    .await
+            }
+            (Disk, Device) => {
+                self.begin_transfer(&self.disk, &self.device, request, self.context.clone())
+                    .await
+            }
             _ => {
                 return Err(anyhow::anyhow!("Invalid transfer type."));
             }
