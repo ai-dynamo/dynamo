@@ -18,11 +18,19 @@ use super::RouteDoc;
 pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
+    http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
+}
+
+/// RAII object for HTTP queue gauge
+/// Tracks requests from HTTP handler start until metrics processing begins
+pub struct HttpQueueGuard {
+    metrics: Arc<Metrics>,
+    model: String,
 }
 
 /// RAII object for inflight gauge and request counters
@@ -64,6 +72,7 @@ pub enum RequestType {
 }
 
 /// Status
+#[derive(PartialEq)]
 pub enum Status {
     Success,
     Error,
@@ -128,6 +137,15 @@ impl Metrics {
             Opts::new(
                 frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let http_queue_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::HTTP_QUEUE),
+                "Number of requests in HTTP processing queue",
             ),
             &["model"],
         )
@@ -198,6 +216,7 @@ impl Metrics {
         Metrics {
             request_counter,
             inflight_gauge,
+            http_queue_gauge,
             request_duration,
             input_sequence_length,
             output_sequence_length,
@@ -263,9 +282,18 @@ impl Metrics {
         self.inflight_gauge.with_label_values(&[model]).dec()
     }
 
+    fn inc_http_queue_gauge(&self, model: &str) {
+        self.http_queue_gauge.with_label_values(&[model]).inc()
+    }
+
+    fn dec_http_queue_gauge(&self, model: &str) {
+        self.http_queue_gauge.with_label_values(&[model]).dec()
+    }
+
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
@@ -303,6 +331,27 @@ impl Metrics {
     pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(self, model.to_string().to_lowercase())
     }
+
+    /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
+    pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
+        HttpQueueGuard::new(self, model.to_string().to_lowercase())
+    }
+}
+
+impl HttpQueueGuard {
+    fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        // Increment the HTTP queue gauge when the guard is created
+        metrics.inc_http_queue_gauge(&model);
+
+        HttpQueueGuard { metrics, model }
+    }
+}
+
+impl Drop for HttpQueueGuard {
+    fn drop(&mut self) {
+        // Decrement the HTTP queue gauge when the guard is dropped
+        self.metrics.dec_http_queue_gauge(&self.model);
+    }
 }
 
 impl InflightGuard {
@@ -336,6 +385,8 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
+        let duration = self.timer.elapsed().as_secs_f64();
+
         // Decrement the gauge when the guard is dropped
         self.metrics.dec_inflight_gauge(&self.model);
 
@@ -353,7 +404,7 @@ impl Drop for InflightGuard {
         self.metrics
             .request_duration
             .with_label_values(&[&self.model])
-            .observe(self.timer.elapsed().as_secs_f64());
+            .observe(duration);
     }
 }
 

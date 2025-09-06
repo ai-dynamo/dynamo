@@ -457,6 +457,11 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
+    // Create HTTP queue guard to track time from HTTP start to metrics processing
+    let http_queue_guard = state
+        .metrics_clone()
+        .create_http_queue_guard(&request.inner.model);
+
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -510,7 +515,6 @@ async fn chat_completions(
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
-    tracing::trace!("Issuing generate call for chat completions");
     let annotations = request.annotations();
 
     // issue the generate call on the engine
@@ -543,6 +547,7 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
+        drop(http_queue_guard); // Request is no longer waiting, now being processed
         stream_handle.arm();
 
         let stream = stream.map(move |response| {
@@ -558,6 +563,7 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
+        drop(http_queue_guard); // Request is no longer waiting, now being processed
         let stream = stream.inspect(move |response| {
             process_metrics_only(response, &mut response_collector);
         });
