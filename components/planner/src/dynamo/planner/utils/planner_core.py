@@ -11,7 +11,7 @@ from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import KubernetesConnector
+from dynamo.planner import KubernetesConnector, VirtualConnector
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -64,11 +64,15 @@ class Planner:
 
         if not self.dryrun:
             self.runtime = runtime
-            self.namespace = SLAPlannerDefaults.namespace
+            self.namespace = args.namespace
 
             if not args.no_operation:
                 if args.environment == "kubernetes":
                     self.connector = KubernetesConnector(self.namespace)
+                elif args.environment == "virtual":
+                    self.connector = VirtualConnector(
+                        runtime, self.namespace, args.backend
+                    )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
@@ -125,6 +129,15 @@ class Planner:
             self.no_correction = True
         else:
             self.no_correction = args.no_correction
+
+    async def _async_init(self):
+        """Async initialization for components that need it"""
+        if (
+            not self.dryrun
+            and hasattr(self, "connector")
+            and hasattr(self.connector, "_async_init")
+        ):
+            await self.connector._async_init()
 
     async def get_workers_info(self):
         if self.runtime is None:
@@ -538,4 +551,5 @@ class Planner:
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
+    await planner._async_init()
     await planner.run()

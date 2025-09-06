@@ -4,6 +4,7 @@
 __all__ = [
     "PlannerConnector",
     "KubernetesConnector",
+    "VirtualConnector",
     "LoadPlannerDefaults",
     "SLAPlannerDefaults",
     "ServiceConfig",
@@ -13,6 +14,7 @@ from dynamo.planner.config import ServiceConfig
 from dynamo.planner.defaults import LoadPlannerDefaults, SLAPlannerDefaults
 from dynamo.planner.kubernetes_connector import KubernetesConnector
 from dynamo.planner.planner_connector import PlannerConnector
+from dynamo.planner.virtual_connector import VirtualConnector
 
 try:
     from ._version import __version__

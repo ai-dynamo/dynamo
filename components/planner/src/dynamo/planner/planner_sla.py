@@ -18,7 +18,6 @@ import logging
 
 from pydantic import BaseModel
 
-from dynamo.planner.defaults import SLAPlannerDefaults
 from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -40,7 +39,7 @@ async def init_planner(runtime: DistributedRuntime, args):
 
     await start_sla_planner(runtime, args)
 
-    component = runtime.namespace(SLAPlannerDefaults.namespace).component("Planner")
+    component = runtime.namespace(args.namespace).component("Planner")
     await component.create_service()
 
     async def generate(request: RequestType):
