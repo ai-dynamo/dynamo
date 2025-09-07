@@ -70,7 +70,7 @@ pub enum HealthTransitionPolicy {
     /// Ready when service has registered at least one endpoint
     EndpointBasedReady,
     /// Custom readiness logic with configurable parameters
-    Custom { 
+    Custom {
         auto_ready_after_seconds: Option<u64>,
         require_endpoints_ready: bool,
     },

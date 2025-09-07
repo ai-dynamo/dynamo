@@ -140,7 +140,6 @@ impl SystemHealth {
         }
 
         let uptime = self.start_time.elapsed();
-        
         match &self.health_transition_policy {
             HealthTransitionPolicy::Manual => {
                 // No automatic transition (current behavior)
@@ -156,9 +155,9 @@ impl SystemHealth {
                 if !self.endpoint_health.is_empty() {
                     let all_endpoints_ready = self.endpoint_health.values()
                         .all(|status| *status == HealthStatus::Ready);
-                    
+
                     if all_endpoints_ready {
-                        tracing::info!("Auto-transitioning to ready - all {} endpoints are ready (policy: endpoint_based_ready)", 
+                        tracing::info!("Auto-transitioning to ready - all {} endpoints are ready (policy: endpoint_based_ready)",
                                      self.endpoint_health.len());
                         self.system_health = HealthStatus::Ready;
                     }
@@ -166,14 +165,14 @@ impl SystemHealth {
             },
             HealthTransitionPolicy::Custom { auto_ready_after_seconds, require_endpoints_ready } => {
                 let mut ready_conditions_met = true;
-                
+
                 // Check time-based condition if specified
                 if let Some(after_seconds) = auto_ready_after_seconds {
                     if uptime.as_secs() < *after_seconds {
                         ready_conditions_met = false;
                     }
                 }
-                
+
                 // Check endpoint-based condition if required
                 if *require_endpoints_ready {
                     if self.endpoint_health.is_empty() {
@@ -186,7 +185,7 @@ impl SystemHealth {
                         }
                     }
                 }
-                
+
                 if ready_conditions_met {
                     tracing::info!("Auto-transitioning to ready after {}s uptime (policy: custom)", uptime.as_secs());
                     self.system_health = HealthStatus::Ready;
@@ -200,7 +199,7 @@ impl SystemHealth {
     pub fn get_health_status_with_transition_check(&mut self) -> (bool, HashMap<String, String>) {
         // Check for automatic health transitions BEFORE reporting status
         self.check_and_update_health_status();
-        
+
         // Now get the current status
         self.get_health_status()
     }
