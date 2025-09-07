@@ -266,6 +266,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
 
+# Create Ray CLI script manually since uv pip doesn't always install console scripts properly
+RUN echo '#!/opt/dynamo/venv/bin/python' > /opt/dynamo/venv/bin/ray && \
+    echo 'import sys' >> /opt/dynamo/venv/bin/ray && \
+    echo 'from ray.scripts.scripts import main' >> /opt/dynamo/venv/bin/ray && \
+    echo 'if __name__ == "__main__":' >> /opt/dynamo/venv/bin/ray && \
+    echo '    sys.exit(main())' >> /opt/dynamo/venv/bin/ray && \
+    chmod +x /opt/dynamo/venv/bin/ray
+
 # Copy benchmarks, examples, and tests for CI
 COPY . /workspace/
 
