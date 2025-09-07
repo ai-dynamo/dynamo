@@ -106,6 +106,16 @@ def parse_args(args: list[str]) -> Config:
 
     parsed_args = parser.parse_args(args)
 
+    # Disable sglang based parser arguments
+    if parsed_args.tool_call_parser is not None:
+        raise ValueError(
+            "tool_call_parser is not supported for SGLang backend. Please use --dyn-tool-call-parser instead to enable tool calling."
+        )
+    if parsed_args.reasoning_parser is not None:
+        raise ValueError(
+            "reasoning_parser is not supported for SGLang backend. Please use --dyn-reasoning-parser instead to enable reasoning."
+        )
+
     # Auto-set bootstrap port if not provided
     if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args):
         args_dict = vars(parsed_args)
