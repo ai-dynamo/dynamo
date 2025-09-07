@@ -237,7 +237,6 @@ impl RuntimeConfig {
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         let mut config: RuntimeConfig = Self::figment().extract()?;
-        
         // Handle DYN_SYSTEM_AUTO_READY_AFTER_SECONDS environment variable
         // This provides a convenient shortcut for time-based health transition
         if let Ok(seconds_str) = std::env::var("DYN_SYSTEM_AUTO_READY_AFTER_SECONDS") {
@@ -250,7 +249,6 @@ impl RuntimeConfig {
                 }
             }
         }
-        
         config.validate()?;
         Ok(config)
     }
