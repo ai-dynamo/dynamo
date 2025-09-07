@@ -171,8 +171,8 @@ pub async fn spawn_system_status_server(
 /// Health handler
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    let system_health = state.drt().system_health.lock().unwrap();
-    let (healthy, endpoints) = system_health.get_health_status();
+    let mut system_health = state.drt().system_health.lock().unwrap();
+    let (healthy, endpoints) = system_health.get_health_status_with_transition_check();
     let uptime = Some(system_health.uptime());
 
     let healthy_string = if healthy { "ready" } else { "notready" };

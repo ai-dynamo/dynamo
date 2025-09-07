@@ -59,6 +59,30 @@ pub enum HealthStatus {
     NotReady,
 }
 
+/// Health transition policy for automatic health status management
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthTransitionPolicy {
+    /// Never auto-transition (current behavior, requires manual set_health_status)
+    Manual,
+    /// Auto-ready after specified uptime seconds
+    TimeBasedReady { after_seconds: u64 },
+    /// Ready when service has registered at least one endpoint
+    EndpointBasedReady,
+    /// Custom readiness logic with configurable parameters
+    Custom { 
+        auto_ready_after_seconds: Option<u64>,
+        require_endpoints_ready: bool,
+    },
+}
+
+impl Default for HealthTransitionPolicy {
+    fn default() -> Self {
+        // Better default: auto-ready after 30 seconds for simple services
+        Self::TimeBasedReady { after_seconds: 30 }
+    }
+}
+
 /// Runtime configuration
 /// Defines the configuration for Tokio runtimes
 #[derive(Serialize, Deserialize, Validate, Debug, Builder, Clone)]
@@ -114,6 +138,12 @@ pub struct RuntimeConfig {
     #[builder(default = "vec![]")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub use_endpoint_health_status: Vec<String>,
+    /// Health Transition Policy
+    /// Controls when and how the system automatically transitions from "notready" to "ready"
+    /// Set this at runtime with environment variable DYN_SYSTEM_HEALTH_TRANSITION_POLICY
+    #[builder(default = "HealthTransitionPolicy::default()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub health_transition_policy: HealthTransitionPolicy,
 
     /// Health endpoint paths
     /// Set this at runtime with environment variable DYN_SYSTEM_HEALTH_PATH
@@ -185,6 +215,8 @@ impl RuntimeConfig {
                             "ENABLED" => "system_enabled",
                             "USE_ENDPOINT_HEALTH_STATUS" => "use_endpoint_health_status",
                             "STARTING_HEALTH_STATUS" => "starting_health_status",
+                            "HEALTH_TRANSITION_POLICY" => "health_transition_policy",
+                            "AUTO_READY_AFTER_SECONDS" => "health_transition_policy",
                             "HEALTH_PATH" => "system_health_path",
                             "LIVE_PATH" => "system_live_path",
                             _ => k.as_str(),
@@ -225,6 +257,7 @@ impl RuntimeConfig {
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
+            health_transition_policy: HealthTransitionPolicy::default(),
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
         }
@@ -254,6 +287,7 @@ impl Default for RuntimeConfig {
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
+            health_transition_policy: HealthTransitionPolicy::default(),
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
         }
