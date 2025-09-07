@@ -64,16 +64,8 @@ pub fn detect_and_parse_tool_call(
     message: &str,
     parser_str: Option<&str>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let mut parser_map: std::collections::HashMap<&str, ToolCallConfig> =
-        std::collections::HashMap::new();
-    parser_map.insert("hermes", ToolCallConfig::hermes());
-    parser_map.insert("nemotron_deci", ToolCallConfig::nemotron_deci());
-    parser_map.insert("llama3_json", ToolCallConfig::llama3_json());
-    parser_map.insert("mistral", ToolCallConfig::mistral());
-    parser_map.insert("phi4", ToolCallConfig::phi4());
-    parser_map.insert("pythonic", ToolCallConfig::pythonic());
-    parser_map.insert("harmony", ToolCallConfig::harmony());
-    parser_map.insert("default", ToolCallConfig::default()); // Add default key
+    // Get the tool parser map
+    let parser_map = get_tool_parser_map();
 
     // Handle None or empty string by defaulting to "default"
     let parser_key = match parser_str {
@@ -86,7 +78,11 @@ pub fn detect_and_parse_tool_call(
             let (results, normal_content) = try_tool_call_parse(message, config)?;
             Ok((results, normal_content))
         }
-        None => anyhow::bail!("Parser for the given config is not implemented"), // Original message
+        None => anyhow::bail!(
+            "Parser '{}' is not implemented. Available parsers: {:?}",
+            parser_key,
+            get_available_tool_parsers()
+        ),
     }
 }
 

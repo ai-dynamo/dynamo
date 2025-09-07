@@ -23,6 +23,7 @@
 
 import argparse
 import asyncio
+import logging
 import os
 import pathlib
 import re
@@ -41,6 +42,10 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 
 from . import __version__
+
+DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+
+logger = logging.getLogger(__name__)
 
 
 def validate_static_endpoint(value):
@@ -136,6 +141,12 @@ def parse_args():
         dest="use_kv_events",
         default=True,
         help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
+    )
+    parser.add_argument(
+        "--namespace",
+        type=str,
+        default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
+        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
     )
     parser.add_argument(
         "--router-replica-sync",
@@ -240,6 +251,7 @@ async def async_main():
 
     if flags.static_endpoint:
         kwargs["endpoint_id"] = flags.static_endpoint
+
     if flags.model_name:
         kwargs["model_name"] = flags.model_name
     if flags.model_path:
@@ -248,6 +260,8 @@ async def async_main():
         kwargs["tls_cert_path"] = flags.tls_cert_path
     if flags.tls_key_path:
         kwargs["tls_key_path"] = flags.tls_key_path
+    if flags.namespace:
+        kwargs["namespace"] = flags.namespace
 
     if is_static:
         # out=dyn://<static_endpoint>
