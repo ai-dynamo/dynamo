@@ -187,6 +187,16 @@ pub fn try_tool_call_parse_pythonic(
     Ok((tool_response?, Some(normal_text)))
 }
 
+pub fn detect_tool_call_start_pythonic(chunk: &str) -> anyhow::Result<bool> {
+    // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
+
+    // Check if the chunk contains atleast "["
+    if !chunk.contains("[") {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +361,39 @@ mod tests {
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "bar");
         assert_eq!(args["x"], json!({"x": 3, "y": {"e": "f"}}));
+    }
+}
+
+#[cfg(test)]
+mod detect_parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_chunk_with_tool_call_start_token() {
+        let text = r#"[foo(a=1, b=2), bar(x=3)]"#;
+        let result = detect_tool_call_start_pythonic(text).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_chunk_without_tool_call_start_token() {
+        let text = r#"foo(a=1, b=2)"#;
+        let result = detect_tool_call_start_pythonic(text).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_chunk_with_tool_call_start_token_in_middle() {
+        let text = r#"information: [foo(a=1, b=2), bar(x=3)]"#;
+        let result = detect_tool_call_start_pythonic(text).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_false_positive() {
+        // Since we detect just "[" as tool call start token, this will be a false positive
+        let text = r#"Hey [ There is one tool call here . foo(a=1, b=2)"#;
+        let result = detect_tool_call_start_pythonic(text).unwrap();
+        assert!(result);
     }
 }
