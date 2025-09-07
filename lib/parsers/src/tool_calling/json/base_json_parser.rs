@@ -311,18 +311,23 @@ pub fn detect_tool_call_start_basic_json(
     chunk: &str,
     config: &JsonParserConfig,
 ) -> anyhow::Result<bool> {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+
     // Case 1: If there is any of the start tokens in the chunk, return true
     if config
         .tool_call_start_tokens
         .iter()
-        .any(|token| chunk.contains(token))
+        .any(|token| trimmed.contains(token))
     {
         return Ok(true);
     }
 
     // Case 2: If there is any "{" or "[" in the chunk, return true
     // This case will lead to false positives for those models which does not emit tool call start tokens
-    if chunk.contains("{") || chunk.contains("[") {
+    if trimmed.contains("{") || trimmed.contains("[") {
         return Ok(true);
     }
     Ok(false)

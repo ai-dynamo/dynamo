@@ -105,11 +105,16 @@ pub fn detect_tool_call_start_deepseek_v3_1(
     chunk: &str,
     config: &JsonParserConfig,
 ) -> anyhow::Result<bool> {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+
     // if chunk contains tool_call_start_tokens then return true
     if config
         .tool_call_start_tokens
         .iter()
-        .any(|token| chunk.contains(token))
+        .any(|token| trimmed.contains(token))
     {
         return Ok(true);
     }

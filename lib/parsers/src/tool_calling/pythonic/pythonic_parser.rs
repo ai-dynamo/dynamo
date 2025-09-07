@@ -188,10 +188,15 @@ pub fn try_tool_call_parse_pythonic(
 }
 
 pub fn detect_tool_call_start_pythonic(chunk: &str) -> anyhow::Result<bool> {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+
     // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
 
     // Check if the chunk contains atleast "["
-    if !chunk.contains("[") {
+    if !trimmed.contains("[") {
         return Ok(false);
     }
     Ok(true)
