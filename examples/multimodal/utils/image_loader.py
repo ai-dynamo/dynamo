@@ -23,15 +23,18 @@ from urllib.parse import urlparse
 import httpx
 from PIL import Image
 
+from .http_client import get_http_client
+
 logger = logging.getLogger(__name__)
 
 
 class ImageLoader:
     CACHE_SIZE_MAXIMUM = 8
 
-    def __init__(self, cache_size: int = CACHE_SIZE_MAXIMUM):
-        self._http_timeout = 30.0
-        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
+    def __init__(
+        self, cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0
+    ):
+        self._http_timeout = http_timeout
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
@@ -62,10 +65,9 @@ class ImageLoader:
                 except binascii.Error as e:
                     raise ValueError(f"Invalid base64 encoding: {e}")
             elif parsed_url.scheme in ("http", "https"):
-                if not self._http_client:
-                    raise RuntimeError("HTTP client not initialized")
+                http_client = get_http_client(self._http_timeout)
 
-                response = await self._http_client.get(image_url)
+                response = await http_client.get(image_url)
                 response.raise_for_status()
 
                 if not response.content:

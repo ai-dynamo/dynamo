@@ -32,23 +32,22 @@
 use crate::{
     config::HealthStatus,
     discovery::Lease,
-    metrics::{prometheus_names, MetricsRegistry},
+    metrics::{MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::EtcdPath,
 };
 
 use super::{
-    error,
+    DistributedRuntime, Result, Runtime, error,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
     utils::Duration,
-    DistributedRuntime, Result, Runtime,
 };
 
-use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
-use crate::protocols::Endpoint as EndpointId;
-use crate::service::ComponentNatsPrometheusMetrics;
+use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
+use crate::protocols::EndpointId;
+use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -223,6 +222,10 @@ impl Component {
         self.name.clone()
     }
 
+    pub fn labels(&self) -> &[(String, String)] {
+        &self.labels
+    }
+
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
         Endpoint {
             component: self.clone(),
@@ -267,61 +270,64 @@ impl Component {
             .await
     }
 
-    /// Add Prometheus metrics for this component's service stats.
+    /// Add Prometheus metrics for this component's NATS service stats.
     ///
-    /// Starts a background task that scrapes stats every ~4.7s and updates metrics.
-    /// The thinking was that it should be a little bit shorter than the Prometheus polling interval.
-    /// Currently Prometheus polls every 6 seconds, and I wanted every poll to be fresh, so this is set
-    /// as an arbitrary 4.7 seconds plus 0.3 seconds if it times out. It's a bit of a hand-wavey decision.
-    pub fn start_scraping_metrics(&self) -> Result<()> {
-        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
-            std::time::Duration::from_millis(300);
-        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(4700);
+    /// Starts a background task that periodically requests service statistics from NATS
+    /// and updates the corresponding Prometheus metrics. The first scrape happens immediately,
+    /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
+    /// which should be near or smaller than typical Prometheus scraping intervals to ensure
+    /// metrics are fresh when Prometheus collects them.
+    pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
+        const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
-        let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
+        // If there is another component with the same service name, this will fail.
+        let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
 
         let component_clone = self.clone();
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
-        debug_assert!(hierarchies
-            .last()
-            .map(|x| x.as_str())
-            .unwrap_or_default()
-            .eq_ignore_ascii_case(&self.service_name())); // it happens that in component, hierarchy and service name are the same
+        debug_assert!(
+            hierarchies
+                .last()
+                .map(|x| x.as_str())
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(&self.service_name())
+        ); // it happens that in component, hierarchy and service name are the same
 
         // Start a background task that scrapes stats every 5 seconds
         let m = component_metrics.clone();
         let c = component_clone.clone();
 
-        // Use std::thread for the background task to avoid runtime context issues
-        std::thread::spawn(move || {
-            // Use the existing secondary runtime from drt for background metrics scraping
-            let rt = c.drt().runtime().secondary();
+        // Use the DRT's runtime handle to spawn the background task.
+        // We cannot use regular `tokio::spawn` here because:
+        // 1. This method may be called from contexts without an active Tokio runtime
+        //    (e.g., tests that create a DRT in a blocking context)
+        // 2. Tests often create a temporary runtime just to build the DRT, then drop it
+        // 3. `tokio::spawn` requires being called from within a runtime context
+        // By using the DRT's own runtime handle, we ensure the task runs in the
+        // correct runtime that will persist for the lifetime of the component.
+        c.drt().runtime().secondary().spawn(async move {
+            let timeout = std::time::Duration::from_millis(500);
+            let mut interval = tokio::time::interval(MAX_WAIT_MS);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            // Run the background scraping loop
-            rt.block_on(async {
-                let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
-                let mut delay = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
-
-                loop {
-                    match c.scrape_stats(timeout).await {
-                        Ok(service_set) => {
-                            m.update_from_service_set(&service_set);
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                "Background scrape failed for {}: {}",
-                                c.service_name(),
-                                err
-                            );
-                            m.reset_to_zeros();
-                            // Double delay on failure, capped at MAX_DELAY
-                            delay = std::cmp::min(delay * 2, MAX_DELAY_MS);
-                        }
+            loop {
+                match c.scrape_stats(timeout).await {
+                    Ok(service_set) => {
+                        m.update_from_service_set(&service_set);
                     }
-                    tokio::time::sleep(delay).await;
+                    Err(err) => {
+                        tracing::error!(
+                            "Background scrape failed for {}: {}",
+                            c.service_name(),
+                            err
+                        );
+                        m.reset_to_zeros();
+                    }
                 }
-            });
+
+                interval.tick().await;
+            }
         });
 
         Ok(())
@@ -567,24 +573,11 @@ impl Namespace {
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
-        let component = ComponentBuilder::from_runtime(self.runtime.clone())
+        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
             .is_static(self.is_static)
-            .build()?;
-
-        // Register the metrics callback for this component.
-        // If registration fails, log a warning but do not propagate the error,
-        // as metrics are not mission critical and should not block component creation.
-        if let Err(err) = component.start_scraping_metrics() {
-            tracing::warn!(
-                "Failed to add metrics callback for component '{}': {}",
-                component.service_name(),
-                err
-            );
-        }
-
-        Ok(component)
+            .build()?)
     }
 
     /// Create a [`Namespace`] in the parent namespace

@@ -67,7 +67,7 @@ sleep 30
 # Check if server is responding
 max_attempts=30
 attempt=0
-until curl -s http://localhost:8080/v1/models > /dev/null 2>&1; do
+until curl -s http://localhost:8000/v1/models > /dev/null 2>&1; do
     attempt=$((attempt + 1))
     if [ $attempt -gt $max_attempts ]; then
         echo "❌ Server failed to start within timeout"
@@ -107,7 +107,7 @@ sleep 30
 
 # Check if server is responding
 attempt=0
-until curl -s http://localhost:8080/v1/models > /dev/null 2>&1; do
+until curl -s http://localhost:8000/v1/models > /dev/null 2>&1; do
     attempt=$((attempt + 1))
     if [ $attempt -gt $max_attempts ]; then
         echo "❌ Server failed to start within timeout"

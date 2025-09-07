@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -81,6 +83,10 @@ class ManagedProcess:
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
 
+    # Ensure attributes exist even if startup fails early
+    proc: Optional[subprocess.Popen] = None
+    _pgid: Optional[int] = None
+
     _logger = logging.getLogger()
     _command_name = None
     _log_path = None
@@ -106,20 +112,30 @@ class ManagedProcess:
 
             return self
 
-        except Exception as e:
-            self.__exit__(None, None, None)
-            raise e
+        except Exception:
+            try:
+                self.__exit__(None, None, None)
+            except Exception as cleanup_err:
+                self._logger.warning(
+                    "Error during cleanup in __enter__: %s", cleanup_err
+                )
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self._terminate_process_group()
+
         process_list = [self.proc, self._tee_proc, self._sed_proc]
         for process in process_list:
             if process:
-                if process.stdout:
-                    process.stdout.close()
-                if process.stdin:
-                    process.stdin.close()
-                terminate_process_tree(process.pid, self._logger)
-                process.wait()
+                try:
+                    if process.stdout:
+                        process.stdout.close()
+                    if process.stdin:
+                        process.stdin.close()
+                    terminate_process_tree(process.pid, self._logger)
+                    process.wait()
+                except Exception as e:
+                    self._logger.warning("Error terminating process: %s", e)
         if self.data_dir:
             self._remove_directory(self.data_dir)
 
@@ -168,6 +184,12 @@ class ManagedProcess:
                 stderr=stderr,
                 start_new_session=True,  # Isolate process group to prevent kill 0 from affecting parent
             )
+            # Capture the child's process group id for robust cleanup even if parent shell exits
+            try:
+                self._pgid = os.getpgid(self.proc.pid)
+            except Exception as e:
+                self._logger.warning("Could not get process group id: %s", e)
+                self._pgid = None
             self._sed_proc = subprocess.Popen(
                 ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
                 stdin=self.proc.stdout,
@@ -189,6 +211,12 @@ class ManagedProcess:
                     stderr=stderr,
                     start_new_session=True,  # Isolate process group to prevent kill 0 from affecting parent
                 )
+                # Capture the child's process group id for robust cleanup even if parent shell exits
+                try:
+                    self._pgid = os.getpgid(self.proc.pid)
+                except Exception as e:
+                    self._logger.warning("Could not get process group id: %s", e)
+                    self._pgid = None
 
                 self._sed_proc = subprocess.Popen(
                     ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
@@ -197,12 +225,77 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
+    def _terminate_process_group(self, timeout: float = 5.0):
+        """Terminate the entire process group/session started for the child.
+
+        This catches cases where the launcher shell exits and its children are reparented,
+        leaving no parent PID to traverse, but they remain in the same process group.
+        """
+        if self._pgid is None:
+            return
+        try:
+            self._logger.info("Terminating process group: %s", self._pgid)
+            os.killpg(self._pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception as e:
+            self._logger.warning(
+                "Error sending SIGTERM to process group %s: %s", self._pgid, e
+            )
+            return
+
+        # Give processes a brief moment to exit gracefully
+        time.sleep(timeout)
+
+        # Force kill if anything remains
+        try:
+            os.killpg(self._pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            self._logger.warning(
+                "Error sending SIGKILL to process group %s: %s", self._pgid, e
+            )
+
     def _remove_directory(self, path: str) -> None:
         """Remove a directory."""
         try:
             shutil.rmtree(path, ignore_errors=True)
         except (OSError, IOError) as e:
             self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
+
+    def _log_tail_on_error(self, lines=20):
+        """Print the last few lines of the log file when process dies."""
+        if self._log_path and os.path.exists(self._log_path):
+            try:
+                with open(self._log_path, "r") as f:
+                    log_lines = f.readlines()
+                    if log_lines:
+                        self._logger.error(
+                            "=== Last %d lines from %s ===",
+                            min(lines, len(log_lines)),
+                            self._log_path,
+                        )
+                        for line in log_lines[-lines:]:
+                            self._logger.error(line.rstrip())
+                        self._logger.error("=== End of log tail ===")
+            except Exception as e:
+                self._logger.warning("Could not read log file: %s", e)
+
+    def _check_process_alive(self, context=""):
+        """Check if the main process is still alive. Raises RuntimeError if dead."""
+        if self.proc and self.proc.poll() is not None:
+            returncode = self.proc.returncode
+            self._logger.error(
+                "Main server process died with exit code %d%s",
+                returncode,
+                f" {context}" if context else "",
+            )
+            # Try to get last few lines from log for debugging
+            self._log_tail_on_error()
+            raise RuntimeError(
+                f"Main server process exited with code {returncode}{f' {context}' if context else ''}"
+            )
 
     def _check_ports(self, timeout):
         elapsed = 0.0
@@ -216,6 +309,9 @@ class ManagedProcess:
         self._logger.info("Checking Port: %s", port)
         elapsed = 0.0
         while elapsed < timeout:
+            # Check if the main process is still alive
+            self._check_process_alive(f"while waiting for port {port}")
+
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(("localhost", port)) == 0:
                     self._logger.info("SUCCESS: Check Port: %s", port)
@@ -231,7 +327,7 @@ class ManagedProcess:
             elapsed += self._check_url(url, timeout - elapsed)
         return elapsed
 
-    def _check_url(self, url, timeout=30, sleep=0.1):
+    def _check_url(self, url, timeout=30, sleep=1, log_interval=10):
         if isinstance(url, tuple):
             response_check = url[1]
             url = url[0]
@@ -240,19 +336,71 @@ class ManagedProcess:
         start_time = time.time()
         self._logger.info("Checking URL %s", url)
         elapsed = 0.0
+        attempt = 0
+        last_log_time = 0.0
+
         while elapsed < timeout:
+            self._check_process_alive("while waiting for health check")
+
+            attempt += 1
+            check_failed = False
+            failure_reason = None
+
             try:
                 response = requests.get(url, timeout=timeout - elapsed)
                 if response.status_code == 200:
                     if response_check is None or response_check(response):
-                        self._logger.info("SUCCESS: Check URL: %s", url)
+                        # Try to format JSON response nicely, otherwise show raw text
+                        try:
+                            response_data = response.json()
+                            response_str = json.dumps(response_data, indent=2)
+                            self._logger.info(
+                                "SUCCESS: Check URL: %s (attempt=%d, elapsed=%.1fs)\nResponse:\n%s",
+                                url,
+                                attempt,
+                                elapsed,
+                                response_str,
+                            )
+                        except (json.JSONDecodeError, Exception):
+                            # If not JSON or any error, show raw text (truncated if too long)
+                            response_text = response.text
+                            if len(response_text) > 500:
+                                response_text = response_text[:500] + "... (truncated)"
+                            self._logger.info(
+                                "SUCCESS: Check URL: %s (attempt=%d, elapsed=%.1fs)\nResponse: %s",
+                                url,
+                                attempt,
+                                elapsed,
+                                response_text,
+                            )
                         return time.time() - start_time
+                    else:
+                        check_failed = True
+                        failure_reason = "custom check failed"
+                else:
+                    check_failed = True
+                    failure_reason = f"status code {response.status_code}"
             except requests.RequestException as e:
-                self._logger.warning("URL check failed: %s", e)
+                check_failed = True
+                failure_reason = f"request exception: {e}"
+
+            # Log progress every log_interval seconds for any failure
+            if check_failed and elapsed - last_log_time >= log_interval:
+                self._logger.info(
+                    "Still waiting for URL %s (%s) (attempt=%d, elapsed=%.1fs)",
+                    url,
+                    failure_reason,
+                    attempt,
+                    elapsed,
+                )
+                last_log_time = elapsed
+
             time.sleep(sleep)
             elapsed = time.time() - start_time
 
-        self._logger.error("FAILED: Check URL: %s", url)
+        self._logger.error(
+            "FAILED: Check URL: %s (attempts=%d, elapsed=%.1fs)", url, attempt, elapsed
+        )
         raise RuntimeError("FAILED: Check URL: %s" % url)
 
     def _terminate_existing(self):
@@ -285,6 +433,27 @@ class ManagedProcess:
                     # Process may have terminated or become inaccessible during iteration
                     pass
 
+    def is_running(self) -> bool:
+        """Check if the process is still running"""
+        return (
+            hasattr(self, "proc") and self.proc is not None and self.proc.poll() is None
+        )
+
+    def subprocesses(self) -> list[psutil.Process]:
+        """Find child processes of the current process."""
+        if (
+            not hasattr(self, "proc")
+            or self.proc is None
+            or self.proc.poll() is not None
+        ):
+            return []
+
+        try:
+            parent = psutil.Process(self.proc.pid)
+            return parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return []
+
 
 def main():
     with ManagedProcess(
@@ -297,8 +466,8 @@ def main():
         ],
         display_output=True,
         terminate_existing=True,
-        health_check_ports=[8080],
-        health_check_urls=["http://localhost:8080/v1/models"],
+        health_check_ports=[8000],
+        health_check_urls=["http://localhost:8000/v1/models"],
         timeout=10,
     ):
         time.sleep(60)

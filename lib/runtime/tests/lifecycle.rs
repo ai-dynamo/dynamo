@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynamo_runtime::{worker::Worker, Result, Runtime};
+use dynamo_runtime::{Result, Runtime, worker::Worker};
 
 async fn hello_world(_runtime: Runtime) -> Result<()> {
     Ok(())

@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::utils::worker_monitor::WorkerMonitor;
 use crate::{
     component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
     pipeline::{
-        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+        AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+        error::{PipelineError, PipelineErrorExt},
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
@@ -21,8 +23,8 @@ use std::{
     future::Future,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 use tokio_stream::StreamExt;
@@ -51,6 +53,13 @@ where
     /// The next step in the chain. PushRouter (this object) picks an instances,
     /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
     addressed: Arc<AddressedPushRouter>,
+
+    /// Worker monitor for tracking KV cache usage
+    worker_monitor: Option<Arc<WorkerMonitor>>,
+
+    /// Threshold for determining when a worker is busy (0.0 to 1.0)
+    /// If None, busy detection is disabled
+    busy_threshold: Option<f64>,
 
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
@@ -86,15 +95,43 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    /// Create a new PushRouter without busy threshold (no busy detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
+        Self::from_client_with_threshold(client, router_mode, None).await
+    }
+
+    /// Create a new PushRouter with optional busy threshold
+    pub async fn from_client_with_threshold(
+        client: Client,
+        router_mode: RouterMode,
+        busy_threshold: Option<f64>,
+    ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
-        Ok(PushRouter {
-            client,
+
+        // Create worker monitor only if we have a threshold and are in dynamic mode
+        let worker_monitor = match (busy_threshold, client.instance_source.as_ref()) {
+            (Some(threshold), InstanceSource::Dynamic(_)) => {
+                let monitor = Arc::new(WorkerMonitor::new_with_threshold(
+                    Arc::new(client.clone()),
+                    threshold,
+                ));
+                monitor.start_monitoring().await?;
+                Some(monitor)
+            }
+            _ => None,
+        };
+
+        let router = PushRouter {
+            client: client.clone(),
             addressed,
             router_mode,
             round_robin_counter: Arc::new(AtomicU64::new(0)),
+            worker_monitor,
+            busy_threshold,
             _phantom: PhantomData,
-        })
+        };
+
+        Ok(router)
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -170,6 +207,21 @@ where
         instance_id: i64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
+        // Check if all workers are busy (only if busy threshold is set)
+        if self.busy_threshold.is_some() {
+            let free_instances = self.client.instance_ids_free();
+            if free_instances.is_empty() {
+                // Check if we actually have any instances at all
+                let all_instances = self.client.instance_ids();
+                if !all_instances.is_empty() {
+                    return Err(PipelineError::ServiceOverloaded(
+                        "All workers are busy, please retry later".to_string(),
+                    )
+                    .into());
+                }
+            }
+        }
+
         let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
@@ -190,10 +242,10 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                    if matches!(req_err.kind(), NatsNoResponders) {
-                        self.client.report_instance_down(instance_id);
-                    }
+                if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
+                    && matches!(req_err.kind(), NatsNoResponders)
+                {
+                    self.client.report_instance_down(instance_id);
                 }
                 Err(err)
             }

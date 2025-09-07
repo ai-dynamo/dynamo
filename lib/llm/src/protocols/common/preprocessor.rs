@@ -5,6 +5,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RouterConfigOverride;
 use crate::protocols::TokenIdType;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
@@ -50,6 +51,14 @@ pub struct PreprocessedRequest {
     /// Estimated number of prefix hit tokens (only used in kv aware routing)
     #[builder(default)]
     pub estimated_prefix_hit_num_blocks: Option<u32>,
+
+    /// Targeted backend instance ID for the request
+    #[builder(default)]
+    pub backend_instance_id: Option<i64>,
+
+    /// Router configuration overrides for this specific request
+    #[builder(default)]
+    pub router_config_override: Option<RouterConfigOverride>,
 }
 
 impl PreprocessedRequest {

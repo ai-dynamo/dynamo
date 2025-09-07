@@ -55,7 +55,7 @@ python3 -m dynamo.frontend --http-port=8000 &
 # optionally run the http server that allows you to flush the kv cache for all workers (see benchmarking section below)
 python3 utils/sgl_http_server.py --ns dynamo &
 # run prefill worker
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
@@ -90,7 +90,7 @@ On the other prefill node (since this example has 4 total prefill nodes), run th
 5. Run the decode worker on the head decode node
 
 ```bash
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \

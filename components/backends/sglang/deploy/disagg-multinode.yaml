@@ -18,15 +18,11 @@ spec:
   services:
     Frontend:
       dynamoNamespace: sglang-disagg-multinode
-      componentType: main
+      componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
-          command: ["sh", "-c"]
-          args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg-multinode && python3 -m dynamo.frontend --http-port=8000"
     decode:
       multinode:
         nodeCount: 2
@@ -35,12 +31,7 @@ spec:
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "40Gi"
         limits:
-          cpu: "10"
-          memory: "40Gi"
           gpu: "4"
       extraPodSpec:
         mainContainer:
@@ -49,7 +40,7 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              python3 -m dynamo.sglang.decode_worker
+              python3 -m dynamo.sglang
               --model-path meta-llama/Llama-3.3-70B-Instruct
               --served-model-name meta-llama/Llama-3.3-70B-Instruct
               --tp-size 8
@@ -63,16 +54,11 @@ spec:
       multinode:
         nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "40Gi"
         limits:
-          cpu: "10"
-          memory: "40Gi"
           gpu: "4"
       extraPodSpec:
         mainContainer:
@@ -81,9 +67,9 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              python3 -m dynamo.sglang.worker
-              --model-path meta-llama/Llama-3.3-70B-Instruct
-              --served-model-name meta-llama/Llama-3.3-70B-Instruct
+              python3 -m dynamo.sglang
+              --model-path Qwen/Qwen3-0.6B
+              --served-model-name Qwen/Qwen3-0.6B
               --tp-size 8
               --trust-remote-code
               --skip-tokenizer-init

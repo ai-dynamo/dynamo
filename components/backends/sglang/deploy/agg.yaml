@@ -11,33 +11,16 @@ spec:
       dynamoNamespace: sglang-agg
       componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "10"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "40Gi"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/components/backends/sglang
-          command: ["sh", "-c"]
-          args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-agg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-agg
       componentType: worker
       replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "32"
-          memory: "80Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -48,9 +31,9 @@ spec:
             - -c
           args:
             - >-
-              python3 -m dynamo.sglang.worker
-              --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-              --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+              python3 -m dynamo.sglang
+              --model-path Qwen/Qwen3-0.6B
+              --served-model-name Qwen/Qwen3-0.6B
               --page-size 16
               --tp 1
               --trust-remote-code

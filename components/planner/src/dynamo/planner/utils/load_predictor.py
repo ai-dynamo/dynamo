@@ -42,10 +42,14 @@ class BasePredictor(ABC):
 
     def add_data_point(self, value):
         """Add new data point to the buffer"""
-        if not math.isnan(value):
-            self.data_buffer.append(value)
+        if math.isnan(value):
+            value = 0
+
+        if len(self.data_buffer) == 0 and value == 0:
+            # skip the beginning idle period
+            return
         else:
-            self.data_buffer.append(0)
+            self.data_buffer.append(value)
 
     def get_last_value(self):
         """Get the last value from the buffer"""
@@ -89,16 +93,26 @@ class ARIMAPredictor(BasePredictor):
         if len(self.data_buffer) < self.minimum_data_points:
             return self.get_last_value()
 
-        # Fit auto ARIMA model
-        self.model = pmdarima.auto_arima(
-            self.data_buffer,
-            suppress_warnings=True,
-            error_action="ignore",
-        )
+        # Check if all values are the same (constant data)
+        # pmdarima will predict 0 for constant data, we need to correct its prediction
+        if len(set(self.data_buffer)) == 1:
+            return self.data_buffer[0]  # Return the constant value
 
-        # Make prediction
-        forecast = self.model.predict(n_periods=1)
-        return forecast[0]
+        try:
+            # Fit auto ARIMA model
+            self.model = pmdarima.auto_arima(
+                self.data_buffer,
+                suppress_warnings=True,
+                error_action="ignore",
+            )
+
+            # Make prediction
+            forecast = self.model.predict(n_periods=1)
+            return forecast[0]
+        except Exception as e:
+            # Log the specific error for debugging
+            logger.warning(f"ARIMA prediction failed: {e}, using last value")
+            return self.get_last_value()
 
 
 # Time-series forecasting model from Meta
@@ -116,6 +130,10 @@ class ProphetPredictor(BasePredictor):
         # Use proper datetime for Prophet
         timestamp = self.start_date + timedelta(seconds=self.curr_step)
         value = 0 if math.isnan(value) else value
+
+        if len(self.data_buffer) == 0 and value == 0:
+            # skip the beginning idle period
+            return
         self.data_buffer.append({"ds": timestamp, "y": value})
         self.curr_step += 1
 

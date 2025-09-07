@@ -10,7 +10,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -26,6 +25,10 @@ func NewFrontendDefaults() *FrontendDefaults {
 func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	// Frontend doesn't need backend-specific config
 	container := f.getCommonContainer(context)
+
+	// Set default command and args
+	container.Command = []string{"python3"}
+	container.Args = []string{"-m", "dynamo.frontend"}
 
 	// Add HTTP port
 	container.Ports = []corev1.ContainerPort{
@@ -66,21 +69,14 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		FailureThreshold:    10,
 	}
 
-	container.Resources = corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
-	}
-
 	// Add standard environment variables
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  commonconsts.EnvDynamoServicePort,
+			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+		},
+		{
+			Name:  "DYN_HTTP_PORT", // TODO: need to reconcile DYNAMO_PORT and DYN_HTTP_PORT
 			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 		},
 	}...)

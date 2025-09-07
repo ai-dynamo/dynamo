@@ -27,21 +27,20 @@
 //!   - ISL Blocks: Cumulative count of total blocks in all KV hit rate events
 //!   - Overlap Blocks: Cumulative count of blocks that were already in the KV cache
 use clap::Parser;
-use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_llm::kv_router::KV_HIT_RATE_SUBJECT;
+use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_runtime::{
-    error, logging,
+    DistributedRuntime, ErrorContext, Result, Runtime, Worker, error, logging,
     traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
-    DistributedRuntime, ErrorContext, Result, Runtime, Worker,
 };
 use futures::stream::StreamExt;
 use std::sync::Arc;
 
 // Import from our library
 use metrics::{
-    collect_endpoints, extract_metrics, postprocess_metrics, LLMWorkerLoadCapacityConfig,
-    MetricsMode, PrometheusMetricsCollector,
+    LLMWorkerLoadCapacityConfig, MetricsMode, PrometheusMetricsCollector, collect_endpoints,
+    extract_metrics, postprocess_metrics,
 };
 
 /// CLI arguments for the metrics application
@@ -274,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_namespace_from_env() {
-        env::set_var("DYN_NAMESPACE", "test-namespace");
+        unsafe { env::set_var("DYN_NAMESPACE", "test-namespace") };
         let args = Args::parse_from(["count", "--component", "comp", "--endpoint", "end"]);
         assert_eq!(args.namespace, "test-namespace");
     }

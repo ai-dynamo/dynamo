@@ -15,6 +15,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # For pull_request events, use the PR head (commit from the contributor's branch/repo)
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
       # Cache lychee results (e.g. to avoid hitting rate limits)
       # https://lychee.cli.rs/github_action_recipes/caching/
@@ -51,11 +56,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          # Set offline mode for pull requests, full check for pushes to main
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "Running lychee in offline mode (internal links only) for PR check"
+            OFFLINE_FLAG="--offline"
+          else
+            echo "Running lychee in full mode (all links) for main branch"
+            OFFLINE_FLAG=""
+          fi
+
           # Run lychee against all files in repo
           lychee \
             --cache \
             --no-progress \
-            --exclude-path "ATTRIBUTIONS.*" \
+            --root-dir "${{ github.workspace }}" \
+            --exclude-path ".*ATTRIBUTIONS.*" \
             --accept "200..=299, 403, 429" \
             --exclude-all-private --exclude 0.0.0.0 \
+            $OFFLINE_FLAG \
             .

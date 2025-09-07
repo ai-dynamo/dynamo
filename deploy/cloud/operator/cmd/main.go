@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"net/url"
 	"os"
 	"time"
 
@@ -31,9 +32,13 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
@@ -64,6 +69,34 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
+	config := mgr.GetConfig()
+
+	// Create kubernetes client for discovery
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create cached discovery client
+	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
+
+	// Create REST mapper
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
+
+	scalesGetter, err := scale.NewForConfig(
+		config,
+		restMapper,
+		dynamic.LegacyAPIPathResolverFunc,
+		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return scalesGetter, nil
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -97,8 +130,8 @@ func main() {
 	var ingressControllerClassName string
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
-	var enableLWS bool
 	var groveTerminationDelay time.Duration
+	var modelExpressURL string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -124,22 +157,36 @@ func main() {
 		"The name of the ingress controller TLS secret to use")
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
-	flag.BoolVar(&enableLWS, "enable-lws", false,
-		"If set, enable leader worker set")
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
 		"The termination delay for Grove PodGangSets")
+	flag.StringVar(&modelExpressURL, "model-express-url", "",
+		"URL of the Model Express server to inject into all pods")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Validate modelExpressURL if provided
+	if modelExpressURL != "" {
+		if _, err := url.Parse(modelExpressURL); err != nil {
+			setupLog.Error(err, "invalid model-express-url provided", "url", modelExpressURL)
+			os.Exit(1)
+		}
+		setupLog.Info("Model Express URL configured", "url", modelExpressURL)
+	}
+
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
-		EnableLWS:           enableLWS,
 		Grove: commonController.GroveConfig{
 			Enabled:          false, // Will be set after Grove discovery
 			TerminationDelay: groveTerminationDelay,
+		},
+		LWS: commonController.LWSConfig{
+			Enabled: false, // Will be set after LWS discovery
+		},
+		KaiScheduler: commonController.KaiSchedulerConfig{
+			Enabled: false, // Will be set after Kai-scheduler discovery
 		},
 		EtcdAddress: etcdAddr,
 		NatsAddress: natsAddr,
@@ -149,6 +196,7 @@ func main() {
 			IngressControllerTLSSecret: ingressControllerTLSSecretName,
 			IngressHostSuffix:          ingressHostSuffix,
 		},
+		ModelExpressURL: modelExpressURL,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -208,10 +256,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Detect Grove availability using discovery client
+	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")
 	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
 	ctrlConfig.Grove.Enabled = groveEnabled
+	setupLog.Info("Detecting LWS availability...")
+	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
+	ctrlConfig.LWS.Enabled = lwsEnabled
+
+	// Detect Kai-scheduler availability using discovery client
+	setupLog.Info("Detecting Kai-scheduler availability...")
+	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
+	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
@@ -321,11 +377,19 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
+	// Create scale client for Grove resource scaling
+	scaleClient, err := createScalesGetter(mgr)
+	if err != nil {
+		setupLog.Error(err, "unable to create scale client")
+		os.Exit(1)
+	}
+
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                ctrlConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
+		ScaleClient:           scaleClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)

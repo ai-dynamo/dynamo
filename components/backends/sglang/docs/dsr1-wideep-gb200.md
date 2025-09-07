@@ -80,7 +80,7 @@ NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
 SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
-python3 -m dynamo.sglang.worker \
+python3 -m dynamo.sglang \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --model-path /model/ \
   --skip-tokenizer-init \
@@ -131,7 +131,7 @@ NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
 SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
-python3 -m dynamo.sglang.decode_worker \
+python3 -m dynamo.sglang \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --model-path /model/ \
   --skip-tokenizer-init \

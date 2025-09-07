@@ -50,6 +50,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # installed within framework specific sections of the Dockerfile.
 
 declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -58,7 +59,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.05-py3
+TRTLLM_BASE_IMAGE_TAG=25.06-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -88,7 +89,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="69e9f6d48944b2ae0124ff57aa59340aa4dfae15"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="a16ba6445c61ed70e7aadfe787d6f316bb422652"
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -97,7 +98,7 @@ TRTLLM_GIT_URL=""
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc4"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc6"
 TENSORRTLLM_PIP_WHEEL=""
 
 
@@ -115,9 +116,15 @@ SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_REF=0.4.1
-NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
+NIXL_UCX_REF=v1.19.0
+NIXL_UCX_EFA_REF=9d2b88a1f67faf9876f267658bd077b379b8bb76
 
 NO_CACHE=""
+
+# sccache configuration for S3
+USE_SCCACHE=""
+SCCACHE_BUCKET=""
+SCCACHE_REGION=""
 
 get_options() {
     while :; do
@@ -280,9 +287,25 @@ get_options() {
         --make-efa)
             NIXL_UCX_REF=$NIXL_UCX_EFA_REF
             ;;
-        --)
-            shift
-            break
+        --use-sccache)
+            USE_SCCACHE=true
+            ;;
+        --sccache-bucket)
+            if [ "$2" ]; then
+                SCCACHE_BUCKET=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+
+        --sccache-region)
+            if [ "$2" ]; then
+                SCCACHE_REGION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
             ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
@@ -343,6 +366,16 @@ get_options() {
     else
         TARGET_STR="--target dev"
     fi
+
+    # Validate sccache configuration
+    if [ "$USE_SCCACHE" = true ]; then
+        if [ -z "$SCCACHE_BUCKET" ]; then
+            error "ERROR: --sccache-bucket is required when --use-sccache is specified"
+        fi
+        if [ -z "$SCCACHE_REGION" ]; then
+            error "ERROR: --sccache-region is required when --use-sccache is specified"
+        fi
+    fi
 }
 
 
@@ -358,14 +391,23 @@ show_image_options() {
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
+    if [ "$USE_SCCACHE" = true ]; then
+        echo "   sccache: Enabled"
+        echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
+        echo "   sccache Region: '${SCCACHE_REGION}'"
+
+        if [ -n "$SCCACHE_S3_KEY_PREFIX" ]; then
+            echo "   sccache S3 Key Prefix: '${SCCACHE_S3_KEY_PREFIX}'"
+        fi
+    fi
     echo ""
 }
 
 show_help() {
     echo "usage: build.sh"
-    echo "  [--base base image]"
+    echo "  [--base-image base image]"
     echo "  [--base-image-tag base image tag]"
-    echo "  [--platform platform for docker build"
+    echo "  [--platform platform for docker build]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
@@ -382,7 +424,11 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
     echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
+    echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
+    echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
+    echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
     exit 0
 }
 
@@ -533,6 +579,11 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    echo "Forcing enable_kvbm to true in vLLM image build"
+    ENABLE_KVBM=true
+fi
+
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the ai-dynamo-runtime"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
@@ -540,6 +591,13 @@ fi
 
 if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
+fi
+
+# Add sccache build arguments
+if [ "$USE_SCCACHE" = true ]; then
+    BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
+    BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
+    BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
@@ -553,6 +611,24 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-$RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+# TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    # Define base image tag before using it
+    DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+    # Start base image build
+    echo "======================================"
+    echo "Starting Build 1: Base Image"
+    echo "======================================"
+    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+    # Start framework build
+    echo "======================================"
+    echo "Starting Build 2: Framework Image"
+    echo "======================================"
+    BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
+    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+else
+    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+fi
+
 
 { set +x; } 2>/dev/null
