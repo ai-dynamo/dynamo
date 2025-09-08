@@ -205,7 +205,7 @@ def send_completion_request(
     session = requests.Session()
     try:
         response = session.post(
-            "http://localhost:8080/v1/completions",
+            "http://localhost:8000/v1/completions",
             headers=headers,
             json=payload,
             timeout=timeout,
@@ -240,7 +240,7 @@ def send_chat_completion_request(
     session = requests.Session()
     try:
         response = session.post(
-            "http://localhost:8080/v1/chat/completions",
+            "http://localhost:8000/v1/chat/completions",
             headers=headers,
             json=payload,
             timeout=timeout,

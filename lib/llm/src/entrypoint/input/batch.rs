@@ -67,7 +67,9 @@ pub async fn run(
     let mut prepared_engine = common::prepare_engine(runtime, engine_config).await?;
 
     let pre_processor = if prepared_engine.has_tokenizer() {
-        Some(OpenAIPreprocessor::new(prepared_engine.card.take().unwrap()).await?)
+        Some(OpenAIPreprocessor::new(
+            prepared_engine.card.take().unwrap(),
+        )?)
     } else {
         None
     };

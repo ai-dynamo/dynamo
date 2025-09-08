@@ -186,7 +186,6 @@ spec:
 
 vLLM workers are configured through command-line arguments. Key parameters include:
 
-- `--endpoint`: Dynamo endpoint in format `dyn://namespace.component.endpoint`
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
 - `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
@@ -198,7 +197,7 @@ See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/se
 Send a test request to verify your deployment:
 
 ```bash
-curl localhost:8080/v1/chat/completions \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",

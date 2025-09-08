@@ -115,7 +115,7 @@ def parse_args(args: list[str]) -> Config:
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
     endpoint = parsed_args.endpoint
     if endpoint is None:

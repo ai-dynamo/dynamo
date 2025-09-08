@@ -31,7 +31,7 @@ dependencies:
     repository: https://nats-io.github.io/k8s/helm/charts/
     condition: nats.enabled
   - name: etcd
-    version: 11.1.0
+    version: 12.0.18
     repository: "https://charts.bitnami.com/bitnami"
     condition: etcd.enabled
   - name: kai-scheduler
