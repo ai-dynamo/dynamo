@@ -239,8 +239,8 @@ impl RuntimeConfig {
         let mut config: RuntimeConfig = Self::figment().extract()?;
         // Handle DYN_SYSTEM_AUTO_READY_AFTER_SECONDS environment variable
         // This provides a convenient shortcut for time-based health transition
-        if let Ok(seconds_str) = std::env::var("DYN_SYSTEM_AUTO_READY_AFTER_SECONDS") {
-            if !seconds_str.is_empty() {
+        if let Ok(seconds_str) = std::env::var("DYN_SYSTEM_AUTO_READY_AFTER_SECONDS")
+            && !seconds_str.is_empty() {
                 if let Ok(seconds) = seconds_str.parse::<u64>() {
                     tracing::info!(
                         "Using DYN_SYSTEM_AUTO_READY_AFTER_SECONDS={} for health transition policy",
@@ -256,7 +256,6 @@ impl RuntimeConfig {
                     );
                 }
             }
-        }
         config.validate()?;
         Ok(config)
     }
