@@ -70,7 +70,6 @@ class DynamoWorkerProcess(ManagedProcess):
             (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
             (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
         ]
-        health_check_funcs = []
 
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
@@ -79,7 +78,6 @@ class DynamoWorkerProcess(ManagedProcess):
         if is_prefill:
             command.append("--is-prefill-worker")
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
-            health_check_funcs = []
 
         # Set debug logging environment
         env = os.environ.copy()
@@ -104,7 +102,6 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=health_check_urls,
-            health_check_funcs=health_check_funcs,
             timeout=300,
             display_output=True,
             terminate_existing=False,
