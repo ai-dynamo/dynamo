@@ -12,7 +12,6 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -89,7 +88,7 @@ impl DeltaAggregator {
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
-        parsing_options: ParsingOptions,
+        _parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -179,40 +178,12 @@ impl DeltaAggregator {
             .await;
 
         // Return early if an error was encountered.
-        let mut aggregator = if let Some(error) = aggregator.error {
+        let aggregator = if let Some(error) = aggregator.error {
             return Err(error);
         } else {
             aggregator
         };
 
-        // After aggregation, inspect each choice's text for tool call syntax
-        for choice in aggregator.choices.values_mut() {
-            if choice.tool_calls.is_none()
-                && let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
-                    &choice.text,
-                    parsing_options.tool_call_parser.as_deref(),
-                )
-            {
-                if tool_calls.is_empty() {
-                    continue;
-                }
-                for tool_call in &tool_calls {
-                    tracing::debug!(
-                        tool_call_id = %tool_call.id,
-                        function_name = %tool_call.function.name,
-                        arguments = %tool_call.function.arguments,
-                        "Parsed structured tool call from aggregated content"
-                    );
-                }
-                choice.tool_calls = Some(tool_calls);
-                choice.text.clear();
-                // If normal text is not empty, update the choice text
-                if let Some(normal_text) = normal_text.filter(|text| !text.is_empty()) {
-                    choice.text = normal_text;
-                }
-                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
-            }
-        }
 
         // Extract aggregated choices and sort them by index.
         let mut choices: Vec<_> = aggregator
