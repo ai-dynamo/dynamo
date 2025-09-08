@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{protocols::common, types::TokenIdType};
@@ -19,13 +7,13 @@ use crate::{protocols::common, types::TokenIdType};
 impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
-    pub fn response_generator(&self) -> DeltaGenerator {
+    pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
             enable_usage: true,
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
         };
 
-        DeltaGenerator::new(self.inner.model.clone(), options)
+        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
     }
 }
 
@@ -47,7 +35,7 @@ pub struct DeltaGenerator {
 }
 
 impl DeltaGenerator {
-    pub fn new(model: String, options: DeltaGeneratorOptions) -> Self {
+    pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -67,8 +55,10 @@ impl DeltaGenerator {
             prompt_tokens_details: None,
         };
 
+        let completion_id = format!("cmpl-{request_id}");
+
         Self {
-            id: format!("cmpl-{}", uuid::Uuid::new_v4()),
+            id: completion_id,
             object: "text_completion".to_string(),
             created: now,
             model,

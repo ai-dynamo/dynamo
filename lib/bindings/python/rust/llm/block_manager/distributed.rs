@@ -8,5 +8,5 @@ mod utils;
 mod worker;
 
 pub use leader::KvbmLeader;
-pub use utils::get_barrier_id;
+pub use utils::get_barrier_id_prefix;
 pub use worker::{KvbmWorker, VllmTensor};

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod context;
+pub mod context;
 mod cuda;
 mod memcpy;
 mod nixl;
@@ -22,8 +22,8 @@ mod strategy;
 use super::*;
 
 use crate::block_manager::storage::{
-    nixl::{NixlRegisterableStorage, NixlStorage},
     DeviceStorage, DiskStorage, PinnedStorage, SystemStorage,
+    nixl::{NixlRegisterableStorage, NixlStorage},
 };
 
 use cudarc::driver::CudaStream;

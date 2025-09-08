@@ -8,18 +8,18 @@ use crate::types::openai::chat_completions::{
 };
 use anyhow::Context as _;
 use dynamo_async_openai::types::FinishReason;
-use dynamo_runtime::{pipeline::Context, runtime::CancellationToken, Runtime};
+use dynamo_runtime::{Runtime, pipeline::Context, runtime::CancellationToken};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-use crate::entrypoint::input::common;
 use crate::entrypoint::EngineConfig;
+use crate::entrypoint::input::common;
 
 /// Max tokens in each response.
 /// TODO: For batch mode this should be the full context size of the model
@@ -67,7 +67,9 @@ pub async fn run(
     let mut prepared_engine = common::prepare_engine(runtime, engine_config).await?;
 
     let pre_processor = if prepared_engine.has_tokenizer() {
-        Some(OpenAIPreprocessor::new(prepared_engine.card.take().unwrap()).await?)
+        Some(OpenAIPreprocessor::new(
+            prepared_engine.card.take().unwrap(),
+        )?)
     } else {
         None
     };

@@ -31,7 +31,7 @@ Dynamo automatically exposes metrics with the `dynamo_` name prefixes. It also a
 
 **Specialized Component Metrics**: Components can also expose additional metrics specific to their functionality. For example, a `preprocessor` component exposes metrics with the `dynamo_preprocessor_*` prefix. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for details on specialized component metrics.
 
-**Kubernetes Integration**: For comprehensive Kubernetes deployment and monitoring setup, see the [Kubernetes Metrics Guide](dynamo_deploy/k8s_metrics.md). This includes Prometheus Operator setup, metrics collection configuration, and visualization in Grafana.
+**Kubernetes Integration**: For comprehensive Kubernetes deployment and monitoring setup, see the [Kubernetes Metrics Guide](dynamo_deploy/metrics.md). This includes Prometheus Operator setup, metrics collection configuration, and visualization in Grafana.
 
 ## Metrics Hierarchy
 
@@ -79,7 +79,7 @@ graph TD
         PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
         PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
-        PROMETHEUS -->|:8080/metrics| DYNAMOFE[Dynamo HTTP FE :8080]
+        PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
         PROMETHEUS -->|:8081/metrics| DYNAMOBACKEND[Dynamo backend :8081]
         DYNAMOFE --> DYNAMOBACKEND
         GRAFANA -->|:9090/query API| PROMETHEUS

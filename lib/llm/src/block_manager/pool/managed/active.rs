@@ -51,10 +51,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
 
         // Set the parent of the block if it has one.
         // This is needed to ensure the lifetime of the parent is at least as long as the child.
-        if let Ok(Some(parent)) = block.parent_sequence_hash() {
-            if let Some(parent_block) = self.match_sequence_hash(parent) {
-                block.set_parent(parent_block.mutable_block().clone());
-            }
+        if let Ok(Some(parent)) = block.parent_sequence_hash()
+            && let Some(parent_block) = self.match_sequence_hash(parent)
+        {
+            block.set_parent(parent_block.mutable_block().clone());
         }
 
         let shared = Arc::new(block);
@@ -78,14 +78,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
     }
 
     pub fn remove(&mut self, block: &mut Block<S, L, M>) {
-        if let Ok(sequence_hash) = block.sequence_hash() {
-            if let Some(weak) = self.map.get(&sequence_hash) {
-                if let Some(_arc) = weak.upgrade() {
-                    block.reset();
-                    return;
-                }
-                self.map.remove(&sequence_hash);
+        if let Ok(sequence_hash) = block.sequence_hash()
+            && let Some(weak) = self.map.get(&sequence_hash)
+        {
+            if let Some(_arc) = weak.upgrade() {
+                block.reset();
+                return;
             }
+            self.map.remove(&sequence_hash);
         }
     }
 

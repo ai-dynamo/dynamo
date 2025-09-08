@@ -26,7 +26,7 @@ Example:
 See `docs/guides/dynamo_run.md` in the repo for full details.
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--static-worker] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|grpc|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--static-worker] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag
@@ -38,14 +38,14 @@ fn main() -> anyhow::Result<()> {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Invalid verbosity level. Valid values are v (debug) or vv (trace)"
-                ))
+                ));
             }
         },
         Err(_) => "info",
     };
 
     if log_level != "info" {
-        std::env::set_var("DYN_LOG", log_level);
+        unsafe { std::env::set_var("DYN_LOG", log_level) };
     }
 
     logging::init();
@@ -94,7 +94,9 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             }
             "out" => {
                 if val == "sglang" || val == "trtllm" || val == "vllm" {
-                    tracing::error!("To run the {val} engine please use the Python interface, see root README or look in directory `components/backends/`.");
+                    tracing::error!(
+                        "To run the {val} engine please use the Python interface, see root README or look in directory `components/backends/`."
+                    );
                     std::process::exit(1);
                 }
 

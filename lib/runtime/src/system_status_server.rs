@@ -15,18 +15,16 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
+use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
-use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
 
 /// System status server information containing socket address and handle
@@ -66,75 +64,21 @@ impl Clone for SystemStatusServerInfo {
     }
 }
 
-/// System status server state containing metrics and uptime tracking
+/// System status server state containing the distributed runtime reference
 pub struct SystemStatusState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
-    start_time: OnceLock<Instant>,
-    uptime_gauge: prometheus::Gauge,
 }
 
 impl SystemStatusState {
-    /// Create new system status server state with the provided metrics registry
+    /// Create new system status server state with the provided distributed runtime
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        // Note: This metric is created at the DRT level (no namespace), so it will be prefixed with "dynamo_component_"
-        let uptime_gauge = match drt.as_ref().create_gauge(
-            "uptime_seconds",
-            "Total uptime of the DistributedRuntime in seconds",
-            &[],
-        ) {
-            Ok(gauge) => gauge,
-            Err(e) if e.to_string().contains("Duplicate metrics") => {
-                // If the metric already exists, get it from the registry
-                // This can happen when SystemStatusState is created multiple times in tests
-                tracing::debug!(
-                    "uptime_seconds metric already registered, retrieving existing metric"
-                );
-                // Create a non-http gauge since we can't retrieve the existing one easily
-                // The important thing is that the metric is registered in the registry
-                prometheus::Gauge::new(
-                    "uptime_seconds",
-                    "Total uptime of the DistributedRuntime in seconds",
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to create dummy gauge: {}", e))?
-            }
-            Err(e) => return Err(e),
-        };
-        let state = Self {
-            root_drt: drt,
-            start_time: OnceLock::new(),
-            uptime_gauge,
-        };
-        Ok(state)
-    }
-
-    /// Initialize the start time (can only be called once)
-    pub fn initialize_start_time(&self) -> Result<(), &'static str> {
-        self.start_time
-            .set(Instant::now())
-            .map_err(|_| "Start time already initialized")
-    }
-
-    pub fn uptime(&self) -> Result<std::time::Duration, &'static str> {
-        self.start_time
-            .get()
-            .ok_or("Start time not initialized")
-            .map(|start_time| start_time.elapsed())
+        Ok(Self { root_drt: drt })
     }
 
     /// Get a reference to the distributed runtime
     pub fn drt(&self) -> &crate::DistributedRuntime {
         &self.root_drt
-    }
-
-    /// Update the uptime gauge with current value
-    pub fn update_uptime_gauge(&self) {
-        if let Ok(uptime) = self.uptime() {
-            let uptime_seconds = uptime.as_secs_f64();
-            self.uptime_gauge.set(uptime_seconds);
-        } else {
-            tracing::warn!("Failed to update uptime gauge: start time not initialized");
-        }
     }
 }
 
@@ -145,7 +89,7 @@ pub async fn spawn_system_status_server(
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    // Create system status server state with the provided metrics registry
+    // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt)?);
     let health_path = server_state
         .drt()
@@ -161,11 +105,6 @@ pub async fn spawn_system_status_server(
         .unwrap()
         .live_path
         .clone();
-
-    // Initialize the start time
-    server_state
-        .initialize_start_time()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize start time: {}", e))?;
 
     let app = Router::new()
         .route(
@@ -232,20 +171,9 @@ pub async fn spawn_system_status_server(
 /// Health handler
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    let (mut healthy, endpoints) = state
-        .drt()
-        .system_health
-        .lock()
-        .unwrap()
-        .get_health_status();
-    let uptime = match state.uptime() {
-        Ok(uptime_state) => Some(uptime_state),
-        Err(e) => {
-            tracing::error!("Failed to get uptime: {}", e);
-            healthy = false;
-            None
-        }
-    };
+    let system_health = state.drt().system_health.lock().unwrap();
+    let (healthy, endpoints) = system_health.get_health_status();
+    let uptime = Some(system_health.uptime());
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -269,7 +197,12 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    state.update_uptime_gauge();
+    state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .update_uptime_gauge();
 
     // Execute all the callbacks starting at the DistributedRuntime level
     assert!(state.drt().basename() == "");
@@ -296,61 +229,10 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 }
 
 // Regular tests: cargo test system_status_server --lib
-// Integration tests: cargo test system_status_server --lib --features integration
-
-#[cfg(test)]
-/// Helper function to create a DRT instance for basic unit tests
-/// Uses from_current to leverage existing tokio runtime without environment configuration
-async fn create_test_drt_async() -> crate::DistributedRuntime {
-    let rt = crate::Runtime::from_current().unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
-
-#[cfg(test)]
-/// Helper function to create a DRT instance for integration tests
-/// Uses spawn_blocking to create runtime safely without ownership issues
-/// Enables system status server for integration testing
-/// Note: This function uses environment variables to configure and create the DistributedRuntime.
-async fn create_test_drt_with_settings_async() -> crate::DistributedRuntime {
-    // Create runtime in blocking context where it can be safely dropped
-    let handle = tokio::task::spawn_blocking(|| {
-        // Load configuration from environment/settings
-        let config = crate::config::RuntimeConfig::from_settings().unwrap();
-
-        // Create runtime with the configuration and extract handle
-        let runtime = config.create_runtime().unwrap();
-        let handle = runtime.handle().clone();
-
-        // Runtime will be automatically dropped when it goes out of scope
-        handle
-    })
-    .await
-    .unwrap();
-
-    // Create Runtime using external handle (no ownership)
-    let rt = crate::Runtime::from_handle(handle).unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::tests::load_log;
-    use crate::metrics::MetricsRegistry;
-    use anyhow::{anyhow, Result};
-    use chrono::{DateTime, Utc};
-    use jsonschema::{Draft, JSONSchema};
-    use rstest::rstest;
-    use serde_json::Value;
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-    use std::sync::Arc;
-    use stdio_override::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
@@ -381,24 +263,38 @@ mod tests {
             "HTTP server should shut down when cancel token is cancelled"
         );
     }
+}
 
-    #[cfg(feature = "integration")]
+// Integration tests: cargo test system_status_server --lib --features integration
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use super::*;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
+    use crate::metrics::MetricsRegistry;
+    use anyhow::Result;
+    use rstest::rstest;
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
     #[tokio::test]
-    async fn test_uptime_without_initialization() {
-        // Test that uptime returns an error if start time is not initialized
+    async fn test_uptime_from_system_health() {
+        // Test that uptime is available from SystemHealth
         temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
             let drt = create_test_drt_async().await;
-            let system_status = SystemStatusState::new(Arc::new(drt)).unwrap();
 
-            // This should return an error because start time is not initialized
-            let result = system_status.uptime();
-            assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), "Start time not initialized");
+            // Get uptime from SystemHealth
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            // Uptime should exist (even if close to zero)
+            assert!(uptime.as_nanos() > 0 || uptime.is_zero());
+
+            // Sleep briefly and check uptime increases
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let uptime_after = drt.system_health.lock().unwrap().uptime();
+            assert!(uptime_after > uptime);
         })
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
@@ -412,8 +308,6 @@ mod tests {
             println!("Full metrics response:\n{}", response);
 
             // Filter out NATS client metrics for comparison
-            use crate::metrics::prometheus_names::{nats_client, nats_service};
-
             let filtered_response: String = response
                 .lines()
                 .filter(|line| {
@@ -439,30 +333,52 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
-    async fn test_start_time_initialization() {
-        // Test that start time can only be initialized once
+    async fn test_uptime_gauge_updates() {
+        // Test that the uptime gauge is properly updated and increases over time
         temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
             let drt = create_test_drt_async().await;
-            let system_status = SystemStatusState::new(Arc::new(drt)).unwrap();
 
-            // First initialization should succeed
-            assert!(system_status.initialize_start_time().is_ok());
+            // Get initial uptime
+            let initial_uptime = drt.system_health.lock().unwrap().uptime();
 
-            // Second initialization should fail
-            assert!(system_status.initialize_start_time().is_err());
+            // Update the gauge with initial value
+            drt.system_health.lock().unwrap().update_uptime_gauge();
 
-            // Sleep for 100ms and verify uptime increases
+            // Sleep for 100ms
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let uptime_after_sleep = system_status.uptime().unwrap();
+
+            // Get uptime after sleep
+            let uptime_after_sleep = drt.system_health.lock().unwrap().uptime();
+
+            // Update the gauge again
+            drt.system_health.lock().unwrap().update_uptime_gauge();
+
+            // Verify uptime increased by at least 100ms
+            let elapsed = uptime_after_sleep - initial_uptime;
             assert!(
-                uptime_after_sleep >= std::time::Duration::from_millis(100),
-                "Uptime should be at least 100ms after sleep, got: {:?}",
-                uptime_after_sleep
+                elapsed >= std::time::Duration::from_millis(100),
+                "Uptime should have increased by at least 100ms after sleep, but only increased by {:?}",
+                elapsed
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_http_requests_fail_when_system_disabled() {
+        // Test that system status server is not running when disabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            let drt = create_test_drt_async().await;
+
+            // Verify that system status server info is None when disabled
+            let system_info = drt.system_status_server_info();
+            assert!(
+                system_info.is_none(),
+                "System status server should not be running when DYN_SYSTEM_ENABLED=false"
             );
 
-            // If we get here, uptime calculation works correctly
+            println!("✓ System status server correctly disabled when DYN_SYSTEM_ENABLED=false");
         })
         .await;
     }
@@ -516,7 +432,7 @@ mod tests {
                 ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
             ],
             (async || {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
@@ -575,7 +491,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "integration")]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
 
@@ -596,7 +511,7 @@ mod tests {
 
                 crate::logging::init();
 
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt
@@ -631,7 +546,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_health_endpoint_with_changing_health_status() {
         // Test health endpoint starts in not ready status, then becomes ready
@@ -646,7 +560,7 @@ mod tests {
                 ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Check if system status server was started
                 let system_info_opt = drt.system_status_server_info();
@@ -745,7 +659,6 @@ mod tests {
         .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_spawn_system_status_server_endpoints() {
         // use reqwest for HTTP requests
@@ -756,7 +669,7 @@ mod tests {
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
             ],
             async {
-                let drt = Arc::new(create_test_drt_with_settings_async().await);
+                let drt = Arc::new(create_test_drt_async().await);
 
                 // Get system status server info from DRT (instead of manually spawning)
                 let system_info = drt

@@ -13,16 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import logging
+import os
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
+import torch
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 
+from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
+from dynamo.nixl_connect import Connector
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.utils.disagg_utils import (
@@ -37,6 +43,7 @@ class DisaggregationMode(Enum):
     AGGREGATED = "prefill_and_decode"
     PREFILL = "prefill"
     DECODE = "decode"
+    ENCODE = "encode"
 
 
 class DisaggregationStrategy(Enum):
@@ -57,9 +64,11 @@ class RequestHandlerConfig:
     disaggregation_mode: DisaggregationMode
     disaggregation_strategy: DisaggregationStrategy
     next_client: object
+    encode_client: Optional[object] = None
     multimodal_processor: Optional[
         MultimodalRequestProcessor
     ] = None  # for multimodal support
+    connector: Optional[Connector] = None
 
 
 class HandlerBase:
@@ -75,8 +84,10 @@ class HandlerBase:
         self.disaggregation_mode = config.disaggregation_mode
         self.disaggregation_strategy = config.disaggregation_strategy
         self.next_client = config.next_client
+        self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
+        self.connector = config.connector
 
     def check_error(self, result: dict):
         """
@@ -89,9 +100,15 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
-    async def generate_locally(self, request: dict):
+    async def generate_locally(
+        self, request: dict, embeddings: Optional[Union[torch.Tensor, dict]] = None
+    ):
         """
         Generate responses based on the disaggregation mode in the request.
+
+        Args:
+            request: The request dictionary containing generation parameters
+            embeddings: Optional tensor or dict containing embeddings for multimodal processing
         """
         logging.debug(f"Request: {request}")
 
@@ -102,7 +119,7 @@ class HandlerBase:
         # Check for multimodal request and process it
         if self.multimodal_processor:
             processed_input = await self.multimodal_processor.process_openai_request(
-                request
+                request, embeddings
             )
 
         else:
@@ -139,7 +156,7 @@ class HandlerBase:
 
         num_output_tokens_so_far = 0
 
-        sampling_params = self.default_sampling_params
+        sampling_params = copy.deepcopy(self.default_sampling_params)
 
         for key, value in request["sampling_options"].items():
             if not value:
@@ -167,6 +184,12 @@ class HandlerBase:
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
         model_name = request.get("model", "unknown_model")
+
+        # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
+        if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+            processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
+            adapters = create_trtllm_adapters(processors)
+            sampling_params.logits_processor = adapters
 
         # NEW: Updated engine call to include multimodal data
         async for res in self.engine.llm.generate_async(

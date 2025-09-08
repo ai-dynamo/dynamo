@@ -76,8 +76,8 @@
 //!     Ok(())
 //! }
 
-use axum::{routing::get, Router};
-use prometheus::{register_counter_vec, register_gauge_vec, Encoder, TextEncoder};
+use axum::{Router, routing::get};
+use prometheus::{Encoder, TextEncoder, register_counter_vec, register_gauge_vec};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -88,7 +88,7 @@ use dynamo_llm::kv_router::scoring::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
 use dynamo_runtime::{
-    distributed::Component, error, service::EndpointInfo, utils::Duration, Result,
+    Result, distributed::Component, error, service::EndpointInfo, utils::Duration,
 };
 
 /// Configuration for metrics collection mode

@@ -8,13 +8,13 @@
 //! for performance analysis.
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use async_trait::async_trait;
 use derive_getters::Dissolve;
-use dynamo_async_openai::{config::OpenAIConfig, error::OpenAIError, Client};
+use dynamo_async_openai::{Client, config::OpenAIConfig, error::OpenAIError};
 use futures::Stream;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -22,10 +22,10 @@ use tracing;
 use uuid::Uuid;
 
 // Import our existing recording infrastructure
+use crate::protocols::Annotated;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
-use crate::protocols::Annotated;
 use dynamo_runtime::engine::{
     AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data, DataStream,
 };
@@ -64,6 +64,8 @@ pub struct HttpRequestContext {
     created_at: Instant,
     /// Whether the request has been stopped
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    /// Child contexts to be stopped if this is stopped
+    child_context: Arc<Mutex<Vec<Arc<dyn AsyncEngineContext>>>>,
 }
 
 impl HttpRequestContext {
@@ -74,6 +76,7 @@ impl HttpRequestContext {
             cancel_token: CancellationToken::new(),
             created_at: Instant::now(),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            child_context: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -84,6 +87,7 @@ impl HttpRequestContext {
             cancel_token: CancellationToken::new(),
             created_at: Instant::now(),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            child_context: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -95,6 +99,7 @@ impl HttpRequestContext {
             cancel_token: self.cancel_token.child_token(),
             created_at: Instant::now(),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            child_context: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -105,6 +110,7 @@ impl HttpRequestContext {
             cancel_token: self.cancel_token.child_token(),
             created_at: Instant::now(),
             stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            child_context: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -144,17 +150,55 @@ impl AsyncEngineContext for HttpRequestContext {
     }
 
     fn stop(&self) {
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop();
+        }
+
         self.stopped
             .store(true, std::sync::atomic::Ordering::Release);
         self.cancel_token.cancel();
     }
 
     fn stop_generating(&self) {
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.stop_generating();
+        }
+
         // For HTTP clients, stop_generating is the same as stop
-        self.stop();
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.cancel_token.cancel();
     }
 
     fn kill(&self) {
+        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        let children = self
+            .child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for child in children {
+            child.kill();
+        }
+
         self.stopped
             .store(true, std::sync::atomic::Ordering::Release);
         self.cancel_token.cancel();
@@ -175,6 +219,13 @@ impl AsyncEngineContext for HttpRequestContext {
     async fn killed(&self) {
         // For HTTP clients, killed is the same as stopped
         self.cancel_token.cancelled().await;
+    }
+
+    fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
+        self.child_context
+            .lock()
+            .expect("Failed to lock child context")
+            .push(child);
     }
 }
 
@@ -523,7 +574,7 @@ impl GenericBYOTClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn test_http_request_context_creation() {

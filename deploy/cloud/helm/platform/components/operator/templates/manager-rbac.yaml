@@ -138,6 +138,13 @@ rules:
   - patch
   - update
 - apiGroups:
+  - scheduling.run.ai
+  resources:
+  - queues
+  verbs:
+  - get
+  - list
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -425,7 +432,6 @@ rules:
   - patch
   - update
   - watch
-{{- if .Values.dynamo.enableLWS }}
 - apiGroups:
   - leaderworkerset.x-k8s.io
   resources:
@@ -450,7 +456,6 @@ rules:
   - patch
   - update
   - watch
-{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
@@ -476,6 +481,45 @@ roleRef:
   kind: ClusterRole
 {{- end }}
   name: '{{ include "dynamo-operator.fullname" . }}-manager-role'
+subjects:
+- kind: ServiceAccount
+  name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
+  namespace: '{{ .Release.Namespace }}'
+---
+# ClusterRole for kai-scheduler queue access
+# This is always a ClusterRole since Queue resources are cluster-scoped
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-queue-reader
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - scheduling.run.ai
+  resources:
+  - queues
+  verbs:
+  - get
+  - list
+---
+# ClusterRoleBinding for kai-scheduler queue access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-queue-reader-binding
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-queue-reader
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
