@@ -172,7 +172,7 @@ For direct control over the benchmark workflow:
 ```bash
 # Endpoint benchmarking
 python3 -u -m benchmarks.utils.benchmark \
-   --endpoint "http://your-endpoint:8000" \
+   --input trtllm=http://your-endpoint:8000 \
    --namespace $NAMESPACE \
    --isl 2000 \
    --std 10 \
