@@ -143,27 +143,37 @@ impl SystemHealth {
         match &self.health_transition_policy {
             HealthTransitionPolicy::Manual => {
                 // No automatic transition (current behavior)
-            },
+            }
             HealthTransitionPolicy::TimeBasedReady { after_seconds } => {
                 if uptime.as_secs() >= *after_seconds {
-                    tracing::info!("Auto-transitioning to ready after {}s uptime (policy: time_based_ready)", uptime.as_secs());
+                    tracing::info!(
+                        "Auto-transitioning to ready after {}s uptime (policy: time_based_ready)",
+                        uptime.as_secs()
+                    );
                     self.system_health = HealthStatus::Ready;
                 }
-            },
+            }
             HealthTransitionPolicy::EndpointBasedReady => {
                 // Ready when service has registered at least one endpoint
                 if !self.endpoint_health.is_empty() {
-                    let all_endpoints_ready = self.endpoint_health.values()
+                    let all_endpoints_ready = self
+                        .endpoint_health
+                        .values()
                         .all(|status| *status == HealthStatus::Ready);
 
                     if all_endpoints_ready {
-                        tracing::info!("Auto-transitioning to ready - all {} endpoints are ready (policy: endpoint_based_ready)",
-                                     self.endpoint_health.len());
+                        tracing::info!(
+                            "Auto-transitioning to ready - all {} endpoints are ready (policy: endpoint_based_ready)",
+                            self.endpoint_health.len()
+                        );
                         self.system_health = HealthStatus::Ready;
                     }
                 }
-            },
-            HealthTransitionPolicy::Custom { auto_ready_after_seconds, require_endpoints_ready } => {
+            }
+            HealthTransitionPolicy::Custom {
+                auto_ready_after_seconds,
+                require_endpoints_ready,
+            } => {
                 let mut ready_conditions_met = true;
 
                 // Check time-based condition if specified
@@ -178,7 +188,9 @@ impl SystemHealth {
                     if self.endpoint_health.is_empty() {
                         ready_conditions_met = false;
                     } else {
-                        let all_endpoints_ready = self.endpoint_health.values()
+                        let all_endpoints_ready = self
+                            .endpoint_health
+                            .values()
                             .all(|status| *status == HealthStatus::Ready);
                         if !all_endpoints_ready {
                             ready_conditions_met = false;
@@ -187,7 +199,10 @@ impl SystemHealth {
                 }
 
                 if ready_conditions_met {
-                    tracing::info!("Auto-transitioning to ready after {}s uptime (policy: custom)", uptime.as_secs());
+                    tracing::info!(
+                        "Auto-transitioning to ready after {}s uptime (policy: custom)",
+                        uptime.as_secs()
+                    );
                     self.system_health = HealthStatus::Ready;
                 }
             }
