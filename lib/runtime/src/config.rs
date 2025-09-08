@@ -240,22 +240,23 @@ impl RuntimeConfig {
         // Handle DYN_SYSTEM_AUTO_READY_AFTER_SECONDS environment variable
         // This provides a convenient shortcut for time-based health transition
         if let Ok(seconds_str) = std::env::var("DYN_SYSTEM_AUTO_READY_AFTER_SECONDS")
-            && !seconds_str.is_empty() {
-                if let Ok(seconds) = seconds_str.parse::<u64>() {
-                    tracing::info!(
-                        "Using DYN_SYSTEM_AUTO_READY_AFTER_SECONDS={} for health transition policy",
-                        seconds
-                    );
-                    config.health_transition_policy = HealthTransitionPolicy::TimeBasedReady {
-                        after_seconds: seconds,
-                    };
-                } else {
-                    tracing::warn!(
-                        "Invalid value for DYN_SYSTEM_AUTO_READY_AFTER_SECONDS: '{}', expected a number",
-                        seconds_str
-                    );
-                }
+            && !seconds_str.is_empty()
+        {
+            if let Ok(seconds) = seconds_str.parse::<u64>() {
+                tracing::info!(
+                    "Using DYN_SYSTEM_AUTO_READY_AFTER_SECONDS={} for health transition policy",
+                    seconds
+                );
+                config.health_transition_policy = HealthTransitionPolicy::TimeBasedReady {
+                    after_seconds: seconds,
+                };
+            } else {
+                tracing::warn!(
+                    "Invalid value for DYN_SYSTEM_AUTO_READY_AFTER_SECONDS: '{}', expected a number",
+                    seconds_str
+                );
             }
+        }
         config.validate()?;
         Ok(config)
     }

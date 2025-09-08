@@ -178,9 +178,10 @@ impl SystemHealth {
 
                 // Check time-based condition if specified
                 if let Some(after_seconds) = auto_ready_after_seconds
-                    && uptime.as_secs() < *after_seconds {
-                        ready_conditions_met = false;
-                    }
+                    && uptime.as_secs() < *after_seconds
+                {
+                    ready_conditions_met = false;
+                }
 
                 // Check endpoint-based condition if required
                 if *require_endpoints_ready {
