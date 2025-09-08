@@ -16,6 +16,15 @@ use validator::Validate;
 // [gluo TODO] nvext is LLM specific, we really only use the annotation field
 pub use super::openai::nvext::{NvExt, NvExtProvider};
 
+#[derive(Debug, Serialize, Clone, Eq, PartialEq, Deserialize)]
+pub enum DataType {
+    Bool,
+    Uint32,
+    Int32,
+    Float32,
+    Bytes,
+}
+
 #[derive(Debug, Serialize, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum FlattenTensor {
@@ -29,13 +38,23 @@ pub enum FlattenTensor {
     Bytes(Vec<Vec<u8>>),
 }
 
+#[derive(Serialize, Deserialize, Validate, Debug, Clone, Eq, PartialEq)]
+pub struct TensorMetadata {
+    pub name: String,
+    pub data_type: DataType,
+    pub shape: Vec<i64>,
+}
+
+#[derive(Serialize, Deserialize, Validate, Debug, Clone, Eq, PartialEq)]
+pub struct TensorModelConfig {
+    pub name: String,
+    pub inputs: Vec<TensorMetadata>,
+    pub outputs: Vec<TensorMetadata>,
+}
+
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct Tensor {
-    name: String,
-    // Even though a tensor will not have negative shape, but use signed value
-    // here to be consistent with other shape usage, i.e. -1 can be seen in
-    // model metadata means the dimension is dynamic.
-    shape: Vec<i64>,
+    metadata: TensorMetadata,
     // [gluo WIP] data type is determined by the enum variant.
     // verify if the request can be properly pass to Python side as
     // here is enum with data and there is no proper mapping in Python.

@@ -28,6 +28,8 @@ use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
 
+use crate::protocols::tensor;
+
 pub mod inference {
     tonic::include_proto!("inference");
 }
@@ -357,9 +359,41 @@ impl GrpcInferenceService for KserveService {
             .find(|entry| request_model_name == &entry.name)
         {
             if entry.model_type.supports_tensor() {
-                Err(Status::unimplemented(
-                    "[gluo WIP] Model is a tensor model, need metadata path",
-                ))?;
+                if let Some(config) = entry.runtime_config.as_ref() {
+                    if let Some(tensor_model_config) = config.tensor_model_config.as_ref() {
+                        return Ok(Response::new(ModelMetadataResponse {
+                            name: tensor_model_config.name.clone(),
+                            versions: vec!["1".to_string()],
+                            platform: "dynamo".to_string(),
+                            inputs: tensor_model_config
+                                .inputs
+                                .iter()
+                                .map(|input| inference::model_metadata_response::TensorMetadata {
+                                    name: input.name.clone(),
+                                    datatype: input.data_type.to_string(),
+                                    shape: input.shape.clone(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            outputs: tensor_model_config
+                                .outputs
+                                .iter()
+                                .map(
+                                    |output| inference::model_metadata_response::TensorMetadata {
+                                        name: output.name.clone(),
+                                        datatype: output.data_type.to_string(),
+                                        shape: output.shape.clone(),
+                                        ..Default::default()
+                                    },
+                                )
+                                .collect(),
+                        }));
+                    }
+                }
+                Err(Status::invalid_argument(format!(
+                    "Model '{}' has type Tensor but no model config is provided",
+                    request_model_name
+                )))?
             } else if entry.model_type.supports_completions() {
                 return Ok(Response::new(ModelMetadataResponse {
                     name: entry.name,
@@ -409,9 +443,43 @@ impl GrpcInferenceService for KserveService {
             .find(|entry| request_model_name == &entry.name)
         {
             if entry.model_type.supports_tensor() {
-                Err(Status::unimplemented(
-                    "[gluo WIP] Model is a tensor model, need config path",
-                ))?;
+                if let Some(config) = entry.runtime_config.as_ref() {
+                    if let Some(tensor_model_config) = config.tensor_model_config.as_ref() {
+                        let model_config = ModelConfig {
+                            name: tensor_model_config.name.clone(),
+                            platform: "dynamo".to_string(),
+                            backend: "dynamo".to_string(),
+                            input: tensor_model_config
+                                .inputs
+                                .iter()
+                                .map(|input| ModelInput {
+                                    name: input.name.clone(),
+                                    data_type: input.data_type.to_kserve(),
+                                    dims: input.shape.clone(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            output: tensor_model_config
+                                .outputs
+                                .iter()
+                                .map(|output| ModelOutput {
+                                    name: output.name.clone(),
+                                    data_type: output.data_type.to_kserve(),
+                                    dims: output.shape.clone(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        };
+                        return Ok(Response::new(ModelConfigResponse {
+                            config: Some(model_config.clone()),
+                        }));
+                    }
+                }
+                Err(Status::invalid_argument(format!(
+                    "Model '{}' has type Tensor but no model config is provided",
+                    request_model_name
+                )))?
             } else if entry.model_type.supports_completions() {
                 let config = ModelConfig {
                     name: entry.name,
@@ -656,6 +724,28 @@ impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
                 infer_response: None,
                 error_message: format!("Failed to convert response: {}", e),
             }),
+        }
+    }
+}
+
+impl tensor::DataType {
+    pub fn to_kserve(&self) -> i32 {
+        match self {
+            &tensor::DataType::Bool => DataType::TypeBool as i32,
+            &tensor::DataType::Uint32 => DataType::TypeUint32 as i32,
+            &tensor::DataType::Int32 => DataType::TypeInt32 as i32,
+            &tensor::DataType::Float32 => DataType::TypeFp32 as i32,
+            &tensor::DataType::Bytes => DataType::TypeString as i32,
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        match self {
+            &tensor::DataType::Bool => "BOOL".to_string(),
+            &tensor::DataType::Uint32 => "UINT32".to_string(),
+            &tensor::DataType::Int32 => "INT32".to_string(),
+            &tensor::DataType::Float32 => "FP32".to_string(),
+            &tensor::DataType::Bytes => "BYTES".to_string(),
         }
     }
 }

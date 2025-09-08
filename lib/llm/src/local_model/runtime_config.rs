@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::protocols::tensor;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
@@ -21,9 +23,15 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
 
-    // Provide KServe model config in the case where the model type is Tensor
+    // Provide tensor model config in the case where the model type is Tensor.
+    // Currently use JSON object for convinence, the programmatic way is to
+    // define the model config struct as part of the tensor protocol and
+    // import it here.
+    // [gluo TODO] switch to ModelConfig if desired and workout a way to
+    // prepare it in a convinent way, the protobuf library used by tonic
+    // doesn't provide JSON parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kserve_model_config: Option<serde_json::Value>,
+    pub tensor_model_config: Option<tensor::TensorModelConfig>,
 }
 
 impl ModelRuntimeConfig {

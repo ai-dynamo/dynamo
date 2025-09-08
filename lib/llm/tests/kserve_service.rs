@@ -7,7 +7,9 @@ pub mod kserve_test {
         tonic::include_proto!("inference");
     }
     use dynamo_llm::discovery::ModelEntry;
+    use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_llm::model_type::{ModelInput, ModelType};
+    use dynamo_llm::protocols::tensor;
     use dynamo_runtime::protocols::EndpointId;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
@@ -1117,20 +1119,24 @@ pub mod kserve_test {
             model_input: ModelInput::Tensor,
             runtime_config: None,
         };
-        service_with_engines.0.model_manager().save_model_entry("key", entry);
+        service_with_engines
+            .0
+            .model_manager()
+            .save_model_entry("key", entry);
 
         let response = client.model_metadata(request).await;
         assert!(response.is_err());
         let err = response.unwrap_err();
         assert_eq!(
             err.code(),
-            tonic::Code::Internal,
-            "Expected Internal error for unregistered model, get {}",
+            tonic::Code::InvalidArgument,
+            "Expected InvalidArgument error for unregistered model, get {}",
             err
         );
         assert!(
-            err.message().contains("Model config is not provided"),
-            "Expected error message to contain 'Model config is not provided', got: {}",
+            err.message()
+                .contains("has type Tensor but no model config is provided"),
+            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
             err.message()
         );
 
@@ -1144,15 +1150,90 @@ pub mod kserve_test {
         let err = response.unwrap_err();
         assert_eq!(
             err.code(),
-            tonic::Code::Internal,
-            "Expected Internal error for unregistered model, get {}",
+            tonic::Code::InvalidArgument,
+            "Expected InvalidArgument error for unregistered model, get {}",
             err
         );
         assert!(
-            err.message().contains("Model config is not provided"),
-            "Expected error message to contain 'Model config is not provided', got: {}",
+            err.message()
+                .contains("has type Tensor but no model config is provided"),
+            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
             err.message()
         );
+
+        // Change model entry to have model config
+        service_with_engines
+            .0
+            .model_manager()
+            .remove_model_entry("key");
+        let entry = ModelEntry {
+            name: "tensor".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "endpoint".to_string(),
+            },
+            model_type: ModelType::Tensor,
+            model_input: ModelInput::Tensor,
+            runtime_config: Some(ModelRuntimeConfig {
+                tensor_model_config: Some(tensor::TensorModelConfig {
+                    name: "tensor".to_string(),
+                    inputs: vec![tensor::TensorMetadata {
+                        name: "input".to_string(),
+                        data_type: tensor::DataType::Bytes,
+                        shape: vec![1],
+                    }],
+                    outputs: vec![tensor::TensorMetadata {
+                        name: "output".to_string(),
+                        data_type: tensor::DataType::Bool,
+                        shape: vec![-1],
+                    }],
+                }),
+                ..Default::default()
+            }),
+        };
+        service_with_engines
+            .0
+            .model_manager()
+            .save_model_entry("key", entry);
+
+        // Success
+        let request = tonic::Request::new(ModelMetadataRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+        let response = client.model_metadata(request).await.unwrap();
+        assert_eq!(
+            response.get_ref().name,
+            "tensor",
+            "Expected response of the same model name",
+        );
+        // input
+        for io in &response.get_ref().inputs {
+            match io.name.as_str() {
+                "input" => {
+                    assert_eq!(
+                        io.datatype, "BYTES",
+                        "Expected 'input' to have datatype 'BYTES'"
+                    );
+                    assert_eq!(io.shape, vec![1], "Expected 'input' to have shape [1]");
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+        // output
+        for io in &response.get_ref().outputs {
+            match io.name.as_str() {
+                "output" => {
+                    assert_eq!(
+                        io.datatype, "BOOL",
+                        "Expected 'output' to have datatype 'BOOL'"
+                    );
+                    assert_eq!(io.shape, vec![-1], "Expected 'output' to have shape [-1]");
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
 
         let model_name = "tensor";
         let request = tonic::Request::new(ModelInferRequest {
