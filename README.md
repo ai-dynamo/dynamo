@@ -21,7 +21,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/support_matrix.md)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 
 # NVIDIA Dynamo
 
@@ -60,7 +60,7 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 | [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md) | ✅ | ✅ | ✅ |
 | [**Load Based Planner**](/docs/architecture/load_planner.md) | 🚧 | 🚧 | 🚧 |
 | [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | ✅ | 🚧 |
-| [**KVBM**](/docs/architecture/kvbm_architecture.md) | 🚧 | 🚧 | 🚧 |
+| [**KVBM**](/docs/architecture/kvbm_architecture.md) | ✅ | ✅ | 🚧 |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 - **[vLLM](components/backends/vllm/README.md)**
