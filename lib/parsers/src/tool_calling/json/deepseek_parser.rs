@@ -43,7 +43,7 @@ pub fn parse_tool_calls_deepseek_v3_1(
     }
 
     // If tool call start token is not present then, no tool calls are there, return empty tool calls and the original trimmed string
-    if !detect_tool_call_start_deepseek_v3_1(trimmed, config).unwrap_or(false) {
+    if !detect_tool_call_start_deepseek_v3_1(trimmed, config) {
         return Ok((vec![], Some(trimmed.to_string())));
     }
 
@@ -101,24 +101,13 @@ pub fn parse_tool_calls_deepseek_v3_1(
     Ok((tool_calls, Some(normal_text)))
 }
 
-pub fn detect_tool_call_start_deepseek_v3_1(
-    chunk: &str,
-    config: &JsonParserConfig,
-) -> anyhow::Result<bool> {
+pub fn detect_tool_call_start_deepseek_v3_1(chunk: &str, config: &JsonParserConfig) -> bool {
     let trimmed = chunk.trim();
-    if trimmed.is_empty() {
-        return Ok(false);
-    }
-
-    // if chunk contains tool_call_start_tokens then return true
-    if config
-        .tool_call_start_tokens
-        .iter()
-        .any(|token| trimmed.contains(token))
-    {
-        return Ok(true);
-    }
-    Ok(false)
+    !trimmed.is_empty()
+        && config
+            .tool_call_start_tokens
+            .iter()
+            .any(|token| trimmed.contains(token))
 }
 
 #[cfg(test)]
@@ -247,7 +236,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_deepseek_v3_1(text, &config).unwrap();
+        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
         assert!(result);
     }
 
@@ -259,7 +248,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_deepseek_v3_1(text, &config).unwrap();
+        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
         assert!(!result);
     }
 
@@ -271,7 +260,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["<｜tool▁calls▁end｜>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_deepseek_v3_1(text, &config).unwrap();
+        let result = detect_tool_call_start_deepseek_v3_1(text, &config);
         assert!(result);
     }
 }

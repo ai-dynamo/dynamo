@@ -307,30 +307,17 @@ pub fn try_tool_call_parse_basic_json(
     Ok((vec![], Some(trimmed.to_string())))
 }
 
-pub fn detect_tool_call_start_basic_json(
-    chunk: &str,
-    config: &JsonParserConfig,
-) -> anyhow::Result<bool> {
+pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig) -> bool {
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
-        return Ok(false);
+        return false;
     }
-
-    // Case 1: If there is any of the start tokens in the chunk, return true
-    if config
+    config
         .tool_call_start_tokens
         .iter()
         .any(|token| trimmed.contains(token))
-    {
-        return Ok(true);
-    }
-
-    // Case 2: If there is any "{" or "[" in the chunk, return true
-    // This case will lead to false positives for those models which does not emit tool call start tokens
-    if trimmed.contains("{") || trimmed.contains("[") {
-        return Ok(true);
-    }
-    Ok(false)
+        || trimmed.contains('{')
+        || trimmed.contains('[')
 }
 
 #[cfg(test)]
@@ -346,7 +333,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["</tool_call>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -358,7 +345,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["</tool_call>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -370,7 +357,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["</tool_call>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -383,7 +370,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["</tool_call>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -396,7 +383,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["</tool_call>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -409,7 +396,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -421,7 +408,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -433,7 +420,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 
@@ -445,7 +432,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_basic_json(text, &config).unwrap();
+        let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
     }
 }

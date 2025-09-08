@@ -35,7 +35,7 @@ pub fn try_tool_call_parse_json(
     }
 }
 
-pub fn detect_tool_call_start_json(chunk: &str, config: &JsonParserConfig) -> anyhow::Result<bool> {
+pub fn detect_tool_call_start_json(chunk: &str, config: &JsonParserConfig) -> bool {
     match config.parser_type {
         JsonParserType::Basic => detect_tool_call_start_basic_json(chunk, config),
         JsonParserType::DeepseekV31 => detect_tool_call_start_deepseek_v3_1(chunk, config),

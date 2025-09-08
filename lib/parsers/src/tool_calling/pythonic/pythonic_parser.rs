@@ -187,19 +187,14 @@ pub fn try_tool_call_parse_pythonic(
     Ok((tool_response?, Some(normal_text)))
 }
 
-pub fn detect_tool_call_start_pythonic(chunk: &str) -> anyhow::Result<bool> {
+pub fn detect_tool_call_start_pythonic(chunk: &str) -> bool {
     let trimmed = chunk.trim();
+    // Early return for empty input
     if trimmed.is_empty() {
-        return Ok(false);
+        return false;
     }
-
-    // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
-
-    // Check if the chunk contains atleast "["
-    if !trimmed.contains("[") {
-        return Ok(false);
-    }
-    Ok(true)
+    // Heuristic: Pythonic tool calls always start with a '[' somewhere in the chunk
+    trimmed.contains('[')
 }
 
 #[cfg(test)]
@@ -376,21 +371,21 @@ mod detect_parser_tests {
     #[test]
     fn test_detect_tool_call_start_pythonic_chunk_with_tool_call_start_token() {
         let text = r#"[foo(a=1, b=2), bar(x=3)]"#;
-        let result = detect_tool_call_start_pythonic(text).unwrap();
+        let result = detect_tool_call_start_pythonic(text);
         assert!(result);
     }
 
     #[test]
     fn test_detect_tool_call_start_pythonic_chunk_without_tool_call_start_token() {
         let text = r#"foo(a=1, b=2)"#;
-        let result = detect_tool_call_start_pythonic(text).unwrap();
+        let result = detect_tool_call_start_pythonic(text);
         assert!(!result);
     }
 
     #[test]
     fn test_detect_tool_call_start_pythonic_chunk_with_tool_call_start_token_in_middle() {
         let text = r#"information: [foo(a=1, b=2), bar(x=3)]"#;
-        let result = detect_tool_call_start_pythonic(text).unwrap();
+        let result = detect_tool_call_start_pythonic(text);
         assert!(result);
     }
 
@@ -398,7 +393,7 @@ mod detect_parser_tests {
     fn test_detect_tool_call_start_pythonic_false_positive() {
         // Since we detect just "[" as tool call start token, this will be a false positive
         let text = r#"Hey [ There is one tool call here . foo(a=1, b=2)"#;
-        let result = detect_tool_call_start_pythonic(text).unwrap();
+        let result = detect_tool_call_start_pythonic(text);
         assert!(result);
     }
 }
