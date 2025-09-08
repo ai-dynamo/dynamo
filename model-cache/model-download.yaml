@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: model-download-llama-3-70b
+  name: model-download
 spec:
   backoffLimit: 3
   completions: 1
@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        app: model-download-llama-3-70b
+        app: model-download
     spec:
       restartPolicy: Never
       containers:
@@ -48,4 +48,4 @@ spec:
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: model-cache-llama-3-70b
+          claimName: model-cache

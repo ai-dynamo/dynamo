@@ -12,7 +12,7 @@ spec:
       dynamoNamespace: llama3-70b-disagg-mn
       pvc:
         create: false
-        name: model-cache-llama-3-70b
+        name: model-cache
         mountPoint: /root/.cache/huggingface
       extraPodSpec:
         mainContainer:
@@ -25,7 +25,7 @@ spec:
       envFromSecret: hf-token-secret
       pvc:
         create: false
-        name: model-cache-llama-3-70b
+        name: model-cache
         mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi
@@ -50,7 +50,7 @@ spec:
       envFromSecret: hf-token-secret
       pvc:
         create: false
-        name: model-cache-llama-3-70b
+        name: model-cache
         mountPoint: /root/.cache/huggingface
       sharedMemory:
         size: 80Gi

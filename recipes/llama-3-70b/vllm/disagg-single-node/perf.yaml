@@ -75,4 +75,4 @@ spec:
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: model-cache-llama-3-70b
+          claimName: model-cache
