@@ -1,3 +1,6 @@
+#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-License-Identifier: Apache-2.0
+
 """
 Health check utilities for Dynamo backends.
 
@@ -6,8 +9,11 @@ Each backend should extend HealthCheckPayload and define its default payload.
 """
 
 import json
+import logging
 import os
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def load_health_check_from_env(
@@ -35,12 +41,20 @@ def load_health_check_from_env(
             # Load from file
             file_path = env_value[1:]
             with open(file_path, "r") as f:
-                return json.load(f)
+                parsed = json.load(f)
         else:
             # Parse as JSON
-            return json.loads(env_value)
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        print(f"Warning: Failed to parse {env_var}: {e}")
+            parsed = json.loads(env_value)
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "%s must be a JSON object (dict). Got: %s",
+                env_var,
+                type(parsed).__name__,
+            )
+            return None
+        return parsed
+    except (json.JSONDecodeError, FileNotFoundError, OSError) as e:
+        logger.warning("Failed to parse %s: %s", env_var, e)
         return None
 
 

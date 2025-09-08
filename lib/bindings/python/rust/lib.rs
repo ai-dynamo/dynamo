@@ -580,7 +580,7 @@ impl Endpoint {
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
 
-        // Convert Python dict to serde_json::Value if provided
+        // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
             .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
             .transpose()
@@ -590,6 +590,15 @@ impl Endpoint {
                     err
                 ))
             })?;
+
+        // Require an object/dict
+        if let Some(ref payload) = health_payload_json {
+            if !payload.is_object() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                     "health_check_payload must be a JSON object (dict)",
+                ));
+            }
+        }
 
         let mut builder = self
             .inner

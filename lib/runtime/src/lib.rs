@@ -176,49 +176,51 @@ impl SystemHealth {
         instance: component::Instance,
         payload: serde_json::Value,
     ) {
-        // Check if already registered - this would indicate a bug
-        {
-            let targets = self.health_check_targets.read().unwrap();
-            if targets.contains_key(endpoint_subject) {
-                tracing::error!(
-                    "ERROR: Attempting to register health check for endpoint '{}' that is already registered! \
-                    This registration will be ignored. \
-                    This may indicate a bug in endpoint lifecycle management.",
-                    endpoint_subject
-                );
-                return; // Early return, don't register again
+        let key = endpoint_subject.to_owned();
+
+        // Atomically check+insert under a single write lock to avoid races.
+        let inserted = {
+            let mut targets = self.health_check_targets.write().unwrap();
+            match targets.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(HealthCheckTarget { instance, payload });
+                    true
+                }
             }
+        };
+
+        if !inserted {
+            tracing::warn!(
+                "Attempted to re-register health check for endpoint '{}'; ignoring.",
+                key
+            );
+            return;
         }
 
-        // Register the health check target
-        let mut targets = self.health_check_targets.write().unwrap();
-        targets.insert(
-            endpoint_subject.to_string(),
-            HealthCheckTarget { instance, payload },
-        );
+        // Create and store a unique notifier for this endpoint (idempotent).
+        {
+            let mut notifiers = self.health_check_notifiers.write().unwrap();
+            notifiers
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
+        }
 
-        // Create and store a unique notifier for this endpoint
-        let mut notifiers = self.health_check_notifiers.write().unwrap();
-        notifiers.insert(
-            endpoint_subject.to_string(),
-            Arc::new(tokio::sync::Notify::new()),
-        );
+        // Initialize endpoint health status conservatively to NotReady.
+        {
+            let mut endpoint_health = self.endpoint_health.write().unwrap();
+            endpoint_health
+                .entry(key.clone())
+                .or_insert(HealthStatus::NotReady);
+        }
 
-        // Also initialize endpoint health status if needed
-        let mut endpoint_health = self.endpoint_health.write().unwrap();
-        endpoint_health
-            .entry(endpoint_subject.to_string())
-            .or_insert(HealthStatus::Ready);
-
-        if let Err(e) = self.new_endpoint_tx.send(endpoint_subject.to_string()) {
+        if let Err(e) = self.new_endpoint_tx.send(key.clone()) {
             tracing::error!(
-                "ERROR: Failed to send endpoint '{}' registration to health check manager: {}. \
-                Health checks will not be performed for this endpoint. \
-                This may indicate the health check manager has shut down.",
-                endpoint_subject,
+                "Failed to send endpoint '{}' registration to health check manager: {}. \
+                 Health checks will not be performed for this endpoint.",
+                key,
                 e
             );
-            // Continue anyway - endpoint will work but without health checks
         }
     }
 

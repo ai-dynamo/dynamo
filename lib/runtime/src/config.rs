@@ -218,9 +218,6 @@ impl RuntimeConfig {
                         // Map DYN_HEALTH_CHECK_* to the correct field names
                         let mapped_key = match k.as_str() {
                             "ENABLED" => "health_check_enabled",
-                            "RESPOND_STALE_THRESHOLD" => {
-                                "health_check_respond_stale_threshold_secs"
-                            }
                             "REQUEST_TIMEOUT" => "health_check_request_timeout_secs",
                             _ => k.as_str(),
                         };

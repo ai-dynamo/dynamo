@@ -42,7 +42,7 @@ pub struct EndpointConfig {
     /// This payload will be sent to the endpoint during health checks
     /// to verify it's responding properly
     #[educe(Debug(ignore))]
-    #[builder(default, setter(into))]
+    #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
 }
 
@@ -138,23 +138,10 @@ impl EndpointConfigBuilder {
                 instance_id: lease_id,
                 transport: TransportType::NatsTcp(subject.clone()),
             };
-            tracing::info!(
-                "Registering endpoint {:?} health check target: {:?}",
-                subject,
-                health_check_payload
-            );
-            system_health.lock().unwrap().register_health_check_target(
-                &subject,
-                instance,
-                health_check_payload.clone(),
-            );
-
-            // Get the endpoint-specific notifier and set it on the handler
-            if let Some(notifier) = system_health
-                .lock()
-                .unwrap()
-                .get_endpoint_health_check_notifier(&subject)
-            {
+            tracing::debug!(subject = %subject, "Registering endpoint health check target");
+            let guard = system_health.lock().unwrap();
+            guard.register_health_check_target(&subject, instance, health_check_payload.clone());
+            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&subject) {
                 handler.set_endpoint_health_check_notifier(notifier)?;
             }
         }

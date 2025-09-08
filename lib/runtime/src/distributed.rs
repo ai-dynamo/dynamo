@@ -163,18 +163,19 @@ impl DistributedRuntime {
             };
 
             // Start the health check manager (spawns per-endpoint monitoring tasks)
-            crate::health_check::start_health_check_manager(
+            match crate::health_check::start_health_check_manager(
                 distributed_runtime.clone(),
                 Some(health_check_config),
             )
             .await
-            .expect("Failed to start health check manager");
-
-            tracing::info!(
-                "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
-                config.canary_wait_time_secs,
-                config.health_check_request_timeout_secs
-            );
+            {
+                Ok(()) => tracing::info!(
+                    "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
+                    config.canary_wait_time_secs,
+                    config.health_check_request_timeout_secs
+                ),
+                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+            }
         }
 
         Ok(distributed_runtime)
