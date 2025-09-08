@@ -14,10 +14,6 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG SGLANG_VERSION="0.5.0rc2"
 
-# sccache configuration - inherit from base build
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET=""
-ARG SCCACHE_REGION=""
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -95,27 +91,7 @@ ARG ARCH
 ARG ARCH_ALT
 
 
-# Install sccache if requested
-COPY container/use-sccache.sh /tmp/use-sccache.sh
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
-
-ENV ARCH_ALT=${ARCH_ALT}
-RUN if [ "$USE_SCCACHE" = "true" ]; then \
-        /tmp/use-sccache.sh install; \
-    fi
-
-# Set environment variables - they'll be empty strings if USE_SCCACHE=false
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    SCCACHE_S3_KEY_PREFIX=${USE_SCCACHE:+${ARCH}} \
-    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
-
 WORKDIR /workspace
-
 # Install SGLang and related dependencies
 ARG SGLANG_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -124,8 +100,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd sglang && \
     git checkout v${SGLANG_VERSION} && \
     # Install in editable mode for development
-    uv pip install -e "python[all]" && \
-    /tmp/use-sccache.sh show-stats "SGLang";
+    uv pip install -e "python[all]"
 
 # Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
 ENV SGL_FORCE_SHUTDOWN=1
