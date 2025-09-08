@@ -497,6 +497,7 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTOR
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
+COPY deploy /workspace/deploy
 COPY components/backends/trtllm /workspace/components/backends/trtllm
 RUN python3 -m pip install --no-cache-dir --break-system-packages /workspace/benchmarks
 

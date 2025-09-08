@@ -43,6 +43,7 @@ class Config:
         self.max_beam_width: int = BuildConfig.max_beam_width
         self.free_gpu_memory_fraction: Optional[float] = None
         self.extra_engine_args: str = ""
+        self.override_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
         self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
         self.disaggregation_strategy: DisaggregationStrategy = (
@@ -74,6 +75,7 @@ class Config:
             f"max_beam_width={self.max_beam_width}, "
             f"free_gpu_memory_fraction={self.free_gpu_memory_fraction}, "
             f"extra_engine_args={self.extra_engine_args}, "
+            f"override_engine_args={self.override_engine_args}, "
             f"migration_limit={self.migration_limit}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
@@ -215,6 +217,12 @@ def cmd_line_args():
         help="Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.",
     )
     parser.add_argument(
+        "--override-engine-args",
+        type=str,
+        default="",
+        help="Python dictionary string to override specific engine arguments from the YAML file. Example: '{\"tensor_parallel_size\": 2, \"kv_cache_config\": {\"enable_block_reuse\": false}}'",
+    )
+    parser.add_argument(
         "--publish-events-and-metrics",
         action="store_true",
         help="If set, publish events and metrics to the dynamo components.",
@@ -349,6 +357,7 @@ def cmd_line_args():
     config.kv_block_size = args.kv_block_size
     config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
+    config.override_engine_args = args.override_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
     config.modality = args.modality
 
