@@ -90,12 +90,15 @@ impl CheckedFile {
         &self.checksum
     }
 
-    /// Does the given file checksum to the same value as this CheckedFile
+    /// Does the given file checksum to the same value as this CheckedFile?
     pub fn checksum_matches<P: AsRef<Path> + std::fmt::Debug>(&self, disk_file: P) -> bool {
-        let disk_file_hash = b3sum(&disk_file)
-            .inspect_err(|error| tracing::error!(disk_file = %disk_file.as_ref().display(), checked_file = self.to_string(), %error, "Failed checking checksum"))
-            .unwrap_or_else(|_|"0".to_string());
-        Checksum::blake3(disk_file_hash) == self.checksum
+        match b3sum(&disk_file) {
+            Ok(h) => Checksum::blake3(h) == self.checksum,
+            Err(error) => {
+                tracing::error!(disk_file = %disk_file.as_ref().display(), checked_file = self.to_string(), %error, "Checksum does not match");
+                false
+            }
+        }
     }
 }
 
@@ -114,7 +117,7 @@ impl Serialize for CheckedFile {
     where
         S: Serializer,
     {
-        let mut cf = serializer.serialize_struct("Checksum", 2)?;
+        let mut cf = serializer.serialize_struct("CheckedFile", 2)?;
         match &self.path {
             Either::Left(path) => cf.serialize_field("path", &path)?,
             Either::Right(url) => cf.serialize_field("path", &url)?,
@@ -166,12 +169,14 @@ fn b3sum<T: AsRef<Path> + std::fmt::Debug>(path: T) -> anyhow::Result<String> {
     let filesize = metadata.len();
     let mut hasher = blake3::Hasher::new();
 
-    if filesize < 10_000_000 {
-        let bytes = std::fs::read(path)?;
-        hasher.update(&bytes);
-    } else {
+    if filesize > 128_000 {
+        // multithreaded. blake3 recommend this above 128 KiB.
         hasher.update_mmap_rayon(path)?;
+    } else {
+        // Uses mmap above 16 KiB, normal load otherwise.
+        hasher.update_mmap(path)?;
     }
+
     let hash = hasher.finalize();
     Ok(hash.to_string())
 }
@@ -288,12 +293,12 @@ mod tests {
         let checksum = Checksum::blake3("a12c3d4");
 
         let serialized = serde_json::to_string(&checksum).unwrap();
-        assert_eq!(serialized.trim(), "blake3:a12c3d4");
+        assert_eq!(serialized.trim(), "\"blake3:a12c3d4\"");
     }
 
     #[test]
     fn test_deserialization_blake3() {
-        let s = "blake3:abcd1234";
+        let s = "\"blake3:abcd1234\"";
         let deserialized: Checksum = serde_json::from_str(s).unwrap();
 
         assert_eq!(deserialized.algorithm, CryptographicHashMethods::BLAKE3);
@@ -302,12 +307,12 @@ mod tests {
 
     #[test]
     fn test_deserialization_invalid_format() {
-        let s = "invalidformat";
+        let s = "\"invalidformat\"";
         let result: Result<Checksum, _> = serde_json::from_str(s);
 
         assert!(result.is_err());
 
-        let s = "blake3:invalid:format";
+        let s = "\"blake3:invalid:format\"";
         let result: Result<Checksum, _> = serde_json::from_str(s);
 
         assert!(result.is_err());

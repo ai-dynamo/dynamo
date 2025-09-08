@@ -224,9 +224,9 @@ impl ModelDeploymentCard {
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
-                let p = checked_file.path().ok_or_else(|| {
-                    anyhow::anyhow!("URL tokenizer cannot be loaded by HF tokenizer")
-                })?;
+                let p = checked_file.path().ok_or_else(||
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?}); call move_from_nats() before tokenizer_hf()", checked_file.url())
+                )?;
                 HfTokenizer::from_file(p).map_err(anyhow::Error::msg)
             }
             Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
@@ -639,17 +639,15 @@ impl HFConfig {
             );
         };
 
+        let gencfg_path = file_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("generation_config.json");
         if text_config.bos_token_id.is_none() {
-            let bos_token_id = crate::file_json_field::<TokenIdType>(
-                &Path::join(
-                    file_path.parent().unwrap_or(&PathBuf::from("")),
-                    "generation_config.json",
-                ),
-                "bos_token_id",
-            )
-            .context(
-                "missing bos_token_id in generation_config.json and config.json, cannot load",
-            )?;
+            let bos_token_id = crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id")
+                .context(
+                    "missing bos_token_id in generation_config.json and config.json, cannot load",
+                )?;
             text_config.bos_token_id = Some(bos_token_id);
         }
         // Now that we have it for sure, set it in the non-Option field
@@ -689,13 +687,7 @@ impl HFConfig {
             })
             .or_else(|| {
                 // Maybe it's in generation_config.json
-                crate::file_json_field(
-                    &Path::join(
-                        file_path.parent().unwrap_or(&PathBuf::from("")),
-                        "generation_config.json",
-                    ),
-                    "eos_token_id",
-                )
+                crate::file_json_field(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
@@ -877,7 +869,7 @@ mod tests {
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
-        let config = HFConfig::from_json_file(config_file.display().to_string())?;
+        let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 128000);
         Ok(())
     }
@@ -886,7 +878,7 @@ mod tests {
     pub fn test_config_json_llama4() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
-        let config = HFConfig::from_json_file(config_file.display().to_string())?;
+        let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 200000);
         Ok(())
     }
