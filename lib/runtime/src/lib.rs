@@ -65,7 +65,7 @@ use crate::metrics::prometheus_names::distributed_runtime;
 use component::{Endpoint, InstanceSource};
 use utils::GracefulShutdownTracker;
 
-use config::HealthStatus;
+use config::{HealthStatus, HealthTransitionPolicy};
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone)]
@@ -94,6 +94,7 @@ pub struct SystemHealth {
     system_health: HealthStatus,
     endpoint_health: HashMap<String, HealthStatus>,
     use_endpoint_health_status: Vec<String>,
+    health_transition_policy: HealthTransitionPolicy,
     health_path: String,
     live_path: String,
     start_time: Instant,
@@ -104,6 +105,7 @@ impl SystemHealth {
     pub fn new(
         starting_health_status: HealthStatus,
         use_endpoint_health_status: Vec<String>,
+        health_transition_policy: HealthTransitionPolicy,
         health_path: String,
         live_path: String,
     ) -> Self {
@@ -115,6 +117,7 @@ impl SystemHealth {
             system_health: starting_health_status,
             endpoint_health,
             use_endpoint_health_status,
+            health_transition_policy,
             health_path,
             live_path,
             start_time: Instant::now(),
@@ -129,7 +132,79 @@ impl SystemHealth {
         self.endpoint_health.insert(endpoint.to_string(), status);
     }
 
-    /// Returns the overall health status and endpoint health statuses
+    /// Check and automatically update health status based on transition policy
+    /// This is the core fix for the health transition issue
+    pub fn check_and_update_health_status(&mut self) {
+        if self.system_health == HealthStatus::Ready {
+            return; // Already ready, no need to transition
+        }
+
+        let uptime = self.start_time.elapsed();
+        match &self.health_transition_policy {
+            HealthTransitionPolicy::Manual => {
+                // No automatic transition (current behavior)
+            },
+            HealthTransitionPolicy::TimeBasedReady { after_seconds } => {
+                if uptime.as_secs() >= *after_seconds {
+                    tracing::info!("Auto-transitioning to ready after {}s uptime (policy: time_based_ready)", uptime.as_secs());
+                    self.system_health = HealthStatus::Ready;
+                }
+            },
+            HealthTransitionPolicy::EndpointBasedReady => {
+                // Ready when service has registered at least one endpoint
+                if !self.endpoint_health.is_empty() {
+                    let all_endpoints_ready = self.endpoint_health.values()
+                        .all(|status| *status == HealthStatus::Ready);
+
+                    if all_endpoints_ready {
+                        tracing::info!("Auto-transitioning to ready - all {} endpoints are ready (policy: endpoint_based_ready)",
+                                     self.endpoint_health.len());
+                        self.system_health = HealthStatus::Ready;
+                    }
+                }
+            },
+            HealthTransitionPolicy::Custom { auto_ready_after_seconds, require_endpoints_ready } => {
+                let mut ready_conditions_met = true;
+
+                // Check time-based condition if specified
+                if let Some(after_seconds) = auto_ready_after_seconds {
+                    if uptime.as_secs() < *after_seconds {
+                        ready_conditions_met = false;
+                    }
+                }
+
+                // Check endpoint-based condition if required
+                if *require_endpoints_ready {
+                    if self.endpoint_health.is_empty() {
+                        ready_conditions_met = false;
+                    } else {
+                        let all_endpoints_ready = self.endpoint_health.values()
+                            .all(|status| *status == HealthStatus::Ready);
+                        if !all_endpoints_ready {
+                            ready_conditions_met = false;
+                        }
+                    }
+                }
+
+                if ready_conditions_met {
+                    tracing::info!("Auto-transitioning to ready after {}s uptime (policy: custom)", uptime.as_secs());
+                    self.system_health = HealthStatus::Ready;
+                }
+            }
+        }
+    }
+
+    /// Check for automatic transitions and return the overall health status and endpoint health statuses
+    /// This is the main method that should be called by the health handler
+    pub fn get_health_status_with_transition_check(&mut self) -> (bool, HashMap<String, String>) {
+        // Check for automatic health transitions BEFORE reporting status
+        self.check_and_update_health_status();
+
+        // Now get the current status
+        self.get_health_status()
+    }
+
+    /// Returns the overall health status and endpoint health statuses (read-only)
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
         let mut endpoints: HashMap<String, String> = HashMap::new();
         for (endpoint, ready) in &self.endpoint_health {

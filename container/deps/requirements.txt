@@ -28,6 +28,7 @@ matplotlib
 msgspec
 mypy
 numpy==1.26.4 # pmdarima is not compatible with numpy 2
+nvidia-ml-py
 opentelemetry-api
 opentelemetry-sdk
 pip
@@ -37,7 +38,6 @@ prometheus-api-client
 prophet
 protobuf==5.29.5
 pydantic==2.7.1
-pynvml
 pyright
 PyYAML
 scikit-learn
