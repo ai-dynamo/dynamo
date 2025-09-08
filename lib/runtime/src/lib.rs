@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, OnceLock, Weak},
     time::Instant,
 };
+use tokio::sync::mpsc;
 
 pub use anyhow::{
     Context as ErrorContext, Error, Ok as OK, Result, anyhow as error, bail as raise,
@@ -93,6 +94,11 @@ pub struct SystemHealth {
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
     /// Maps endpoint subject to its specific health check notifier
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Channel for new endpoint registrations
+    /// This solves the race condition where HealthCheckManager starts before endpoints are registered
+    /// Using a channel ensures no registrations are lost.
+    new_endpoint_tx: mpsc::UnboundedSender<String>,
+    new_endpoint_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     use_endpoint_health_status: Vec<String>,
     health_path: String,
     live_path: String,
@@ -111,11 +117,17 @@ impl SystemHealth {
         for endpoint in &use_endpoint_health_status {
             endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
         }
+
+        // Create the channel for endpoint registration notifications
+        let (tx, rx) = mpsc::unbounded_channel();
+
         SystemHealth {
             system_health: starting_health_status,
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            new_endpoint_tx: tx,
+            new_endpoint_rx: Arc::new(std::sync::Mutex::new(Some(rx))),
             use_endpoint_health_status,
             health_path,
             live_path,
@@ -168,6 +180,21 @@ impl SystemHealth {
         instance: component::Instance,
         payload: serde_json::Value,
     ) {
+        // Check if already registered - this would indicate a bug
+        {
+            let targets = self.health_check_targets.read().unwrap();
+            if targets.contains_key(endpoint_subject) {
+                tracing::error!(
+                    "ERROR: Attempting to register health check for endpoint '{}' that is already registered! \
+                    This registration will be ignored. \
+                    This may indicate a bug in endpoint lifecycle management.",
+                    endpoint_subject
+                );
+                return; // Early return, don't register again
+            }
+        }
+
+        // Register the health check target
         let mut targets = self.health_check_targets.write().unwrap();
         targets.insert(
             endpoint_subject.to_string(),
@@ -186,6 +213,17 @@ impl SystemHealth {
         endpoint_health
             .entry(endpoint_subject.to_string())
             .or_insert(HealthStatus::Ready);
+
+        if let Err(e) = self.new_endpoint_tx.send(endpoint_subject.to_string()) {
+            tracing::error!(
+                "ERROR: Failed to send endpoint '{}' registration to health check manager: {}. \
+                Health checks will not be performed for this endpoint. \
+                This may indicate the health check manager has shut down.",
+                endpoint_subject,
+                e
+            );
+            // Continue anyway - endpoint will work but without health checks
+        }
     }
 
     /// Get all health check targets
@@ -228,6 +266,12 @@ impl SystemHealth {
     ) -> Option<Arc<tokio::sync::Notify>> {
         let notifiers = self.health_check_notifiers.read().unwrap();
         notifiers.get(endpoint_subject).cloned()
+    }
+
+    /// Take the receiver for new endpoint registrations (can only be called once)
+    /// This is used by HealthCheckManager to receive notifications of new endpoints
+    pub fn take_new_endpoint_receiver(&self) -> Option<mpsc::UnboundedReceiver<String>> {
+        self.new_endpoint_rx.lock().unwrap().take()
     }
 
     /// Initialize the uptime gauge using the provided metrics registry

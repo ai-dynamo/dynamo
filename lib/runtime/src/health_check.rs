@@ -46,7 +46,7 @@ pub struct HealthCheckManager {
     config: HealthCheckConfig,
     /// Cache of PushRouters and payloads for each endpoint
     router_cache: RouterCache,
-    /// Track per-endpoint health check tasks  
+    /// Track per-endpoint health check tasks
     /// Maps: endpoint_subject -> task_handle
     endpoint_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
@@ -117,7 +117,12 @@ impl HealthCheckManager {
             self.spawn_endpoint_health_check_task(endpoint_subject);
         }
 
-        info!("HealthCheckManager started successfully");
+        // CRITICAL: Spawn a task to monitor for NEW endpoints registered after startup
+        // This uses a channel-based approach to guarantee no lost notifications
+        // Will return an error if the receiver has already been taken
+        self.spawn_new_endpoint_monitor().await?;
+
+        info!("HealthCheckManager started successfully with channel-based endpoint discovery");
         Ok(())
     }
 
@@ -187,6 +192,55 @@ impl HealthCheckManager {
             "Spawned health check task for endpoint: {}",
             endpoint_subject
         );
+    }
+
+    /// Spawn a task to monitor for newly registered endpoints
+    /// Returns an error if duplicate endpoints are detected, indicating a bug in the system
+    async fn spawn_new_endpoint_monitor(self: &Arc<Self>) -> anyhow::Result<()> {
+        let manager = self.clone();
+
+        // Get the receiver (can only be taken once)
+        let mut rx = {
+            let system_health = manager.drt.system_health.lock().unwrap();
+            system_health.take_new_endpoint_receiver().ok_or_else(|| {
+                anyhow::anyhow!("Endpoint receiver already taken - this should only be called once")
+            })?
+        };
+
+        tokio::spawn(async move {
+            info!("Starting dynamic endpoint discovery monitor with channel-based notifications");
+
+            while let Some(endpoint_subject) = rx.recv().await {
+                debug!(
+                    "Received endpoint registration via channel: {}",
+                    endpoint_subject
+                );
+
+                let already_exists = {
+                    let tasks = manager.endpoint_tasks.lock().unwrap();
+                    tasks.contains_key(&endpoint_subject)
+                };
+
+                if already_exists {
+                    error!(
+                        "CRITICAL: Received registration for endpoint '{}' that already has a health check task!",
+                        endpoint_subject
+                    );
+                    break;
+                }
+
+                info!(
+                    "Spawning health check task for new endpoint: {}",
+                    endpoint_subject
+                );
+                manager.spawn_endpoint_health_check_task(endpoint_subject);
+            }
+
+            info!("Endpoint discovery monitor exiting - no new endpoints will be monitored!");
+        });
+
+        info!("Dynamic endpoint discovery monitor started");
+        Ok(())
     }
 
     /// Send a health check request through AsyncEngine

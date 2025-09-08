@@ -1,8 +1,8 @@
 """
-Simple health check utilities for Dynamo backends.
+Health check utilities for Dynamo backends.
 
-This module provides helper functions for working with health check payloads.
-Most backends should define their payload directly in main.py.
+This module provides a base class for backend-specific health check payloads.
+Each backend should extend HealthCheckPayload and define its default payload.
 """
 
 import json
@@ -10,70 +10,23 @@ import os
 from typing import Any, Dict, Optional
 
 
-def get_default_health_check_payload(backend: Optional[str] = None) -> Dict[str, Any]:
+def load_health_check_from_env(
+    env_var: str = "DYN_HEALTH_CHECK_PAYLOAD",
+) -> Optional[Dict[str, Any]]:
     """
-    Get a simple default health check payload.
-
-    This is a helper function if you want a default payload.
-
-    Args:
-        backend: Backend type ('vllm', 'sglang', 'trtllm', etc.)
-
-    Returns:
-        A simple health check payload suitable for the backend.
-    """
-    if not backend:
-        backend = "vllm"
-
-    backend = backend.lower()
-
-    if backend == "vllm":
-        return {
-            "prompt": "1",
-            "max_tokens": 1,
-            "temperature": 0.0,
-            "stream": False,
-        }
-    elif backend == "sglang":
-        return {
-            "token_ids": [1],
-            "sampling_options": {
-                "temperature": 0.0,
-                "max_tokens": 1,
-            },
-            "stop_conditions": {
-                "max_tokens": 1,
-            },
-        }
-    elif backend in ["trtllm", "trt", "tensorrt"]:
-        return {
-            "messages": [{"role": "user", "content": "1"}],
-            "max_tokens": 1,
-            "temperature": 0.0,
-            "stream": False,
-        }
-    else:
-        # Default to vLLM format
-        return {
-            "prompt": "1",
-            "max_tokens": 1,
-            "temperature": 0.0,
-            "stream": False,
-        }
-
-
-def load_health_check_from_env() -> Optional[Dict[str, Any]]:
-    """
-    Load health check payload from DYN_HEALTH_CHECK_PAYLOAD environment variable.
+    Load health check payload from environment variable.
 
     Supports two formats:
     1. JSON string: export DYN_HEALTH_CHECK_PAYLOAD='{"prompt": "test", "max_tokens": 1}'
     2. File path: export DYN_HEALTH_CHECK_PAYLOAD='@/path/to/health_check.json'
 
+    Args:
+        env_var: Name of the environment variable to check (default: DYN_HEALTH_CHECK_PAYLOAD)
+
     Returns:
         Dict containing the health check payload, or None if not set.
     """
-    env_value = os.environ.get("DYN_HEALTH_CHECK_PAYLOAD")
+    env_value = os.environ.get(env_var)
     if not env_value:
         return None
 
@@ -87,5 +40,41 @@ def load_health_check_from_env() -> Optional[Dict[str, Any]]:
             # Parse as JSON
             return json.loads(env_value)
     except (json.JSONDecodeError, FileNotFoundError) as e:
-        print(f"Warning: Failed to parse DYN_HEALTH_CHECK_PAYLOAD: {e}")
+        print(f"Warning: Failed to parse {env_var}: {e}")
         return None
+
+
+class HealthCheckPayload:
+    """
+    Base class for managing health check payloads.
+
+    Each backend should extend this class and set self.default_payload
+    in their __init__ method.
+
+    Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
+    """
+
+    def __init__(self):
+        """
+        Initialize health check payload.
+
+        Subclasses should call super().__init__() after setting self.default_payload.
+        """
+        if not hasattr(self, "default_payload"):
+            raise NotImplementedError(
+                "Subclass must set self.default_payload before calling super().__init__()"
+            )
+
+        self._payload = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Get the health check payload as a dictionary.
+
+        Returns the environment override if DYN_HEALTH_CHECK_PAYLOAD is set,
+        otherwise returns the default payload.
+        """
+        if self._payload is None:
+            # Check for environment override
+            self._payload = load_health_check_from_env() or self.default_payload
+        return self._payload

@@ -138,6 +138,11 @@ impl EndpointConfigBuilder {
                 instance_id: lease_id,
                 transport: TransportType::NatsTcp(subject.clone()),
             };
+            tracing::info!(
+                "Registering endpoint {:?} health check target: {:?}",
+                subject,
+                health_check_payload
+            );
             system_health.lock().unwrap().register_health_check_target(
                 &subject,
                 instance,

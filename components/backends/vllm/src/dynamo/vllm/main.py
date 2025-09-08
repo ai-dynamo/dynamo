@@ -11,7 +11,6 @@ from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from dynamo import health_check
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -31,6 +30,7 @@ from .args import (
     parse_args,
 )
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .health_check import VllmHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -152,11 +152,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
-    # Load health check payload from environment or use default
-    health_check_payload = health_check.load_health_check_from_env()
-    if health_check_payload is None:
-        # Use default health check payload for vLLM
-        health_check_payload = health_check.get_default_health_check_payload("vllm")
+    # Get health check payload (checks env var and falls back to vLLM default)
+    health_check_payload = VllmHealthCheckPayload().to_dict()
+    logger.info(f"TzuLing Health check payload: {health_check_payload}")
 
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
@@ -271,11 +269,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             custom_template_path=config.custom_jinja_template,
         )
 
-    # Load health check payload from environment or use default
-    health_check_payload = health_check.load_health_check_from_env()
-    if health_check_payload is None:
-        # Use default health check payload for vLLM
-        health_check_payload = health_check.get_default_health_check_payload("vllm")
+    # Get health check payload (checks env var and falls back to vLLM default)
+    health_check_payload = VllmHealthCheckPayload().to_dict()
+    logger.info(f"TzuLing Health check payload: {health_check_payload}")
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")
