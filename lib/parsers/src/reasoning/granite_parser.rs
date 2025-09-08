@@ -51,7 +51,11 @@ impl ReasoningParser for GraniteReasoningParser {
             .find(|&token| text.contains(token))
             .unwrap_or(self.think_end_tokens.first().unwrap());
         // Implement parsing logic specific to Granite format
-        let in_reasoning = self._in_reasoning || text.contains(think_start_token);
+        let in_reasoning = self._in_reasoning
+            || self
+                .think_start_tokens
+                .iter()
+                .any(|token| text.contains(token));
         if !in_reasoning {
             return ParserResult {
                 normal_text: text.to_string(),
