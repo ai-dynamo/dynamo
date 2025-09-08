@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import logging
 import time
@@ -47,7 +50,7 @@ def send_request(
             curl_command += (
                 ' \\\n  -H "Content-Type: application/json" \\\n  -d \''
                 + payload_json
-                + "''"
+                + "'"
             )
     logger.log(log_level, "Sending request (curl equivalent):\n%s", curl_command)
 

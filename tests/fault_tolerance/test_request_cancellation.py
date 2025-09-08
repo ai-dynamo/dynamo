@@ -13,10 +13,6 @@ from huggingface_hub import snapshot_download
 
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.payload_builder import (
-    make_chat_health_check,
-    make_completions_health_check,
-)
 from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
@@ -74,14 +70,7 @@ class DynamoWorkerProcess(ManagedProcess):
             (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
             (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
         ]
-        health_check_funcs = [
-            make_chat_health_check(
-                FRONTEND_PORT, "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            ),
-            make_completions_health_check(
-                FRONTEND_PORT, "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-            ),
-        ]
+        health_check_funcs = []
 
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"

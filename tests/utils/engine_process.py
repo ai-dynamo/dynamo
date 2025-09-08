@@ -10,15 +10,11 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.payload_builder import (
-    make_chat_health_check,
-    make_completions_health_check,
-)
 from tests.utils.payloads import BasePayload, check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
-FRONTEND_PORT = 8080
+FRONTEND_PORT = 8000
 
 
 class EngineResponseError(Exception):
@@ -174,10 +170,6 @@ class EngineProcess(ManagedProcess):
                     f"http://localhost:{config.models_port}/health",
                     check_health_generate,
                 ),
-            ],
-            health_check_funcs=[
-                make_chat_health_check(config.models_port, config.model),
-                make_completions_health_check(config.models_port, config.model),
             ],
             delayed_start=config.delayed_start,
             terminate_existing=False,

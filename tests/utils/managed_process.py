@@ -141,51 +141,73 @@ class ManagedProcess:
                 )
             raise
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self._terminate_process_group()
+    def _cleanup_stragglers(self):
+        """Clean up straggler processes - called during exit and signal handling"""
+        try:
+            if self.stragglers or self.straggler_commands:
+                self._logger.info(
+                    "Checking for straggler processes: stragglers=%s, straggler_commands=%s",
+                    self.stragglers,
+                    self.straggler_commands,
+                )
 
-        process_list = [self.proc, self._tee_proc, self._sed_proc]
-        for process in process_list:
-            if process:
+            for ps_process in psutil.process_iter(["name", "cmdline"]):
                 try:
-                    if process.stdout:
-                        process.stdout.close()
-                    if process.stdin:
-                        process.stdin.close()
-                    terminate_process_tree(process.pid, self._logger)
-                    process.wait()
-                except Exception as e:
-                    self._logger.warning("Error terminating process: %s", e)
-        if self.data_dir:
-            self._remove_directory(self.data_dir)
-
-        if self.stragglers or self.straggler_commands:
-            self._logger.info(
-                "Checking for straggler processes: stragglers=%s, straggler_commands=%s",
-                self.stragglers,
-                self.straggler_commands,
-            )
-
-        for ps_process in psutil.process_iter(["name", "cmdline"]):
-            try:
-                if ps_process.name() in self.stragglers:
-                    self._logger.info(
-                        "Terminating Straggler %s %s", ps_process.name(), ps_process.pid
-                    )
-
-                    terminate_process_tree(ps_process.pid, self._logger)
-                for cmdline in self.straggler_commands:
-                    if cmdline in " ".join(ps_process.cmdline()):
+                    process_name = ps_process.name()
+                    if process_name in self.stragglers:
                         self._logger.info(
-                            "Terminating Straggler Cmdline %s %s %s",
-                            ps_process.name(),
-                            ps_process.pid,
-                            cmdline,
+                            "Terminating Straggler %s %s", process_name, ps_process.pid
                         )
                         terminate_process_tree(ps_process.pid, self._logger)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                # Process may have terminated or become inaccessible during iteration
-                pass
+
+                    # Check command line arguments
+                    cmdline = ps_process.cmdline()
+                    cmdline_str = " ".join(cmdline) if cmdline else ""
+                    for straggler_cmd in self.straggler_commands:
+                        if straggler_cmd in cmdline_str:
+                            self._logger.info(
+                                "Terminating Straggler Cmdline %s %s %s",
+                                process_name,
+                                ps_process.pid,
+                                straggler_cmd,
+                            )
+                            terminate_process_tree(ps_process.pid, self._logger)
+                            break  # Avoid terminating the same process multiple times
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                    psutil.ZombieProcess,
+                ):
+                    # Process may have terminated or become inaccessible during iteration
+                    pass
+                except Exception as e:
+                    # Catch any other unexpected errors to ensure cleanup continues
+                    self._logger.warning("Error checking process: %s", e)
+        except Exception as e:
+            # Ensure that any error in straggler cleanup doesn't prevent other cleanup
+            self._logger.error("Error during straggler cleanup: %s", e)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self._terminate_process_group()
+
+            process_list = [self.proc, self._tee_proc, self._sed_proc]
+            for process in process_list:
+                if process:
+                    try:
+                        if process.stdout:
+                            process.stdout.close()
+                        if process.stdin:
+                            process.stdin.close()
+                        terminate_process_tree(process.pid, self._logger)
+                        process.wait()
+                    except Exception as e:
+                        self._logger.warning("Error terminating process: %s", e)
+            if self.data_dir:
+                self._remove_directory(self.data_dir)
+        finally:
+            # Always run straggler cleanup, even if interrupted
+            self._cleanup_stragglers()
 
     def _start_process(self):
         assert self._command_name

@@ -12,12 +12,11 @@ import pytest
 import requests
 from huggingface_hub import snapshot_download
 
+from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 from tests.utils.payloads import check_models_api
 
 logger = logging.getLogger(__name__)
-
-FRONTEND_PORT = 8080
 
 
 class DynamoFrontendProcess(ManagedProcess):
