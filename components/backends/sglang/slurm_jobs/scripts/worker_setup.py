@@ -192,6 +192,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Whether multiple frontend architecture is enabled (affects infrastructure setup)",
     )
 
+    parser.add_argument(
+        "--use_init_locations",
+        action="store_true",
+        help="Whether we add --init-expert-locations to launch commands",
+    )
+
     return parser.parse_args(args)
 
 
@@ -227,6 +233,7 @@ def setup_env_vars_for_gpu_script(
     total_gpus: int,
     total_nodes: int,
     port: int = DIST_INIT_PORT,
+    use_init_locations: bool = True,
 ):
     """Setup environment variables required by GPU scripts (h100.sh, gb200-fp8.sh, gb200-fp4.sh)"""
     os.environ["HOST_IP"] = host_ip
@@ -234,12 +241,14 @@ def setup_env_vars_for_gpu_script(
     os.environ["TOTAL_GPUS"] = str(total_gpus)
     os.environ["RANK"] = str(local_rank)
     os.environ["TOTAL_NODES"] = str(total_nodes)
+    os.environ['USE_INIT_LOCATIONS'] = str(use_init_locations)
 
     logging.info(f"Set HOST_IP: {host_ip}")
     logging.info(f"Set PORT: {port}")
     logging.info(f"Set TOTAL_GPUS: {total_gpus}")
     logging.info(f"Set RANK: {local_rank}")
     logging.info(f"Set TOTAL_NODES: {total_nodes}")
+    logging.info(f"Set USE_INIT_LOCATIONS: {use_init_locations}")
 
 
 def get_gpu_command(worker_type: str, gpu_type: str) -> str:
@@ -312,6 +321,7 @@ def setup_prefill_worker(
     gpus_per_node: int,
     gpu_type: str,
     multiple_frontends_enabled: bool = False,
+    use_init_locations: bool = True,
 ) -> int:
     """
     Setup the prefill worker.
@@ -328,7 +338,7 @@ def setup_prefill_worker(
             raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
-    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker)
+    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker, use_init_locations=use_init_locations)
 
     # Use appropriate GPU script instead of generating command directly
     cmd_to_run = get_gpu_command("prefill", gpu_type)
@@ -343,6 +353,7 @@ def setup_decode_worker(
     nodes_per_worker: int,
     gpus_per_node: int,
     gpu_type: str,
+    use_init_locations: bool = True,
 ) -> int:
     """
     Setup the decode worker.
@@ -354,7 +365,7 @@ def setup_decode_worker(
         raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
-    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker)
+    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker, use_init_locations=use_init_locations)
 
     # Use appropriate GPU script instead of generating command directly
     cmd_to_run = get_gpu_command("decode", gpu_type)
@@ -388,6 +399,7 @@ def main(input_args: list[str] | None = None):
     logging.info(f"Leader IP: {args.leader_ip}")
     logging.info(f"Master IP: {args.master_ip}")
     logging.info(f"Nodes per worker: {args.nodes_per_worker}")
+    logging.info(f"Use init locations?: {args.use_init_locations}")
 
     setup_env(args.master_ip)
     
@@ -407,6 +419,7 @@ def main(input_args: list[str] | None = None):
             args.gpus_per_node,
             args.gpu_type,
             args.multiple_frontends_enabled,
+            args.use_init_locations,
         )
     elif args.worker_type == "decode":
         setup_decode_worker(
@@ -417,6 +430,7 @@ def main(input_args: list[str] | None = None):
             args.nodes_per_worker,
             args.gpus_per_node,
             args.gpu_type,
+            args.use_init_locations,
         )
 
     logging.info(f"{args.worker_type.capitalize()} worker setup complete")

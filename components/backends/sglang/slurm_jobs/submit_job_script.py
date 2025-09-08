@@ -154,6 +154,13 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         default=0,
         help="Number of additional frontend nodes (beyond the first frontend on node 1)"
     )
+
+    parser.add_argument(
+        '--use-init-location',
+        action="store_true",
+        help="Whether we use '--init-expert-locations' json files"
+    )
+
     return parser.parse_args(args)
 
 
@@ -196,6 +203,7 @@ def main(input_args: list[str] | None = None):
         "partition": args.partition,
         "enable_multiple_frontends": args.enable_multiple_frontends,
         "num_additional_frontends": args.num_additional_frontends,
+        "use_init_location": args.use_init_location,
     }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:

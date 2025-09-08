@@ -173,6 +173,12 @@ WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE} --master_ip
 WORKER_ARGS="$WORKER_ARGS --multiple-frontends-enabled"
 {% endraw %}
 {% endif %}
+{% if use_init_location %}
+{% raw %}
+# Add multiple frontends flag for worker setup
+WORKER_ARGS="$WORKER_ARGS --use_init_locations"
+{% endraw %}
+{% endif %}
 {% raw %}
 
 {% endraw %}

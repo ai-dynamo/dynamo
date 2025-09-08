@@ -57,9 +57,19 @@ if [ -z "$TOTAL_NODES" ]; then
     exit 1
 fi
 
+if [ -z "$USE_INIT_LOCATIONS" ]; then
+    echo "Error: USE_INIT_LOCATIONS environment variable is not set"
+    exit 1
+fi
+
 # Construct command based on mode
 if [ "$mode" = "prefill" ]; then
     # GB200 dynamo prefill command
+    set -x
+    # SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
+
+    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json"; fi
+    
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     MC_TE_METRIC=true \
     SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE=100000 \
@@ -100,15 +110,18 @@ if [ "$mode" = "prefill" ]; then
         --eplb-algorithm deepseek \
         --attention-backend cutlass_mla \
         --watchdog-timeout 1000000 \
-        --init-expert-location /configs/prefill_dsr1-0528_in1000out1000_num40000.json  \
         --disable-cuda-graph \
         --chunked-prefill-size 131072 \
         --max-total-tokens 524288 \
         --deepep-config /configs/deepep_config.json \
         --stream-interval 50 \
-        --log-level debug
+        --log-level debug ${command_suffix}
 
 elif [ "$mode" = "decode" ]; then
+    set -x
+    command_suffix=""
+    if [[ "${USE_INIT_LOCATIONS,,}" == "true" ]]; then command_suffix="--init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json"; fi
+
     # GB200 dynamo decode command
     DYN_SKIP_SGLANG_LOG_FORMATTING=1 \
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=512 \
@@ -154,8 +167,7 @@ elif [ "$mode" = "decode" ]; then
         --eplb-algorithm deepseek \
         --attention-backend cutlass_mla \
         --watchdog-timeout 1000000 \
-        --init-expert-location /configs/decode_dsr1-0528_loadgen_in1024out1024_num2000_2p12d.json \
         --chunked-prefill-size 36864 \
         --stream-interval 50 \
-        --mem-fraction-static 0.82
+        --mem-fraction-static 0.82 ${command_suffix}
 fi
