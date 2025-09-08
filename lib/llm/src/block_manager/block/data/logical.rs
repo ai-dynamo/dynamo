@@ -5,13 +5,13 @@ use super::*;
 
 pub mod distributed_leader_worker;
 pub mod null;
-
 use crate::block_manager::block::{
     BlockDataProvider, ReadableBlock, WritableBlock,
     transfer::{TransferContext, TransferError, WriteToStrategy},
 };
 use crate::block_manager::locality::Logical;
 use crate::block_manager::storage::{self, nixl::NixlDescriptor};
+use smallvec::SmallVec;
 use tokio::sync::oneshot;
 
 pub enum LogicalKinds {
@@ -37,7 +37,7 @@ pub trait LogicalResources: Clone + Send + Sync + 'static + std::fmt::Debug {
 /// Individual block storage - cannot be cloned to ensure uniqueness
 #[derive(Debug)]
 pub struct LogicalBlockData<S: Storage, R: LogicalResources> {
-    block_id: BlockId,
+    block_ids: SmallVec<[BlockId; 1]>,
     block_set_id: usize,
     worker_id: WorkerID,
     resources: Arc<R>,
@@ -56,7 +56,7 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
         page_size: usize,
     ) -> Self {
         Self {
-            block_id,
+            block_ids: [block_id].iter().map(|x| *x).collect(),
             block_set_id,
             worker_id,
             resources,
@@ -73,7 +73,21 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
 
 impl<S: Storage, R: LogicalResources> BlockDataExt<S> for LogicalBlockData<S, R> {
     fn block_id(&self) -> BlockId {
-        self.block_id
+        if self.block_ids.len() == 1 {
+            self.block_ids[0]
+        } else {
+            panic!("used LocalBlockData::block_id() for fragmented block");
+        }
+    }
+
+    #[inline(always)]
+    fn fragment_block_id(&self, idx: usize) -> BlockId {
+        if self.block_ids.len() != 1 {
+            self.block_ids[idx]
+        } else {
+            tracing::error!("Backtrace: {}", std::backtrace::Backtrace::force_capture());
+            panic!("used LocalBlockData::fragment_block_id() for non-fragmented block");
+        }
     }
 
     fn block_set_id(&self) -> usize {
@@ -89,6 +103,14 @@ impl<S: Storage, R: LogicalResources> BlockDataExt<S> for LogicalBlockData<S, R>
     }
 
     fn is_fully_contiguous(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn is_fragmented(&self) -> bool {
+        unimplemented!()
+    }
+
+    fn num_fragments(&self) -> usize {
         unimplemented!()
     }
 
