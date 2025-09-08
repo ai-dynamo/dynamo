@@ -29,9 +29,9 @@ spec:
         command: ["python", "-m", "benchmarks.profiler.profile_sla"]
         args:
           - --config
-          - /workspace/data/configs/disagg.yaml
+          - /data/configs/disagg.yaml
           - --output-dir
-          - /workspace/data/profiling_results
+          - /data/profiling_results
           - --namespace
           - ${NAMESPACE}
           - --backend
@@ -50,7 +50,7 @@ spec:
           - "20"
         volumeMounts:
           - name: output-volume
-            mountPath: /workspace/data
+            mountPath: /data
       restartPolicy: Never
       volumes:
         - name: output-volume

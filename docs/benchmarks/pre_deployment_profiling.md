@@ -24,6 +24,21 @@ We assume there is no piggy-backed prefill requests in the decode engine. Even i
 
 The script will first detect the number of available GPUs on the current nodes (multi-node engine not supported yet). Then, it will profile the prefill and decode performance with different TP sizes. For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), the script directly measures the TTFT for a request with given isl without kv-reusing. For decode, since the ITL (or iteration time) is relevant with how many requests are in-flight, the script will measure the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script will enable kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL.
 
+### GPU Resource Usage
+
+**Important**: Profiling tests different tensor parallelism (TP) configurations **sequentially**, not in parallel. This means:
+
+- **One TP configuration at a time**: Each tensor parallelism size (TP1, TP2, TP4, TP8, etc.) is tested individually
+- **Full GPU access**: Each TP configuration gets exclusive access to all available GPUs during its profiling run
+- **Resource isolation**: No interference between different TP configurations during testing
+- **Accurate measurements**: Each configuration is profiled under identical resource conditions
+
+This sequential approach ensures:
+- **Precise performance profiling** without resource conflicts
+- **Consistent GPU allocation** for fair comparison across TP sizes
+- **Reliable cleanup** between different TP configuration tests
+- **Accurate SLA compliance verification** for each configuration
+
 After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
 
 ![Prefill Performance](../../docs/images/h100_prefill_performance.png)

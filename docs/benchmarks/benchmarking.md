@@ -130,6 +130,23 @@ The script automatically:
 4. **Generates** comparison plots using your custom labels in `./benchmarks/results/plots/`
 5. **Cleans up** deployments when complete
 
+### GPU Resource Usage
+
+**Important**: Models are deployed and benchmarked **sequentially**, not in parallel. This means:
+
+- **One deployment at a time**: Each DynamoGraphDeployment is deployed, benchmarked, and cleaned up before the next one starts
+- **Full GPU access**: Each deployment gets exclusive access to all available GPUs during its benchmark run
+- **Resource isolation**: No resource conflicts between different deployment configurations
+- **Fair comparison**: Each configuration is tested under identical resource conditions
+
+This sequential approach ensures:
+- **Accurate performance measurements** without interference between deployments
+- **Consistent resource allocation** for fair comparison across different configurations
+- **Simplified resource management** without complex GPU scheduling
+- **Reliable cleanup** between benchmark runs
+
+If you need to benchmark multiple configurations simultaneously, consider using separate Kubernetes namespaces or running benchmarks on different clusters.
+
 ### Results Clearing Behavior
 
 **Important**: The benchmark script automatically clears the output directory before each run to ensure clean, reproducible results. This means:
