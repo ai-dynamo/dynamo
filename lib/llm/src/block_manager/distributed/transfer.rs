@@ -14,6 +14,7 @@ use crate::block_manager::{
     block::{
         Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
         data::local::LocalBlockData,
+        data::local::LocalBlockDataBase,
         locality,
         transfer::{TransferContext, WriteTo, WriteToStrategy},
     },
@@ -26,14 +27,13 @@ use async_trait::async_trait;
 use std::{any::Any, sync::Arc};
 
 type LocalBlock<S, M> = Block<S, locality::Local, M>;
-type LocalBlockDataList<S> = Vec<LocalBlockData<S>>;
 
 /// A handler for all block transfers. Wraps a group of [`BlockTransferPoolManager`]s.
 #[derive(Clone)]
 pub struct BlockTransferHandler {
-    device: Option<LocalBlockDataList<DeviceStorage>>,
-    host: Option<LocalBlockDataList<PinnedStorage>>,
-    disk: Option<LocalBlockDataList<DiskStorage>>,
+    device: Option<LocalBlockDataBase<DeviceStorage>>,
+    host: Option<LocalBlockDataBase<PinnedStorage>>,
+    disk: Option<LocalBlockDataBase<DiskStorage>>,
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     // add worker-connector scheduler client here
@@ -49,37 +49,35 @@ impl BlockTransferHandler {
         // add worker-connector scheduler client here
     ) -> Result<Self> {
         Ok(Self {
-            device: Self::get_local_data(device_blocks),
-            host: Self::get_local_data(host_blocks),
-            disk: Self::get_local_data(disk_blocks),
+            device: Self::get_local_data_base(device_blocks),
+            host: Self::get_local_data_base(host_blocks),
+            disk: Self::get_local_data_base(disk_blocks),
             context,
             scheduler_client,
         })
     }
 
-    fn get_local_data<S: Storage>(
+    fn get_local_data_base<S: Storage>(
         blocks: Option<Vec<LocalBlock<S, BasicMetadata>>>,
-    ) -> Option<LocalBlockDataList<S>> {
-        blocks.map(|blocks| {
-            blocks
-                .into_iter()
-                .map(|b| {
-                    let block_data = b.block_data() as &dyn Any;
-
-                    block_data
-                        .downcast_ref::<LocalBlockData<S>>()
-                        .unwrap()
-                        .clone()
-                })
-                .collect()
-        })
+    ) -> Option<LocalBlockDataBase<S>> {
+        let Some(vec) = blocks else { return None };
+        if let Some(b) = vec.first() {
+            let block_data = b.block_data() as &dyn Any;
+            let block_data = block_data
+                .downcast_ref::<LocalBlockData<S>>()
+                .unwrap()
+                .clone();
+            Some(block_data.base())
+        } else {
+            None
+        }
     }
 
     /// Initiate a transfer between two pools.
     async fn begin_transfer<Source, Target>(
         &self,
-        source_pool_list: &Option<LocalBlockDataList<Source>>,
-        target_pool_list: &Option<LocalBlockDataList<Target>>,
+        source_pool_base: &Option<LocalBlockDataBase<Source>>,
+        target_pool_base: &Option<LocalBlockDataBase<Target>>,
         request: BlockTransferRequest,
     ) -> Result<tokio::sync::oneshot::Receiver<()>>
     where
@@ -93,23 +91,23 @@ impl BlockTransferHandler {
         LocalBlockData<Source>: BlockDataProvider<Locality = locality::Local>,
         LocalBlockData<Target>: BlockDataProviderMut<Locality = locality::Local>,
     {
-        let Some(source_pool_list) = source_pool_list else {
+        let Some(source_pool_base) = source_pool_base else {
             return Err(anyhow::anyhow!("Source pool manager not initialized"));
         };
-        let Some(target_pool_list) = target_pool_list else {
+        let Some(target_pool_base) = target_pool_base else {
             return Err(anyhow::anyhow!("Target pool manager not initialized"));
         };
 
         // Extract the `from` and `to` indices from the request.
-        let source_idxs = request.blocks().iter().map(|(from, _)| *from);
-        let target_idxs = request.blocks().iter().map(|(_, to)| *to);
+        let source_idxs = request.blocks().iter().map(|(from, _)| from);
+        let target_idxs = request.blocks().iter().map(|(_, to)| to);
 
         // Get the blocks corresponding to the indices.
         let sources: Vec<LocalBlockData<Source>> = source_idxs
-            .map(|idx| source_pool_list[idx].clone())
+            .map(|idx| source_pool_base.get_data(idx.clone()))
             .collect();
         let mut targets: Vec<LocalBlockData<Target>> = target_idxs
-            .map(|idx| target_pool_list[idx].clone())
+            .map(|idx| target_pool_base.get_data(idx.clone()))
             .collect();
 
         // Perform the transfer, and return the notifying channel.

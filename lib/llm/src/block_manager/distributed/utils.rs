@@ -3,6 +3,7 @@
 
 use derive_getters::Getters;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::block_manager::connector::protocol::LeaderTransferRequest;
 
@@ -33,7 +34,7 @@ pub struct ConnectorRequestLeader {
 pub struct BlockTransferRequest {
     pub from_pool: BlockTransferPool,
     pub to_pool: BlockTransferPool,
-    pub blocks: Vec<(usize, usize)>,
+    pub blocks: Vec<(SmallVec<[usize; 1]>, SmallVec<[usize; 1]>)>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector_req: Option<LeaderTransferRequest>,
@@ -49,7 +50,15 @@ impl BlockTransferRequest {
         Self {
             from_pool,
             to_pool,
-            blocks,
+            blocks: blocks
+                .into_iter()
+                .map(|(src, dst)| {
+                    (
+                        [src].iter().map(|x| *x).collect(),
+                        [dst].iter().map(|x| *x).collect(),
+                    )
+                })
+                .collect(),
             connector_req: None,
         }
     }
@@ -63,7 +72,15 @@ impl BlockTransferRequest {
         Self {
             from_pool,
             to_pool,
-            blocks,
+            blocks: blocks
+                .into_iter()
+                .map(|(src, dst)| {
+                    (
+                        [src].iter().map(|x| *x).collect(),
+                        [dst].iter().map(|x| *x).collect(),
+                    )
+                })
+                .collect(),
             connector_req: Some(connector_req),
         }
     }

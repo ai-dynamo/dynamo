@@ -206,6 +206,12 @@ pub struct KvBlockManagerConfig {
     /// Channel to reset the block manager to a specific cache level
     #[builder(default)]
     pub block_reset_channel: Option<BlockResetChannel>,
+
+    /// Ratio between offload block size and engine block size
+    /// Offload blocks are larger to enable more efficient I/O operations
+    #[builder(default = "32")]
+    #[validate(range(min = 1))]
+    pub offload_block_size_ratio: usize,
 }
 
 impl KvBlockManagerConfig {

@@ -113,18 +113,50 @@ where
 
     for layer_idx in layer_range {
         for outer_idx in 0..src_data.num_outer_dims() {
-            let src_view = src_data.layer_view(layer_idx, outer_idx)?;
-            let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+            if src_data.is_fragmented() {
+                let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+                let mut dst_ptr = unsafe { dst_view.as_mut_ptr() };
+                let n = src_data.num_fragments();
 
-            debug_assert_eq!(src_view.size(), dst_view.size());
+                for i in 0..n {
+                    let src_view = src_data.layer_view_fragment(i, layer_idx, outer_idx)?;
+                    debug_assert_eq!(src_view.size() * n, dst_view.size());
 
-            unsafe {
-                memcpy_fn(
-                    src_view.as_ptr(),
-                    dst_view.as_mut_ptr(),
-                    src_view.size(),
-                    stream,
-                )?;
+                    unsafe {
+                        memcpy_fn(src_view.as_ptr(), dst_ptr, src_view.size(), stream)?;
+
+                        dst_ptr = dst_ptr.add(src_view.size());
+                    }
+                }
+            } else if dst_data.is_fragmented() {
+                let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                let mut src_ptr = unsafe { src_view.as_ptr() };
+                let n = dst_data.num_fragments();
+
+                for i in 0..n {
+                    let mut dst_view = dst_data.layer_view_fragment_mut(i, layer_idx, outer_idx)?;
+                    debug_assert_eq!(src_view.size(), dst_view.size() * n);
+
+                    unsafe {
+                        memcpy_fn(src_ptr, dst_view.as_mut_ptr(), dst_view.size(), stream)?;
+
+                        src_ptr = src_ptr.add(dst_view.size());
+                    }
+                }
+            } else {
+                let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+
+                debug_assert_eq!(src_view.size(), dst_view.size());
+
+                unsafe {
+                    memcpy_fn(
+                        src_view.as_ptr(),
+                        dst_view.as_mut_ptr(),
+                        src_view.size(),
+                        stream,
+                    )?;
+                }
             }
         }
     }
