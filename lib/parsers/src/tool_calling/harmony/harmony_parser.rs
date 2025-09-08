@@ -29,11 +29,7 @@ pub fn parse_tool_calls_harmony(
     // Check if tool call start tokens are present, if not return everything as normal text
     // Start Token: "<|start|>assistant<|channel|>commentary" should be present in the text if tool calls are present
     // End Token: "<|call|>"
-    if !config
-        .tool_call_start_tokens
-        .iter()
-        .any(|token| trimmed.contains(token))
-    {
+    if !detect_tool_call_start_harmony(text, config) {
         return Ok((vec![], Some(trimmed)));
     }
 
@@ -158,6 +154,17 @@ pub fn parse_tool_calls_harmony(
     Ok((res, Some(normal_text.to_string())))
 }
 
+pub fn detect_tool_call_start_harmony(chunk: &str, config: &JsonParserConfig) -> bool {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    config
+        .tool_call_start_tokens
+        .iter()
+        .any(|token| trimmed.contains(token))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +275,34 @@ mod tests {
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "celsius");
+    }
+}
+
+#[cfg(test)]
+mod detect_parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_tool_call_start_harmony_chunk_with_tool_call_start_token() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_harmony(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_harmony_chunk_without_tool_call_start_token() {
+        let text = r#"<|channel|>commentary to=functions.get_current_weather"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
+            tool_call_end_tokens: vec!["<|call|>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_harmony(text, &config);
+        assert!(!result);
     }
 }
