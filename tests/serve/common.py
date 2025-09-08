@@ -3,62 +3,58 @@
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
-import os
-from dataclasses import dataclass
-from typing import Any, Callable, List
+import logging
+from typing import Any, Dict, Optional
 
-from tests.utils.deployment_graph import Payload
+from tests.utils.client import send_request
+from tests.utils.engine_process import EngineConfig, EngineProcess
 
-# Common text prompt used across tests
-TEXT_PROMPT = "Tell me a short joke about AI."
-
-
-@dataclass
-class EngineConfig:
-    """Base configuration for engine test scenarios"""
-
-    name: str
-    directory: str
-    script_name: str
-    marks: List[Any]
-    endpoints: List[str]
-    response_handlers: List[Callable[[Any], str]]
-    model: str
-    timeout: int = 600
-    delayed_start: int = 0
+DEFAULT_TIMEOUT = 10
 
 
-def create_payload_for_config(config: EngineConfig) -> Payload:
-    """Create a standard payload using the model from the engine config.
+def run_serve_deployment(
+    config: EngineConfig,
+    request: Any,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> None:
+    """Run a standard serve deployment test for any EngineConfig.
 
-    This provides the default implementation for text-only models.
+    - Launches the engine via EngineProcess.from_script
+    - Builds a payload (with optional override/mutator)
+    - Iterates configured endpoints and validates responses and logs
     """
-    expected_response = (
-        ["Hello world"]
-        if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1"
-        else ["AI"]
-    )
-    return Payload(
-        payload_chat={
-            "model": config.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": TEXT_PROMPT,
-                }
-            ],
-            "max_tokens": 150,
-            "temperature": 0.1,
-            "stream": False,
-        },
-        payload_completions={
-            "model": config.model,
-            "prompt": TEXT_PROMPT,
-            "max_tokens": 150,
-            "temperature": 0.1,
-            "stream": False,
-        },
-        repeat_count=3,
-        expected_log=[],
-        expected_response=expected_response,
-    )
+
+    logger = logging.getLogger(request.node.name)
+    logger.info("Starting %s test_deployment", config.name)
+
+    assert (
+        config.request_payloads is not None and len(config.request_payloads) > 0
+    ), "request_payloads must be provided on EngineConfig"
+
+    logger.info("Using model: %s", config.model)
+    logger.info("Script: %s", config.script_name)
+
+    with EngineProcess.from_script(
+        config, request, extra_env=extra_env
+    ) as server_process:
+        for payload in config.request_payloads:
+            logger.info("TESTING: Payload: %s", payload.__class__.__name__)
+
+            payload_item = payload
+            # inject model
+            if hasattr(payload_item, "with_model"):
+                payload_item = payload_item.with_model(config.model)
+
+            if payload_item.port != config.models_port:
+                logger.warning(
+                    f"Current payload port: {payload_item.port} doesn't match the model port: {config.models_port}"
+                )
+
+            for _ in range(payload_item.repeat_count):
+                response = send_request(
+                    url=payload_item.url(),
+                    payload=payload_item.body,
+                    timeout=payload_item.timeout,
+                    method=payload_item.method,
+                )
+                server_process.check_response(payload_item, response)

@@ -3,177 +3,86 @@
 
 import logging
 import os
-import time
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import EngineConfig
-from tests.serve.common import create_payload_for_config as base_create_payload
-from tests.utils.deployment_graph import (
-    Payload,
-    chat_completions_response_handler,
-    completions_response_handler,
+from tests.serve.common import run_serve_deployment
+from tests.utils.engine_process import EngineConfig
+from tests.utils.payload_builder import (
+    chat_payload,
+    chat_payload_default,
+    completion_payload_default,
+    metric_payload_default,
 )
-from tests.utils.engine_process import EngineProcess
 
 logger = logging.getLogger(__name__)
-
-
-def create_payload_for_config(config: "VLLMConfig") -> Payload:
-    """Create a payload using the model from the vLLM config"""
-    if config.name in ["multimodal_agg_llava", "multimodal_agg_qwen"]:
-        # Special handling for multimodal models
-        return Payload(
-            payload_chat={
-                "model": config.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "What is in this image?"},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                                },
-                            },
-                        ],
-                    }
-                ],
-                "max_tokens": 300,
-                "temperature": 0.0,
-                "stream": False,
-            },
-            repeat_count=1,
-            expected_log=[],
-            expected_response=["bus"],
-        )
-    elif config.name == "multimodal_video_agg":
-        # Special handling for multimodal models
-        return Payload(
-            payload_chat={
-                "model": config.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Describe the video in detail"},
-                            {
-                                "type": "video_url",
-                                "video_url": {
-                                    "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                                },
-                            },
-                        ],
-                    }
-                ],
-                "max_tokens": 300,
-                "stream": False,
-            },
-            repeat_count=1,
-            expected_log=[],
-            expected_response=["rabbit"],
-        )
-    else:
-        # Use base implementation for standard text models
-        return base_create_payload(config)
 
 
 @dataclass
 class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
 
-    args: Optional[List[str]] = None
+    stragglers: list[str] = field(default_factory=lambda: ["VLLM:EngineCore"])
 
 
-class VLLMProcess(EngineProcess):
-    """Simple process manager for vllm shell scripts"""
-
-    def __init__(self, config: VLLMConfig, request):
-        self.port = 8000
-        self.config = config
-        self.dir = config.directory
-        script_path = os.path.join(self.dir, "launch", config.script_name)
-
-        if not os.path.exists(script_path):
-            raise FileNotFoundError(f"vLLM script not found: {script_path}")
-
-        command = ["bash", script_path]
-        if config.args:
-            command.extend(config.args)
-
-        super().__init__(
-            command=command,
-            timeout=config.timeout,
-            display_output=True,
-            working_dir=self.dir,
-            health_check_ports=[],  # Disable port health check
-            health_check_urls=[
-                (f"http://localhost:{self.port}/v1/models", self._check_models_api)
-            ],
-            delayed_start=config.delayed_start,
-            terminate_existing=False,  # If true, will call all bash processes including myself
-            stragglers=[],  # Don't kill any stragglers automatically
-            log_dir=request.node.name,
-        )
-
+vllm_dir = os.environ.get("VLLM_DIR", "/workspace/components/backends/vllm")
 
 # vLLM test configurations
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
-        directory="/workspace/components/backends/vllm",
+        directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        endpoints=["v1/chat/completions", "v1/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-            completions_response_handler,
-        ],
+        marks=[pytest.mark.gpu_1],
         model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6),
+        ],
     ),
     "agg-router": VLLMConfig(
         name="agg-router",
-        directory="/workspace/components/backends/vllm",
+        directory=vllm_dir,
         script_name="agg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-        endpoints=["v1/chat/completions", "v1/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-            completions_response_handler,
-        ],
+        marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(
+                expected_log=[
+                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+\)",
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
+                    r"Selected worker: \d+, logit: ",
+                ]
+            )
+        ],
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+        },
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
-        directory="/workspace/components/backends/vllm",
+        directory=vllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-        endpoints=["v1/chat/completions", "v1/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-            completions_response_handler,
-        ],
+        marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
     ),
     "deepep": VLLMConfig(
         name="deepep",
-        directory="/workspace/components/backends/vllm",
+        directory=vllm_dir,
         script_name="dsr1_dep.sh",
         marks=[
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
         ],
-        endpoints=["v1/chat/completions", "v1/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-            completions_response_handler,
-        ],
         model="deepseek-ai/DeepSeek-V2-Lite",
-        args=[
+        script_args=[
             "--model",
             "deepseek-ai/DeepSeek-V2-Lite",
             "--num-nodes",
@@ -184,46 +93,84 @@ vllm_configs = {
             "2",
         ],
         timeout=700,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
     ),
     "multimodal_agg_llava": VLLMConfig(
         name="multimodal_agg_llava",
         directory="/workspace/examples/multimodal",
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-        endpoints=["v1/chat/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-        ],
+        marks=[pytest.mark.gpu_2],
         model="llava-hf/llava-1.5-7b-hf",
-        args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+                temperature=0.0,
+            )
+        ],
     ),
     "multimodal_agg_qwen": VLLMConfig(
         name="multimodal_agg_qwen",
         directory="/workspace/examples/multimodal",
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-        endpoints=["v1/chat/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-        ],
+        marks=[pytest.mark.gpu_2],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
-        args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
+        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         timeout=360,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["bus"],
+            )
+        ],
     ),
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
         directory="/workspace/examples/multimodal",
         script_name="video_agg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-        endpoints=["v1/chat/completions"],
-        response_handlers=[
-            chat_completions_response_handler,
-        ],
+        marks=[pytest.mark.gpu_2],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
         delayed_start=0,
-        args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
+        script_args=["--model", "llava-hf/LLaVA-NeXT-Video-7B-hf"],
         timeout=360,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {
+                            "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["rabbit"],
+            )
+        ],
     ),
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
@@ -231,13 +178,9 @@ vllm_configs = {
     #     directory="/workspace/examples/multimodal",
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
-    #     endpoints=["v1/chat/completions"],
-    #     response_handlers=[
-    #         chat_completions_response_handler,
-    #     ],
     #     model="llava-hf/llava-1.5-7b-hf",
     #     delayed_start=45,
-    #     args=["--model", "llava-hf/llava-1.5-7b-hf"],
+    #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
     # ),
 }
 
@@ -253,41 +196,11 @@ def vllm_config_test(request):
     return vllm_configs[request.param]
 
 
+@pytest.mark.vllm
 @pytest.mark.e2e
 def test_serve_deployment(vllm_config_test, request, runtime_services):
     """
     Test dynamo serve deployments with different graph configurations.
     """
-
-    # runtime_services is used to start nats and etcd
-
-    logger = logging.getLogger(request.node.name)
-    logger.info("Starting test_deployment")
-
     config = vllm_config_test
-    payload = create_payload_for_config(config)
-
-    logger.info("Using model: %s", config.model)
-    logger.info("Script: %s", config.script_name)
-
-    with VLLMProcess(config, request) as server_process:
-        for endpoint, response_handler in zip(
-            config.endpoints, config.response_handlers
-        ):
-            url = f"http://localhost:{server_process.port}/{endpoint}"
-            start_time = time.time()
-            elapsed = 0.0
-
-            request_body = (
-                payload.payload_chat
-                if endpoint == "v1/chat/completions"
-                else payload.payload_completions
-            )
-
-            for _ in range(payload.repeat_count):
-                elapsed = time.time() - start_time
-
-                response = server_process.send_request(
-                    url, payload=request_body, timeout=config.timeout - elapsed
-                )
-                server_process.check_response(payload, response, response_handler)
+    run_serve_deployment(config, request)
