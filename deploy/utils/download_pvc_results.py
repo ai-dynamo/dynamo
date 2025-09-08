@@ -23,7 +23,7 @@ Creates an access pod, copies files, and exits. You can optionally exclude YAML 
 
 Usage:
     python3 download_pvc_results.py --namespace <namespace> --output-dir <local_directory> \
-        --folder </absolute/folder/in/pvc> [--no-config]
+        --folder /data/<folder/in/pvc> [--no-config]
 """
 
 import argparse
@@ -182,10 +182,21 @@ def main():
     parser.add_argument(
         "--folder",
         required=True,
-        help="Absolute folder path in the PVC to download, e.g. /profiling_results or /benchmarking_results",
+        help="Absolute folder path in the PVC to download, must start with /data/, e.g. /data/profiling_results or /data/benchmarking_results",
     )
 
     args = parser.parse_args()
+
+    # Validate folder path starts with /data/
+    if not args.folder.startswith("/data/"):
+        print("❌ Error: Folder path must start with '/data/'")
+        print(f"   Provided: {args.folder}")
+        print("   Quick Fix: Add '/data/' prefix to your path")
+        print("   Examples:")
+        print("     /profiling_results → /data/profiling_results")
+        print("     /benchmarking_results → /data/benchmarking_results")
+        print("     /configs → /data/configs")
+        sys.exit(1)
 
     print("📥 PVC Results Download")
     print("=" * 40)
