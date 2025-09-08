@@ -60,7 +60,7 @@ impl ReasoningParser for GraniteReasoningParser {
         }
 
         // The text is considered to be in a reasoning block.
-        let processed_text = text.replace(think_start_token, "").trim().to_string();
+        let processed_text = text.replacen(think_start_token, "", 1).trim().to_string();
 
         if !processed_text.contains(think_end_token) {
             // Assume reasoning was truncated before `think_end_token`
@@ -130,7 +130,7 @@ impl ReasoningParser for GraniteReasoningParser {
             .unwrap_or(self.think_end_tokens.first().unwrap());
 
         if !self._stripped_think_start && current_text.contains(think_start_token) {
-            current_text = current_text.replace(think_start_token, "");
+            current_text = current_text.replacen(think_start_token, "", 1);
             self._buffer = current_text.to_string();
             self._stripped_think_start = true;
             self._in_reasoning = true;
@@ -309,7 +309,10 @@ mod tests {
         let text = "Here's my thought process: I think Here's my thought process: is confusing. Here's my response: Done.";
         let result = parser.parse_reasoning_streaming_incremental(text, &[]);
 
-        assert_eq!(result.reasoning_text, " I think  is confusing. ");
+        assert_eq!(
+            result.reasoning_text,
+            " I think Here's my thought process: is confusing. "
+        );
         assert_eq!(result.normal_text, " Done.");
     }
 
