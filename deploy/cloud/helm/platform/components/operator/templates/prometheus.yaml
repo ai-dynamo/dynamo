@@ -34,7 +34,7 @@ spec:
     matchLabels:
       nvidia.com/dynamo-component-type: frontend
       nvidia.com/metrics-enabled: "true"
---- 
+---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
@@ -56,7 +56,7 @@ spec:
     matchLabels:
       nvidia.com/dynamo-component-type: worker
       nvidia.com/metrics-enabled: "true"
---- 
+---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
