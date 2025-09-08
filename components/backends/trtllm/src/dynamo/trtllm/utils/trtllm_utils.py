@@ -283,7 +283,7 @@ def cmd_line_args():
         type=str,
         default=None,
         choices=get_reasoning_parser_names(),
-        help="Reasoning parser name for the model.",
+        help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
 
     args = parser.parse_args()
