@@ -24,8 +24,6 @@ const DEFAULT_SYSTEM_LIVE_PATH: &str = "/live";
 /// Default health check configuration
 /// This is the wait time before sending canary health checks when no activity is detected
 pub const DEFAULT_CANARY_WAIT_TIME_SECS: u64 = 10;
-/// Default threshold for considering responses stale
-pub const DEFAULT_HEALTH_CHECK_RESPOND_STALE_THRESHOLD_SECS: u64 = 5;
 /// Default timeout for individual health check requests
 pub const DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS: u64 = 3;
 
@@ -114,15 +112,6 @@ pub struct RuntimeConfig {
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub starting_health_status: HealthStatus,
 
-    /// Use Endpoint Health Status
-    /// When using endpoint health status, health status
-    /// is the AND of individual endpoint health
-    /// Set this at runtime with environment variable DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-    /// with the list of endpoints to consider for system health
-    #[builder(default = "vec![]")]
-    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub use_endpoint_health_status: Vec<String>,
-
     /// Health endpoint paths
     /// Set this at runtime with environment variable DYN_SYSTEM_HEALTH_PATH
     #[builder(default = "DEFAULT_SYSTEM_HEALTH_PATH.to_string()")]
@@ -145,12 +134,6 @@ pub struct RuntimeConfig {
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub canary_wait_time_secs: u64,
 
-    /// Health check respond stale threshold in seconds
-    /// Set this at runtime with environment variable DYN_HEALTH_CHECK_RESPOND_STALE_THRESHOLD
-    #[builder(default = "DEFAULT_HEALTH_CHECK_RESPOND_STALE_THRESHOLD_SECS")]
-    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub health_check_respond_stale_threshold_secs: u64,
-
     /// Health check request timeout in seconds
     /// Set this at runtime with environment variable DYN_HEALTH_CHECK_REQUEST_TIMEOUT
     #[builder(default = "DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS")]
@@ -172,11 +155,6 @@ impl fmt::Display for RuntimeConfig {
         write!(f, "system_enabled={}", self.system_enabled)?;
         write!(
             f,
-            "use_endpoint_health_status={:?}",
-            self.use_endpoint_health_status
-        )?;
-        write!(
-            f,
             "starting_health_status={:?}",
             self.starting_health_status
         )?;
@@ -184,11 +162,6 @@ impl fmt::Display for RuntimeConfig {
         write!(f, ", system_live_path={}", self.system_live_path)?;
         write!(f, ", health_check_enabled={}", self.health_check_enabled)?;
         write!(f, ", canary_wait_time_secs={}", self.canary_wait_time_secs)?;
-        write!(
-            f,
-            ", health_check_respond_stale_threshold_secs={}",
-            self.health_check_respond_stale_threshold_secs
-        )?;
         write!(
             f,
             ", health_check_request_timeout_secs={}",
@@ -227,7 +200,6 @@ impl RuntimeConfig {
                             "HOST" => "system_host",
                             "PORT" => "system_port",
                             "ENABLED" => "system_enabled",
-                            "USE_ENDPOINT_HEALTH_STATUS" => "use_endpoint_health_status",
                             "STARTING_HEALTH_STATUS" => "starting_health_status",
                             "HEALTH_PATH" => "system_health_path",
                             "LIVE_PATH" => "system_live_path",
@@ -283,6 +255,15 @@ impl RuntimeConfig {
     ///
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
+        // Check for deprecated environment variable
+        if std::env::var("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS").is_ok() {
+            tracing::warn!(
+                "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. \
+                System health is now determined by endpoints that register with health check payloads. \
+                Please update your configuration to register health check payloads directly on endpoints."
+            );
+        }
+
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;
         Ok(config)
@@ -302,13 +283,10 @@ impl RuntimeConfig {
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
-            use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
-            health_check_respond_stale_threshold_secs:
-                DEFAULT_HEALTH_CHECK_RESPOND_STALE_THRESHOLD_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
         }
     }
@@ -336,13 +314,10 @@ impl Default for RuntimeConfig {
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
-            use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
-            health_check_respond_stale_threshold_secs:
-                DEFAULT_HEALTH_CHECK_RESPOND_STALE_THRESHOLD_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
         }
     }
@@ -529,17 +504,6 @@ mod tests {
             || {
                 let config = RuntimeConfig::from_settings().unwrap();
                 assert!(config.starting_health_status == HealthStatus::Ready);
-            },
-        );
-    }
-
-    #[test]
-    fn test_system_use_endpoint_health_status() {
-        temp_env::with_vars(
-            vec![("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some("[\"ready\"]"))],
-            || {
-                let config = RuntimeConfig::from_settings().unwrap();
-                assert!(config.use_endpoint_health_status == vec!["ready"]);
             },
         );
     }

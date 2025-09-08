@@ -10,10 +10,10 @@ from dynamo.health_check import HealthCheckPayload
 class TrtllmHealthCheckPayload(HealthCheckPayload):
     """
     TRT-LLM-specific health check payload.
-    
+
     Provides TRT-LLM defaults and inherits environment override support from base class.
     """
-    
+
     def __init__(self):
         """
         Initialize TRT-LLM health check payload with TRT-LLM-specific defaults.

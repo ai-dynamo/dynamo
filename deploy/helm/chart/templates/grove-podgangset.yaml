@@ -109,8 +109,6 @@ spec:
               value: "true"
             - name: DYN_SYSTEM_PORT
               value: "{{ $.Values.dynamoSystemPort | default 9090 }}"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: "[\"generate\"]"
             {{- end }}
             {{- if $serviceSpec.envFromSecret }}
             envFrom:

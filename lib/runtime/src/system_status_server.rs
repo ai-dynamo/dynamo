@@ -161,29 +161,8 @@ pub async fn spawn_system_status_server(
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Get basic health status
     let system_health = state.drt().system_health.lock().unwrap();
-    let (healthy, endpoints_basic) = system_health.get_health_status();
+    let (healthy, endpoints) = system_health.get_health_status();
     let uptime = Some(system_health.uptime());
-
-    // Enhanced: Add response time information for endpoints with health check payloads
-    let mut endpoint_details = serde_json::Map::new();
-
-    // Check if we have health check targets registered
-    let has_health_checks = system_health.has_health_check_targets();
-
-    if has_health_checks {
-        // Include detailed response time info for monitored endpoints
-        for (endpoint, status_str) in &endpoints_basic {
-            // Create endpoint detail with status
-            let mut details = serde_json::Map::new();
-            details.insert("status".to_string(), json!(status_str));
-            endpoint_details.insert(endpoint.clone(), json!(details));
-        }
-    } else {
-        // Simple format for backwards compatibility when no health checks configured
-        for (endpoint, status) in endpoints_basic {
-            endpoint_details.insert(endpoint, json!(status));
-        }
-    }
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -195,8 +174,7 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let response = json!({
         "status": healthy_string,
         "uptime": uptime,
-        "endpoints": endpoint_details,
-        "has_active_monitoring": has_health_checks
+        "endpoints": endpoints,
     });
 
     tracing::trace!("Response {}", response.to_string());
@@ -566,15 +544,13 @@ mod integration_tests {
     #[tokio::test]
     async fn test_health_endpoint_with_changing_health_status() {
         // Test health endpoint starts in not ready status, then becomes ready
-        // when endpoints are created (DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=generate)
+        // when endpoints register with health check payloads
         const ENDPOINT_NAME: &str = "generate";
-        const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
         temp_env::async_with_vars(
             [
                 ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
-                ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -631,7 +607,8 @@ mod integration_tests {
                 // Create the ingress and start the endpoint service
                 let ingress = Ingress::for_engine(std::sync::Arc::new(TestHandler)).unwrap();
 
-                // Start the service and endpoint
+                // Start the service and endpoint with a health check payload
+                // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
                     let _ = component
                         .service_builder()
@@ -641,6 +618,9 @@ mod integration_tests {
                         .endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)
+                        .health_check_payload(serde_json::json!({
+                            "test": "health_check"
+                        }))
                         .start()
                         .await;
                 });
@@ -737,14 +717,9 @@ mod integration_tests {
                 ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
-                (
-                    "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-                    Some("[\"test.endpoint\"]"),
-                ),
                 // Enable health check with short intervals for testing
                 ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
                 ("DYN_CANARY_WAIT_TIME", Some("1")), // Send canary after 1 second of inactivity
-                ("DYN_HEALTH_CHECK_RESPOND_STALE_THRESHOLD", Some("1")), // Consider stale after 1 second
                 ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("1")), // Immediately timeout to mimic unresponsiveness
                 ("RUST_LOG", Some("info")),                      // Enable logging for test
             ],

@@ -83,9 +83,7 @@ pub struct HealthCheckTarget {
 }
 
 /// Current Health Status
-/// If use_endpoint_health_status is set then
-/// initialize the endpoint_health hashmap to the
-/// starting health status
+/// System health is determined by all endpoints that have registered health checks
 #[derive(Clone)]
 pub struct SystemHealth {
     system_health: HealthStatus,
@@ -99,7 +97,6 @@ pub struct SystemHealth {
     /// Using a channel ensures no registrations are lost.
     new_endpoint_tx: mpsc::UnboundedSender<String>,
     new_endpoint_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
-    use_endpoint_health_status: Vec<String>,
     health_path: String,
     live_path: String,
     start_time: Instant,
@@ -109,26 +106,19 @@ pub struct SystemHealth {
 impl SystemHealth {
     pub fn new(
         starting_health_status: HealthStatus,
-        use_endpoint_health_status: Vec<String>,
         health_path: String,
         live_path: String,
     ) -> Self {
-        let mut endpoint_health = HashMap::new();
-        for endpoint in &use_endpoint_health_status {
-            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
-        }
-
         // Create the channel for endpoint registration notifications
         let (tx, rx) = mpsc::unbounded_channel();
 
         SystemHealth {
             system_health: starting_health_status,
-            endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
+            endpoint_health: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(std::sync::Mutex::new(Some(rx))),
-            use_endpoint_health_status,
             health_path,
             live_path,
             start_time: Instant::now(),
@@ -145,7 +135,9 @@ impl SystemHealth {
     }
 
     /// Returns the overall health status and endpoint health statuses
+    /// System health is determined by ALL endpoints that have registered health checks
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
+        let health_check_targets = self.health_check_targets.read().unwrap();
         let endpoint_health = self.endpoint_health.read().unwrap();
         let mut endpoints: HashMap<String, String> = HashMap::new();
 
@@ -160,13 +152,17 @@ impl SystemHealth {
             );
         }
 
-        let healthy = if !self.use_endpoint_health_status.is_empty() {
-            self.use_endpoint_health_status.iter().all(|endpoint| {
-                endpoint_health
-                    .get(endpoint)
-                    .is_some_and(|status| *status == HealthStatus::Ready)
-            })
+        // If we have registered health check targets, use them to determine health
+        let healthy = if !health_check_targets.is_empty() {
+            health_check_targets
+                .iter()
+                .all(|(endpoint_subject, _target)| {
+                    endpoint_health
+                        .get(endpoint_subject)
+                        .is_some_and(|status| *status == HealthStatus::Ready)
+                })
         } else {
+            // No health check targets registered, use simple system health
             self.system_health == HealthStatus::Ready
         };
 

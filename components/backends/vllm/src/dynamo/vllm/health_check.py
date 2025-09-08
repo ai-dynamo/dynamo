@@ -10,10 +10,10 @@ from dynamo.health_check import HealthCheckPayload
 class VllmHealthCheckPayload(HealthCheckPayload):
     """
     vLLM-specific health check payload.
-    
+
     Provides vLLM defaults and inherits environment override support from base class.
     """
-    
+
     def __init__(self):
         """
         Initialize vLLM health check payload with vLLM-specific defaults.
