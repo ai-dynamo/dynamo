@@ -153,6 +153,7 @@ filterwarnings = [
     "ignore:.*unclosed.*socket.*:ResourceWarning", # Ignore unclosed socket warnings
     "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
+    "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
 ]
 
 
