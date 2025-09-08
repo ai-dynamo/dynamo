@@ -7,6 +7,7 @@ on:
   push:
     branches:
     - main
+    - release/*.*.*
   pull_request:
 
 # Cancel any previous check runs for the same pull request to avoid redundant workflows.
