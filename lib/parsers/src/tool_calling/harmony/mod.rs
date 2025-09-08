@@ -4,4 +4,4 @@
 pub mod harmony_parser;
 
 pub use super::{config, response};
-pub use harmony_parser::parse_tool_calls_harmony;
+pub use harmony_parser::{detect_tool_call_start_harmony, parse_tool_calls_harmony};
