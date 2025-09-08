@@ -24,8 +24,7 @@ use tracing;
 
 use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
 
-
-fn _may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
+pub fn _may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     // No need to validate or enforce other schema checks as the basic Named function schema is already validated while creating the request.
     // Empty parameters is allowed by OpenAI at request level. Need to enforce it at template level.
     // Whenever parameters is empty, insert "type": "object" and "properties": {}
@@ -33,39 +32,48 @@ fn _may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     if let Some(arr) = tools.as_array() {
         for tool in arr {
             let mut tool = tool.clone();
-            if let Some(function) = tool.get_mut("function") {
-                if let Some(parameters) = function.get_mut("parameters") {
-                    // Only operate if parameters is an object
-                    if parameters.is_object() {
-                        let mut needs_type = false;
-                        let mut needs_properties = false;
-                        let is_empty = parameters.as_object().map(|o| o.is_empty()).unwrap_or(false);
+            if let Some(function) = tool.get_mut("function")
+                && let Some(parameters) = function.get_mut("parameters")
+            {
+                // Only operate if parameters is an object
+                if parameters.is_object() {
+                    let mut needs_type = false;
+                    let mut needs_properties = false;
+                    let is_empty = parameters
+                        .as_object()
+                        .map(|o| o.is_empty())
+                        .unwrap_or(false);
 
-                        // If empty, we need to insert both
-                        if is_empty {
-                            needs_type = true;
-                            needs_properties = true;
-                        } else {
-                            // If not empty, check if type/properties are missing
-                            if let Some(obj) = parameters.as_object() {
-                                if !obj.contains_key("type") {
-                                    needs_type = true;
-                                }
-                                if !obj.contains_key("properties") {
-                                    needs_properties = true;
-                                }
+                    // If empty, we need to insert both
+                    if is_empty {
+                        needs_type = true;
+                        needs_properties = true;
+                    } else {
+                        // If not empty, check if type/properties are missing
+                        if let Some(obj) = parameters.as_object() {
+                            if !obj.contains_key("type") {
+                                needs_type = true;
+                            }
+                            if !obj.contains_key("properties") {
+                                needs_properties = true;
                             }
                         }
+                    }
 
-                        if needs_type || needs_properties {
-                            if let Some(obj) = parameters.as_object_mut() {
-                                if needs_type {
-                                    obj.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-                                }
-                                if needs_properties {
-                                    obj.insert("properties".to_string(), serde_json::Value::Object(Default::default()));
-                                }
-                            }
+                    if (needs_type || needs_properties)
+                        && let Some(obj) = parameters.as_object_mut()
+                    {
+                        if needs_type {
+                            obj.insert(
+                                "type".to_string(),
+                                serde_json::Value::String("object".to_string()),
+                            );
+                        }
+                        if needs_properties {
+                            obj.insert(
+                                "properties".to_string(),
+                                serde_json::Value::Object(Default::default()),
+                            );
                         }
                     }
                 }
@@ -90,8 +98,9 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
             None
         } else {
             // Try to fix the tool schema if it is missing type and properties
-            let json_tools = _may_be_fix_tool_schema(serde_json::to_value(&self.inner.tools).unwrap());
-            Some(Value::from_serialize(&json_tools))
+            Some(_may_be_fix_tool_schema(
+                serde_json::to_value(&self.inner.tools).unwrap(),
+            )?)
         }
     }
 
@@ -200,9 +209,6 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             add_generation_prompt
         );
 
-        println!("tools: {:?}", tools);
-        println!("add_generation_prompt: {:?}", add_generation_prompt);
-        println!("has_tools: {:?}", has_tools);
         let ctx = context! {
             messages => req.messages(),
             tools => tools,
@@ -222,9 +228,6 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         } else {
             self.env.get_template("default")?
         };
-        println!("tmpl: {:?}", tmpl);
-        println!("ctx: {:?}", ctx);
-        println!("tmpl.render(&ctx): {:?}", tmpl.render(&ctx)?);
         Ok(tmpl.render(&ctx)?)
     }
 }
@@ -232,7 +235,6 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_may_be_fix_tool_schema_missing_type_and_properties() {
@@ -256,7 +258,10 @@ mod tests {
         let tools = serde_json::to_value(request.tools()).unwrap();
 
         assert!(tools[0]["function"]["parameters"]["type"] == "object");
-        assert!(tools[0]["function"]["parameters"]["properties"] == serde_json::Value::Object(Default::default()));
+        assert!(
+            tools[0]["function"]["parameters"]["properties"]
+                == serde_json::Value::Object(Default::default())
+        );
     }
 
     #[test]
@@ -291,7 +296,10 @@ mod tests {
 
         let mut expected_properties = serde_json::Map::new();
         let mut location = serde_json::Map::new();
-        location.insert("type".to_string(), serde_json::Value::String("string".to_string()));
+        location.insert(
+            "type".to_string(),
+            serde_json::Value::String("string".to_string()),
+        );
         location.insert(
             "description".to_string(),
             serde_json::Value::String("City and state, e.g., 'San Francisco, CA'".to_string()),
@@ -325,7 +333,10 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let tools = serde_json::to_value(request.tools()).unwrap();
 
-        assert_eq!(tools[0]["function"]["parameters"]["properties"], serde_json::Value::Object(Default::default()));
+        assert_eq!(
+            tools[0]["function"]["parameters"]["properties"],
+            serde_json::Value::Object(Default::default())
+        );
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
     }
 }
