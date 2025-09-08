@@ -172,6 +172,7 @@ markers = [
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
     "vllm: marks tests as requiring vllm",
+    "trtllm: marks tests as requiring trtllm",
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
     "slow: marks tests as known to be slow",

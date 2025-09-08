@@ -73,6 +73,7 @@ class ManagedProcess:
     env: Optional[dict] = None
     health_check_ports: List[int] = field(default_factory=list)
     health_check_urls: List[Any] = field(default_factory=list)
+    health_check_funcs: List[Any] = field(default_factory=list)
     delayed_start: int = 0
     timeout: int = 300
     working_dir: Optional[str] = None
@@ -93,6 +94,24 @@ class ManagedProcess:
     _tee_proc = None
     _sed_proc = None
 
+    @property
+    def log_path(self):
+        """Return the absolute path to the process log file if available."""
+        return self._log_path
+
+    def read_logs(self) -> str:
+        """Read and return the entire contents of the process log file.
+
+        Returns an empty string if the log file is not yet available.
+        """
+        try:
+            if self._log_path and os.path.exists(self._log_path):
+                with open(self._log_path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+        except Exception as e:
+            self._logger.warning("Could not read log file %s: %s", self._log_path, e)
+        return ""
+
     def __enter__(self):
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
@@ -109,6 +128,7 @@ class ManagedProcess:
             time.sleep(self.delayed_start)
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)
+            self._check_funcs(self.timeout - elapsed)
 
             return self
 
@@ -121,44 +141,73 @@ class ManagedProcess:
                 )
             raise
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self._terminate_process_group()
+    def _cleanup_stragglers(self):
+        """Clean up straggler processes - called during exit and signal handling"""
+        try:
+            if self.stragglers or self.straggler_commands:
+                self._logger.info(
+                    "Checking for straggler processes: stragglers=%s, straggler_commands=%s",
+                    self.stragglers,
+                    self.straggler_commands,
+                )
 
-        process_list = [self.proc, self._tee_proc, self._sed_proc]
-        for process in process_list:
-            if process:
+            for ps_process in psutil.process_iter(["name", "cmdline"]):
                 try:
-                    if process.stdout:
-                        process.stdout.close()
-                    if process.stdin:
-                        process.stdin.close()
-                    terminate_process_tree(process.pid, self._logger)
-                    process.wait()
-                except Exception as e:
-                    self._logger.warning("Error terminating process: %s", e)
-        if self.data_dir:
-            self._remove_directory(self.data_dir)
-
-        for ps_process in psutil.process_iter(["name", "cmdline"]):
-            try:
-                if ps_process.name() in self.stragglers:
-                    self._logger.info(
-                        "Terminating Straggler %s %s", ps_process.name(), ps_process.pid
-                    )
-
-                    terminate_process_tree(ps_process.pid, self._logger)
-                for cmdline in self.straggler_commands:
-                    if cmdline in " ".join(ps_process.cmdline()):
+                    process_name = ps_process.name()
+                    if process_name in self.stragglers:
                         self._logger.info(
-                            "Terminating Straggler Cmdline %s %s %s",
-                            ps_process.name(),
-                            ps_process.pid,
-                            cmdline,
+                            "Terminating Straggler %s %s", process_name, ps_process.pid
                         )
                         terminate_process_tree(ps_process.pid, self._logger)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                # Process may have terminated or become inaccessible during iteration
-                pass
+
+                    # Check command line arguments
+                    cmdline = ps_process.cmdline()
+                    cmdline_str = " ".join(cmdline) if cmdline else ""
+                    for straggler_cmd in self.straggler_commands:
+                        if straggler_cmd in cmdline_str:
+                            self._logger.info(
+                                "Terminating Straggler Cmdline %s %s %s",
+                                process_name,
+                                ps_process.pid,
+                                straggler_cmd,
+                            )
+                            terminate_process_tree(ps_process.pid, self._logger)
+                            break  # Avoid terminating the same process multiple times
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                    psutil.ZombieProcess,
+                ):
+                    # Process may have terminated or become inaccessible during iteration
+                    pass
+                except Exception as e:
+                    # Catch any other unexpected errors to ensure cleanup continues
+                    self._logger.warning("Error checking process: %s", e)
+        except Exception as e:
+            # Ensure that any error in straggler cleanup doesn't prevent other cleanup
+            self._logger.error("Error during straggler cleanup: %s", e)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self._terminate_process_group()
+
+            process_list = [self.proc, self._tee_proc, self._sed_proc]
+            for process in process_list:
+                if process:
+                    try:
+                        if process.stdout:
+                            process.stdout.close()
+                        if process.stdin:
+                            process.stdin.close()
+                        terminate_process_tree(process.pid, self._logger)
+                        process.wait()
+                    except Exception as e:
+                        self._logger.warning("Error terminating process: %s", e)
+            if self.data_dir:
+                self._remove_directory(self.data_dir)
+        finally:
+            # Always run straggler cleanup, even if interrupted
+            self._cleanup_stragglers()
 
     def _start_process(self):
         assert self._command_name
@@ -327,7 +376,7 @@ class ManagedProcess:
             elapsed += self._check_url(url, timeout - elapsed)
         return elapsed
 
-    def _check_url(self, url, timeout=30, sleep=1, log_interval=10):
+    def _check_url(self, url, timeout=30, sleep=1, log_interval=20):
         if isinstance(url, tuple):
             response_check = url[1]
             url = url[0]
@@ -402,6 +451,70 @@ class ManagedProcess:
             "FAILED: Check URL: %s (attempts=%d, elapsed=%.1fs)", url, attempt, elapsed
         )
         raise RuntimeError("FAILED: Check URL: %s" % url)
+
+    def _check_funcs(self, timeout):
+        elapsed = 0.0
+        for func in self.health_check_funcs:
+            elapsed += self._check_func(func, timeout - elapsed)
+        return elapsed
+
+    def _check_func(self, func, timeout=30, sleep=1, log_interval=20):
+        start_time = time.time()
+        func_name = getattr(func, "__name__", str(func))
+        self._logger.info("Running custom health check '%s'", func_name)
+        elapsed = 0.0
+        attempt = 0
+        last_log_time = 0.0
+
+        while elapsed < timeout:
+            self._check_process_alive("while waiting for health check")
+
+            attempt += 1
+            check_failed = False
+            failure_reason = None
+
+            try:
+                # Prefer functions that accept remaining timeout; fall back to no-arg call
+                try:
+                    result = func(timeout - elapsed)
+                except TypeError:
+                    result = func()
+
+                if bool(result):
+                    self._logger.info(
+                        "SUCCESS: Custom health check '%s' passed (attempt=%d, elapsed=%.1fs)",
+                        func_name,
+                        attempt,
+                        elapsed,
+                    )
+                    return time.time() - start_time
+                else:
+                    check_failed = True
+                    failure_reason = "returned False"
+            except Exception as e:
+                check_failed = True
+                failure_reason = f"exception: {e}"
+
+            if check_failed and elapsed - last_log_time >= log_interval:
+                self._logger.info(
+                    "Still waiting on custom health check '%s' (%s) (attempt=%d, elapsed=%.1fs)",
+                    func_name,
+                    failure_reason,
+                    attempt,
+                    elapsed,
+                )
+                last_log_time = elapsed
+
+            time.sleep(sleep)
+            elapsed = time.time() - start_time
+
+        self._logger.error(
+            "FAILED: Custom health check '%s' (attempts=%d, elapsed=%.1fs)",
+            func_name,
+            attempt,
+            elapsed,
+        )
+        raise RuntimeError("FAILED: Custom health check")
 
     def _terminate_existing(self):
         if self.terminate_existing:
