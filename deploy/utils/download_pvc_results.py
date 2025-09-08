@@ -36,7 +36,7 @@ try:
     from deploy.utils.kubernetes import (
         check_kubectl_access,
         cleanup_access_pod,
-        deploy_access_pod,
+        ensure_clean_access_pod,
         run_command,
     )
 except ModuleNotFoundError:
@@ -46,7 +46,7 @@ except ModuleNotFoundError:
     from deploy.utils.kubernetes import (
         check_kubectl_access,
         cleanup_access_pod,
-        deploy_access_pod,
+        ensure_clean_access_pod,
         run_command,
     )
 
@@ -194,7 +194,7 @@ def main():
     check_kubectl_access(args.namespace)
 
     # Deploy access pod
-    pod_name = deploy_access_pod(args.namespace)
+    pod_name = ensure_clean_access_pod(args.namespace)
     try:
         # List and download files
         files = list_pvc_contents(args.namespace, pod_name, args.folder, args.no_config)

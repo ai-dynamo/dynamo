@@ -90,7 +90,7 @@ Use the injector utility to place your DGD manifest into the PVC. The profiling 
 python3 deploy/utils/inject_manifest.py \
   --namespace $NAMESPACE \
   --src components/backends/vllm/deploy/disagg.yaml \
-  --dest /configs/disagg.yaml
+  --dest /data/configs/disagg.yaml
 
 # Set the docker image for the profiling job; any docker image that contains your script.
 export DOCKER_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
@@ -112,14 +112,16 @@ Use the default pre-built image and inject custom configurations via PVC:
 2. **Inject your custom disagg configuration:**
    ```bash
    # Use default disagg.yaml config
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /configs/disagg.yaml
+   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
 
    # Or use a custom disagg config file
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /configs/disagg.yaml
+   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
 
    # Or specify a custom target path in the PVC
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /profiling_results/my-disagg.yaml
+   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/profiling_results/my-disagg.yaml
    ```
+
+   > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
 
 3. **Set the config path for the profiling job:**
    ```bash
@@ -176,10 +178,10 @@ To download the results:
 
 ```bash
 # Download to directory
-python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /profiling_results
+python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
 
 # Download without any of the auto-created config.yaml files used in profiling
-python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /profiling_results --no-config
+python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results --no-config
 ```
 
 The script will:
@@ -191,7 +193,7 @@ The script will:
 
 The profiling results directory contains the following structure:
 ```
-/workspace/profiling_results/
+/workspace/data/profiling_results/
 ├── prefill_performance.png                    # Main prefill performance plot
 ├── decode_performance.png                     # Main decode performance plot
 ├── prefill_tp1/                               # Individual TP profiling directories
