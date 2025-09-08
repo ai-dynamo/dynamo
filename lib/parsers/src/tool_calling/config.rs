@@ -81,7 +81,7 @@ impl ToolCallConfig {
             format: ToolCallParserType::Json,
             json: JsonParserConfig {
                 tool_call_start_tokens: vec!["<tool_call>".to_string()],
-                tool_call_end_tokens: vec!["\n</tool_call>".to_string()],
+                tool_call_end_tokens: vec!["</tool_call>".to_string()],
                 ..Default::default()
             },
         }
