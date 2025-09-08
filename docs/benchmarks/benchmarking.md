@@ -33,7 +33,7 @@ The framework is a wrapper around `genai-perf` that:
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
-**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The actual model loaded is determined by your deployment manifests. Only one model can be benchmarked at a time across all inputs to ensure fair comparison. The default `--model` value in the benchmarking script is `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, but it must match the model in the manifest(s) and the model deployed at the endpoint(s).
+**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The actual model loaded is determined by your deployment manifests. Only one model can be benchmarked at a time across all inputs to ensure fair comparison. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model in the manifest(s) and the model deployed at the endpoint(s).
 
 ## Prerequisites
 
@@ -103,7 +103,7 @@ REQUIRED:
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: Qwen/Qwen3-0.6B)
                                 NOTE: This must match the model configured in your deployment manifests and endpoints
   -i, --isl LENGTH              Input sequence length (default: 2000)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)

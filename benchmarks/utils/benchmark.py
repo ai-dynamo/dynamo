@@ -64,7 +64,7 @@ def main() -> int:
     parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
     parser.add_argument(
         "--model",
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        default="Qwen/Qwen3-0.6B",
         help="Model name",
     )
     parser.add_argument(
