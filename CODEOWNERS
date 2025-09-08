@@ -8,7 +8,7 @@
 Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane @hhzhang16
+*.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
@@ -19,7 +19,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Examples
 /examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ishandhanani @ai-dynamo/dynamo-rust-codeowners
 /examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
-/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16
+/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16 @biswapanda
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
