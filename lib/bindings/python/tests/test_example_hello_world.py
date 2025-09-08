@@ -75,6 +75,8 @@ async def test_hello_world(example_dir, server_process):
     # Split output into lines and filter out empty lines
     lines = [line.strip() for line in client_output.split("\n") if line.strip()]
 
+    # Each client iteration produces 4 lines in about 4 seconds
+    # The client ran for 5 seconds so the first iteration is expected to be completed
     # Assert the first 4 lines are the expected sequence
     assert (
         len(lines) >= 4
