@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestDynamoComponentDeployment_IsMainComponent(t *testing.T) {
+func TestDynamoComponentDeployment_IsFrontendComponent(t *testing.T) {
 	type fields struct {
 		TypeMeta   metav1.TypeMeta
 		ObjectMeta metav1.ObjectMeta
@@ -73,8 +73,8 @@ func TestDynamoComponentDeployment_IsMainComponent(t *testing.T) {
 				Spec:       tt.fields.Spec,
 				Status:     tt.fields.Status,
 			}
-			if got := s.IsMainComponent(); got != tt.want {
-				t.Errorf("DynamoComponentDeployment.IsMainComponent() = %v, want %v", got, tt.want)
+			if got := s.IsFrontendComponent(); got != tt.want {
+				t.Errorf("DynamoComponentDeployment.IsFrontendComponent() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -206,6 +206,57 @@ func TestDynamoComponentDeployment_SetDynamoDeploymentConfig(t *testing.T) {
 			s.SetDynamoDeploymentConfig(tt.args.config)
 			if !reflect.DeepEqual(s.Spec.DynamoComponentDeploymentSharedSpec.Envs, tt.want) {
 				t.Errorf("DynamoComponentDeployment.SetDynamoDeploymentConfig() = %v, want %v", s.Spec.DynamoComponentDeploymentSharedSpec.Envs, tt.want)
+			}
+		})
+	}
+}
+
+func TestDynamoComponentDeployment_GetParentGraphDeploymentName(t *testing.T) {
+	type fields struct {
+		TypeMeta   metav1.TypeMeta
+		ObjectMeta metav1.ObjectMeta
+		Spec       DynamoComponentDeploymentSpec
+		Status     DynamoComponentDeploymentStatus
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   string
+	}{
+		{
+			name: "test",
+			fields: fields{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: "DynamoGraphDeployment",
+							Name: "name",
+						},
+					},
+				},
+			},
+			want: "name",
+		},
+		{
+			name: "no owner reference",
+			fields: fields{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{},
+				},
+			},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &DynamoComponentDeployment{
+				TypeMeta:   tt.fields.TypeMeta,
+				ObjectMeta: tt.fields.ObjectMeta,
+				Spec:       tt.fields.Spec,
+				Status:     tt.fields.Status,
+			}
+			if got := s.GetParentGraphDeploymentName(); got != tt.want {
+				t.Errorf("DynamoComponentDeployment.GetParentGraphDeploymentName() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -4,28 +4,52 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
+    discovery::{MODEL_ROOT_PATH, ModelManager, ModelUpdate, ModelWatcher},
+    endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
-    entrypoint::{self, input::common, EngineConfig},
-    http::service::service_v2,
+    entrypoint::{self, EngineConfig, input::common},
+    http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
+    namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::transports::etcd;
-use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
-    let mut http_service_builder = service_v2::HttpService::builder()
-        .port(engine_config.local_model().http_port())
-        .enable_chat_endpoints(true)
-        .enable_cmpl_endpoints(true)
-        .enable_embeddings_endpoints(true)
-        .with_request_template(engine_config.local_model().request_template());
+    let local_model = engine_config.local_model();
+    let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
+        (Some(tls_cert_path), Some(tls_key_path)) => {
+            if !tls_cert_path.exists() {
+                anyhow::bail!("TLS certificate not found: {}", tls_cert_path.display());
+            }
+            if !tls_key_path.exists() {
+                anyhow::bail!("TLS key not found: {}", tls_key_path.display());
+            }
+            service_v2::HttpService::builder()
+                .enable_tls(true)
+                .tls_cert_path(Some(tls_cert_path.to_path_buf()))
+                .tls_key_path(Some(tls_key_path.to_path_buf()))
+                .port(local_model.http_port())
+        }
+        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (_, _) => {
+            // CLI should prevent us ever getting here
+            anyhow::bail!(
+                "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"
+            );
+        }
+    };
+    if let Some(http_host) = local_model.http_host() {
+        http_service_builder = http_service_builder.host(http_host);
+    }
+    http_service_builder =
+        http_service_builder.with_request_template(engine_config.local_model().request_template());
 
     let http_service = match engine_config {
         EngineConfig::Dynamic(_) => {
@@ -38,6 +62,14 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
+                    // Check if we should filter by namespace (based on the local model's namespace)
+                    // Get namespace from the model, fallback to endpoint_id namespace if not set
+                    let namespace = engine_config.local_model().namespace().unwrap_or("");
+                    let target_namespace = if is_global_namespace(namespace) {
+                        None
+                    } else {
+                        Some(namespace.to_string())
+                    };
                     run_watcher(
                         distributed_runtime,
                         http_service.state().manager_clone(),
@@ -45,6 +77,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         MODEL_ROOT_PATH,
                         router_config.router_mode,
                         Some(router_config.kv_router_config),
+                        router_config.busy_threshold,
+                        target_namespace,
+                        Arc::new(http_service.clone()),
                     )
                     .await?;
                 }
@@ -84,19 +119,32 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None
             };
 
+            let tokenizer_hf = card.tokenizer_hf()?;
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, kv_chooser.clone())
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser.clone(),
+                tokenizer_hf.clone(),
+            )
             .await?;
             manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
 
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(card, &client, router_mode, kv_chooser)
-            .await?;
+            let completions_engine =
+                entrypoint::build_routed_pipeline::<
+                    NvCreateCompletionRequest,
+                    NvCreateCompletionResponse,
+                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
+                .await?;
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
+
+            for endpoint_type in EndpointType::all() {
+                http_service.enable_model_endpoint(endpoint_type, true);
+            }
 
             http_service
         }
@@ -106,6 +154,11 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let manager = http_service.model_manager();
             manager.add_completions_model(model.service_name(), engine.clone())?;
             manager.add_chat_completions_model(model.service_name(), engine)?;
+
+            // Enable all endpoints
+            for endpoint_type in EndpointType::all() {
+                http_service.enable_model_endpoint(endpoint_type, true);
+            }
             http_service
         }
         EngineConfig::StaticCore {
@@ -116,19 +169,25 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
 
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone())
-            .await?;
+            let tokenizer_hf = model.card().tokenizer_hf()?;
+            let chat_pipeline =
+                common::build_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
+                .await?;
             manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine)
+            >(model.card(), inner_engine, tokenizer_hf)
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
+            // Enable all endpoints
+            for endpoint_type in EndpointType::all() {
+                http_service.enable_model_endpoint(endpoint_type, true);
+            }
             http_service
         }
     };
@@ -147,6 +206,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
@@ -154,13 +214,60 @@ async fn run_watcher(
     network_prefix: &str,
     router_mode: RouterMode,
     kv_router_config: Option<KvRouterConfig>,
+    busy_threshold: Option<f64>,
+    target_namespace: Option<String>,
+    http_service: Arc<HttpService>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
+    let mut watch_obj = ModelWatcher::new(
+        runtime,
+        model_manager,
+        router_mode,
+        kv_router_config,
+        busy_threshold,
+    );
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-    let _watcher_task = tokio::spawn(async move {
-        watch_obj.watch(receiver).await;
+
+    // Create a channel to receive model type updates
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+    watch_obj.set_notify_on_model_update(tx);
+
+    // Spawn a task to watch for model type changes and update HTTP service endpoints
+    let _endpoint_enabler_task = tokio::spawn(async move {
+        while let Some(model_type) = rx.recv().await {
+            tracing::debug!("Received model type update: {:?}", model_type);
+            update_http_endpoints(http_service.clone(), model_type);
+        }
     });
+
+    // Pass the sender to the watcher
+    let _watcher_task = tokio::spawn(async move {
+        watch_obj.watch(receiver, target_namespace.as_deref()).await;
+    });
+
     Ok(())
+}
+
+/// Updates HTTP service endpoints based on available model types
+fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
+    tracing::debug!(
+        "Updating HTTP service endpoints for model type: {:?}",
+        model_type
+    );
+    match model_type {
+        ModelUpdate::Added(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, true);
+            }
+        }
+        ModelUpdate::Removed(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, false);
+            }
+        }
+    }
 }

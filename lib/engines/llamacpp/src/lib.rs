@@ -10,17 +10,17 @@ use std::{
 use async_stream::stream;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::error as pipeline_error;
-use dynamo_runtime::pipeline::{async_trait, Error, ManyOut, SingleIn};
+use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn, async_trait};
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::{CancellationToken, ErrorContext, Result};
 use llama_cpp_2::{
-    context::{params::LlamaContextParams, LlamaContext},
+    LogOptions,
+    context::{LlamaContext, params::LlamaContextParams},
     llama_backend::LlamaBackend,
     llama_batch::LlamaBatch,
-    model::{params::LlamaModelParams, LlamaModel},
+    model::{LlamaModel, params::LlamaModelParams},
     sampling::LlamaSampler,
     token::LlamaToken,
-    LogOptions,
 };
 
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
@@ -268,6 +268,7 @@ fn run_request(
             //text: if output.text.is_empty() { None } else { Some(output.text) },
             cum_log_probs: None, // TODO output.cumulative_logprob.map(|v| v as f64),
             log_probs: None,     // TODO  output.logprobs
+            top_logprobs: None,
             finish_reason: None,
             index: None,
         };

@@ -23,6 +23,14 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+def _get_prometheus_port_from_env():
+    """
+    Get prometheus port from environment variables if set.
+    Otherwise, return 0, which means not reporting metrics using prometheus.
+    """
+    return os.environ.get("PLANNER_PROMETHEUS_PORT", 0)
+
+
 # Source of truth for planner defaults
 class BasePlannerDefaults:
     namespace = "dynamo"
@@ -35,6 +43,7 @@ class BasePlannerDefaults:
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
+    prometheus_port = _get_prometheus_port_from_env()
 
 
 class LoadPlannerDefaults(BasePlannerDefaults):
@@ -61,7 +70,7 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
-    port = os.environ.get("DYNAMO_PORT", "8000")
+    port = os.environ.get("PROMETHEUS_PORT", "9090")
     namespace = os.environ.get("DYNAMO_NAMESPACE", "vllm-disagg-planner")
     prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
     profile_results_dir = "profiling_results"
@@ -71,6 +80,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     itl = 0.05  # in seconds
     load_predictor = "arima"  # ["constant", "arima", "prophet"]
     load_prediction_window_size = 50  # predict load using how many recent load samples
+    no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
 
 
 class VllmComponentName:

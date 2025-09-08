@@ -15,18 +15,16 @@
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
-use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
+use crate::metrics::prometheus_names::{nats_client, nats_service};
 use crate::traits::DistributedRuntimeProvider;
-use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
 
 /// System status server information containing socket address and handle
@@ -66,59 +64,21 @@ impl Clone for SystemStatusServerInfo {
     }
 }
 
-/// System status server state containing metrics and uptime tracking
+/// System status server state containing the distributed runtime reference
 pub struct SystemStatusState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
-    start_time: OnceLock<Instant>,
-    uptime_gauge: prometheus::Gauge,
 }
 
 impl SystemStatusState {
-    /// Create new system status server state with the provided metrics registry
+    /// Create new system status server state with the provided distributed runtime
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
-        // to maintain consistency with the project's metric naming convention
-        let uptime_gauge = drt.as_ref().create_gauge(
-            "dynamo_uptime_seconds",
-            "Total uptime of the DistributedRuntime in seconds",
-            &[],
-        )?;
-        let state = Self {
-            root_drt: drt,
-            start_time: OnceLock::new(),
-            uptime_gauge,
-        };
-        Ok(state)
-    }
-
-    /// Initialize the start time (can only be called once)
-    pub fn initialize_start_time(&self) -> Result<(), &'static str> {
-        self.start_time
-            .set(Instant::now())
-            .map_err(|_| "Start time already initialized")
-    }
-
-    pub fn uptime(&self) -> Result<std::time::Duration, &'static str> {
-        self.start_time
-            .get()
-            .ok_or("Start time not initialized")
-            .map(|start_time| start_time.elapsed())
+        Ok(Self { root_drt: drt })
     }
 
     /// Get a reference to the distributed runtime
     pub fn drt(&self) -> &crate::DistributedRuntime {
         &self.root_drt
-    }
-
-    /// Update the uptime gauge with current value
-    pub fn update_uptime_gauge(&self) {
-        if let Ok(uptime) = self.uptime() {
-            let uptime_seconds = uptime.as_secs_f64();
-            self.uptime_gauge.set(uptime_seconds);
-        } else {
-            tracing::warn!("Failed to update uptime gauge: start time not initialized");
-        }
     }
 }
 
@@ -129,7 +89,7 @@ pub async fn spawn_system_status_server(
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    // Create system status server state with the provided metrics registry
+    // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt)?);
     let health_path = server_state
         .drt()
@@ -145,11 +105,6 @@ pub async fn spawn_system_status_server(
         .unwrap()
         .live_path
         .clone();
-
-    // Initialize the start time
-    server_state
-        .initialize_start_time()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize start time: {}", e))?;
 
     let app = Router::new()
         .route(
@@ -209,26 +164,16 @@ pub async fn spawn_system_status_server(
             tracing::error!("System status server error: {}", e);
         }
     });
+
     Ok((actual_address, handle))
 }
 
 /// Health handler
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
-    let (mut healthy, endpoints) = state
-        .drt()
-        .system_health
-        .lock()
-        .unwrap()
-        .get_health_status();
-    let uptime = match state.uptime() {
-        Ok(uptime_state) => Some(uptime_state),
-        Err(e) => {
-            tracing::error!("Failed to get uptime: {}", e);
-            healthy = false;
-            None
-        }
-    };
+    let system_health = state.drt().system_health.lock().unwrap();
+    let (healthy, endpoints) = system_health.get_health_status();
+    let uptime = Some(system_health.uptime());
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -252,9 +197,25 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    state.update_uptime_gauge();
+    state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .update_uptime_gauge();
 
-    // Get metrics from the registry
+    // Execute all the callbacks starting at the DistributedRuntime level
+    assert!(state.drt().basename() == "");
+    let callback_results = state
+        .drt()
+        .execute_metrics_callbacks(&state.drt().hierarchy());
+    for result in callback_results {
+        if let Err(e) = result {
+            tracing::error!("Error executing metrics callback: {}", e);
+        }
+    }
+
+    // Get all metrics from DistributedRuntime (top-level)
     match state.drt().prometheus_metrics_fmt() {
         Ok(response) => (StatusCode::OK, response),
         Err(e) => {
@@ -268,34 +229,12 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 }
 
 // Regular tests: cargo test system_status_server --lib
-// Integration tests: cargo test system_status_server --lib --features integration
-
-#[cfg(test)]
-/// Helper function to create a DRT instance for async testing
-/// Uses the test-friendly constructor without discovery
-async fn create_test_drt_async() -> crate::DistributedRuntime {
-    let rt = crate::Runtime::from_current().unwrap();
-    crate::DistributedRuntime::from_settings_without_discovery(rt)
-        .await
-        .unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::tests::load_log;
-    use crate::metrics::MetricsRegistry;
-    use anyhow::{anyhow, Result};
-    use chrono::{DateTime, Utc};
-    use jsonschema::{Draft, JSONSchema};
-    use rstest::rstest;
-    use serde_json::Value;
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-    use std::sync::Arc;
-    use stdio_override::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
+    // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
     async fn test_http_server_lifecycle() {
         let cancel_token = CancellationToken::new();
@@ -312,8 +251,7 @@ mod tests {
                 .await;
         });
 
-        // wait for a while to let the server start
-        sleep(Duration::from_millis(100)).await;
+        // server starts immediately, no need to wait
 
         // cancel token
         cancel_token.cancel();
@@ -325,48 +263,132 @@ mod tests {
             "HTTP server should shut down when cancel token is cancelled"
         );
     }
+}
 
-    #[cfg(feature = "integration")]
+// Integration tests: cargo test system_status_server --lib --features integration
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use super::*;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
+    use crate::metrics::MetricsRegistry;
+    use anyhow::Result;
+    use rstest::rstest;
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn test_uptime_from_system_health() {
+        // Test that uptime is available from SystemHealth
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            let drt = create_test_drt_async().await;
+
+            // Get uptime from SystemHealth
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            // Uptime should exist (even if close to zero)
+            assert!(uptime.as_nanos() > 0 || uptime.is_zero());
+
+            // Sleep briefly and check uptime increases
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let uptime_after = drt.system_health.lock().unwrap().uptime();
+            assert!(uptime_after > uptime);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
-        let drt = create_test_drt_async().await;
-        let runtime_metrics = SystemStatusState::new(Arc::new(drt)).unwrap();
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            let drt = create_test_drt_async().await;
+            // SystemStatusState is already created in distributed.rs when DYN_SYSTEM_ENABLED=false
+            // so we don't need to create it again here
 
-        // Initialize start time
-        runtime_metrics.initialize_start_time().unwrap();
+            // The uptime_seconds metric should already be registered and available
+            let response = drt.prometheus_metrics_fmt().unwrap();
+            println!("Full metrics response:\n{}", response);
 
-        runtime_metrics.uptime_gauge.set(42.0);
+            // Filter out NATS client metrics for comparison
+            let filtered_response: String = response
+                .lines()
+                .filter(|line| {
+                    !line.contains(nats_client::PREFIX) && !line.contains(nats_service::PREFIX)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
 
-        let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
-        println!("Full metrics response:\n{}", response);
-
-        let expected = "\
-# HELP dynamo_component_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_component_dynamo_uptime_seconds gauge
-dynamo_component_dynamo_uptime_seconds 42
-";
-        assert_eq!(response, expected);
+            // Check that uptime_seconds metric is present with correct namespace
+            assert!(
+                filtered_response.contains("# HELP dynamo_component_uptime_seconds"),
+                "Should contain uptime_seconds help text"
+            );
+            assert!(
+                filtered_response.contains("# TYPE dynamo_component_uptime_seconds gauge"),
+                "Should contain uptime_seconds type"
+            );
+            assert!(
+                filtered_response.contains("dynamo_component_uptime_seconds"),
+                "Should contain uptime_seconds metric with correct namespace"
+            );
+        })
+        .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
-    async fn test_start_time_initialization() {
-        // Test that start time can only be initialized once
-        let drt = create_test_drt_async().await;
-        let runtime_metrics = SystemStatusState::new(Arc::new(drt)).unwrap();
+    async fn test_uptime_gauge_updates() {
+        // Test that the uptime gauge is properly updated and increases over time
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            let drt = create_test_drt_async().await;
 
-        // First initialization should succeed
-        assert!(runtime_metrics.initialize_start_time().is_ok());
+            // Get initial uptime
+            let initial_uptime = drt.system_health.lock().unwrap().uptime();
 
-        // Second initialization should fail
-        assert!(runtime_metrics.initialize_start_time().is_err());
+            // Update the gauge with initial value
+            drt.system_health.lock().unwrap().update_uptime_gauge();
 
-        // Uptime should work after initialization
-        let _uptime = runtime_metrics.uptime().unwrap();
-        // If we get here, uptime calculation works correctly
+            // Sleep for 100ms
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Get uptime after sleep
+            let uptime_after_sleep = drt.system_health.lock().unwrap().uptime();
+
+            // Update the gauge again
+            drt.system_health.lock().unwrap().update_uptime_gauge();
+
+            // Verify uptime increased by at least 100ms
+            let elapsed = uptime_after_sleep - initial_uptime;
+            assert!(
+                elapsed >= std::time::Duration::from_millis(100),
+                "Uptime should have increased by at least 100ms after sleep, but only increased by {:?}",
+                elapsed
+            );
+        })
+        .await;
     }
 
+    #[tokio::test]
+    async fn test_http_requests_fail_when_system_disabled() {
+        // Test that system status server is not running when disabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            let drt = create_test_drt_async().await;
+
+            // Verify that system status server info is None when disabled
+            let system_info = drt.system_status_server_info();
+            assert!(
+                system_info.is_none(),
+                "System status server should not be running when DYN_SYSTEM_ENABLED=false"
+            );
+
+            println!("✓ System status server correctly disabled when DYN_SYSTEM_ENABLED=false");
+        })
+        .await;
+    }
+
+    /// This test verifies the health and liveness endpoints of the system status server.
+    /// It checks that the endpoints respond with the correct HTTP status codes and bodies
+    /// based on the initial health status and any custom endpoint paths provided via environment variables.
+    /// The test is parameterized using multiple #[case] attributes to cover various scenarios,
+    /// including different initial health states ("ready" and "notready"), default and custom endpoint paths,
+    /// and expected response codes and bodies.
     #[rstest]
     #[case("ready", 200, "ready", None, None, 3)]
     #[case("notready", 503, "notready", None, None, 3)]
@@ -390,8 +412,6 @@ dynamo_component_dynamo_uptime_seconds 42
         #[case] expected_num_tests: usize,
     ) {
         use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
         // use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // use reqwest for HTTP requests
 
@@ -402,6 +422,8 @@ dynamo_component_dynamo_uptime_seconds 42
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
             [
+                ("DYN_SYSTEM_ENABLED", Some("true")),
+                ("DYN_SYSTEM_PORT", Some("0")),
                 (
                     "DYN_SYSTEM_STARTING_HEALTH_STATUS",
                     Some(starting_health_status),
@@ -410,20 +432,14 @@ dynamo_component_dynamo_uptime_seconds 42
                 ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
             ],
             (async || {
-                let runtime = crate::Runtime::from_settings().unwrap();
-                let drt = Arc::new(
-                    crate::DistributedRuntime::from_settings_without_discovery(runtime)
-                        .await
-                        .unwrap(),
-                );
-                let cancel_token = CancellationToken::new();
-                let (addr, _) =
-                    spawn_system_status_server("127.0.0.1", 0, cancel_token.clone(), drt)
-                        .await
-                        .unwrap();
-                println!("[test] Waiting for server to start...");
-                sleep(std::time::Duration::from_millis(1000)).await;
-                println!("[test] Server should be up, starting requests...");
+                let drt = Arc::new(create_test_drt_async().await);
+
+                // Get system status server info from DRT (instead of manually spawning)
+                let system_info = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started by DRT");
+                let addr = system_info.socket_addr;
+
                 let client = reqwest::Client::new();
 
                 // Prepare test cases
@@ -475,17 +491,16 @@ dynamo_component_dynamo_uptime_seconds 42
     }
 
     #[tokio::test]
-    #[cfg(feature = "integration")]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
 
         // Closure call is needed here to satisfy async_with_vars
 
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
             [
+                ("DYN_SYSTEM_ENABLED", Some("true")),
+                ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
                 ("DYN_LOGGING_JSONL", Some("1")),
                 ("DYN_LOG", Some("trace")),
@@ -496,18 +511,13 @@ dynamo_component_dynamo_uptime_seconds 42
 
                 crate::logging::init();
 
-                let runtime = crate::Runtime::from_settings().unwrap();
-                let drt = Arc::new(
-                    crate::DistributedRuntime::from_settings_without_discovery(runtime)
-                        .await
-                        .unwrap(),
-                );
-                let cancel_token = CancellationToken::new();
-                let (addr, _) =
-                    spawn_system_status_server("127.0.0.1", 0, cancel_token.clone(), drt)
-                        .await
-                        .unwrap();
-                sleep(std::time::Duration::from_millis(1000)).await;
+                let drt = Arc::new(create_test_drt_async().await);
+
+                // Get system status server info from DRT (instead of manually spawning)
+                let system_info = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started by DRT");
+                let addr = system_info.socket_addr;
                 let client = reqwest::Client::new();
                 for path in [("/health"), ("/live"), ("/someRandomPathNotFoundHere")] {
                     let traceparent_value =
@@ -536,35 +546,136 @@ dynamo_component_dynamo_uptime_seconds 42
         Ok(())
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
-    async fn test_uptime_without_initialization() {
-        // Test that uptime returns an error if start time is not initialized
-        let drt = create_test_drt_async().await;
-        let runtime_metrics = SystemStatusState::new(Arc::new(drt)).unwrap();
+    async fn test_health_endpoint_with_changing_health_status() {
+        // Test health endpoint starts in not ready status, then becomes ready
+        // when endpoints are created (DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=generate)
+        const ENDPOINT_NAME: &str = "generate";
+        const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_ENABLED", Some("true")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
 
-        // This should return an error because start time is not initialized
-        let result = runtime_metrics.uptime();
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Start time not initialized");
+                // Check if system status server was started
+                let system_info_opt = drt.system_status_server_info();
+
+                // Ensure system status server was spawned by DRT
+                assert!(
+                    system_info_opt.is_some(),
+                    "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_ENABLED=true, but system_status_server_info() returned None. Environment: DYN_SYSTEM_ENABLED={:?}, DYN_SYSTEM_PORT={:?}",
+                    std::env::var("DYN_SYSTEM_ENABLED"),
+                    std::env::var("DYN_SYSTEM_PORT")
+                );
+
+                // Get the system status server info from DRT - this should never fail now due to above check
+                let system_info = system_info_opt.unwrap();
+                let addr = system_info.socket_addr;
+
+                // Initially check health - should be not ready
+                let client = reqwest::Client::new();
+                let health_url = format!("http://{}/health", addr);
+
+                let response = client.get(&health_url).send().await.unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+
+                // Health should be not ready (503) initially
+                assert_eq!(status, 503, "Health should be 503 (not ready) initially, got: {}", status);
+                assert!(body.contains("\"status\":\"notready\""), "Health should contain status notready");
+
+                // Now create a namespace, component, and endpoint to make the system healthy
+                let namespace = drt.namespace("ns1234").unwrap();
+                let component = namespace.component("comp1234").unwrap();
+
+                // Create a simple test handler
+                use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};
+                use crate::protocols::annotated::Annotated;
+
+                struct TestHandler;
+
+                #[async_trait]
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for TestHandler {
+                    async fn generate(&self, input: SingleIn<String>) -> crate::Result<ManyOut<Annotated<String>>> {
+                        let (data, ctx) = input.into_parts();
+                        let response = Annotated::from_data(format!("You responded: {}", data));
+                        Ok(crate::pipeline::ResponseStream::new(
+                            Box::pin(crate::stream::iter(vec![response])),
+                            ctx.context()
+                        ))
+                    }
+                }
+
+                // Create the ingress and start the endpoint service
+                let ingress = Ingress::for_engine(std::sync::Arc::new(TestHandler)).unwrap();
+
+                // Start the service and endpoint
+                tokio::spawn(async move {
+                    let _ = component
+                        .service_builder()
+                        .create()
+                        .await
+                        .unwrap()
+                        .endpoint(ENDPOINT_NAME)
+                        .endpoint_builder()
+                        .handler(ingress)
+                        .start()
+                        .await;
+                });
+
+                // Hit health endpoint 200 times to verify consistency
+                let mut success_count = 0;
+                let mut failures = Vec::new();
+
+                for i in 1..=200 {
+                    let response = client.get(&health_url).send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+
+                    if status == 200 && body.contains("\"status\":\"ready\"") {
+                        success_count += 1;
+                    } else {
+                        failures.push((i, status.as_u16(), body.clone()));
+                        if failures.len() <= 5 {  // Only log first 5 failures
+                            tracing::warn!("Request {}: status={}, body={}", i, status, body);
+                        }
+                    }
+                }
+
+                tracing::info!("Health endpoint test results: {}/200 requests succeeded", success_count);
+                if !failures.is_empty() {
+                    tracing::warn!("Failed requests: {}", failures.len());
+                }
+
+                // Expect at least 150 out of 200 requests to be successful
+                assert!(success_count >= 150, "Expected at least 150 out of 200 requests to succeed, but only {} succeeded", success_count);
+            },
+        )
+        .await;
     }
 
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_spawn_system_status_server_endpoints() {
         // use reqwest for HTTP requests
         temp_env::async_with_vars(
-            [("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready"))],
+            [
+                ("DYN_SYSTEM_ENABLED", Some("true")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
+            ],
             async {
-                let cancel_token = CancellationToken::new();
-                let drt = create_test_drt_async().await;
-                let (addr, server_handle) =
-                    spawn_system_status_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
-                        .await
-                        .unwrap();
-                println!("[test] Waiting for server to start...");
-                sleep(std::time::Duration::from_millis(1000)).await;
-                println!("[test] Server should be up, starting requests...");
+                let drt = Arc::new(create_test_drt_async().await);
+
+                // Get system status server info from DRT (instead of manually spawning)
+                let system_info = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started by DRT");
+                let addr = system_info.socket_addr;
                 let client = reqwest::Client::new();
                 for (path, expect_200, expect_body) in [
                     ("/health", true, "ready"),
@@ -592,51 +703,9 @@ dynamo_component_dynamo_uptime_seconds 42
                         body
                     );
                 }
-                cancel_token.cancel();
-                match server_handle.await {
-                    Ok(_) => println!("[test] Server shut down normally"),
-                    Err(e) => {
-                        if e.is_panic() {
-                            println!("[test] Server panicked: {:?}", e);
-                        } else {
-                            println!("[test] Server cancelled: {:?}", e);
-                        }
-                    }
-                }
+                // DRT handles server cleanup automatically
             },
         )
         .await;
-    }
-
-    #[cfg(feature = "integration")]
-    #[tokio::test]
-    async fn test_http_server_basic_functionality() {
-        // Test basic HTTP server functionality without requiring etcd
-        let cancel_token = CancellationToken::new();
-        let cancel_token_for_server = cancel_token.clone();
-
-        // Test basic HTTP server lifecycle
-        let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
-
-        // start HTTP server
-        let server_handle = tokio::spawn(async move {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(cancel_token_for_server.cancelled_owned())
-                .await;
-        });
-
-        // wait for a while to let the server start
-        sleep(Duration::from_millis(100)).await;
-
-        // cancel token
-        cancel_token.cancel();
-
-        // wait for the server to shut down
-        let result = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
-        assert!(
-            result.is_ok(),
-            "HTTP server should shut down when cancel token is cancelled"
-        );
     }
 }

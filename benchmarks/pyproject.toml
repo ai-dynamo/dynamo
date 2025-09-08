@@ -42,6 +42,7 @@ classifiers = [
 dependencies = [
     "networkx",
     "pandas",
+    "pydantic>=2",
     "tabulate",
     "types-tabulate",
     "transformers",
@@ -49,7 +50,7 @@ dependencies = [
 ]
 
 [project.scripts]
-datagen = "data_generator.cli:main"
+datagen = "prefix_data_generator.cli:main"
 
 [project.urls]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
@@ -59,10 +60,10 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["data_generator"]
+packages = ["prefix_data_generator"]
 
 [tool.setuptools.package-data]
-data_generator = ["**/*.py"]
+prefix_data_generator = ["**/*.py"]
 
 [tool.mypy]
 explicit_package_bases = true

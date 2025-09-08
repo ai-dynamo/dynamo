@@ -43,7 +43,7 @@ async fn test_backend_with_metrics() -> Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     // Get the System status server info to find the actual port
-    let system_status_info = distributed.system_status_info();
+    let system_status_info = distributed.system_status_server_info();
     let system_status_port = match system_status_info {
         Some(info) => {
             println!("System status server running on: {}", info.address());
@@ -118,7 +118,7 @@ async fn test_backend_with_metrics() -> Result<()> {
                 println!("{}", metrics_content);
                 println!("=== END METRICS CONTENT ===");
 
-                // Parse and verify ingress metrics are greater than 0 (except concurrent_requests)
+                // Parse and verify ingress metrics are greater than 0 (except inflight_requests)
                 verify_ingress_metrics_greater_than_0(&metrics_content);
 
                 println!("Successfully retrieved and verified metrics!");
@@ -143,7 +143,7 @@ async fn test_backend_with_metrics() -> Result<()> {
 }
 
 fn verify_ingress_metrics_greater_than_0(metrics_content: &str) {
-    // Define the work handler metrics we want to verify (excluding concurrent_requests which can be 0)
+    // Define the work handler metrics we want to verify (excluding inflight_requests which can be 0)
     let metrics_to_verify = [
         "my_custom_bytes_processed_total",
         "requests_total",

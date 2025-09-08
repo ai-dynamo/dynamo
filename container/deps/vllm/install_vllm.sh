@@ -20,13 +20,16 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="ba81acbdc1eec643ba815a76628ae3e4b2263b76"
+VLLM_REF="1da94e673c257373280026f75ceb4effac80e892"  # from v0.10.1.1
+# When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
+# aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
+VLLM_PRECOMPILED_WHEEL_LOCATION="https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_REF}/vllm-0.10.1.1-cp38-abi3-manylinux1_x86_64.whl"
 VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="03d0be3"
-FLASHINF_REF="v0.2.8rc1"
+DEEPGEMM_REF="f85ec64"
+FLASHINF_REF="v0.2.11"
 TORCH_BACKEND="cu128"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
@@ -83,13 +86,13 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
-            echo "  --vllm-ref REF    Git reference to checkout (default: f4135232b9a8c4845f8961fb1cd17581c56ae2ce)"
-            echo "  --max-jobs NUM    Maximum number of parallel jobs (default: 16)"
+            echo "  --vllm-ref REF    Git reference to checkout (default: ${VLLM_REF})"
+            echo "  --max-jobs NUM    Maximum number of parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
-            echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
-            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 1876566)"
-            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: v0.2.8rc1)"
-            echo "  --torch-backend BACKEND  Torch backend to use (default: cu128)"
+            echo "  --installation-dir DIR  Directory to install vllm (default: ${INSTALLATION_DIR})"
+            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: ${DEEPGEMM_REF})"
+            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: ${FLASHINF_REF})"
+            echo "  --torch-backend BACKEND  Torch backend to use (default: ${TORCH_BACKEND})"
             exit 0
             ;;
         *)
@@ -112,8 +115,12 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 # Install common dependencies
 uv pip install pip cuda-python
 
-# Install LMCache
-uv pip install lmcache
+if [ "$ARCH" = "amd64" ]; then
+    # LMCache installation currently fails on arm64 due to CUDA dependency issues:
+    # OSError: CUDA_HOME environment variable is not set. Please set it to your CUDA install root.
+    # TODO: Re-enable for arm64 after verifying lmcache compatibility and resolving the build issue.
+    uv pip install lmcache==0.3.3
+fi
 
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
@@ -127,7 +134,7 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+    if ! uv pip install torch==2.7.1+cu128 torchaudio==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl; then
         echo "Pinned versions failed"
         exit 1
         # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
@@ -143,10 +150,19 @@ if [ "$ARCH" = "arm64" ]; then
     fi
 else
     echo "Installing vllm for AMD64 architecture"
+
+    echo "Attempting to install pinned OpenAI version..."
+    if ! uv pip install  openai==1.99.9; then
+        echo "Pinned versions failed"
+        exit 1
+    fi
+
+    export VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_PRECOMPILED_WHEEL_LOCATION}"
+
     if [ "$EDITABLE" = "true" ]; then
-        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=$TORCH_BACKEND
+	uv pip install -e . --torch-backend=$TORCH_BACKEND
     else
-        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
+        uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
 

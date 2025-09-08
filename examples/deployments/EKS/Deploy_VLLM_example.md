@@ -25,8 +25,8 @@ dynamo-cloud   vllm-agg-router-vllmdecodeworker-787d575485-zkwdd                
 Test the Deployment
 
 ```
-kubectl port-forward deployment/vllm-agg-router-frontend 8080:8000 -n dynamo-cloud
-curl localhost:8080/v1/chat/completions \
+kubectl port-forward deployment/vllm-agg-router-frontend 8000:8000 -n dynamo-cloud
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",

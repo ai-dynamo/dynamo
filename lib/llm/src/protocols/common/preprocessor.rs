@@ -4,7 +4,8 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use super::{SamplingOptions, StopConditions};
+use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RouterConfigOverride;
 use crate::protocols::TokenIdType;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
@@ -29,6 +30,10 @@ pub struct PreprocessedRequest {
     /// are needed.
     pub sampling_options: SamplingOptions,
 
+    /// OutputOptions are options that control the output of the inference engine such as whether
+    /// to return log probabilities, or whether to skip special tokens in output.
+    pub output_options: OutputOptions,
+
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location
@@ -46,6 +51,14 @@ pub struct PreprocessedRequest {
     /// Estimated number of prefix hit tokens (only used in kv aware routing)
     #[builder(default)]
     pub estimated_prefix_hit_num_blocks: Option<u32>,
+
+    /// Targeted backend instance ID for the request
+    #[builder(default)]
+    pub backend_instance_id: Option<i64>,
+
+    /// Router configuration overrides for this specific request
+    #[builder(default)]
+    pub router_config_override: Option<RouterConfigOverride>,
 }
 
 impl PreprocessedRequest {

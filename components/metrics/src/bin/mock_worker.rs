@@ -14,25 +14,25 @@
 // limitations under the License.
 
 use dynamo_llm::kv_router::{
+    KV_HIT_RATE_SUBJECT,
     protocols::{ForwardPassMetrics, KvStats, WorkerStats},
     scheduler::KVHitRateEvent,
-    KV_HIT_RATE_SUBJECT,
 };
 use dynamo_runtime::{
-    component::{service::EndpointStats, Namespace},
+    DistributedRuntime, Result, Runtime, Worker,
+    component::{Namespace, service::EndpointStats},
     logging,
     pipeline::{
-        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
     },
     protocols::annotated::Annotated,
     stream,
     traits::events::EventPublisher,
-    DistributedRuntime, Result, Runtime, Worker,
 };
 use rand::Rng;
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 fn main() -> Result<()> {
     logging::init();

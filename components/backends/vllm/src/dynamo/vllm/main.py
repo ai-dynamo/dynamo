@@ -12,6 +12,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
@@ -79,12 +81,16 @@ async def worker(runtime: DistributedRuntime):
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logging.info("Signal handlers set up for graceful shutdown")
+    logging.debug("Signal handlers set up for graceful shutdown")
 
     if config.is_prefill_worker:
         await init_prefill(runtime, config)
+        logger.debug("init_prefill completed")
     else:
         await init(runtime, config)
+        logger.debug("init completed")
+
+    logger.debug("Worker function completed, exiting...")
 
 
 def setup_vllm_engine(config, stat_logger=None):
@@ -98,7 +104,7 @@ def setup_vllm_engine(config, stat_logger=None):
         setup_lmcache_environment()
         logger.info("LMCache enabled for VllmWorker")
     else:
-        logger.info("LMCache is disabled")
+        logger.debug("LMCache is disabled")
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
@@ -141,21 +147,32 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # TODO register_prefill in similar vein to register_llm
 
-    handler = PrefillWorkerHandler(component, engine_client, default_sampling_params)
+    handler = PrefillWorkerHandler(
+        runtime, component, engine_client, default_sampling_params
+    )
 
     try:
+        logger.debug("Starting serve_endpoint for prefill worker")
         await asyncio.gather(
             # for prefill, we want to shutdown the engine after all prefill requests are finished because
             #     (temp reason): we don't support re-routing prefill requests
             #     (long-term reason): prefill engine should pull from a global queue so there is
             #                         only a few in-flight requests that can be quickly finished
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", config.model)],
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
         )
+        logger.debug("serve_endpoint completed for prefill worker")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        logger.debug("Cleaning up prefill worker")
         handler.cleanup()
 
 
@@ -177,7 +194,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         .client()
     )
 
-    factory = StatLoggerFactory(component, config.engine_args.data_parallel_rank or 0)
+    factory = StatLoggerFactory(
+        component,
+        config.engine_args.data_parallel_rank or 0,
+        metrics_labels=[("model", config.model)],
+    )
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
     )
@@ -190,7 +211,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     logger.info(f"VllmWorker for {config.model} has been initialized")
 
     handler = DecodeWorkerHandler(
-        component, engine_client, default_sampling_params, prefill_worker_client
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        prefill_worker_client,
     )
 
     if config.engine_args.enable_prefix_caching:
@@ -213,28 +238,79 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publisher = kv_publisher
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        runtime_config = ModelRuntimeConfig()
+
+        # make a `collective_rpc` call to get runtime configuration values
+        logging.info(
+            "Getting engine runtime configuration metadata from vLLM engine..."
+        )
+        runtime_values = get_engine_cache_info(engine_client)
+        runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+        runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
+        runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
+        runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.reasoning_parser = config.reasoning_parser
+
         await register_llm(
-            ModelType.Backend,
+            ModelInput.Tokens,
+            ModelType.Chat | ModelType.Completions,
             generate_endpoint,
             config.model,
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
             migration_limit=config.migration_limit,
+            runtime_config=runtime_config,
+            custom_template_path=config.custom_jinja_template,
         )
 
     try:
+        logger.debug("Starting serve_endpoint for decode worker")
         await asyncio.gather(
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
-            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=config.migration_limit <= 0,
+                metrics_labels=[("model", config.model)],
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
+            ),
         )
+        logger.debug("serve_endpoint completed for decode worker")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        logger.debug("Cleaning up decode worker")
         # Cleanup background tasks
         handler.cleanup()
+
+
+def get_engine_cache_info(engine: AsyncLLM):
+    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+
+    try:
+        # Get values directly from vllm_config instead of collective_rpc
+        cache_values = {
+            "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
+        }
+
+        scheduler_values = {
+            "max_num_seqs": engine.vllm_config.scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
+        }
+
+        logging.info(f"Cache config values: {cache_values}")
+        logging.info(f"Scheduler config values: {scheduler_values}")
+        return {
+            "num_gpu_blocks": cache_values["num_gpu_blocks"],
+            "max_num_seqs": scheduler_values["max_num_seqs"],
+            "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
+        }
+    except Exception as e:
+        logging.error(f"Failed to get configuration values from vLLM config: {e}")
+        raise
 
 
 def main():

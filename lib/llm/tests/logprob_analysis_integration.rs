@@ -10,10 +10,9 @@ use dynamo_llm::perf::logprobs::analyze_logprob_sensitivity;
 use dynamo_llm::perf::{RecordedStream, TimestampedResponse};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
-use async_openai::types::{
+use dynamo_async_openai::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
-    ChatCompletionTokenLogprob, CreateChatCompletionStreamResponse, FinishReason, Role,
-    TopLogprobs,
+    ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
 };
 
 // Type aliases to simplify complex test data structures
@@ -236,8 +235,8 @@ fn create_multi_choice_stream() -> Arc<RecordedStream<NvCreateChatCompletionStre
 //         record_stream_with_context(Box::pin(filtered_stream), ctx, RecordingMode::Sink);
 // }
 
-fn create_stream_with_multiple_close_tokens(
-) -> Arc<RecordedStream<NvCreateChatCompletionStreamResponse>> {
+fn create_stream_with_multiple_close_tokens()
+-> Arc<RecordedStream<NvCreateChatCompletionStreamResponse>> {
     let start_time = Instant::now();
     let responses = vec![TimestampedResponse::new(
         create_response_with_linear_probs(
@@ -387,6 +386,7 @@ fn create_response_with_linear_probs(
             tool_calls: None,
             role: Some(Role::Assistant),
             refusal: None,
+            reasoning_content: None,
         },
         finish_reason: Some(FinishReason::Stop),
         logprobs: Some(ChatChoiceLogprobs {
@@ -395,7 +395,7 @@ fn create_response_with_linear_probs(
         }),
     };
 
-    let inner = CreateChatCompletionStreamResponse {
+    NvCreateChatCompletionStreamResponse {
         id: "test_id".to_string(),
         choices: vec![choice],
         created: 1234567890,
@@ -404,9 +404,7 @@ fn create_response_with_linear_probs(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
-    };
-
-    NvCreateChatCompletionStreamResponse { inner }
+    }
 }
 
 fn create_multi_choice_response(
@@ -466,6 +464,7 @@ fn create_multi_choice_response(
                     tool_calls: None,
                     role: Some(Role::Assistant),
                     refusal: None,
+                    reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
                 logprobs: Some(ChatChoiceLogprobs {
@@ -476,7 +475,7 @@ fn create_multi_choice_response(
         })
         .collect();
 
-    let inner = CreateChatCompletionStreamResponse {
+    NvCreateChatCompletionStreamResponse {
         id: "test_id".to_string(),
         choices,
         created: 1234567890,
@@ -485,7 +484,5 @@ fn create_multi_choice_response(
         system_fingerprint: None,
         object: "chat.completion.chunk".to_string(),
         usage: None,
-    };
-
-    NvCreateChatCompletionStreamResponse { inner }
+    }
 }

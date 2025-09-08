@@ -62,7 +62,7 @@ The `dynamo_component_errors_total` metric includes the following error types:
 - `dynamo_component_request_duration_seconds` - Request processing time
 
 ### Gauges
-- `dynamo_component_concurrent_requests` - Number of requests currently being processed
+- `dynamo_component_inflight_requests` - Number of requests currently being processed
 
 ### Custom Metrics (Optional)
 - `dynamo_component_bytes_processed_total` - Total data bytes processed by system handler (example)
@@ -80,9 +80,9 @@ These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and
 When the system is running, you'll see metrics from http://<ip>:<port>/metrics like this:
 
 ```prometheus
-# HELP dynamo_component_concurrent_requests Number of requests currently being processed by component endpoint
-# TYPE dynamo_component_concurrent_requests gauge
-dynamo_component_concurrent_requests{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0
+# HELP dynamo_component_inflight_requests Number of requests currently being processed by component endpoint
+# TYPE dynamo_component_inflight_requests gauge
+dynamo_component_inflight_requests{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0
 
 # HELP dynamo_component_bytes_processed_total Example of a custom metric. Total number of data bytes processed by system handler
 # TYPE dynamo_component_bytes_processed_total counter
@@ -185,7 +185,7 @@ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 cargo run --bin system_server
 The server will start an system status server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
 
 
-To Run an actual LLM frontend + server (aggregated example), launch both of them. By default, the frontend listens to port 8080.
+To Run an actual LLM frontend + server (aggregated example), launch both of them. By default, the frontend listens to port 8000.
 ```
 python -m dynamo.frontend &
 
@@ -202,5 +202,5 @@ Once running, you can query the metrics:
 curl http://localhost:8081/metrics | grep -E "dynamo_component"
 
 # Get all frontend metrics
-curl http://localhost:8080/metrics | grep -E "dynamo_frontend"
+curl http://localhost:8000/metrics | grep -E "dynamo_frontend"
 ```

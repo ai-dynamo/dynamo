@@ -15,9 +15,9 @@
 
 use anyhow::Result;
 use prometheus::{
+    IntCounterVec, IntGaugeVec, Opts, Registry,
     core::{AtomicI64, AtomicU64, GenericCounter, GenericGauge},
-    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry, IntCounterVec,
-    IntGaugeVec, Opts, Registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
 use std::sync::Arc;
 pub struct BlockManagerMetrics {

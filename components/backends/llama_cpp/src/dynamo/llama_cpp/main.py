@@ -11,9 +11,11 @@ from typing import Optional
 import uvloop
 from llama_cpp import Llama
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+
+from . import __version__
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 
@@ -39,10 +41,10 @@ async def worker(runtime: DistributedRuntime):
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    model_type = ModelType.Chat  # llama.cpp does the pre-processing
     endpoint = component.endpoint(config.endpoint)
     await register_llm(
-        model_type,
+        ModelInput.Tokens,
+        ModelType.Chat,
         endpoint,
         config.model_path,
         config.model_name,
@@ -82,6 +84,9 @@ class RequestHandler:
 def cmd_line_args():
     parser = argparse.ArgumentParser(
         description="llama.cpp server integrated with Dynamo LLM."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"Dynamo Backend llama.cpp {__version__}"
     )
     parser.add_argument(
         "--model-path",

@@ -5,9 +5,8 @@ import argparse
 import logging
 import os
 
+from utils.profile_decode import profile_decode
 from utils.profile_prefill import profile_prefill
-
-from benchmarks.profiler.utils.profile_decode import profile_decode
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,6 +34,13 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="model name",
+    )
+    parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        required=False,
+        default="",
+        help="tokenizer path",
     )
     parser.add_argument(
         "--url",
@@ -76,10 +82,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     os.makedirs(args.work_dir, exist_ok=True)
+    if args.tokenizer_path == "":
+        args.tokenizer_path = args.model_name
     if args.mode == "prefill":
         profile_prefill(
             args.work_dir,
             args.model_name,
+            args.tokenizer_path,
             args.url,
             args.num_gpus,
             args.max_context_length,
@@ -90,6 +99,7 @@ if __name__ == "__main__":
         profile_decode(
             args.work_dir,
             args.model_name,
+            args.tokenizer_path,
             args.url,
             args.num_gpus,
             args.max_kv_tokens,

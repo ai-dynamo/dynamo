@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{error, CancellationToken, ErrorContext, Result, Runtime};
+use crate::{CancellationToken, ErrorContext, Result, Runtime, error};
 
 use async_nats::jetstream::kv;
 use derive_builder::Builder;
@@ -21,15 +21,16 @@ use derive_getters::Dissolve;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use validator::Validate;
 
 use etcd_client::{
-    Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, PutOptions, PutResponse,
-    TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
+    Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, LockClient, LockOptions,
+    LockResponse, PutOptions, PutResponse, TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions,
+    Watcher,
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 mod lease;
 mod path;
@@ -304,6 +305,32 @@ impl Client {
             .await?;
 
         Ok(get_response.take_kvs())
+    }
+
+    /// Acquire a distributed lock using etcd's native lock mechanism
+    /// Returns a LockResponse that can be used to unlock later
+    pub async fn lock(
+        &self,
+        key: impl Into<Vec<u8>>,
+        lease_id: Option<i64>,
+    ) -> Result<LockResponse> {
+        let mut lock_client = self.client.lock_client();
+        let id = lease_id.unwrap_or(self.lease_id());
+        let options = LockOptions::new().with_lease(id);
+        lock_client
+            .lock(key, Some(options))
+            .await
+            .map_err(|err| err.into())
+    }
+
+    /// Release a distributed lock using the key from the LockResponse
+    pub async fn unlock(&self, lock_key: impl Into<Vec<u8>>) -> Result<()> {
+        let mut lock_client = self.client.lock_client();
+        lock_client
+            .unlock(lock_key)
+            .await
+            .map_err(|err: etcd_client::Error| anyhow::anyhow!(err))?;
+        Ok(())
     }
 
     pub async fn kv_get_and_watch_prefix(
@@ -605,7 +632,7 @@ impl KvCache {
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
-    use crate::{distributed::DistributedConfig, DistributedRuntime};
+    use crate::{DistributedRuntime, distributed::DistributedConfig};
 
     use super::*;
 
@@ -632,15 +659,11 @@ mod tests {
             .id();
 
         // Create the key
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
+        let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
         // Try to create the key again - this should fail
-        let result = client
-            .kv_create(key.to_string(), value.to_vec(), Some(lease_id))
-            .await;
+        let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_err());
 
         // Create or validate should succeed as the values match

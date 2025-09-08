@@ -1,10 +1,9 @@
 # Tokenizers
 
 ## Introduction
-`tokenizers` is designed for efficient and versatile tokenization in natural language processing. It supports both HuggingFace and SentencePiece models, offering a streamlined API for text encoding and decoding.
+`tokenizers` is designed for efficient and versatile tokenization in natural language processing. It supports both HuggingFace models, offering a streamlined API for text encoding and decoding.
 
 ## Features
-- **Support for HuggingFace and SentencePiece Tokenizers**: Easily integrate popular tokenization models into your NLP projects.
 - **Hash Verification**: Ensures tokenization consistency and accuracy across different models.
 - **Simple Encoding and Decoding**: Facilitates the conversion of text to token IDs and back.
 - **Sequence Management**: Manage sequences of tokens for complex NLP tasks effectively.

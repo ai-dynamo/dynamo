@@ -14,16 +14,18 @@
 // limitations under the License.
 
 pub use crate::component::Component;
+use crate::transports::nats::DRTNatsClientPrometheusMetrics;
 use crate::{
+    ErrorContext, RuntimeCallback,
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
     metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
-    ErrorContext,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use super::utils::GracefulShutdownTracker;
+use super::{Arc, DistributedRuntime, OK, OnceCell, Result, Runtime, SystemHealth, Weak, error};
 use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
@@ -39,6 +41,12 @@ impl MetricsRegistry for DistributedRuntime {
 
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![] // drt is the root, so no parent hierarchy
+    }
+}
+
+impl std::fmt::Debug for DistributedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DistributedRuntime")
     }
 }
 
@@ -76,6 +84,8 @@ impl DistributedRuntime {
             live_endpoint_path,
         )));
 
+        let nats_client_for_metrics = nats_client.clone();
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -85,19 +95,43 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+            hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
                 String,
-                prometheus::Registry,
+                crate::MetricsRegistryEntry,
             >::new())),
             system_health,
         };
 
-        // Start system status server if enabled
+        let nats_client_metrics = DRTNatsClientPrometheusMetrics::new(
+            &distributed_runtime,
+            nats_client_for_metrics.client().clone(),
+        )?;
+        let mut drt_hierarchies = distributed_runtime.parent_hierarchy();
+        drt_hierarchies.push(distributed_runtime.hierarchy());
+        // Register a callback to update NATS client metrics
+        let nats_client_callback = Arc::new({
+            let nats_client_clone = nats_client_metrics.clone();
+            move || {
+                nats_client_clone.set_from_client_stats();
+                Ok(())
+            }
+        });
+        distributed_runtime.register_metrics_callback(drt_hierarchies, nats_client_callback);
+
+        // Initialize the uptime gauge in SystemHealth
+        distributed_runtime
+            .system_health
+            .lock()
+            .unwrap()
+            .initialize_uptime_gauge(&distributed_runtime)?;
+
+        // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
+            // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start system status server (it spawns its own task internally)
+            // Start system status server (it creates SystemStatusState internally)
             match crate::system_status_server::spawn_system_status_server(
                 &host,
                 port,
@@ -127,7 +161,10 @@ impl DistributedRuntime {
                 }
             }
         } else {
-            tracing::debug!("Health and system status server is disabled via DYN_SYSTEM_ENABLED");
+            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
+            tracing::debug!(
+                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
+            );
         }
 
         Ok(distributed_runtime)
@@ -224,8 +261,63 @@ impl DistributedRuntime {
         self.runtime.child_token()
     }
 
+    pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
+        self.runtime.graceful_shutdown_tracker()
+    }
+
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
+    }
+
+    /// Add a Prometheus metric to a specific hierarchy's registry. Note that it is possible
+    /// to register the same metric name multiple times, as long as the labels are different.
+    pub fn add_prometheus_metric(
+        &self,
+        hierarchy: &str,
+        prometheus_metric: Box<dyn prometheus::core::Collector>,
+    ) -> anyhow::Result<()> {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        let entry = registries.entry(hierarchy.to_string()).or_default();
+
+        // Try to register the metric
+        entry
+            .prometheus_registry
+            .register(prometheus_metric)
+            .map_err(|e| e.into())
+    }
+
+    /// Add a callback function to metrics registries for the given hierarchies
+    pub fn register_metrics_callback(&self, hierarchies: Vec<String>, callback: RuntimeCallback) {
+        let mut registries = self.hierarchy_to_metricsregistry.write().unwrap();
+        for hierarchy in hierarchies {
+            registries
+                .entry(hierarchy)
+                .or_default()
+                .add_callback(callback.clone());
+        }
+    }
+
+    /// Execute all callbacks for a given hierarchy key and return their results
+    pub fn execute_metrics_callbacks(&self, hierarchy: &str) -> Vec<anyhow::Result<()>> {
+        // Clone callbacks while holding read lock (fast operation)
+        let callbacks = {
+            let registries = self.hierarchy_to_metricsregistry.read().unwrap();
+            registries
+                .get(hierarchy)
+                .map(|entry| entry.runtime_callbacks.clone())
+        }; // Read lock released here
+
+        // Execute callbacks without holding the lock
+        match callbacks {
+            Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Get all registered hierarchy keys. Private because it is only used for testing.
+    fn get_registered_hierarchies(&self) -> Vec<String> {
+        let registries = self.hierarchy_to_metricsregistry.read().unwrap();
+        registries.keys().cloned().collect()
     }
 }
 
@@ -255,5 +347,78 @@ impl DistributedConfig {
         config.etcd_config.attach_lease = false;
 
         config
+    }
+}
+
+pub mod distributed_test_utils {
+    //! Common test helper functions for DistributedRuntime tests
+    // TODO: Use in-memory DistributedRuntime for tests instead of full runtime when available.
+
+    /// Helper function to create a DRT instance for integration-only tests.
+    /// Uses from_current to leverage existing tokio runtime
+    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings_without_discovery
+    #[cfg(feature = "integration")]
+    pub async fn create_test_drt_async() -> crate::DistributedRuntime {
+        let rt = crate::Runtime::from_current().unwrap();
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
+            .await
+            .unwrap()
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod tests {
+    use super::distributed_test_utils::create_test_drt_async;
+
+    #[tokio::test]
+    async fn test_drt_uptime_after_delay_system_disabled() {
+        // Test uptime with system status server disabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("false"))], async {
+            // Start a DRT
+            let drt = create_test_drt_async().await;
+
+            // Wait 50ms
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            // Check that uptime is 50+ ms
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            assert!(
+                uptime >= std::time::Duration::from_millis(50),
+                "Expected uptime to be at least 50ms, but got {:?}",
+                uptime
+            );
+
+            println!(
+                "✓ DRT uptime test passed (system disabled): uptime = {:?}",
+                uptime
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_drt_uptime_after_delay_system_enabled() {
+        // Test uptime with system status server enabled
+        temp_env::async_with_vars([("DYN_SYSTEM_ENABLED", Some("true"))], async {
+            // Start a DRT
+            let drt = create_test_drt_async().await;
+
+            // Wait 50ms
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            // Check that uptime is 50+ ms
+            let uptime = drt.system_health.lock().unwrap().uptime();
+            assert!(
+                uptime >= std::time::Duration::from_millis(50),
+                "Expected uptime to be at least 50ms, but got {:?}",
+                uptime
+            );
+
+            println!(
+                "✓ DRT uptime test passed (system enabled): uptime = {:?}",
+                uptime
+            );
+        })
+        .await;
     }
 }

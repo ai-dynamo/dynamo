@@ -6,7 +6,7 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::build_routed_pipeline;
+pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 
 use std::sync::Arc;
 
@@ -21,6 +21,7 @@ use crate::{
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
+    pub busy_threshold: Option<f64>,
 }
 
 impl RouterConfig {
@@ -28,7 +29,13 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
+            busy_threshold: None,
         }
+    }
+
+    pub fn with_busy_threshold(mut self, threshold: Option<f64>) -> Self {
+        self.busy_threshold = threshold;
+        self
     }
 }
 

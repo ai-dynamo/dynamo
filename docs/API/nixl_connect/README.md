@@ -103,7 +103,7 @@ flowchart LR
 
 ### Multimodal Example
 
-In the case of the [Dynamo Multimodal Disaggregated Example](../../examples/multimodal/README.md):
+In the case of the [Dynamo Multimodal Disaggregated Example](../../../examples/multimodal/README.md):
 
  1. The HTTP frontend accepts a text prompt and a URL to an image.
 
@@ -153,11 +153,11 @@ flowchart LR
 
 #### Code Examples
 
-See [prefill_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/prefill_worker.py#L199) or [decode_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/decode_worker.py#L239) from our Multimodal example,
+See [prefill_worker](../../../examples/multimodal/components/worker.py) or [decode_worker](../../../examples/multimodal/components/worker.py) from our Multimodal example,
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable_operation.md),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
-See [encode_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/encode_worker.py#L190) from our Multimodal example,
+See [encode_worker](../../..//examples/multimodal/components/encode_worker.py#L190) from our Multimodal example,
 for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
 a [`WriteOperation`](write_operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
@@ -170,7 +170,6 @@ and the worker awaits for the data transfer to complete for yielding a response.
   - [Device](device.md)
   - [ReadOperation](read_operation.md)
   - [ReadableOperation](readable_operation.md)
-  - [SerializedRequest](serialized_request.md)
   - [WritableOperation](writable_operation.md)
   - [WriteOperation](write_operation.md)
 
@@ -178,7 +177,6 @@ and the worker awaits for the data transfer to complete for yielding a response.
 ## References
 
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
-    - [NVIDIA Dynamo NIXL Connect](https://github.com/ai-dynamo/dynamo/tree/main/docs/runtime/nixl_connect)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal)
+  - [Dynamo Multimodal Example](../../..//examples/multimodal)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

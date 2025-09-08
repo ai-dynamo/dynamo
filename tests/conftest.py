@@ -141,14 +141,14 @@ def pytest_collection_modifyitems(config, items):
     It is used to skip tests that are not supported on all environments.
     """
 
-    # Tests marked with tensorrtllm requires specific environment with tensorrtllm
+    # Tests marked with trtllm requires specific environment with tensorrtllm
     # installed. Hence, we skip them if the user did not explicitly ask for them.
-    if config.getoption("-m") and "tensorrtllm" in config.getoption("-m"):
+    if config.getoption("-m") and "trtllm_marker" in config.getoption("-m"):
         return
-    skip_tensorrtllm = pytest.mark.skip(reason="need -m tensorrtllm to run")
+    skip_trtllm = pytest.mark.skip(reason="need -m trtllm_marker to run")
     for item in items:
-        if "tensorrtllm" in item.keywords:
-            item.add_marker(skip_tensorrtllm)
+        if "trtllm_marker" in item.keywords:
+            item.add_marker(skip_trtllm)
 
         # Auto-inject predownload_models fixture for serve tests only (not router tests)
         # Skip items that don't have fixturenames (like MypyFileItem)

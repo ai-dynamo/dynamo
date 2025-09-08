@@ -21,11 +21,11 @@
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock, Weak},
+    time::Instant,
 };
-use tokio::sync::Mutex;
 
 pub use anyhow::{
-    anyhow as error, bail as raise, Context as ErrorContext, Error, Ok as OK, Result,
+    Context as ErrorContext, Error, Ok as OK, Result, anyhow as error, bail as raise,
 };
 
 use async_once_cell::OnceCell;
@@ -55,11 +55,15 @@ pub mod utils;
 pub mod worker;
 
 pub mod distributed;
+pub use distributed::distributed_test_utils;
 pub use futures::stream;
 pub use tokio_util::sync::CancellationToken;
 pub use worker::Worker;
 
+use crate::metrics::prometheus_names::distributed_runtime;
+
 use component::{Endpoint, InstanceSource};
+use utils::GracefulShutdownTracker;
 
 use config::HealthStatus;
 
@@ -77,6 +81,8 @@ pub struct Runtime {
     primary: RuntimeType,
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
+    endpoint_shutdown_token: CancellationToken,
+    graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
 }
 
 /// Current Health Status
@@ -90,6 +96,8 @@ pub struct SystemHealth {
     use_endpoint_health_status: Vec<String>,
     health_path: String,
     live_path: String,
+    start_time: Instant,
+    uptime_gauge: OnceLock<prometheus::Gauge>,
 }
 
 impl SystemHealth {
@@ -109,6 +117,8 @@ impl SystemHealth {
             use_endpoint_health_status,
             health_path,
             live_path,
+            start_time: Instant::now(),
+            uptime_gauge: OnceLock::new(),
         }
     }
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -145,6 +155,98 @@ impl SystemHealth {
 
         (healthy, endpoints)
     }
+
+    /// Initialize the uptime gauge using the provided metrics registry
+    pub fn initialize_uptime_gauge<T: crate::metrics::MetricsRegistry>(
+        &self,
+        registry: &T,
+    ) -> anyhow::Result<()> {
+        let gauge = registry.create_gauge(
+            distributed_runtime::UPTIME_SECONDS,
+            "Total uptime of the DistributedRuntime in seconds",
+            &[],
+        )?;
+        self.uptime_gauge
+            .set(gauge)
+            .map_err(|_| anyhow::anyhow!("uptime_gauge already initialized"))?;
+        Ok(())
+    }
+
+    /// Get the current uptime as a Duration
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start_time.elapsed()
+    }
+
+    /// Update the uptime gauge with the current uptime value
+    pub fn update_uptime_gauge(&self) {
+        if let Some(gauge) = self.uptime_gauge.get() {
+            gauge.set(self.uptime().as_secs_f64());
+        }
+    }
+}
+
+/// Type alias for runtime callback functions to reduce complexity
+///
+/// This type represents an Arc-wrapped callback function that can be:
+/// - Shared efficiently across multiple threads and contexts
+/// - Cloned without duplicating the underlying closure
+/// - Used in generic contexts requiring 'static lifetime
+///
+/// The Arc wrapper is included in the type to make sharing explicit.
+type RuntimeCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
+
+/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy
+pub struct MetricsRegistryEntry {
+    /// The Prometheus registry for this prefix
+    pub prometheus_registry: prometheus::Registry,
+    /// List of function callbacks that receive a reference to any MetricsRegistry
+    pub runtime_callbacks: Vec<RuntimeCallback>,
+}
+
+impl MetricsRegistryEntry {
+    /// Create a new metrics registry entry with an empty registry and no callbacks
+    pub fn new() -> Self {
+        Self {
+            prometheus_registry: prometheus::Registry::new(),
+            runtime_callbacks: Vec::new(),
+        }
+    }
+
+    /// Add a callback function that receives a reference to any MetricsRegistry
+    pub fn add_callback(&mut self, callback: RuntimeCallback) {
+        self.runtime_callbacks.push(callback);
+    }
+
+    /// Execute all runtime callbacks and return their results
+    pub fn execute_callbacks(&self) -> Vec<anyhow::Result<()>> {
+        self.runtime_callbacks
+            .iter()
+            .map(|callback| callback())
+            .collect()
+    }
+
+    /// Returns true if a metric with the given name already exists in the Prometheus registry
+    pub fn has_metric_named(&self, metric_name: &str) -> bool {
+        self.prometheus_registry
+            .gather()
+            .iter()
+            .any(|mf| mf.name() == metric_name)
+    }
+}
+
+impl Default for MetricsRegistryEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for MetricsRegistryEntry {
+    fn clone(&self) -> Self {
+        Self {
+            prometheus_registry: self.prometheus_registry.clone(),
+            runtime_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+        }
+    }
 }
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
@@ -171,11 +273,12 @@ pub struct DistributedRuntime {
     // startup. Will not start etcd.
     is_static: bool,
 
-    instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+    instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
     // Health Status
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
-    // This map associates metric prefixes with their corresponding Prometheus registries.
-    prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
+    // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
+    // Uses RwLock for better concurrency - multiple threads can read (execute callbacks) simultaneously.
+    hierarchy_to_metricsregistry: Arc<std::sync::RwLock<HashMap<String, MetricsRegistryEntry>>>,
 }

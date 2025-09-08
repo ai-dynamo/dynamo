@@ -25,17 +25,18 @@ This directory contains scripts for benchmarking TensorRT-LLM performance with D
 Please note that:
 
 - These scripts have not undergone formal quality assurance testing
-- They were executed on GB200 systems
+- These scripts were tested on GB200 systems. To run all configurations, you will need at least 16 nodes, with each node equipped with 4 GPUs.
 - They are intended for demonstration and educational purposes
 - Use at your own risk in production environments
 - Always review and test scripts thoroughly before running in your specific environment
+- In disaggregated mode, using `--exclusive` flag to launch worker processes can impact runtime performance. Hence, these scripts specify nodelist explicitly in srun call.
 - We are actively working on refining the configuration sweeps.
 
 ## Scripts Overview
 
 ### Core Scripts
 
-1. `submit.sh` - Main entry point for submitting benchmark jobs for disaggregated configurations. This includes WideEP optimization for DEP>=16.
+1. `submit_disagg.sh` - Main entry point for submitting benchmark jobs for disaggregated configurations. This includes WideEP optimization for DEP>=16.
 2. `submit_agg.sh` - Main entry point for submitting benchmark jobs for aggregated configurations.
 3. `post_process.py` - Scan the genai-perf results to produce a json with entries to each config point.
 4. `plot_performance_comparison.py` - Takes the json result file for disaggregated and/or aggregated configuration sweeps and plots a pareto line for better visualization.
@@ -104,7 +105,7 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 
 ```bash
 # Queues the SLURM jobs for disaggregated configurations for DeepSeek R1 without MTP
-./submit.sh mtp=off all
+./submit_disagg.sh mtp=off all
 ```
 
 ### Disaggregated (Includes WideEP) - MTP on

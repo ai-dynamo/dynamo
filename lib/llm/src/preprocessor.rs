@@ -15,34 +15,35 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
-use async_openai::types::EncodingFormat;
+use dynamo_async_openai::types::EncodingFormat;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use crate::model_card::{ModelDeploymentCard, ModelInfo, TokenizerKind};
+use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
+use crate::protocols::common::preprocessor::PreprocessedRequestBuilder;
 use crate::tokenizers::Encoding;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    async_trait, AsyncEngineContext, Error, ManyOut, Operator, SingleIn,
+    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
-    common::{SamplingOptionsProvider, StopConditionsProvider},
+    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
+        DeltaGeneratorExt,
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         nvext::NvExtProvider,
-        DeltaGeneratorExt,
     },
 };
-use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
+use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -97,30 +98,27 @@ pub struct OpenAIPreprocessor {
 }
 
 impl OpenAIPreprocessor {
-    pub async fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+    pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        let formatter = PromptFormatter::from_mdc(&mdc)?;
+        let tokenizer = mdc.tokenizer_hf()?;
+        match formatter {
+            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+        }
+    }
+
+    pub fn new_with_parts(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        hf_tokenizer: tokenizers::Tokenizer,
+    ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum();
-        let formatter = PromptFormatter::from_mdc(mdc.clone()).await?;
-        let PromptFormatter::OAI(formatter) = formatter;
-
-        let tokenizer = match &mdc.tokenizer {
-            Some(TokenizerKind::HfTokenizerJson(file)) => HuggingFaceTokenizer::from_file(file)?,
-            Some(TokenizerKind::GGUF(tokenizer)) => {
-                HuggingFaceTokenizer::from_tokenizer(*tokenizer.clone())
-            }
-            None => {
-                anyhow::bail!(
-                    "Blank ModelDeploymentCard cannot be used for pre-processing, no tokenizer"
-                );
-            }
-        };
-        let tokenizer = Arc::new(tokenizer);
-
+        let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
         let Some(model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
-        let model_info = model_info.get_model_info().await?;
+        let model_info = model_info.get_model_info()?;
 
         Ok(Arc::new(Self {
             formatter,
@@ -129,7 +127,6 @@ impl OpenAIPreprocessor {
             mdcsum,
         }))
     }
-
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
         self.tokenizer.encode(s)
@@ -146,15 +143,114 @@ impl OpenAIPreprocessor {
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
+            + OutputOptionsProvider
             + NvExtProvider,
     >(
         &self,
         request: &R,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
-        let mut annotations = HashMap::new();
+        let mut builder = self.builder(request)?;
+        let formatted_prompt = self.apply_template(request)?;
+        let annotations = self.gather_tokens(request, &mut builder, formatted_prompt)?;
+
+        Ok((builder.build()?, annotations))
+    }
+
+    pub fn builder<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
 
+        let mut stop_conditions = request.extract_stop_conditions()?;
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            for eos_token in self.model_info.eos_token_ids() {
+                if !stop_tokens.contains(&eos_token) {
+                    stop_tokens.push(eos_token);
+                }
+            }
+        } else {
+            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+        }
+
+        // apply ignore eos if not already set
+        stop_conditions.apply_ignore_eos();
+
+        if !stop_conditions.ignore_eos.unwrap_or(false) {
+            builder.eos_token_ids(self.model_info.eos_token_ids());
+        }
+
+        builder.stop_conditions(stop_conditions);
+        builder.sampling_options(request.extract_sampling_options()?);
+        builder.output_options(request.extract_output_options()?);
+        builder.annotations(request.annotations().unwrap_or_default());
+        builder.mdc_sum(Some(self.mdcsum.clone()));
+        builder.estimated_prefix_hit_num_blocks(None);
+        // Extract backend_instance_id from nvext if present
+        if let Some(nvext) = request.nvext() {
+            builder.backend_instance_id(nvext.backend_instance_id);
+        }
+
+        Ok(builder)
+    }
+
+    pub fn apply_template<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<Option<String>> {
+        if let PromptInput::Text(_) = request.prompt_input_type()
+            && let Some(TextInput::Single(_)) = request.extract_text()
+        {
+            let use_raw_prompt = request
+                .nvext()
+                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
+
+            let formatted_prompt = if use_raw_prompt {
+                match request.raw_prompt() {
+                    Some(prompt) => prompt,
+                    None => {
+                        tracing::warn!("Raw prompt requested but not available");
+                        self.formatter.render(request)?
+                    }
+                }
+            } else {
+                self.formatter.render(request)?
+            };
+            Ok(Some(formatted_prompt))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn gather_tokens<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        builder: &mut PreprocessedRequestBuilder,
+        formatted_prompt: Option<String>,
+    ) -> Result<HashMap<String, String>> {
+        let mut annotations = HashMap::new();
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
@@ -177,40 +273,57 @@ impl OpenAIPreprocessor {
             PromptInput::Text(_) => {
                 if let Some(text_input) = request.extract_text() {
                     match text_input {
-                        TextInput::Single(_) => {
-                            let use_raw_prompt = request
-                                .nvext()
-                                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
+                        TextInput::Single(raw_prompt) => {
+                            if let Some(f) = formatted_prompt.as_ref()
+                                && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
+                            {
+                                annotations
+                                    .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
+                            }
 
-                            let formatted_prompt = if use_raw_prompt {
-                                match request.raw_prompt() {
-                                    Some(prompt) => prompt,
-                                    None => {
-                                        tracing::warn!("Raw prompt requested but not available");
-                                        self.formatter.render(request)?
-                                    }
+                            // Completions will use raw_prompt, no template
+                            let prompt = formatted_prompt.unwrap_or(raw_prompt);
+
+                            // Check if backend_instance_id is present and token_data is provided
+                            let has_backend_instance_id = request
+                                .nvext()
+                                .and_then(|ext| ext.backend_instance_id)
+                                .is_some();
+
+                            let token_data =
+                                request.nvext().and_then(|ext| ext.token_data.as_ref());
+
+                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
+                                if let Some(tokens) = token_data {
+                                    tracing::trace!(
+                                        "Using provided tokens from EPP: {} ids",
+                                        tokens.len()
+                                    );
+                                    // need ownership for the builder, so clone.
+                                    (tokens.clone(), true)
+                                } else {
+                                    tracing::warn!(
+                                        "backend_instance_id provided but no token_data; tokenizing prompt"
+                                    );
+                                    let encoding = self.tokenizer.encode(&prompt)?;
+                                    (encoding.token_ids().to_vec(), false)
                                 }
                             } else {
-                                self.formatter.render(request)?
+                                // No backend_instance_id provided, continue the normal flow.
+                                let encoding = self.tokenizer.encode(&prompt)?;
+                                (encoding.token_ids().to_vec(), false)
                             };
 
-                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
-
-                            if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-                                annotations.insert(
-                                    ANNOTATION_FORMATTED_PROMPT.to_string(),
-                                    formatted_prompt,
-                                );
-                            }
-
-                            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                            if request.has_annotation(ANNOTATION_TOKEN_IDS)
+                                && !skip_token_annotation
+                            {
                                 annotations.insert(
                                     ANNOTATION_TOKEN_IDS.to_string(),
-                                    serde_json::to_string(encoding.token_ids())?,
+                                    serde_json::to_string(&tokens_vec)?,
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids().to_vec());
+                            builder.token_ids(tokens_vec);
                         }
                         TextInput::Batch(texts) => {
                             let token_batches: Vec<Vec<u32>> = texts
@@ -228,32 +341,7 @@ impl OpenAIPreprocessor {
                 }
             }
         }
-
-        let mut stop_conditions = request.extract_stop_conditions()?;
-        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
-                }
-            }
-        } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
-        }
-
-        // apply ignore eos if not already set
-        stop_conditions.apply_ignore_eos();
-
-        if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
-        }
-
-        builder.stop_conditions(stop_conditions);
-        builder.sampling_options(request.extract_sampling_options()?);
-        builder.annotations(request.annotations().unwrap_or_default());
-        builder.mdc_sum(Some(self.mdcsum.clone()));
-        builder.estimated_prefix_hit_num_blocks(None);
-
-        Ok((builder.build()?, annotations))
+        Ok(annotations)
     }
 
     /// Preprocess an embedding request, handling both text and token ID inputs.
@@ -270,11 +358,11 @@ impl OpenAIPreprocessor {
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
         let all_token_ids = match &request.inner.input {
-            async_openai::types::EmbeddingInput::String(s) => {
+            dynamo_async_openai::types::EmbeddingInput::String(s) => {
                 let encoding = self.tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
-            async_openai::types::EmbeddingInput::StringArray(arr) => {
+            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = self.tokenizer.clone();
@@ -290,8 +378,10 @@ impl OpenAIPreprocessor {
                     .collect();
                 token_arrays
             }
-            async_openai::types::EmbeddingInput::IntegerArray(token_ids) => vec![token_ids.clone()],
-            async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+            dynamo_async_openai::types::EmbeddingInput::IntegerArray(token_ids) => {
+                vec![token_ids.clone()]
+            }
+            dynamo_async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
                 token_arrays.clone()
             }
         };
@@ -431,11 +521,11 @@ impl OpenAIPreprocessor {
         let transformed_stream = stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
-                let embeddings: Vec<async_openai::types::Embedding> = engine_output
+                let embeddings: Vec<dynamo_async_openai::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| async_openai::types::Embedding {
+                    .map(|(index, embedding)| dynamo_async_openai::types::Embedding {
                         index: index as u32,
                         object: "embedding".to_string(),
                         embedding: embedding.into_iter().map(|f| f as f32).collect(),
@@ -443,11 +533,11 @@ impl OpenAIPreprocessor {
                     .collect();
 
                 let response = NvCreateEmbeddingResponse {
-                    inner: async_openai::types::CreateEmbeddingResponse {
+                    inner: dynamo_async_openai::types::CreateEmbeddingResponse {
                         object: "list".to_string(),
                         model: original_request.inner.model.clone(),
                         data: embeddings,
-                        usage: async_openai::types::EmbeddingUsage {
+                        usage: dynamo_async_openai::types::EmbeddingUsage {
                             prompt_tokens: engine_output.prompt_tokens,
                             total_tokens: engine_output.total_tokens,
                         },
@@ -480,18 +570,14 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
         // convert the chat completion request to a common completion request
@@ -538,21 +624,19 @@ impl
         &self,
         request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<
-                SingleIn<PreprocessedRequest>,
-                ManyOut<Annotated<BackendOutput>>,
-                Error,
-            >,
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
         // create a response generator
-        let response_generator = request.response_generator();
+        let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request)?;
+        let mut builder = self.builder(&request)?;
+        let annotations = self.gather_tokens(&request, &mut builder, None)?;
+        let common_request = builder.build()?;
 
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
@@ -596,10 +680,10 @@ impl
         request: SingleIn<NvCreateEmbeddingRequest>,
         next: Arc<
             dyn AsyncEngine<
-                SingleIn<PreprocessedEmbeddingRequest>,
-                ManyOut<Annotated<EmbeddingsEngineOutput>>,
-                Error,
-            >,
+                    SingleIn<PreprocessedEmbeddingRequest>,
+                    ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                    Error,
+                >,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
         // Unpack request

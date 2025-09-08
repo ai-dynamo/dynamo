@@ -18,7 +18,6 @@ The deprecated `metrics` component is a utility for collecting, aggregating, and
 
 **Note**: This is a demo implementation. The deprecated `metrics` component is no longer under active development.
 - In this demo the metrics names use the prefix "llm", but in production they will be prefixed with "dynamo" (e.g., the HTTP `/metrics` endpoint will serve metrics with "dynamo" prefixes)
-- This demo will only work when using examples/llm/configs/agg.yml-- other configurations will not work
 
 <div align="center">
   <img src="images/dynamo_metrics_grafana.png" alt="Dynamo Metrics Dashboard"/>
@@ -81,8 +80,7 @@ metrics --component MyComponent --endpoint my_endpoint
 
 ### Real Worker
 
-To run a more realistic deployment to gathering metrics from,
-see the examples in [examples/llm](../../examples/llm).
+To run a more realistic deployment to gather metrics:
 
 ```bash
 python -m dynamo.frontend &

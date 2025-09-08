@@ -17,7 +17,7 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 * **Performance interpolation**: Leverages profiling results data from pre-deployment profiling for accurate scaling decisions
 * **Correction factors**: Adapts to real-world performance deviations from profiled data
 
-## Architecture
+## Design
 
 The SLA planner consists of several key components:
 
@@ -28,7 +28,9 @@ The SLA planner consists of several key components:
 
 ## Pre-Deployment Profiling
 
-SLA-based planner requires pre-deployment profiling to operate. See [Pre-Deployment Profiling](pre_deployment_profiling.md) for more details.
+**Prerequisite**: SLA-based planner requires pre-deployment profiling to be completed before deployment. The profiling process analyzes your model's performance characteristics to determine optimal tensor parallelism configurations and scaling parameters that the planner will use during operation.
+
+See [Pre-Deployment Profiling](../benchmarks/pre_deployment_profiling.md) for detailed instructions on running the profiling process.
 
 ## Load Prediction
 
@@ -108,11 +110,11 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../guides/dynamo_deploy/sla_planner_deployment.md).
 
-**Quick Start:**
+**To deploy SLA Planner:**
 ```bash
 cd components/backends/vllm/deploy
 kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
 ```
 
 > [!NOTE]
-> The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The dynamo frontend provides these metrics automatically.
+> The SLA planner requires a frontend that reports metrics at the `/metrics` HTTP endpoint with the number of requests, ISL, OSL, TTFT, and ITL in the correct format. The dynamo frontend provides these metrics automatically.

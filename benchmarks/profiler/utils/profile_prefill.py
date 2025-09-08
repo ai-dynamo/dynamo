@@ -4,8 +4,9 @@
 import logging
 
 import numpy as np
-from utils.genai_perf import benchmark_prefill
-from utils.plot import plot_prefill_interpolation
+
+from benchmarks.profiler.utils.genai_perf import benchmark_prefill
+from benchmarks.profiler.utils.plot import plot_prefill_interpolation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,7 +20,13 @@ logger.addHandler(console_handler)
 
 
 def profile_prefill(
-    work_dir, model_name, url, num_gpus, max_context_length, interpolation_granularity
+    work_dir,
+    model_name,
+    tokenizer,
+    url,
+    num_gpus,
+    max_context_length,
+    interpolation_granularity,
 ):
     prefill_isl = []
     prefill_ttft = []
@@ -32,7 +39,11 @@ def profile_prefill(
         # run genai-perf
         genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
         gap_result = benchmark_prefill(
-            isl, genai_perf_artifact_dir, model_name, base_url=url
+            isl,
+            genai_perf_artifact_dir,
+            model_name,
+            tokenizer,
+            base_url=url,
         )
         if gap_result is not None:
             ttft = gap_result["time_to_first_token"]["avg"]

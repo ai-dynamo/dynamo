@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import numpy as np
 import scipy
 
@@ -30,7 +31,7 @@ class PrefillInterpolator:
 
         with np.load(prefill_npz_fn) as raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
-            self.prefill_ttft = raw_data["prefill_ttft"]
+            self.prefill_ttft = raw_data["prefill_ttft"] / 1000  # convert ms to s
             self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
 
         self.min_isl = min(self.prefill_isl)
@@ -143,7 +144,9 @@ class DecodeInterpolator:
         ix, iy = self.compute_idx(concurrency, context_length)
         return self.thpt_interpolator[iy, ix]
 
-    def find_best_throughput_per_gpu(self, itl: float, context_length: float) -> float:
+    def find_best_throughput_per_gpu(
+        self, itl: float, context_length: float
+    ) -> tuple[float, float, float]:
         # find the max kv_load that has itl <= target itl
         # here we cannot use binary search as interpolated itl might not be monotonic
         iy = int(
@@ -157,5 +160,71 @@ class DecodeInterpolator:
 
         for ix in range(self.resolution - 1, -1, -1):
             if self.itl_interpolator[iy, ix] <= itl:
-                return self.thpt_interpolator[iy, ix]
-        return self.thpt_interpolator[iy, 0]
+                return (
+                    self.thpt_interpolator[iy, ix],
+                    self.itl_interpolator[iy, ix],
+                    self.xi[ix],
+                )
+        return self.thpt_interpolator[iy, 0], self.itl_interpolator[iy, 0], self.xi[0]
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile_results_dir", type=str, required=True)
+    parser.add_argument("--isl", type=int, default=3000)
+    parser.add_argument("--osl", type=int, default=150)
+    parser.add_argument("--ttft", type=float, default=0.1, help="in s")
+    parser.add_argument("--itl", type=float, default=0.01, help="in s")
+    args = parser.parse_args()
+
+    print(f"ISL={args.isl}, OSL={args.osl}")
+    print(f"TTFT={args.ttft}s, ITL={args.itl}s")
+    print(f"Using profile results from {args.profile_results_dir}")
+    print("")
+
+    # first interpolate prefill
+    print("Interpolating prefill performance ...")
+    prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
+
+    est_ttft = prefill_interpolator.interpolate_ttft(args.isl)
+    est_thpt_per_gpu = prefill_interpolator.interpolate_thpt_per_gpu(args.isl)
+
+    if est_ttft <= args.ttft:
+        print(
+            f"\tEstimated TTFT={est_ttft:.3f}s <= target TTFT={args.ttft:.3f}s. Requests can queue {args.ttft - est_ttft:.3f}s maximally while meeting TTFT SLA."
+        )
+    else:
+        print(
+            f"\tEstimated TTFT={est_ttft:.3f}s > target TTFT={args.ttft:.3f}s. Cannot meet TTFT SLA."
+        )
+
+    print(
+        f"\tEstimated throughput: {est_thpt_per_gpu:.2f} tokens/s/gpu. Request rate at {est_thpt_per_gpu / args.isl:.2f} requests/s will saturate one GPU."
+    )
+
+    print("")
+
+    # then interpolate decode
+    decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+
+    print("Interpolating decode performance ...")
+    context_length = args.isl + args.osl // 2
+    print(f"\tAverage context length: isl + osl/2 = {context_length}.")
+    (
+        est_thpt_per_gpu,
+        est_itl,
+        est_kv_usage,
+    ) = decode_interpolator.find_best_throughput_per_gpu(args.itl, context_length)
+    if est_itl <= args.itl:
+        print(
+            f"\tEstimated ITL={est_itl:.4f}s <= target ITL={args.itl:.4f}s at {est_kv_usage*100:.2f}% active kv usage."
+        )
+        print(
+            f"\tEstimated throughput: {est_thpt_per_gpu:.2f} token/s/gpu. Request rate at {est_thpt_per_gpu / args.osl:.2f} requests/s will saturate one GPU."
+        )
+    else:
+        print(
+            f"\tEstimated ITL={est_itl:.4f}s > target ITL={args.itl:.4f}s. Cannot meet ITL SLA."
+        )

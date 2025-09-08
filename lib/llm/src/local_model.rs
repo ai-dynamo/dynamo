@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
@@ -16,12 +16,16 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
-use crate::model_type::ModelType;
+use crate::model_type::{ModelInput, ModelType};
 use crate::request_template::RequestTemplate;
 
 mod network_name;
 pub use network_name::ModelNetworkName;
+pub mod runtime_config;
+
+use runtime_config::ModelRuntimeConfig;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -34,7 +38,8 @@ const DEFAULT_NAME: &str = "dynamo";
 const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 
 /// We can't have it default to 0, so pick something
-const DEFAULT_HTTP_PORT: u16 = 8080;
+/// 'pub' because the bindings use it for consistency.
+pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
@@ -45,17 +50,27 @@ pub struct LocalModelBuilder {
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
+    http_host: Option<String>,
     http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     migration_limit: u32,
     is_mocker: bool,
+    extra_engine_args: Option<PathBuf>,
+    runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
+    custom_template_path: Option<PathBuf>,
+    namespace: Option<String>,
 }
 
 impl Default for LocalModelBuilder {
     fn default() -> Self {
         LocalModelBuilder {
             kv_cache_block_size: DEFAULT_KV_CACHE_BLOCK_SIZE,
+            http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
+            tls_cert_path: Default::default(),
+            tls_key_path: Default::default(),
             model_path: Default::default(),
             model_name: Default::default(),
             model_config: Default::default(),
@@ -65,7 +80,11 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             is_mocker: Default::default(),
+            extra_engine_args: Default::default(),
+            runtime_config: Default::default(),
             user_data: Default::default(),
+            custom_template_path: Default::default(),
+            namespace: Default::default(),
         }
     }
 }
@@ -102,9 +121,23 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Passing None resets it to default
-    pub fn http_port(&mut self, port: Option<u16>) -> &mut Self {
-        self.http_port = port.unwrap_or(DEFAULT_HTTP_PORT);
+    pub fn http_host(&mut self, host: Option<String>) -> &mut Self {
+        self.http_host = host;
+        self
+    }
+
+    pub fn http_port(&mut self, port: u16) -> &mut Self {
+        self.http_port = port;
+        self
+    }
+
+    pub fn tls_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_cert_path = p;
+        self
+    }
+
+    pub fn tls_key_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_key_path = p;
         self
     }
 
@@ -113,8 +146,18 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn namespace(&mut self, namespace: Option<String>) -> &mut Self {
+        self.namespace = namespace;
+        self
+    }
+
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
+        self
+    }
+
+    pub fn custom_template_path(&mut self, custom_template_path: Option<PathBuf>) -> &mut Self {
+        self.custom_template_path = custom_template_path;
         self
     }
 
@@ -125,6 +168,16 @@ impl LocalModelBuilder {
 
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
+        self
+    }
+
+    pub fn extra_engine_args(&mut self, extra_engine_args: Option<PathBuf>) -> &mut Self {
+        self.extra_engine_args = extra_engine_args;
+        self
+    }
+
+    pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
+        self.runtime_config = runtime_config;
         self
     }
 
@@ -150,6 +203,7 @@ impl LocalModelBuilder {
             .endpoint_id
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
+
         let template = self
             .template_file
             .as_deref()
@@ -163,13 +217,20 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+            card.runtime_config = self.runtime_config.clone();
+
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
                 endpoint_id,
                 template,
+                http_host: self.http_host.take(),
                 http_port: self.http_port,
+                tls_cert_path: self.tls_cert_path.take(),
+                tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
+                runtime_config: self.runtime_config.clone(),
+                namespace: self.namespace.clone(),
             });
         }
 
@@ -191,7 +252,8 @@ impl LocalModelBuilder {
         // --model-config takes precedence over --model-path
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
-        let mut card = ModelDeploymentCard::load(&model_config_path).await?;
+        let mut card =
+            ModelDeploymentCard::load(model_config_path, self.custom_template_path.as_deref())?;
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {
@@ -218,16 +280,34 @@ impl LocalModelBuilder {
             card.context_length = context_length;
         }
 
+        // Override runtime configs with mocker engine args
+        if self.is_mocker
+            && let Some(path) = &self.extra_engine_args
+        {
+            let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                .expect("Failed to load mocker engine args for runtime config overriding.");
+            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
+            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
+            self.runtime_config.max_num_batched_tokens =
+                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
+        }
+
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
+        card.runtime_config = self.runtime_config.clone();
 
         Ok(LocalModel {
             card,
             full_path,
             endpoint_id,
             template,
+            http_host: self.http_host.take(),
             http_port: self.http_port,
+            tls_cert_path: self.tls_cert_path.take(),
+            tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
+            runtime_config: self.runtime_config.clone(),
+            namespace: self.namespace.clone(),
         })
     }
 }
@@ -238,8 +318,13 @@ pub struct LocalModel {
     card: ModelDeploymentCard,
     endpoint_id: EndpointId,
     template: Option<RequestTemplate>,
-    http_port: u16, // Only used if input is HTTP server
+    http_host: Option<String>,
+    http_port: u16,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
+    runtime_config: ModelRuntimeConfig,
+    namespace: Option<String>,
 }
 
 impl LocalModel {
@@ -266,12 +351,32 @@ impl LocalModel {
         self.template.clone()
     }
 
+    pub fn http_host(&self) -> Option<String> {
+        self.http_host.clone()
+    }
+
     pub fn http_port(&self) -> u16 {
         self.http_port
     }
 
+    pub fn tls_cert_path(&self) -> Option<&Path> {
+        self.tls_cert_path.as_deref()
+    }
+
+    pub fn tls_key_path(&self) -> Option<&Path> {
+        self.tls_key_path.as_deref()
+    }
+
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn runtime_config(&self) -> &ModelRuntimeConfig {
+        &self.runtime_config
+    }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
 
     pub fn is_gguf(&self) -> bool {
@@ -297,6 +402,7 @@ impl LocalModel {
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
+        model_input: ModelInput,
     ) -> anyhow::Result<()> {
         // A static component doesn't have an etcd_client because it doesn't need to register
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
@@ -311,6 +417,7 @@ impl LocalModel {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
+
         card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
@@ -321,8 +428,10 @@ impl LocalModel {
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
-            endpoint: endpoint.id(),
+            endpoint_id: endpoint.id(),
             model_type,
+            runtime_config: Some(self.runtime_config.clone()),
+            model_input,
         };
         etcd_client
             .kv_create(

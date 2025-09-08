@@ -695,7 +695,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(dynamo_response_bytes_total{endpoint=\"generate\"}[1m])",
+          "expr": "rate(dynamo_component_response_bytes_total{dynamo_endpoint=\"generate\"}[1m])",
           "legendFormat": "Response bytes",
           "range": true,
           "refId": "A"
@@ -706,7 +706,7 @@
             "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "rate(dynamo_request_bytes_total{endpoint=\"generate\"}[1m])",
+          "expr": "rate(dynamo_component_request_bytes_total{dynamo_endpoint=\"generate\"}[1m])",
           "hide": false,
           "instant": false,
           "legendFormat": "Request bytes",
@@ -800,7 +800,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(dynamo_requests_total{endpoint=\"generate\"}[1m])",
+          "expr": "rate(dynamo_component_requests_total{dynamo_endpoint=\"generate\"}[1m])",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -905,7 +905,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "dynamo_request_duration_seconds_sum / dynamo_request_duration_seconds_count",
+          "expr": "dynamo_component_request_duration_seconds_sum / dynamo_component_request_duration_seconds_count",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -997,7 +997,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(dynamo_errors_total{endpoint=\"generate\"}[1m])",
+          "expr": "rate(dynamo_component_errors_total{dynamo_endpoint=\"generate\"}[1m])",
           "legendFormat": "{{error_type}}",
           "range": true,
           "refId": "A"

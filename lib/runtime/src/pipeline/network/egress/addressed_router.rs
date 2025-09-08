@@ -18,10 +18,10 @@ use async_nats::{HeaderMap, HeaderValue};
 use tracing as log;
 
 use super::*;
-use crate::logging::get_distributed_tracing_context;
 use crate::logging::DistributedTraceContext;
-use crate::{protocols::maybe_error::MaybeError, Result};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt, StreamNotifyClose};
+use crate::logging::get_distributed_tracing_context;
+use crate::{Result, protocols::maybe_error::MaybeError};
+use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

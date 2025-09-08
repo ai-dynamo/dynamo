@@ -42,6 +42,7 @@ scrape_configs:
       - targets: ['host.docker.internal:8080']  # on the "monitoring" network
 
   # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
+  # If you want to update the scrape_interval, you may want to also update component.rs's MAX_DELAY
   - job_name: 'dynamo-backend'
     scrape_interval: 6s
     static_configs:
@@ -56,6 +57,18 @@ scrape_configs:
     static_configs:
       # - targets: ['localhost:9091']  # metrics aggregation service on host
       - targets: ['host.docker.internal:9091']  # metrics aggregation service on host
+
+  # KVBM leader related metrics
+  - job_name: 'kvbm-leader-metrics'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['host.docker.internal:6881']
+
+  # KVBM worker related metrics
+  - job_name: 'kvbm-worker-metrics'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['host.docker.internal:6880']
 
   # Uncomment to see its own Prometheus metrics
   # - job_name: 'prometheus'

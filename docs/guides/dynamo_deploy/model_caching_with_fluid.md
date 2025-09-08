@@ -27,7 +27,7 @@ helm install fluid fluid/fluid -n fluid-system
 ```
 For advanced configuration, see the [Fluid Installation Guide](https://fluid-cloudnative.github.io/docs/get-started/installation).
 
-## Quick Start
+## Pre-deployment Steps
 
 1. Install Fluid (see [Installation](#installation)).
 2. Create a Dataset and Runtime (see [the following example](#webufs-example)).
@@ -318,7 +318,7 @@ spec:
 
 - [Fluid Documentation](https://fluid-cloudnative.github.io/)
 - [Alluxio Documentation](https://docs.alluxio.io/)
-- [MinIO Documentation](https://min.io/docs/)
+- [MinIO Documentation](https://docs.min.io/)
 - [Hugging Face Hub](https://huggingface.co/docs/hub/index)
 - [Dynamo README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md)
 - [Dynamo Documentation](https://docs.nvidia.com/dynamo/latest/index.html)

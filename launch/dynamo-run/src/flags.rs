@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
-use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::mocker::protocols::MockEngineArgs;
@@ -45,8 +45,17 @@ pub struct Flags {
     pub model_path_flag: Option<PathBuf>,
 
     /// HTTP port. `in=http` only
+    /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
     #[arg(long, default_value = "8080")]
     pub http_port: u16,
+
+    /// TLS certificate file
+    #[arg(long, requires = "tls_key_path")]
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// TLS certificate key file
+    #[arg(long, requires = "tls_cert_path")]
+    pub tls_key_path: Option<PathBuf>,
 
     /// The name of the model we are serving
     #[arg(long)]
@@ -167,13 +176,19 @@ impl Flags {
         match out_opt {
             Output::Auto => {
                 if self.context_length.is_some() {
-                    anyhow::bail!("'--context-length' flag should only be used on the worker node, not on the ingress");
+                    anyhow::bail!(
+                        "'--context-length' flag should only be used on the worker node, not on the ingress"
+                    );
                 }
                 if self.kv_cache_block_size.is_some() {
-                    anyhow::bail!("'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress");
+                    anyhow::bail!(
+                        "'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress"
+                    );
                 }
                 if self.migration_limit.is_some() {
-                    anyhow::bail!("'--migration-limit' flag should only be used on the worker node, not on the ingress");
+                    anyhow::bail!(
+                        "'--migration-limit' flag should only be used on the worker node, not on the ingress"
+                    );
                 }
             }
             Output::Static(_) => {
@@ -202,7 +217,9 @@ impl Flags {
             #[cfg(feature = "llamacpp")]
             Output::LlamaCpp => {
                 if !local_model.path().is_file() {
-                    anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
+                    anyhow::bail!(
+                        "--model-path should refer to a GGUF file. llama_cpp does not support safetensors."
+                    );
                 }
             }
             Output::Mocker => {
@@ -231,6 +248,9 @@ impl Flags {
                 self.use_kv_events,
                 self.router_replica_sync,
                 self.max_num_batched_tokens,
+                // defaulting below args (no longer maintaining new flags for dynamo-run)
+                None,
+                None,
             ),
         )
     }
