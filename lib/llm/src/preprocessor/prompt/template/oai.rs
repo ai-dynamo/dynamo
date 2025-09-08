@@ -256,7 +256,7 @@ mod tests {
         let tools = serde_json::to_value(request.tools()).unwrap();
 
         assert!(tools[0]["function"]["parameters"]["type"] == "object");
-        assert!(tools[0]["function"]["parameters"]["properties"] == serde_json::Value::Object(Default::default()));    
+        assert!(tools[0]["function"]["parameters"]["properties"] == serde_json::Value::Object(Default::default()));
     }
 
     #[test]
