@@ -17,7 +17,7 @@ For a basic installation:
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
-# Values allow podmnonitors to be picked up that are outside of the kube-prometheus-stack helm release
+# Values allow PodMonitors to be picked up that are outside of the kube-prometheus-stack helm release
 helm install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}" \

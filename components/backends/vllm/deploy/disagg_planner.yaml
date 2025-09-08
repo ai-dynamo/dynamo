@@ -53,9 +53,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/planner/src/dynamo/planner
-          ports:
-            - name: metrics
-              containerPort: 9085
           command:
             - /bin/sh
             - -c
@@ -66,7 +63,6 @@ spec:
               --backend=vllm
               --adjustment-interval=60
               --profile-results-dir=/workspace/profiling_results
-              --prometheus-port=9085
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
