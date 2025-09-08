@@ -306,3 +306,133 @@ pub fn try_tool_call_parse_basic_json(
 
     Ok((vec![], Some(trimmed.to_string())))
 }
+
+pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig) -> bool {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    config
+        .tool_call_start_tokens
+        .iter()
+        .any(|token| trimmed.contains(token))
+        || trimmed.contains('{')
+        || trimmed.contains('[')
+}
+
+#[cfg(test)]
+mod detect_parser_tests {
+    use super::*;
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_hermes() {
+        let text =
+            r#"<tool_call>{"name": "search", "parameters": { "query": "rust" } }</tool_call>"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token() {
+        let text = r#"{"name": "search", "parameters": { "query": "rust" } }"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token_with_normal_text() {
+        let text = r#"Here it is {"name": "#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_with_square_brackets() {
+        // These kind of false positives are expected when calling this function for stream=True
+        let text = r#"Here it is [{"name": "search","#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_false_positive() {
+        // These kind of false positives are expected when calling this function for stream=True
+        let text = r#"Here it is { Whats up"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_nemotron_deci() {
+        let text =
+            r#"<TOOLCALL>[{"name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
+            tool_call_end_tokens: vec!["</TOOLCALL>".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_with_lllama3_json_token() {
+        let text = r#"<|python_tag|>{ "name": }"#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<|python_tag|>".to_string()],
+            tool_call_end_tokens: vec!["".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_mistral_token() {
+        let text = r#"Hello Yo ! [TOOL_CALLS]{"name": "search", "#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["[TOOL_CALLS]".to_string()],
+            tool_call_end_tokens: vec!["".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+
+    #[test]
+    fn detect_tool_call_start_basic_json_chunk_phi4_token() {
+        let text = r#"functools{"name": "search", "#;
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["functools".to_string()],
+            tool_call_end_tokens: vec!["".to_string()],
+            ..Default::default()
+        };
+        let result = detect_tool_call_start_basic_json(text, &config);
+        assert!(result);
+    }
+}

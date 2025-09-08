@@ -618,7 +618,7 @@ if [ -z "$RUN_PREFIX" ]; then
 fi
 
 # TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
-if [[ $FRAMEWORK == "VLLM" ]]; then
+if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
     # Define base image tag before using it
     DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
     # Start base image build
