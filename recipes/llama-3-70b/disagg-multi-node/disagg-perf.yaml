@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: llama3-70b-disagg-mn-benchmark
+  name: llama3-70b-disagg-mn-perf
 spec:
   backoffLimit: 3
   completions: 1
@@ -9,11 +9,11 @@ spec:
   template:
     metadata:
       labels:
-        app: llama3-70b-disagg-mn-benchmark
+        app: llama3-70b-disagg-mn-perf
     spec:
       restartPolicy: Never
       containers:
-      - name: benchmark
+      - name: perf
         image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
         workingDir: /workspace/components/backends/vllm
         command:
@@ -32,7 +32,7 @@ spec:
           echo "✅ Model '$TARGET_MODEL' is now available!"
           curl -s "http://$ENDPOINT/v1/models" | jq .
           # now run the benchmark
-          export ARTIFACT_DIR="/tmp/genai-$RANDOM"
+          export ARTIFACT_DIR="/tmp/genai"
           mkdir -p "$ARTIFACT_DIR"
           echo "Running benchmark..."
           export COLUMNS=200
