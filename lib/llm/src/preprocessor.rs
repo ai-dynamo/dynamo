@@ -95,6 +95,7 @@ pub struct OpenAIPreprocessor {
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
     model_info: Arc<dyn ModelInfo>,
+    tool_call_parser: Option<String>,
 }
 
 impl OpenAIPreprocessor {
@@ -119,12 +120,14 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
+        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
 
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
             model_info,
             mdcsum,
+            tool_call_parser,
         }))
     }
     /// Encode a string to it's tokens
@@ -550,6 +553,102 @@ impl OpenAIPreprocessor {
 
         ResponseStream::new(Box::pin(transformed_stream), context)
     }
+
+    /// Apply tool calling jail to the stream using the preprocessor's tool call parser
+    pub fn apply_tool_calling_jail_with_parser(
+        &self,
+        stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
+        apply_tool_calling_jail_internal(stream, self.tool_call_parser.clone())
+    }
+}
+
+/// Detect if the given text chunk indicates the start of a tool call
+/// This function will be implemented by the user
+pub fn detect_tool_call_start(_chunk: &str, _parser_str: Option<&str>) -> anyhow::Result<bool> {
+    // TODO: Implement actual tool call detection logic
+    // This is a placeholder implementation
+    Ok(false)
+}
+
+/// Apply tool calling jail to the stream - stops/jails the stream under certain conditions
+/// When jailed, the stream will be unjailed when the input stream ends
+fn apply_tool_calling_jail_internal(
+    stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    tool_call_parser: Option<String>,
+) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
+    let context = stream.context();
+    
+    struct JailState {
+        stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        is_jailed: bool,
+        tool_call_parser: Option<String>,
+    }
+
+    let jail_state = JailState {
+        stream,
+        is_jailed: false,
+        tool_call_parser,
+    };
+
+    // Transform the stream using unfold to maintain state
+    let jailed_stream = stream::unfold(jail_state, |mut state| async move {
+        if let Some(response) = state.stream.next().await {
+            // Check if we should jail the stream
+            if !state.is_jailed {
+                // Handle the case where response.data is Option<T>
+                if let Some(ref chat_response) = response.data {
+                    // Extract text content from the response
+                    if let Some(choice) = chat_response.choices.first() {
+                        if let Some(ref content) = choice.delta.content {
+                            // Check for tool call start
+                            match detect_tool_call_start(
+                                content,
+                                state.tool_call_parser.as_deref(),
+                            ) {
+                                Ok(should_jail) => {
+                                    if should_jail {
+                                        tracing::debug!("Tool call detected, jailing stream");
+                                        state.is_jailed = true;
+                                        // Return empty response to effectively jail
+                                        let empty_response = NvCreateChatCompletionStreamResponse {
+                                            id: chat_response.id.clone(),
+                                            object: chat_response.object.clone(),
+                                            created: chat_response.created,
+                                            model: chat_response.model.clone(),
+                                            system_fingerprint: chat_response.system_fingerprint.clone(),
+                                            choices: vec![],
+                                            usage: chat_response.usage.clone(),
+                                            service_tier: chat_response.service_tier.clone(),
+                                        };
+                                        return Some((
+                                            response.map_data(|_| Ok(empty_response)),
+                                            state,
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Error detecting tool call start: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If not jailed or jailing condition not met, return the response as-is
+            Some((response, state))
+        } else {
+            // Stream ended - if we were jailed, we should unjail now
+            if state.is_jailed {
+                tracing::debug!("Stream ended, unjailing");
+                state.is_jailed = false;
+            }
+            None
+        }
+    });
+
+    ResponseStream::new(Box::pin(jailed_stream), context)
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -601,6 +700,8 @@ impl
 
         // transform the postprocessor stream
         let stream = Self::transform_postprocessor_stream(response_stream, response_generator);
+
+        let stream = self.apply_tool_calling_jail_with_parser(stream);
         let context = stream.context();
 
         // prepend the annotations to the response stream
