@@ -8,7 +8,7 @@ import signal
 import sys
 
 import uvloop
-from tensorrt_llm import SamplingParams
+from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi import (
     BuildConfig,
     CapacitySchedulerPolicy,
