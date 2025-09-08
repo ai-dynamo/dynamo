@@ -24,7 +24,7 @@ use tracing;
 
 use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
 
-pub fn _may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
+fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
     // No need to validate or enforce other schema checks as the basic Named function schema is already validated while creating the request.
     // Empty parameters is allowed by OpenAI at request level. Need to enforce it at template level.
     // Whenever parameters is empty, insert "type": "object" and "properties": {}
@@ -98,7 +98,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
             None
         } else {
             // Try to fix the tool schema if it is missing type and properties
-            Some(_may_be_fix_tool_schema(
+            Some(may_be_fix_tool_schema(
                 serde_json::to_value(&self.inner.tools).unwrap(),
             )?)
         }
