@@ -64,10 +64,10 @@ impl HealthCheckManager {
     /// Get or create a PushRouter for an endpoint
     async fn get_or_create_router(
         &self,
+        cache_key: &str,
         endpoint: Endpoint,
     ) -> anyhow::Result<Arc<PushRouter<serde_json::Value, Annotated<serde_json::Value>>>> {
-        // TODO: Maybe use Endpoint::etcd_root()?
-        let cache_key = endpoint.path(); // Use the full endpoint path as cache key
+        let cache_key = cache_key.to_string();
 
         // Check cache first
         {
@@ -90,10 +90,7 @@ impl HealthCheckManager {
         );
 
         // Cache it
-        self.router_cache
-            .lock()
-            .unwrap()
-            .insert(cache_key, router.clone());
+        self.router_cache.lock().unwrap().insert(cache_key, router.clone());
 
         Ok(router)
     }
@@ -269,7 +266,7 @@ impl HealthCheckManager {
         let endpoint = component.endpoint(&target.instance.endpoint);
 
         // Get or create router for this endpoint
-        let router = self.get_or_create_router(endpoint).await?;
+        let router = self.get_or_create_router(endpoint_subject, endpoint).await?;
 
         // Create the request context
         let request: SingleIn<serde_json::Value> = Context::new(payload.clone());
