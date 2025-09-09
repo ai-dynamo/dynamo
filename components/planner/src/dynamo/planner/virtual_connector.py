@@ -16,8 +16,12 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 # Constants for scaling readiness check and waiting
-SCALING_CHECK_INTERVAL = int(os.environ.get('SCALING_CHECK_INTERVAL', 10))  # Check every 10 seconds
-SCALING_MAX_WAIT_TIME = int(os.environ.get('SCALING_MAX_WAIT_TIME', 1800))  # Maximum wait time: 30 minutes (1800 seconds)
+SCALING_CHECK_INTERVAL = int(
+    os.environ.get("SCALING_CHECK_INTERVAL", 10)
+)  # Check every 10 seconds
+SCALING_MAX_WAIT_TIME = int(
+    os.environ.get("SCALING_MAX_WAIT_TIME", 1800)
+)  # Maximum wait time: 30 minutes (1800 seconds)
 SCALING_MAX_RETRIES = SCALING_MAX_WAIT_TIME // SCALING_CHECK_INTERVAL  # 180 retries
 
 
