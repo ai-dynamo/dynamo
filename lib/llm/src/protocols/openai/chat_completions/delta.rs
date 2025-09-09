@@ -102,7 +102,7 @@ impl DeltaGenerator {
             .runtime_config
             .reasoning_parser
             .as_deref()
-            .map(|parser_name| ReasoningParserType::get_reasoning_parser_from_name(parser_name));
+            .map(ReasoningParserType::get_reasoning_parser_from_name);
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
@@ -205,8 +205,8 @@ impl DeltaGenerator {
         if text_ref.is_empty() && token_ids.is_empty() {
             return None;
         }
-        let parser_result = reasoning_parser
-            .parse_reasoning_streaming_incremental(text_ref, token_ids);
+        let parser_result =
+            reasoning_parser.parse_reasoning_streaming_incremental(text_ref, token_ids);
 
         Some(parser_result)
     }
@@ -333,18 +333,14 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         };
 
         // Handle reasoning parsing if enabled, otherwise treat all text as normal
-        let (normal_text, reasoning_content) = if self.reasoning_parser.is_some() {
-            let reasoning_parser_result = self
-                .create_reasoning_content(&delta.text, &delta.token_ids)
-                .unwrap_or_default();
-            (
-                reasoning_parser_result.get_some_normal_text(),
-                reasoning_parser_result.get_some_reasoning(),
-            )
-        } else {
-            // No reasoning parser configured, treat all text as normal
-            (delta.text, None)
-        };
+        let (normal_text, reasoning_content) =
+            match self.create_reasoning_content(&delta.text, &delta.token_ids) {
+                Some(reasoning_parser_result) => (
+                    reasoning_parser_result.get_some_normal_text(),
+                    reasoning_parser_result.get_some_reasoning(),
+                ),
+                None => (delta.text, None),
+            };
 
         // Create the streaming response.
         let index = 0;
