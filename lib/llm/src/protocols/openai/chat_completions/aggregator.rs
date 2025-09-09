@@ -129,7 +129,7 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice.delta.role,
                                     finish_reason: None,
-                                    logprobs: choice.logprobs,
+                                    logprobs: None,
                                     tool_calls: None,
                                     reasoning_content: None,
                                 });
@@ -149,6 +149,28 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                        }
+
+                        // Update logprobs
+                        if let Some(logprobs) = &choice.logprobs {
+                            let state_lps = state_choice.logprobs.get_or_insert(
+                                dynamo_async_openai::types::ChatChoiceLogprobs {
+                                    content: None,
+                                    refusal: None,
+                                },
+                            );
+                            if let Some(content_lps) = &logprobs.content {
+                                state_lps
+                                    .content
+                                    .get_or_insert(Vec::new())
+                                    .extend(content_lps.clone());
+                            }
+                            if let Some(refusal_lps) = &logprobs.refusal {
+                                state_lps
+                                    .refusal
+                                    .get_or_insert(Vec::new())
+                                    .extend(refusal_lps.clone());
+                            }
                         }
                     }
                 }
@@ -305,6 +327,7 @@ mod tests {
         text: &str,
         role: Option<dynamo_async_openai::types::Role>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+        logprob: Option<f32>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
@@ -315,11 +338,22 @@ mod tests {
             refusal: None,
             reasoning_content: None,
         };
+        let logprobs = logprob.map(|lp| dynamo_async_openai::types::ChatChoiceLogprobs {
+            content: Some(vec![
+                dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                    token: text.to_string(),
+                    logprob: lp,
+                    bytes: None,
+                    top_logprobs: vec![],
+                },
+            ]),
+            refusal: None,
+        });
         let choice = dynamo_async_openai::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
-            logprobs: None,
+            logprobs,
         };
 
         let data = NvCreateChatCompletionStreamResponse {
@@ -372,6 +406,7 @@ mod tests {
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
             None,
+            None,
         );
 
         // Create a stream
@@ -409,12 +444,14 @@ mod tests {
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
             None,
+            Some(-0.1),
         );
         let annotated_delta2 = create_test_delta(
             0,
             " world!",
             None,
             Some(dynamo_async_openai::types::FinishReason::Stop),
+            Some(-0.2),
         );
 
         // Create a stream
@@ -438,6 +475,25 @@ mod tests {
             Some(dynamo_async_openai::types::FinishReason::Stop)
         );
         assert_eq!(choice.message.role, dynamo_async_openai::types::Role::User);
+        assert_eq!(
+            choice
+                .logprobs
+                .as_ref()
+                .unwrap()
+                .content
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            choice.logprobs.as_ref().unwrap().content.as_ref().unwrap()[0].logprob,
+            -0.1
+        );
+        assert_eq!(
+            choice.logprobs.as_ref().unwrap().content.as_ref().unwrap()[1].logprob,
+            -0.2
+        );
     }
 
     #[allow(deprecated)]
@@ -538,6 +594,7 @@ mod tests {
             tool_call_json,
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+            None,
         );
         let data = annotated_delta.data.unwrap();
 
@@ -598,6 +655,7 @@ mod tests {
             tool_call_json,
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+            None,
         );
         let data = annotated_delta.data.unwrap();
 
