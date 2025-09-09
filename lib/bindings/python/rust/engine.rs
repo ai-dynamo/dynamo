@@ -14,6 +14,8 @@
 // limitations under the License.
 
 use super::context::{callable_accepts_kwarg, Context};
+use dynamo_llm::protocols::DataStream;
+use dynamo_runtime::engine::AsyncEngineContext;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
@@ -73,7 +75,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// ```
 #[pyclass]
 #[derive(Clone)]
-pub struct PythonAsyncEngine(PythonServerStreamingEngine);
+pub struct PythonAsyncEngine(pub PythonServerStreamingEngine);
 
 #[pymethods]
 impl PythonAsyncEngine {
@@ -135,31 +137,16 @@ impl PythonServerStreamingEngine {
             has_context,
         }
     }
-}
 
-#[derive(Debug, thiserror::Error)]
-enum ResponseProcessingError {
-    #[error("python exception: {0}")]
-    PythonException(String),
-
-    #[error("python generator exit: {0}")]
-    PyGeneratorExit(String),
-
-    #[error("deserialize error: {0}")]
-    DeserializeError(String),
-
-    #[error("gil offload error: {0}")]
-    OffloadError(String),
-}
-
-#[async_trait]
-impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
-    for PythonServerStreamingEngine
-where
-    Req: Data + Serialize,
-    Resp: Data + for<'de> Deserialize<'de>,
-{
-    async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
+    /// Generate the response in parts.
+    pub async fn generate_in_parts<Req, Resp>(
+        &self,
+        request: SingleIn<Req>,
+    ) -> Result<(DataStream<Annotated<Resp>>, Arc<dyn AsyncEngineContext>), Error>
+    where
+        Req: Data + Serialize,
+        Resp: Data + for<'de> Deserialize<'de>,
+    {
         // Create a context
         let (request, context) = request.transfer(());
         let ctx = context.context();
@@ -290,8 +277,36 @@ where
         });
 
         let stream = ReceiverStream::new(rx);
+        let context = context.context();
+        Ok((Box::pin(stream), context))
+    }
+}
 
-        Ok(ResponseStream::new(Box::pin(stream), context.context()))
+#[derive(Debug, thiserror::Error)]
+enum ResponseProcessingError {
+    #[error("python exception: {0}")]
+    PythonException(String),
+
+    #[error("python generator exit: {0}")]
+    PyGeneratorExit(String),
+
+    #[error("deserialize error: {0}")]
+    DeserializeError(String),
+
+    #[error("gil offload error: {0}")]
+    OffloadError(String),
+}
+
+#[async_trait]
+impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
+    for PythonServerStreamingEngine
+where
+    Req: Data + Serialize,
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
+        let (stream, context) = self.generate_in_parts(request).await?;
+        Ok(ResponseStream::new(Box::pin(stream), context))
     }
 }
 

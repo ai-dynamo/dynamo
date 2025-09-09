@@ -177,8 +177,24 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        match self.0.generate(request).await {
-            Ok(res) => Ok(res),
+        match self.0 .0.generate_in_parts(request).await {
+            Ok((mut stream, context)) => {
+                let first_item = match futures::StreamExt::next(&mut stream).await {
+                    Some(item) => item,
+                    None => {
+                        return Err(Error::new(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "python async generator stream ended before processing started",
+                        )));
+                    }
+                };
+
+                // Create a new stream that yields the first item followed by the rest of the original stream
+                let once_stream = futures::stream::once(async { first_item });
+                let stream = futures::StreamExt::chain(once_stream, stream);
+
+                Ok(ResponseStream::new(Box::pin(stream), context))
+            }
 
             // Inspect the error - if it was an HttpError from Python, extract the code and message
             // and return the rust version of HttpError
