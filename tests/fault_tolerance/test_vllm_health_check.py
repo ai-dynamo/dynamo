@@ -56,10 +56,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "-m",
             "dynamo.vllm",
             "--model",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            "Qwen/Qwen3-0.6B",
             "--enforce-eager",
-            "--gpu-memory-utilization",
-            "0.45",
             "--max-model-len",
             "8192",
             "--migration-limit",
@@ -125,9 +123,9 @@ class DynamoWorkerProcess(ManagedProcess):
 
 def download_model() -> None:
     """
-    Download the DeepSeek-R1-Distill-Llama-8B model from HuggingFace Hub if not already cached.
+    Download the Qwen/Qwen3-0.6B model from HuggingFace Hub if not already cached.
     """
-    model_id = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    model_id = "Qwen/Qwen3-0.6B"
     logger.info(f"Caching model {model_id}...")
 
     max_retries = 5
@@ -138,7 +136,7 @@ def download_model() -> None:
             # Download the model to the default cache directory
             # This will skip download if the model is already cached
             snapshot_download(
-                repo_id="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+                repo_id="Qwen/Qwen3-0.6B",
                 repo_type="model",
                 local_files_only=False,
             )
@@ -163,7 +161,7 @@ def send_completion_request(
 ) -> requests.Response:
     """Send a completion request to the frontend"""
     payload = {
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "model": "Qwen/Qwen3-0.6B",
         "prompt": prompt,
         "max_tokens": max_tokens,
     }
