@@ -53,7 +53,7 @@ else
 fi
 
 # run ingress
-python -m dynamo.frontend &
+python -m dynamo.frontend --http-port=8000 &
 
 # run processor
 python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &

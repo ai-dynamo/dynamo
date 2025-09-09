@@ -5,8 +5,8 @@ pub mod base_json_parser;
 pub mod deepseek_parser;
 
 pub use super::{config, response};
-pub use base_json_parser::try_tool_call_parse_basic_json;
-pub use deepseek_parser::parse_tool_calls_deepseek_v3_1;
+pub use base_json_parser::{detect_tool_call_start_basic_json, try_tool_call_parse_basic_json};
+pub use deepseek_parser::{detect_tool_call_start_deepseek_v3_1, parse_tool_calls_deepseek_v3_1};
 
 pub use super::config::JsonParserConfig;
 pub use super::response::ToolCallResponse;
@@ -32,5 +32,12 @@ pub fn try_tool_call_parse_json(
     match config.parser_type {
         JsonParserType::Basic => try_tool_call_parse_basic_json(message, config),
         JsonParserType::DeepseekV31 => parse_tool_calls_deepseek_v3_1(message, config),
+    }
+}
+
+pub fn detect_tool_call_start_json(chunk: &str, config: &JsonParserConfig) -> bool {
+    match config.parser_type {
+        JsonParserType::Basic => detect_tool_call_start_basic_json(chunk, config),
+        JsonParserType::DeepseekV31 => detect_tool_call_start_deepseek_v3_1(chunk, config),
     }
 }

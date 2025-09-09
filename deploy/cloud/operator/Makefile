@@ -57,7 +57,7 @@ ensure-yq:
 	fi
 
 .PHONY: manifests
-manifests: controller-gen ensure-yq generate-api-docs ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"

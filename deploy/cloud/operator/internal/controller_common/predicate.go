@@ -58,6 +58,8 @@ type Config struct {
 	IngressConfig       IngressConfig
 	// ModelExpressURL is the URL of the Model Express server to inject into all pods
 	ModelExpressURL string
+	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
+	PrometheusEndpoint string
 }
 
 type IngressConfig struct {
