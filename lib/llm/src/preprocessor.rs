@@ -22,7 +22,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
+use dynamo_parsers::tool_calling::{try_tool_call_parse_aggregate, parsers::detect_tool_call_start};
 
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -601,53 +601,6 @@ impl OpenAIPreprocessor {
     }
 }
 
-/// Detect if the given text chunk indicates the start of a tool call
-/// Checks for tool call start patterns based on the parser type
-pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::Result<bool> {
-    let parser_name = parser_str.unwrap_or("default");
-    
-    // Check for common tool call start patterns based on parser type
-    match parser_name {
-        "nemotron_deci" | "default" => {
-            // Check for <TOOLCALL> pattern
-            Ok(chunk.contains("<TOOLCALL>"))
-        }
-        "hermes" => {
-            // Check for <tool_call> pattern
-            Ok(chunk.contains("<tool_call>"))
-        }
-        "phi4" => {
-            // Check for functools[ pattern
-            Ok(chunk.contains("functools["))
-        }
-        "mistral" | "llama3_json" => {
-            // Check for various JSON array patterns or python tag
-            Ok(chunk.contains("[{") || 
-               chunk.contains("<|python_tag|>") || 
-               chunk.contains("[TOOL_CALLS]"))
-        }
-        "pythonic" => {
-            // Check for function call pattern like [function_name(
-            Ok(chunk.contains("[") && chunk.contains("("))
-        }
-        "harmony" => {
-            // Check for harmony-specific patterns
-            Ok(chunk.contains("<|channel|>") && chunk.contains("functions."))
-        }
-        "deepseek_v3_1" => {
-            // Check for deepseek patterns
-            Ok(chunk.contains("｜tool▁calls▁begin｜") || chunk.contains("｜tool▁call▁begin｜"))
-        }
-        _ => {
-            // For unknown parsers, check for common patterns
-            Ok(chunk.contains("<TOOLCALL>") || 
-               chunk.contains("<tool_call>") || 
-               chunk.contains("functools[") ||
-               chunk.contains("[{") ||
-               chunk.contains("<|python_tag|>"))
-        }
-    }
-}
 
 /// Apply tool calling jail to the stream - stops/jails the stream under certain conditions
 /// When jailed, the stream will be unjailed when the input stream ends
@@ -1329,23 +1282,29 @@ mod tests {
         assert!(!detect_tool_call_start("Hello world", Some("nemotron_deci")).unwrap());
         assert!(!detect_tool_call_start("<tool_call>", Some("nemotron_deci")).unwrap()); // Wrong format
 
-        // Test hermes parser
+        // Test hermes parser - now also detects JSON patterns
         assert!(detect_tool_call_start("<tool_call>", Some("hermes")).unwrap());
+        assert!(detect_tool_call_start("{\"name\": \"test\"}", Some("hermes")).unwrap()); // JSON detection
         assert!(!detect_tool_call_start("Hello world", Some("hermes")).unwrap());
         assert!(!detect_tool_call_start("<TOOLCALL>", Some("hermes")).unwrap()); // Wrong format
 
         // Test phi4 parser
         assert!(detect_tool_call_start("functools[", Some("phi4")).unwrap());
+        assert!(detect_tool_call_start("{\"name\": \"test\"}", Some("phi4")).unwrap()); // JSON detection
         assert!(!detect_tool_call_start("Hello world", Some("phi4")).unwrap());
 
         // Test mistral parser
         assert!(detect_tool_call_start("[{", Some("mistral")).unwrap());
-        assert!(detect_tool_call_start("<|python_tag|>", Some("mistral")).unwrap());
         assert!(detect_tool_call_start("[TOOL_CALLS]", Some("mistral")).unwrap());
         assert!(!detect_tool_call_start("Hello world", Some("mistral")).unwrap());
 
+        // Test llama3_json parser
+        assert!(detect_tool_call_start("<|python_tag|>", Some("llama3_json")).unwrap());
+        assert!(detect_tool_call_start("{\"name\": \"test\"}", Some("llama3_json")).unwrap()); // JSON detection
+
         // Test default parser (should behave like nemotron_deci)
         assert!(detect_tool_call_start("<TOOLCALL>", None).unwrap());
+        assert!(detect_tool_call_start("{\"name\": \"test\"}", None).unwrap()); // JSON detection
         assert!(!detect_tool_call_start("Hello world", None).unwrap());
     }
 
