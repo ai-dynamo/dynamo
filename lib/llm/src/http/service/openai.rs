@@ -28,7 +28,7 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
-    metrics::{Endpoint, ResponseMetricCollector},
+    metrics::{Endpoint, HttpQueueGuard, ResponseMetricCollector},
     service_v2,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
@@ -259,30 +259,27 @@ async fn completions(
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
 
+    // todo - make the protocols be optional for model name
+    // todo - when optional, if none, apply a default
+    let model = request.inner.model.clone();
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
     // update the request to always stream
     let request = request.map(|mut req| {
         req.inner.stream = Some(true);
         req
     });
 
-    // todo - make the protocols be optional for model name
-    // todo - when optional, if none, apply a default
-    let model = &request.inner.model;
-
     // todo - error handling should be more robust
     let engine = state
         .manager()
-        .get_completions_engine(model)
+        .get_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), model);
+    let parsing_options = get_parsing_options(state.manager(), &model);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Completions, streaming);
-
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -292,6 +289,12 @@ async fn completions(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+
+    // Create inflight_guard now that actual processing has begun
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -317,8 +320,11 @@ async fn completions(
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
+        // For streaming, we'll drop the http_queue_guard on the first token
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &mut response_collector)
+            // Calls observe_response() on each token
+            process_streaming_with_event_converter(EventConverter::from(response), &mut response_collector, &mut http_queue_guard)
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -331,8 +337,10 @@ async fn completions(
         Ok(sse_stream.into_response())
     } else {
         // Tap the stream to collect metrics for non-streaming requests without altering items
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
-            process_metrics_only(response, &mut response_collector);
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_streaming_with_metrics(response, &mut response_collector, &mut http_queue_guard);
         });
 
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -459,10 +467,9 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
-    // Create HTTP queue guard to track time from HTTP start to metrics processing
-    let http_queue_guard = state
-        .metrics_clone()
-        .create_http_queue_guard(&request.inner.model);
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let model = request.inner.model.clone();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
@@ -498,24 +505,17 @@ async fn chat_completions(
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
-    let model = &request.inner.model;
-
     // todo - determine the proper error code for when a request model is not present
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
         .manager()
-        .get_chat_completions_engine(model)
+        .get_chat_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), model);
+    let parsing_options = get_parsing_options(state.manager(), &model);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
-
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let annotations = request.annotations();
 
@@ -524,6 +524,12 @@ async fn chat_completions(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+
+    // Create inflight_guard now that actual processing has begun
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -549,11 +555,12 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        drop(http_queue_guard); // Request is no longer waiting, now being processed
-        stream_handle.arm();
+        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &mut response_collector)
+            // Calls observe_response() on each token
+            process_streaming_with_event_converter(EventConverter::from(response), &mut response_collector, &mut http_queue_guard)
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -565,9 +572,10 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
-        drop(http_queue_guard); // Request is no longer waiting, now being processed
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
-            process_metrics_only(response, &mut response_collector);
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_streaming_with_metrics(response, &mut response_collector, &mut http_queue_guard);
         });
 
         let response =
@@ -681,6 +689,10 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let model = request.inner.model.clone();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
@@ -730,23 +742,16 @@ async fn responses(
         request
     });
 
-    let model = &request.inner.model;
-
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
         .manager()
-        .get_chat_completions_engine(model)
+        .get_chat_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), model);
+    let parsing_options = get_parsing_options(state.manager(), &model);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Responses, false);
-
-    let _response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     tracing::trace!("Issuing generate call for chat completions");
 
@@ -755,6 +760,19 @@ async fn responses(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+
+    // Create inflight_guard now that actual processing has begun
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Responses, false);
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_streaming_with_metrics(response, &mut response_collector, &mut http_queue_guard);
+    });
 
     // TODO: handle streaming, currently just unary
     let response =
@@ -966,26 +984,42 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
     }
 }
 
-fn process_metrics_only<T>(
+fn process_streaming_with_metrics<T>(
     annotated: &Annotated<T>,
     response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
 ) {
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+
+        // Drop http_queue_guard on first token for non-streaming (same as streaming)
+        if response_collector.is_first_token() && metrics.chunk_tokens > 0
+            && let Some(guard) = http_queue_guard.take() {
+            drop(guard);
+        }
+
         response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
     }
 }
 
-fn process_event_converter<T: Serialize>(
+fn process_streaming_with_event_converter<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
 ) -> Result<Event, axum::Error> {
     let mut annotated = annotated.0;
 
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+
+        // Drop http_queue_guard on first token for streaming
+        if response_collector.is_first_token() && metrics.chunk_tokens > 0
+            && let Some(guard) = http_queue_guard.take() {
+            drop(guard);
+        }
+
         response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
 
         // Chomp the LLMMetricAnnotation so it's not returned in the response stream
@@ -1020,6 +1054,7 @@ fn process_event_converter<T: Serialize>(
 
     Ok(event)
 }
+
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`

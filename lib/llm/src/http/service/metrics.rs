@@ -484,6 +484,11 @@ impl ResponseMetricCollector {
         self.osl = osl;
     }
 
+    /// Check if this will be the first token (before calling observe_response)
+    pub fn is_first_token(&self) -> bool {
+        self.is_first_token
+    }
+
     /// Observe a response with input sequence length and number of new tokens
     pub fn observe_response(&mut self, isl: usize, num_tokens: usize) {
         if num_tokens == 0 {

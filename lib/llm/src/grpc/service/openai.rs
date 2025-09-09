@@ -10,6 +10,7 @@ use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
 use crate::discovery::ModelManager;
+use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::{
     ParsingOptions,
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -23,7 +24,7 @@ use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
     metrics::{Endpoint, ResponseMetricCollector},
 };
-use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
+use crate::http::service::metrics::InflightGuard;
 
 use tonic::Status;
 
@@ -72,6 +73,8 @@ pub async fn completion_response_stream(
         .get_completions_engine(model)
         .map_err(|_| Status::not_found("model not found"))?;
 
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+
     let inflight_guard =
         state
             .metrics_clone()
@@ -112,8 +115,15 @@ pub async fn completion_response_stream(
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
 
-    // Tap on the stream to collect response metrics
+    // Tap on the stream to collect response metrics and handle http_queue_guard
+    let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
+        // Check if this is the first token and drop http_queue_guard
+        if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(response)
+            && response_collector.is_first_token() && metrics.chunk_tokens > 0
+            && let Some(guard) = http_queue_guard.take() {
+            drop(guard);
+        }
         process_metrics_only(response, &mut response_collector);
     });
 
