@@ -9,11 +9,8 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
-use crate::discovery::ModelManager;
-use crate::preprocessor::LLMMetricAnnotation;
-use crate::protocols::openai::{
-    ParsingOptions,
-    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+use crate::protocols::openai::completions::{
+    NvCreateCompletionRequest, NvCreateCompletionResponse,
 };
 use crate::types::Annotated;
 
@@ -22,9 +19,8 @@ use super::kserve;
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{Endpoint, ResponseMetricCollector},
+    metrics::{Endpoint, InflightGuard, process_response_and_observe_metrics},
 };
-use crate::http::service::metrics::InflightGuard;
 
 use tonic::Status;
 
@@ -118,13 +114,12 @@ pub async fn completion_response_stream(
     // Tap on the stream to collect response metrics and handle http_queue_guard
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
-        // Check if this is the first token and drop http_queue_guard
-        if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(response)
-            && response_collector.is_first_token() && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take() {
-            drop(guard);
-        }
-        process_metrics_only(response, &mut response_collector);
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
     });
 
     let stream = grpc_monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
@@ -176,18 +171,8 @@ pub fn grpc_monitor_for_disconnects<T>(
     }
 }
 
-fn process_metrics_only<T>(
-    annotated: &Annotated<T>,
-    response_collector: &mut ResponseMetricCollector,
-) {
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-    }
-}
-
 /// Get the request ID from a primary source, or lastly create a new one if not present
+// TODO: Similar function exists in lib/llm/src/http/service/openai.rs but with different signature and more complex logic (distributed tracing, headers)
 fn get_or_create_request_id(primary: Option<&str>) -> String {
     // Try to get the request ID from the primary source
     if let Some(primary) = primary
@@ -199,11 +184,4 @@ fn get_or_create_request_id(primary: Option<&str>) -> String {
     // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
     let uuid = uuid::Uuid::new_v4();
     uuid.to_string()
-}
-
-pub fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
-    let tool_call_parser = manager.get_model_tool_call_parser(model);
-    let reasoning_parser = None; // TODO: Implement reasoning parser
-
-    ParsingOptions::new(tool_call_parser, reasoning_parser)
 }

@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
+        sse::{KeepAlive, Sse},
     },
     routing::{get, post},
 };
@@ -28,12 +28,14 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
-    metrics::{Endpoint, HttpQueueGuard, ResponseMetricCollector},
+    metrics::{
+        Endpoint, EventConverter, get_parsing_options, process_response_and_observe_metrics,
+        process_response_using_event_converter_and_observe_metrics,
+    },
     service_v2,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
-    ParsingOptions,
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -41,7 +43,6 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
-use crate::{discovery::ModelManager, preprocessor::LLMMetricAnnotation};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -164,6 +165,7 @@ impl From<HttpError> for ErrorMessage {
 }
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
+// TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context()
@@ -193,13 +195,6 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     };
 
     uuid.to_string()
-}
-
-fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
-    let tool_call_parser = manager.get_model_tool_call_parser(model);
-    let reasoning_parser = None; // TODO: Implement reasoning parser
-
-    ParsingOptions::new(tool_call_parser, reasoning_parser)
 }
 
 /// OpenAI Completions Request Handler
@@ -284,17 +279,17 @@ async fn completions(
     // prepare to process any annotations
     let annotations = request.annotations();
 
+    // Create inflight_guard before calling engine to ensure errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
-
-    // Create inflight_guard now that actual processing has begun
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::Completions, streaming);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -324,7 +319,11 @@ async fn completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.map(move |response| {
             // Calls observe_response() on each token
-            process_streaming_with_event_converter(EventConverter::from(response), &mut response_collector, &mut http_queue_guard)
+            process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            )
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -340,7 +339,11 @@ async fn completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_streaming_with_metrics(response, &mut response_collector, &mut http_queue_guard);
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
         });
 
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -379,6 +382,9 @@ async fn embeddings(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+
     // todo - error handling should be more robust
     let engine = state
         .manager()
@@ -391,11 +397,24 @@ async fn embeddings(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
 
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
+
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
 
     // Embeddings are typically returned as a single response (non-streaming)
     // so we fold the stream into a single response
@@ -519,17 +538,17 @@ async fn chat_completions(
 
     let annotations = request.annotations();
 
+    // Create inflight_guard before calling engine to ensure errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
+
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
-
-    // Create inflight_guard now that actual processing has begun
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -560,7 +579,11 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.map(move |response| {
             // Calls observe_response() on each token
-            process_streaming_with_event_converter(EventConverter::from(response), &mut response_collector, &mut http_queue_guard)
+            process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            )
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -575,7 +598,11 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_streaming_with_metrics(response, &mut response_collector, &mut http_queue_guard);
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
         });
 
         let response =
@@ -771,7 +798,11 @@ async fn responses(
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
         // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_streaming_with_metrics(response, &mut response_collector, &mut http_queue_guard);
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
     });
 
     // TODO: handle streaming, currently just unary
@@ -975,86 +1006,6 @@ struct ModelListing {
     created: u64,         //  Seconds since epoch
     owned_by: String,
 }
-
-struct EventConverter<T>(Annotated<T>);
-
-impl<T> From<Annotated<T>> for EventConverter<T> {
-    fn from(annotated: Annotated<T>) -> Self {
-        EventConverter(annotated)
-    }
-}
-
-fn process_streaming_with_metrics<T>(
-    annotated: &Annotated<T>,
-    response_collector: &mut ResponseMetricCollector,
-    http_queue_guard: &mut Option<HttpQueueGuard>,
-) {
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-
-        // Drop http_queue_guard on first token for non-streaming (same as streaming)
-        if response_collector.is_first_token() && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take() {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-    }
-}
-
-fn process_streaming_with_event_converter<T: Serialize>(
-    annotated: EventConverter<T>,
-    response_collector: &mut ResponseMetricCollector,
-    http_queue_guard: &mut Option<HttpQueueGuard>,
-) -> Result<Event, axum::Error> {
-    let mut annotated = annotated.0;
-
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-
-        // Drop http_queue_guard on first token for streaming
-        if response_collector.is_first_token() && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take() {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
-        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
-            annotated.event = None;
-            annotated.comment = None;
-        }
-    }
-
-    let mut event = Event::default();
-
-    if let Some(data) = annotated.data {
-        event = event.json_data(data)?;
-    }
-
-    if let Some(msg) = annotated.event {
-        if msg == "error" {
-            let msgs = annotated
-                .comment
-                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-            return Err(axum::Error::new(msgs.join(" -- ")));
-        }
-        event = event.event(msg);
-    }
-
-    if let Some(comments) = annotated.comment {
-        for comment in comments {
-            event = event.comment(comment);
-        }
-    }
-
-    Ok(event)
-}
-
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`
