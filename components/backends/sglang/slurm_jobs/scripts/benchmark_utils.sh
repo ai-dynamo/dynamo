@@ -47,7 +47,6 @@ warmup_model() {
     config=$5
 
     IFS='x' read -r -a config_list <<< "$config"
-
     isl=${config_list[0]}
     osl=${config_list[1]}
     num_prompts=${config_list[2]}
