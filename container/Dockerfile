@@ -231,7 +231,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 
 # Build NIXL Python module
 # TODO OPS-590: Move gds_path selection based on arch into NIXL build and re-enable gds backend for arm64
-RUN if [ "$ARCH" = "arm64" ]; then \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
