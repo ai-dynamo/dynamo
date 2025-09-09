@@ -54,17 +54,17 @@ def main() -> int:
         help="Input in format <label>=<manifest_path_or_endpoint>. Can be specified multiple times for comparisons.",
     )
     parser.add_argument("--namespace", required=True, help="Kubernetes namespace")
-    parser.add_argument("--isl", type=int, default=200, help="Input sequence length")
+    parser.add_argument("--isl", type=int, default=2000, help="Input sequence length")
     parser.add_argument(
         "--std",
         type=int,
         default=10,
         help="Input sequence standard deviation",
     )
-    parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
+    parser.add_argument("--osl", type=int, default=256, help="Output sequence length")
     parser.add_argument(
         "--model",
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        default="Qwen/Qwen3-0.6B",
         help="Model name",
     )
     parser.add_argument(

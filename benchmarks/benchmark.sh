@@ -11,7 +11,7 @@ DYNAMO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Configuration - all set via command line arguments
 NAMESPACE=""
-MODEL="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+MODEL="Qwen/Qwen3-0.6B"
 ISL=2000
 STD=10
 OSL=256
@@ -46,7 +46,7 @@ REQUIRED:
 
 OPTIONS:
     -h, --help                    Show this help message
-    -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+    -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: Qwen/Qwen3-0.6B)
                                   NOTE: This must match the model configured in your deployment manifests and the model deployed in any endpoints.
     -i, --isl LENGTH              Input sequence length (default: $ISL)
     -s, --std STDDEV              Input sequence standard deviation (default: $STD)
