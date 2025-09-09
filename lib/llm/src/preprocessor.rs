@@ -810,7 +810,7 @@ fn apply_tool_calling_jail_internal(
                                             } else {
                                                 None
                                             },
-                                            tool_calls: Some(tool_call_chunks),
+                                            tool_calls: Some(tool_call_chunks.clone()),
                                             function_call: None,
                                             refusal: None,
                                             reasoning_content: None,
