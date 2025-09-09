@@ -377,6 +377,12 @@ impl DistributedRuntime {
         self.inner.runtime().shutdown();
     }
 
+    fn child_token(&self) -> CancellationToken {
+        CancellationToken {
+            inner: self.inner.runtime().child_token(),
+        }
+    }
+
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }

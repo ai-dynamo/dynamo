@@ -52,6 +52,30 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
+
+    def child_token(self) -> CancellationToken:
+        """
+        Get a child cancellation token from the runtime
+        """
+        ...
+
+class CancellationToken:
+    """
+    A cancellation token for coordinating shutdown across components
+    """
+
+    def cancel(self) -> None:
+        """
+        Cancel the token
+        """
+        ...
+
+    async def cancelled(self) -> None:
+        """
+        Wait for the token to be cancelled
+        """
+        ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime

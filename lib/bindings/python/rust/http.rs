@@ -177,7 +177,7 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        match self.0 .0.generate_in_parts(request).await {
+        match self.0.0.generate_in_parts(request).await {
             Ok((mut stream, context)) => {
                 let first_item = match futures::StreamExt::next(&mut stream).await {
                     Some(item) => item,
