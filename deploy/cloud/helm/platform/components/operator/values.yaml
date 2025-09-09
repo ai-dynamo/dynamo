@@ -75,9 +75,6 @@ controllerManager:
     annotations: {}
 
 dynamo:
-  imageBuilder:
-    serviceAccount:
-      annotations: {}
   components:
     serviceAccount:
       annotations: {}
@@ -98,6 +95,9 @@ dynamo:
     password: ""
     existingSecretName: ''
     secure: true
+
+  metrics:
+    prometheusEndpoint: ""
 
 
 #imagePullSecrets: []

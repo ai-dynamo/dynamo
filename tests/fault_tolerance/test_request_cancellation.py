@@ -11,7 +11,9 @@ import pytest
 import requests
 from huggingface_hub import snapshot_download
 
+from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +66,18 @@ class DynamoWorkerProcess(ManagedProcess):
             "3",
         ]
 
-        # Add prefill worker flag if needed
-        if is_prefill:
-            command.append("--is-prefill-worker")
+        health_check_urls = [
+            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
+            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+        ]
 
         # Set port based on worker type
         port = "8082" if is_prefill else "8081"
+
+        # Add prefill worker flag if needed
+        if is_prefill:
+            command.append("--is-prefill-worker")
+            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
 
         # Set debug logging environment
         env = os.environ.copy()
@@ -93,10 +101,17 @@ class DynamoWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[(f"http://localhost:{port}/health", self.is_ready)],
+            health_check_urls=health_check_urls,
             timeout=300,
             display_output=True,
             terminate_existing=False,
+            # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
+            stragglers=[
+                "VLLM::EngineCore",
+            ],
+            straggler_commands=[
+                "-m dynamo.vllm",
+            ],
             log_dir=log_dir,
         )
 
@@ -300,14 +315,14 @@ def verify_request_cancelled(
     worker_log_content = read_log_content(worker_process._log_path)
     new_worker_content = worker_log_content[worker_log_offset:]
 
-    # Find request ID from "New Request ID: <id>" line
+    # Find the LAST occurrence of "New Request ID: <id>" line (health checks may log earlier ones)
     request_id = None
-    for line in new_worker_content.split("\n"):
+    for line in reversed(new_worker_content.split("\n")):
         # Strip ANSI codes and whitespace for pattern matching
         clean_line = strip_ansi_codes(line).strip()
         if "New Request ID: " in clean_line:
-            # Extract ID from the end of the line
-            parts = clean_line.split("New Request ID: ")
+            # Extract ID from the last delimiter occurrence on the line
+            parts = clean_line.rsplit("New Request ID: ", 1)
             if len(parts) > 1:
                 request_id = parts[-1].strip()
                 break
@@ -394,10 +409,6 @@ def test_request_cancellation_vllm(request, runtime_services):
         with worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
-            # TODO: Why the model is not immediately available at the frontend after health check
-            #       returns success.
-            time.sleep(2)
-
             # Step 3: Test request cancellation
             frontend_log_offset, worker_log_offset = 0, 0
 
@@ -464,10 +475,6 @@ def test_request_cancellation_vllm_decode(request, runtime_services):
 
             with decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
-
-                # TODO: Why the model is not immediately available at the frontend after health check
-                #       returns success.
-                time.sleep(2)
 
                 # Step 4: Test request cancellation for completion scenario only
                 logger.info(

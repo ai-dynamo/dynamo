@@ -6,9 +6,6 @@ This guide provides a walkthrough for collecting and visualizing metrics from Dy
 
 ## Prerequisites
 
-### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/installation_guide.md) for detailed instructions on deploying the Dynamo operator.
-
 ### Install kube-prometheus-stack
 If you don't have an existing Prometheus setup, you'll likely want to install the kube-prometheus-stack. This is a collection of Kubernetes manifests that includes the Prometheus Operator, Prometheus, Grafana, and other monitoring components in a pre-configured setup. The stack introduces custom resources that make it easy to deploy and manage monitoring in Kubernetes:
 
@@ -20,8 +17,8 @@ For a basic installation:
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
-# Values allow podmnonitors to be picked up that are outside of the kube-prometheus-stack helm release
-helm install prometheus prometheus-community/kube-prometheus-stack \
+# Values allow PodMonitors to be picked up that are outside of the kube-prometheus-stack helm release
+helm install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}" \
   --set prometheus.prometheusSpec.probeNamespaceSelector="{}"
@@ -29,6 +26,16 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 
 > [!Note]
 > The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
+
+### Install Dynamo Operator
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/installation_guide.md) for detailed instructions on deploying the Dynamo operator.
+Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
+
+```bash
+helm install dynamo-platform ...
+  --set prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+```
+
 
 ### DCGM Metrics Collection (Optional)
 
@@ -86,7 +93,7 @@ For more information about validating the deployment, see the [vLLM README](../.
 
 ### Create PodMonitors
 
-The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. To enable this discovery, the Dynamo operator automatically adds these labels to all pods:
+The Prometheus Operator uses PodMonitor resources to automatically discover and scrape metrics from pods. To enable this discovery, the Dynamo operator automatically creates PodMonitor resource and adds these labels to all pods:
 - `nvidia.com/metrics-enabled: "true"` - Enables metrics collection
 - `nvidia.com/dynamo-component-type: "frontend|worker"` - Identifies the component type
 
@@ -101,85 +108,6 @@ metadata:
 spec:
   # …
 ```
-
-Let's create two monitors - one for each component type:
-
-First, create the frontend PodMonitor:
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: dynamo-frontend-metrics
-  namespace: $NAMESPACE
-spec:
-  selector:
-    matchLabels:
-      nvidia.com/metrics-enabled: "true"
-      nvidia.com/dynamo-component-type: "frontend"
-  podMetricsEndpoints:
-    - port: http
-      path: /metrics
-      interval: 2s
-  namespaceSelector:
-    matchNames:
-      - $NAMESPACE
-```
-
-Then, create the worker PodMonitor:
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: dynamo-worker-metrics
-  namespace: $NAMESPACE
-spec:
-  selector:
-    matchLabels:
-      nvidia.com/metrics-enabled: "true"
-      nvidia.com/dynamo-component-type: "worker"
-  podMetricsEndpoints:
-    - port: system
-      path: /metrics
-      interval: 2s
-  namespaceSelector:
-    matchNames:
-      - $NAMESPACE
-```
-
-If you are using planner, you can also create a PodMonitor for the planner:
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: dynamo-planner-metrics
-  namespace: $NAMESPACE
-spec:
-  selector:
-    matchLabels:
-      nvidia.com/metrics-enabled: "true"
-      nvidia.com/dynamo-component-type: "planner"
-  podMetricsEndpoints:
-    - port: metrics
-      path: /metrics
-      interval: 2s
-  namespaceSelector:
-    matchNames:
-      - $NAMESPACE
-```
-
-Apply the PodMonitors:
-```bash
-pushd deploy/metrics/k8s
-# envsubst replaces ${NAMESPACE} with the actual namespace value
-envsubst < frontend-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
-envsubst < worker-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
-envsubst < planner-podmonitor.yaml | kubectl apply -n $NAMESPACE -f -
-popd
-```
-
-This will cause Prometheus to be re-configured to scrape metrics from the pods of your DynamoGraphDeployment.
 
 ### Configure Grafana Dashboard
 
