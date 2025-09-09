@@ -119,4 +119,19 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         default=SLAPlannerDefaults.no_correction,
         help="Disable correction factor",
     )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        help="Model name for database lookup when profile_results_dir is not provided",
+    )
+    parser.add_argument(
+        "--prefill-tp-size",
+        type=int,
+        help="Prefill tensor parallelism size for database lookup when profile_results_dir is not provided",
+    )
+    parser.add_argument(
+        "--decode-tp-size",
+        type=int,
+        help="Decode tensor parallelism size for database lookup when profile_results_dir is not provided",
+    )
     return parser
