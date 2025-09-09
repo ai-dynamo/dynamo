@@ -19,7 +19,7 @@ jobs:
         include:
           - framework: vllm
             target: runtime
-            pytest_marks: "e2e and vllm and gpu_1 and not slow"
+            pytest_marks: "e2e and vllm and gpu_1"
           - framework: sglang
             target: runtime
             pytest_marks: "e2e and sglang and gpu_1"
