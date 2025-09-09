@@ -16,6 +16,7 @@
 import json
 import logging
 import re
+import shlex
 from typing import Literal, Optional, Protocol
 
 from pydantic import BaseModel
@@ -83,11 +84,13 @@ def break_arguments(args: list[str] | None) -> list[str]:
     if args is None:
         return ans
     if isinstance(args, str):
-        ans = re.split(r"[ =]", args)
+        # Use shlex.split to properly handle quoted arguments and JSON values
+        ans = shlex.split(args)
     else:
         for arg in args:
             if arg is not None:
-                ans.extend(arg.split(" "))
+                # Use shlex.split to properly handle quoted arguments
+                ans.extend(shlex.split(arg))
     return ans
 
 
@@ -102,7 +105,8 @@ def remove_valued_arguments(args: list[str], key: str) -> list[str]:
 
 
 def join_arguments(args: list[str]) -> list[str]:
-    return [" ".join(args)]
+    # Use shlex.join to properly quote arguments that contain spaces or special characters
+    return [shlex.join(args)]
 
 
 def append_argument(args: list[str], to_append) -> list[str]:
@@ -712,6 +716,7 @@ class TrtllmConfigModifier:
             raise ValueError("Missing extraPodSpec or mainContainer in worker service")
         args = worker_service.extraPodSpec.mainContainer.args
 
+        # Break arguments to handle both joined strings and lists
         args = break_arguments(args)
 
         # For TRT-LLM, we need to update the override-engine-args

@@ -42,6 +42,19 @@ Aggregated deployment with custom configuration.
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
 - `TRTLLMWorker`: Single worker handling both prefill and decode with custom configuration mounted from the configmap
 
+### 6. **Disaggregated Planner Deployment** (`disagg_planner.yaml`)
+Advanced disaggregated deployment with SLA-based automatic scaling.
+
+**Architecture:**
+- `Frontend`: HTTP API server coordinating between workers
+- `Planner`: SLA-based planner that monitors performance and scales workers automatically
+- `Prometheus`: Metrics collection and monitoring
+- `TRTLLMDecodeWorker`: Specialized decode-only worker
+- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+
+> [!NOTE]
+> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
