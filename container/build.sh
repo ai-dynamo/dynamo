@@ -603,7 +603,7 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
     BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
-    BUILD_ARGS+=" --secret id=aws-key-id,env=AWS_SECRET_ACCESS_KEY"
+    BUILD_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

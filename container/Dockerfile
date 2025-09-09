@@ -164,7 +164,7 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-key-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
@@ -216,7 +216,7 @@ ENV NIXL_SRC_DIR=/opt/nixl \
 
 # Build and install NIXL
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-key-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     if [ "$ARCH" = "arm64" ]; then \
@@ -321,7 +321,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build wheels
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
-    --mount=type=secret,id=aws-key-id,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
