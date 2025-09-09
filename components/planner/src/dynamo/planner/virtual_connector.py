@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional
 
@@ -15,8 +16,8 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 # Constants for scaling readiness check and waiting
-SCALING_CHECK_INTERVAL = 10  # Check every 10 seconds
-SCALING_MAX_WAIT_TIME = 1800  # Maximum wait time: 30 minutes (1800 seconds)
+SCALING_CHECK_INTERVAL = int(os.environ.get('SCALING_CHECK_INTERVAL', 10))  # Check every 10 seconds
+SCALING_MAX_WAIT_TIME = int(os.environ.get('SCALING_MAX_WAIT_TIME', 1800))  # Maximum wait time: 30 minutes (1800 seconds)
 SCALING_MAX_RETRIES = SCALING_MAX_WAIT_TIME // SCALING_CHECK_INTERVAL  # 180 retries
 
 
@@ -51,7 +52,7 @@ class VirtualConnector(PlannerConnector):
         self.decision_id = -1
 
         # Track when we first started skipping scaling due to unready state
-        self.first_skip_timestamp = None
+        self.first_skip_timestamp: Optional[float] = None
 
         # Store etcd_client for async initialization
         self._etcd_client = etcd_client
@@ -182,7 +183,11 @@ class VirtualConnector(PlannerConnector):
                 )
 
             # Check if we've been waiting too long
-            time_waited = current_time - self.first_skip_timestamp
+            if self.first_skip_timestamp is not None:
+                time_waited = current_time - self.first_skip_timestamp
+            else:
+                # This should not happen since we just set it above, but for type safety
+                time_waited = 0.0
             if time_waited < SCALING_MAX_WAIT_TIME:
                 logger.warning(
                     f"Previous scaling decision #{self.decision_id} not ready, "
