@@ -29,9 +29,9 @@ spec:
         command: ["python", "-m", "benchmarks.profiler.profile_sla"]
         args:
           - --config
-          - /workspace/configs/disagg.yaml
+          - /data/configs/disagg.yaml
           - --output-dir
-          - /workspace/profiling_results
+          - /data/profiling_results
           - --namespace
           - ${NAMESPACE}
           - --backend
@@ -50,15 +50,10 @@ spec:
           - "20"
         volumeMounts:
           - name: output-volume
-            mountPath: /workspace/profiling_results
-          - name: configs
-            mountPath: /workspace/configs
+            mountPath: /data
       restartPolicy: Never
       volumes:
         - name: output-volume
-          persistentVolumeClaim:
-            claimName: dynamo-pvc
-        - name: configs
           persistentVolumeClaim:
             claimName: dynamo-pvc
   backoffLimit: 0

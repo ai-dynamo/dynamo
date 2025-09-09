@@ -48,7 +48,7 @@ spec:
       pvc:
         create: false
         name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /workspace/profiling_results
+        mountPoint: /data/profiling_results
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
@@ -62,7 +62,7 @@ spec:
               --environment=kubernetes
               --backend=vllm
               --adjustment-interval=60
-              --profile-results-dir=/workspace/profiling_results
+              --profile-results-dir=/data/profiling_results
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend

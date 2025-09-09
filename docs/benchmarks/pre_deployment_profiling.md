@@ -24,6 +24,21 @@ We assume there is no piggy-backed prefill requests in the decode engine. Even i
 
 The script will first detect the number of available GPUs on the current nodes (multi-node engine not supported yet). Then, it will profile the prefill and decode performance with different TP sizes. For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), the script directly measures the TTFT for a request with given isl without kv-reusing. For decode, since the ITL (or iteration time) is relevant with how many requests are in-flight, the script will measure the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script will enable kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL.
 
+### GPU Resource Usage
+
+**Important**: Profiling tests different tensor parallelism (TP) configurations **sequentially**, not in parallel. This means:
+
+- **One TP configuration at a time**: Each tensor parallelism size (TP1, TP2, TP4, TP8, etc.) is tested individually
+- **Full GPU access**: Each TP configuration gets exclusive access to all available GPUs during its profiling run
+- **Resource isolation**: No interference between different TP configurations during testing
+- **Accurate measurements**: Each configuration is profiled under identical resource conditions
+
+This sequential approach ensures:
+- **Precise performance profiling** without resource conflicts
+- **Consistent GPU allocation** for fair comparison across TP sizes
+- **Reliable cleanup** between different TP configuration tests
+- **Accurate SLA compliance verification** for each configuration
+
 After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
 
 ![Prefill Performance](../../docs/images/h100_prefill_performance.png)
@@ -90,7 +105,7 @@ Use the injector utility to place your DGD manifest into the PVC. The profiling 
 python3 deploy/utils/inject_manifest.py \
   --namespace $NAMESPACE \
   --src components/backends/vllm/deploy/disagg.yaml \
-  --dest /configs/disagg.yaml
+  --dest /data/configs/disagg.yaml
 
 # Set the docker image for the profiling job; any docker image that contains your script.
 export DOCKER_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
@@ -112,14 +127,16 @@ Use the default pre-built image and inject custom configurations via PVC:
 2. **Inject your custom disagg configuration:**
    ```bash
    # Use default disagg.yaml config
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /configs/disagg.yaml
+   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
 
    # Or use a custom disagg config file
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /configs/disagg.yaml
+   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
 
    # Or specify a custom target path in the PVC
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /profiling_results/my-disagg.yaml
+   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/profiling_results/my-disagg.yaml
    ```
+
+   > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
 
 3. **Set the config path for the profiling job:**
    ```bash
@@ -176,10 +193,10 @@ To download the results:
 
 ```bash
 # Download to directory
-python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /profiling_results
+python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
 
 # Download without any of the auto-created config.yaml files used in profiling
-python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /profiling_results --no-config
+python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results --no-config
 ```
 
 The script will:
@@ -191,7 +208,7 @@ The script will:
 
 The profiling results directory contains the following structure:
 ```
-/workspace/profiling_results/
+/workspace/data/profiling_results/
 ├── prefill_performance.png                    # Main prefill performance plot
 ├── decode_performance.png                     # Main decode performance plot
 ├── prefill_tp1/                               # Individual TP profiling directories
