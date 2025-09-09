@@ -4,6 +4,7 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.06-py3"
 ARG RELEASE_BUILD
+ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 
@@ -234,6 +235,7 @@ ARG ARCH_ALT
 FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG RELEASE_BUILD
 ARG CARGO_BUILD_JOBS
+ARG ENABLE_KVBM
 # Set CARGO_BUILD_JOBS to 16 if not provided
 # This is to prevent cargo from building $(nproc) jobs in parallel,
 # which might exceed the number of opened files limit.
@@ -279,16 +281,21 @@ COPY launch /workspace/launch
 RUN cargo build \
 	--release \
 	--locked \
-	--features dynamo-llm/block-manager \
+	--features block-manager \
 	--workspace
 
 # Build dynamo wheels
 RUN uv build --wheel --out-dir /workspace/dist && \
     cd /workspace/lib/bindings/python && \
-    uv build --wheel --out-dir /workspace/dist --python 3.12 && \
+    uv pip install maturin[patchelf] && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        maturin build --release --features block-manager --out /workspace/dist; \
+    else \
+        maturin build --release --out /workspace/dist; \
+    fi && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv build --wheel --out-dir /workspace/dist --python 3.11 && \
-        uv build --wheel --out-dir /workspace/dist --python 3.10; \
+        uv run --python 3.11 maturin build --release --out /workspace/dist && \
+        uv run --python 3.10 maturin build --release --out /workspace/dist; \
     fi
 
 ########################################
