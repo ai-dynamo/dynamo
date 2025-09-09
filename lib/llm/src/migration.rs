@@ -108,17 +108,16 @@ impl RetryManager {
                 }
             };
             if let Some(response) = response_stream.next().await {
-                if let Some(err) = response.err() {
-                    if err
+                if let Some(err) = response.err()
+                    && err
                         .chain()
                         .any(|e| e.to_string().starts_with(STREAM_ERR_MSG))
-                    {
-                        tracing::warn!("Stream disconnected... recreating stream...");
-                        if let Err(err) = self.new_stream().await {
-                            tracing::warn!("Cannot recreate stream: {:#}", err);
-                        } else {
-                            continue;
-                        }
+                {
+                    tracing::warn!("Stream disconnected... recreating stream...");
+                    if let Err(err) = self.new_stream().await {
+                        tracing::warn!("Cannot recreate stream: {:#}", err);
+                    } else {
+                        continue;
                     }
                 }
                 self.track_response(&response);

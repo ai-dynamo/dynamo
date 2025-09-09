@@ -231,13 +231,13 @@ where
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
-                    if let Some(err) = res.err() {
-                        if format!("{:?}", err) == STREAM_ERR_MSG {
-                            tracing::debug!(
-                                "Reporting instance {instance_id} down due to stream error: {err}"
-                            );
-                            client.report_instance_down(instance_id);
-                        }
+                    if let Some(err) = res.err()
+                        && format!("{:?}", err) == STREAM_ERR_MSG
+                    {
+                        tracing::debug!(
+                            "Reporting instance {instance_id} down due to stream error: {err}"
+                        );
+                        client.report_instance_down(instance_id);
                     }
                     res
                 });
