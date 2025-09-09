@@ -107,16 +107,34 @@ def download_models(model_list=None, ignore_weights=False):
 
 
 @pytest.fixture(scope="session")
-def predownload_models():
-    """Fixture wrapper around download_models for all TEST_MODELS"""
-    download_models()
+def predownload_models(pytestconfig):
+    """Fixture wrapper around download_models for models used in collected tests"""
+    # Get models from pytest config if available, otherwise fall back to TEST_MODELS
+    models = getattr(pytestconfig, "models_to_download", None)
+    if models:
+        logging.info(
+            f"Downloading {len(models)} models needed for collected tests\nModels: {models}"
+        )
+        download_models(model_list=list(models))
+    else:
+        # Fallback to original behavior if extraction failed
+        download_models()
     yield
 
 
 @pytest.fixture(scope="session")
-def predownload_tokenizers():
-    """Fixture wrapper around download_models for all TEST_MODELS"""
-    download_models(ignore_weights=True)
+def predownload_tokenizers(pytestconfig):
+    """Fixture wrapper around download_models for tokenizers used in collected tests"""
+    # Get models from pytest config if available, otherwise fall back to TEST_MODELS
+    models = getattr(pytestconfig, "models_to_download", None)
+    if models:
+        logging.info(
+            f"Downloading tokenizers for {len(models)} models needed for collected tests\nModels: {models}"
+        )
+        download_models(model_list=list(models), ignore_weights=True)
+    else:
+        # Fallback to original behavior if extraction failed
+        download_models(ignore_weights=True)
     yield
 
 
@@ -135,42 +153,26 @@ def logger(request):
     logger.removeHandler(handler)
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
-    It is used to skip tests that are not supported on all environments.
     """
-
-    # Tests marked with trtllm requires specific environment with tensorrtllm
-    # installed. Hence, we skip them if the user did not explicitly ask for them.
-    if config.getoption("-m") and "trtllm_marker" in config.getoption("-m"):
-        return
-    skip_trtllm = pytest.mark.skip(reason="need -m trtllm_marker to run")
+    # Collect models via explicit pytest mark from final filtered items only
+    models_to_download = set()
     for item in items:
-        if "trtllm_marker" in item.keywords:
-            item.add_marker(skip_trtllm)
+        # Only collect from items that are not skipped
+        if any(
+            getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
+        ):
+            continue
+        model_mark = item.get_closest_marker("model")
+        if model_mark and model_mark.args:
+            models_to_download.add(model_mark.args[0])
 
-        # Auto-inject predownload_models fixture for serve tests only (not router tests)
-        # Skip items that don't have fixturenames (like MypyFileItem)
-        if hasattr(item, "fixturenames"):
-            # Guard clause: skip if already has the fixtures
-            if (
-                "predownload_models" in item.fixturenames
-                or "predownload_tokenizers" in item.fixturenames
-            ):
-                continue
-
-            # Guard clause: skip if marked with skip_model_download
-            if item.get_closest_marker("skip_model_download"):
-                continue
-
-            # Add appropriate fixture based on test path
-            if "serve" in str(item.path):
-                item.fixturenames = list(item.fixturenames)
-                item.fixturenames.append("predownload_models")
-            elif "router" in str(item.path):
-                item.fixturenames = list(item.fixturenames)
-                item.fixturenames.append("predownload_tokenizers")
+    # Store models to download in pytest config for fixtures to access
+    if models_to_download:
+        config.models_to_download = models_to_download
 
 
 class EtcdServer(ManagedProcess):
