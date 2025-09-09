@@ -236,7 +236,7 @@ args:
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/installation_guide.md)
 - **SLA Planner**: [SLA Planner Deployment Guide](../../../../docs/guides/dynamo_deploy/sla_planner_deployment.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
