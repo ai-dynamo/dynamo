@@ -19,6 +19,7 @@ on:
   push:
     branches:
       - main
+      - release/*.*.*
       - "pull-request/[0-9]+"
     # Skip docs only changes
     paths-ignore:

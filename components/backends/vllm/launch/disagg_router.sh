@@ -6,7 +6,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-python -m dynamo.frontend --router-mode kv &
+python -m dynamo.frontend --router-mode kv --http-port=8000 &
 
 # routing will happen between the two decode workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

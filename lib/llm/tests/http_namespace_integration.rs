@@ -6,7 +6,7 @@
 
 use dynamo_llm::{
     discovery::ModelEntry,
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
     namespace::{GLOBAL_NAMESPACE, is_global_namespace},
 };
 use dynamo_runtime::protocols::EndpointId;
@@ -18,6 +18,7 @@ fn create_test_model_entry(
     component: &str,
     endpoint_name: &str,
     model_type: ModelType,
+    model_input: ModelInput,
 ) -> ModelEntry {
     ModelEntry {
         name: name.to_string(),
@@ -27,6 +28,7 @@ fn create_test_model_entry(
             name: endpoint_name.to_string(),
         },
         model_type,
+        model_input,
         runtime_config: None,
     }
 }
@@ -41,6 +43,7 @@ fn test_namespace_filtering_behavior() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
         create_test_model_entry(
             "model-2",
@@ -48,13 +51,15 @@ fn test_namespace_filtering_behavior() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
         create_test_model_entry(
             "model-3",
             "dynamo",
             "backend",
             "generate",
-            ModelType::Completion,
+            ModelType::Completions,
+            ModelInput::Tokens,
         ),
         create_test_model_entry(
             "model-4",
@@ -62,6 +67,7 @@ fn test_namespace_filtering_behavior() {
             "backend",
             "generate",
             ModelType::Embedding,
+            ModelInput::Tokens,
         ),
     ];
 
@@ -165,6 +171,7 @@ fn test_model_discovery_scoping_scenarios() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
         create_test_model_entry(
             "mistral-7b",
@@ -172,6 +179,7 @@ fn test_model_discovery_scoping_scenarios() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
         create_test_model_entry(
             "gpt-3.5",
@@ -179,8 +187,16 @@ fn test_model_discovery_scoping_scenarios() {
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
-        create_test_model_entry("claude-3", "dynamo", "backend", "generate", ModelType::Chat),
+        create_test_model_entry(
+            "claude-3",
+            "dynamo",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ),
     ];
 
     let visible_models: Vec<&ModelEntry> = available_models
@@ -228,14 +244,29 @@ fn test_namespace_boundary_conditions() {
     // Test edge cases and boundary conditions for namespace handling
 
     let test_models = vec![
-        create_test_model_entry("model-1", "", "backend", "generate", ModelType::Chat), // Empty namespace
-        create_test_model_entry("model-2", "dynamo", "backend", "generate", ModelType::Chat), // Global namespace
+        create_test_model_entry(
+            "model-1",
+            "",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ), // Empty namespace
+        create_test_model_entry(
+            "model-2",
+            "dynamo",
+            "backend",
+            "generate",
+            ModelType::Chat,
+            ModelInput::Tokens,
+        ), // Global namespace
         create_test_model_entry(
             "model-3",
             "ns-with-special-chars_123",
             "backend",
             "generate",
             ModelType::Chat,
+            ModelInput::Tokens,
         ),
     ];
 

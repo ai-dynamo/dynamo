@@ -10,7 +10,6 @@ use crate::{
     entrypoint::{self, EngineConfig, input::common},
     http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
-    model_type::ModelType,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -120,18 +119,27 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None
             };
 
+            let tokenizer_hf = card.tokenizer_hf()?;
             let chat_engine = entrypoint::build_routed_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(card, &client, router_mode, None, kv_chooser.clone())
+            >(
+                card,
+                &client,
+                router_mode,
+                None,
+                kv_chooser.clone(),
+                tokenizer_hf.clone(),
+            )
             .await?;
             manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
 
-            let completions_engine = entrypoint::build_routed_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(card, &client, router_mode, None, kv_chooser)
-            .await?;
+            let completions_engine =
+                entrypoint::build_routed_pipeline::<
+                    NvCreateCompletionRequest,
+                    NvCreateCompletionResponse,
+                >(card, &client, router_mode, None, kv_chooser, tokenizer_hf)
+                .await?;
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
 
             for endpoint_type in EndpointType::all() {
@@ -161,17 +169,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             let http_service = http_service_builder.build()?;
             let manager = http_service.model_manager();
 
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone())
-            .await?;
+            let tokenizer_hf = model.card().tokenizer_hf()?;
+            let chat_pipeline =
+                common::build_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(model.card(), inner_engine.clone(), tokenizer_hf.clone())
+                .await?;
             manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
                 NvCreateCompletionResponse,
-            >(model.card(), inner_engine)
+            >(model.card(), inner_engine, tokenizer_hf)
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
             // Enable all endpoints
@@ -247,23 +257,17 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
         model_type
     );
     match model_type {
-        ModelUpdate::Added(model_type) => match model_type {
-            ModelType::Backend => {
-                service.enable_model_endpoint(EndpointType::Chat, true);
-                service.enable_model_endpoint(EndpointType::Completion, true);
+        ModelUpdate::Added(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, true);
             }
-            _ => {
-                service.enable_model_endpoint(model_type.as_endpoint_type(), true);
+        }
+        ModelUpdate::Removed(model_type) => {
+            // Handle all supported endpoint types, not just the first one
+            for endpoint_type in model_type.as_endpoint_types() {
+                service.enable_model_endpoint(endpoint_type, false);
             }
-        },
-        ModelUpdate::Removed(model_type) => match model_type {
-            ModelType::Backend => {
-                service.enable_model_endpoint(EndpointType::Chat, false);
-                service.enable_model_endpoint(EndpointType::Completion, false);
-            }
-            _ => {
-                service.enable_model_endpoint(model_type.as_endpoint_type(), false);
-            }
-        },
+        }
     }
 }

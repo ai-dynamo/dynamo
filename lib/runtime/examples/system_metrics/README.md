@@ -185,7 +185,7 @@ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 cargo run --bin system_server
 The server will start an system status server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
 
 
-To Run an actual LLM frontend + server (aggregated example), launch both of them. By default, the frontend listens to port 8080.
+To Run an actual LLM frontend + server (aggregated example), launch both of them. By default, the frontend listens to port 8000.
 ```
 python -m dynamo.frontend &
 
@@ -202,5 +202,5 @@ Once running, you can query the metrics:
 curl http://localhost:8081/metrics | grep -E "dynamo_component"
 
 # Get all frontend metrics
-curl http://localhost:8080/metrics | grep -E "dynamo_frontend"
+curl http://localhost:8000/metrics | grep -E "dynamo_frontend"
 ```

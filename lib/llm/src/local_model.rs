@@ -18,7 +18,7 @@ use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
-use crate::model_type::ModelType;
+use crate::model_type::{ModelInput, ModelType};
 use crate::request_template::RequestTemplate;
 
 mod network_name;
@@ -59,6 +59,7 @@ pub struct LocalModelBuilder {
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
+    custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
 }
 
@@ -82,6 +83,7 @@ impl Default for LocalModelBuilder {
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
             user_data: Default::default(),
+            custom_template_path: Default::default(),
             namespace: Default::default(),
         }
     }
@@ -151,6 +153,11 @@ impl LocalModelBuilder {
 
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
+        self
+    }
+
+    pub fn custom_template_path(&mut self, custom_template_path: Option<PathBuf>) -> &mut Self {
+        self.custom_template_path = custom_template_path;
         self
     }
 
@@ -245,7 +252,8 @@ impl LocalModelBuilder {
         // --model-config takes precedence over --model-path
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
-        let mut card = ModelDeploymentCard::load(&model_config_path).await?;
+        let mut card =
+            ModelDeploymentCard::load(model_config_path, self.custom_template_path.as_deref())?;
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {
@@ -394,6 +402,7 @@ impl LocalModel {
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
+        model_input: ModelInput,
     ) -> anyhow::Result<()> {
         // A static component doesn't have an etcd_client because it doesn't need to register
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
@@ -422,6 +431,7 @@ impl LocalModel {
             endpoint_id: endpoint.id(),
             model_type,
             runtime_config: Some(self.runtime_config.clone()),
+            model_input,
         };
         etcd_client
             .kv_create(

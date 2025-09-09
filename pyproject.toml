@@ -153,6 +153,7 @@ filterwarnings = [
     "ignore:.*unclosed.*socket.*:ResourceWarning", # Ignore unclosed socket warnings
     "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
+    "ignore:The pynvml package is deprecated.*:FutureWarning", # Ignore pynvml deprecation warning, temporary until upstream library updates to nvidia-ml-py
 ]
 
 
@@ -171,6 +172,7 @@ markers = [
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
     "vllm: marks tests as requiring vllm",
+    "trtllm: marks tests as requiring trtllm",
     "trtllm_marker: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
     "slow: marks tests as known to be slow",
