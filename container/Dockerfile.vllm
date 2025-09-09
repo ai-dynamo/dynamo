@@ -199,7 +199,9 @@ RUN apt-get update && \
         ninja-build \
         g++ \
         # prometheus dependencies
-        ca-certificates && \
+        ca-certificates \
+        # DeepGemm uses 'cuobjdump' which does not come with CUDA image
+        cuda-command-line-tools-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
@@ -248,6 +250,10 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
+
+# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
+# is not properly set for complilation. Set CPATH to help nvcc find the headers.
+ENV CPATH=/usr/local/cuda/include:$CPATH
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
