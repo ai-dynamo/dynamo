@@ -35,17 +35,25 @@ class EngineConfig:
 
     name: str
     directory: str
-    script_name: str
     marks: List[Any]
     request_payloads: List[BasePayload]
     model: str
 
+    script_name: Optional[str] = None
+    command: Optional[List[str]] = None
     script_args: Optional[List[str]] = None
     models_port: int = 8000
     timeout: int = 600
     delayed_start: int = 0
     env: Dict[str, str] = field(default_factory=dict)
     stragglers: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Validate that either script_name or command is provided, but not both."""
+        if not self.script_name and not self.command:
+            raise ValueError("Either script_name or command must be provided")
+        if self.script_name and self.command:
+            raise ValueError("Cannot provide both script_name and command")
 
 
 class EngineProcess(ManagedProcess):
@@ -132,24 +140,21 @@ class EngineProcess(ManagedProcess):
         logger.info(f"SUCCESS: All expected log patterns: {patterns} found")
 
     @classmethod
-    def from_script(
+    def from_config(
         cls,
         config: EngineConfig,
         request: Any,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> "EngineProcess":
-        """Factory to create an EngineProcess configured to run a launch script."""
+        """Factory to create an EngineProcess from configuration (script or command)."""
         assert isinstance(config, EngineConfig), "Must use an instance of EngineConfig"
 
-        directory = config.directory
-        script_path = os.path.join(directory, "launch", config.script_name)
-
-        if not os.path.exists(script_path):
-            raise FileNotFoundError(f"Script not found: {script_path}")
-
-        command: List[str] = ["bash", script_path]
-        if config.script_args:
-            command.extend(config.script_args)
+        if config.script_name:
+            command = cls._build_script_command(config)
+        elif config.command:
+            command = config.command.copy()
+        else:
+            raise ValueError("Either script_name or command must be provided in config")
 
         env = os.environ.copy()
         if getattr(config, "env", None):
@@ -162,7 +167,7 @@ class EngineProcess(ManagedProcess):
             env=env,
             timeout=config.timeout,
             display_output=True,
-            working_dir=directory,
+            working_dir=config.directory,
             health_check_ports=[],
             health_check_urls=[
                 (f"http://localhost:{config.models_port}/v1/models", check_models_api),
@@ -176,3 +181,47 @@ class EngineProcess(ManagedProcess):
             stragglers=config.stragglers,
             log_dir=request.node.name,
         )
+
+    @classmethod
+    def _build_script_command(cls, config: EngineConfig) -> List[str]:
+        """Build command from script configuration."""
+        assert (
+            config.script_name
+        ), "Must provide script_name to run fn _build_script_command"
+        directory = config.directory
+        script_path = os.path.join(directory, "launch", config.script_name)
+
+        if not os.path.exists(script_path):
+            raise FileNotFoundError(f"Script not found: {script_path}")
+
+        command: List[str] = ["bash", script_path]
+        if config.script_args:
+            command.extend(config.script_args)
+
+        return command
+
+    @classmethod
+    def from_script(
+        cls,
+        config: EngineConfig,
+        request: Any,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> "EngineProcess":
+        """Factory to create an EngineProcess configured to run a launch script.
+
+        Deprecated: Use from_config() instead.
+        """
+        return cls.from_config(config, request, extra_env)
+
+    @classmethod
+    def from_command(
+        cls,
+        config: EngineConfig,
+        request: Any,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> "EngineProcess":
+        """Factory to create an EngineProcess configured to run a direct command.
+
+        Deprecated: Use from_config() instead.
+        """
+        return cls.from_config(config, request, extra_env)
