@@ -177,14 +177,19 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        match self.0.0.generate_in_parts(request).await {
+        match self.0 .0.generate_in_parts(request).await {
             Ok((mut stream, context)) => {
+                let request_id = context.id().to_string();
                 let first_item = match futures::StreamExt::next(&mut stream).await {
+                    // TODO - item may still contain an Annotated error. How do we want to handle that?
+                    // TODO - should we be returning an HttpError here?
                     Some(item) => item,
                     None => {
+                        let error_msg = "python async generator stream ended before processing started";
+                        tracing::warn!(request_id, error_msg);
                         return Err(Error::new(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
-                            "python async generator stream ended before processing started",
+                            error_msg,
                         )));
                     }
                 };
