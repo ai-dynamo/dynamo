@@ -292,4 +292,70 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### Additional Routing Features
+
+The `KvPushRouter` provides additional methods for fine-grained control:
+
+- **`best_worker_id()`**: Query which worker would be selected for given tokens without actually routing the request. Returns `(worker_id, overlap_blocks)`.
+- **`get_potential_loads()`**: Get detailed load information for all workers including potential prefill tokens and active decode blocks.
+- **`worker_id` parameter in `generate()`**: Force routing to a specific worker by passing `worker_id=<id>` to bypass the automatic KV-aware selection.
+
 The `router_config_override` parameter allows you to adjust routing behavior per request without recreating the router. This is useful for implementing different routing strategies based on request characteristics.
+
+### Custom Routing Example: Minimizing TTFT
+
+Here's an example of using `get_potential_loads()` to implement custom routing that minimizes Time To First Token (TTFT) by selecting the worker with the least prefill work:
+
+```python
+import asyncio
+from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+
+async def minimize_ttft_routing():
+    # Setup router
+    runtime = DistributedRuntime.detached()
+    namespace = runtime.namespace("inference")
+    component = namespace.component("vllm")
+    endpoint = component.endpoint("generate")
+
+    router = KvPushRouter(
+        endpoint=endpoint,
+        block_size=16,
+        kv_router_config=KvRouterConfig()
+    )
+
+    # Your input tokens
+    token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    # Get potential loads for all workers
+    potential_loads = await router.get_potential_loads(token_ids)
+
+    # Find worker with minimum prefill tokens (best for TTFT)
+    best_worker = min(potential_loads, key=lambda x: x['potential_prefill_tokens'])
+
+    print(f"Worker loads: {potential_loads}")
+    print(f"Selected worker {best_worker['worker_id']} with {best_worker['potential_prefill_tokens']} prefill tokens")
+
+    # Route directly to the selected worker
+    stream = await router.generate(
+        token_ids=token_ids,
+        model="meta-llama/Llama-2-7b-hf",
+        worker_id=best_worker['worker_id'],  # Force routing to optimal worker
+        stop_conditions={"max_tokens": 20}
+    )
+
+    # Process response
+    async for response in stream:
+        if isinstance(response, dict) and "token_ids" in response:
+            print(f"Generated tokens: {response['token_ids']}")
+
+if __name__ == "__main__":
+    asyncio.run(minimize_ttft_routing())
+```
+
+This approach gives you complete control over routing decisions, allowing you to optimize for different metrics based on your specific requirements. As some examples:
+
+- **Minimize TTFT**: Select worker with lowest `potential_prefill_tokens`
+- **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
+- **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
+
+See [KV Router Architecture](../components/router/README.md) for performance tuning details.

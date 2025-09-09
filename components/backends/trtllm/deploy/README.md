@@ -34,6 +34,14 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 - `TRTLLMDecodeWorker`: Specialized decode-only worker
 - `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
 
+### 5. **Aggregated Deployment with Config** (`agg-with-config.yaml`)
+Aggregated deployment with custom configuration.
+
+**Architecture:**
+- `nvidia-config`: ConfigMap containing a custom trtllm configuration
+- `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `TRTLLMWorker`: Single worker handling both prefill and decode with custom configuration mounted from the configmap
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
@@ -258,7 +266,7 @@ Configure the `model` name and `host` based on your deployment.
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
 - **Multinode Deployment**: [Multinode Examples](../multinode/multinode-examples.md)

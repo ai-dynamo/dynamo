@@ -2,12 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
+use regex::Regex;
 use rustpython_parser::{
     Mode,
     ast::{Constant, Expr, Mod},
     parse,
 };
 use serde_json::{Number, Value, json};
+use std::sync::OnceLock;
+
+static PYTHONIC_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Get the compiled regex pattern for pythonic tool calls
+/// Initialize the regex pattern once, no need to compile it everytime
+fn get_pythonic_regex() -> &'static Regex {
+    PYTHONIC_REGEX.get_or_init(|| {
+        // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
+        let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
+        Regex::new(pattern).expect("Failed to compile pythonic regex pattern")
+    })
+}
 
 fn strip_text(message: &str) -> String {
     // Remove unexpected python tags if any
@@ -17,11 +31,7 @@ fn strip_text(message: &str) -> String {
 }
 
 fn get_regex_matches(message: &str) -> Vec<String> {
-    use regex::Regex;
-    // Format Structure: [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
-    let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
-    let re = Regex::new(pattern).unwrap();
-
+    let re = get_pythonic_regex();
     let mut matches = Vec::new();
     for cap in re.find_iter(message) {
         matches.push(cap.as_str().to_string());
@@ -175,6 +185,16 @@ pub fn try_tool_call_parse_pythonic(
         .to_string();
 
     Ok((tool_response?, Some(normal_text)))
+}
+
+pub fn detect_tool_call_start_pythonic(chunk: &str) -> bool {
+    let trimmed = chunk.trim();
+    // Early return for empty input
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Heuristic: Pythonic tool calls always start with a '[' somewhere in the chunk
+    trimmed.contains('[')
 }
 
 #[cfg(test)]
@@ -341,5 +361,39 @@ mod tests {
         let (name, args) = extract_name_and_args(result[1].clone());
         assert_eq!(name, "bar");
         assert_eq!(args["x"], json!({"x": 3, "y": {"e": "f"}}));
+    }
+}
+
+#[cfg(test)]
+mod detect_parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_chunk_with_tool_call_start_token() {
+        let text = r#"[foo(a=1, b=2), bar(x=3)]"#;
+        let result = detect_tool_call_start_pythonic(text);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_chunk_without_tool_call_start_token() {
+        let text = r#"foo(a=1, b=2)"#;
+        let result = detect_tool_call_start_pythonic(text);
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_chunk_with_tool_call_start_token_in_middle() {
+        let text = r#"information: [foo(a=1, b=2), bar(x=3)]"#;
+        let result = detect_tool_call_start_pythonic(text);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_detect_tool_call_start_pythonic_false_positive() {
+        // Since we detect just "[" as tool call start token, this will be a false positive
+        let text = r#"Hey [ There is one tool call here . foo(a=1, b=2)"#;
+        let result = detect_tool_call_start_pythonic(text);
+        assert!(result);
     }
 }

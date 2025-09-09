@@ -8,7 +8,7 @@
 # request via NATS to this python script, which runs sglang.
 #
 # The key differences between this and `server_sglang_tok.py` are:
-# - The `register_llm` function registers us a `Backend` model
+# - The `register_llm` function registers us a `Chat` and `Completions` model that accepts `Tokens` input
 # - The `generate` function receives a pre-tokenized request and must return token_ids in the response.
 #
 # Setup a virtualenv with dynamo.llm, dynamo.runtime and sglang[all] installed
@@ -27,7 +27,7 @@ import sglang
 import uvloop
 from sglang.srt.server_args import ServerArgs
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -91,7 +91,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(ModelType.Backend, endpoint, config.model)
+    await register_llm(
+        ModelInput.Tokens,
+        ModelType.Chat | ModelType.Completions,
+        endpoint,
+        config.model,
+    )
 
     engine_args = ServerArgs(
         model_path=config.model,

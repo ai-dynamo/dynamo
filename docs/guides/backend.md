@@ -16,7 +16,7 @@ The Python file must do three things:
 3. Attach a request handler
 
 ```
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
    # 1. Decorate a function to get the runtime
@@ -29,10 +29,11 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
     component = runtime.namespace("namespace").component("component")
     await component.create_service()
     model_path = "Qwen/Qwen3-0.6B" # or "/data/models/Qwen3-0.6B"
-    model_type = ModelType.Backend
+    model_input = ModelInput.Tokens # or ModelInput.Text if engine handles pre-processing
+    model_type = ModelType.Chat # or ModelType.Chat | ModelType.Completions if model can be deployed on chat and completions endpoints
     endpoint = component.endpoint("endpoint")
     # Optional last param to register_llm is model_name. If not present derives it from model_path
-    await register_llm(model_type, endpoint, model_path)
+    await register_llm(model_input, model_type, endpoint, model_path)
 
     # Initialize your engine here
     # engine = ...
@@ -62,10 +63,13 @@ The `model_path` can be:
 - The path to a checkout of a HuggingFace repo - any folder containing safetensor files as well as `config.json`, `tokenizer.json` and `tokenizer_config.json`.
 - The path to a GGUF file, if your engine supports that.
 
+The `model_input` can be:
+- ModelInput.Tokens. Your engine expects pre-processed input (token IDs). Dynamo handles tokenization and pre-processing.
+- ModelInput.Text. Your engine expects raw text input and handles its own tokenization and pre-processing.
+
 The `model_type` can be:
-- ModelType.Backend. Dynamo handles pre-processing. Your `generate` method receives a `request` dict containing a `token_ids` array of int. It must return a dict also containing a `token_ids` array and an optional `finish_reason` string.
-- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat). Your engine handles pre-processing.
-- ModelType.Completion. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions). Your engine handles pre-processing.
+- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat).
+- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
 
 `register_llm` can also take the following kwargs:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name, the folder name, or the GGUF file name.

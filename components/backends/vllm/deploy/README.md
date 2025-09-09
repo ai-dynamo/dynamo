@@ -186,7 +186,6 @@ spec:
 
 vLLM workers are configured through command-line arguments. Key parameters include:
 
-- `--endpoint`: Dynamo endpoint in format `dyn://namespace.component.endpoint`
 - `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
 - `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
@@ -198,7 +197,7 @@ See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/se
 Send a test request to verify your deployment:
 
 ```bash
-curl localhost:8080/v1/chat/completions \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -237,7 +236,7 @@ args:
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/installation_guide.md)
 - **SLA Planner**: [SLA Planner Deployment Guide](../../../../docs/guides/dynamo_deploy/sla_planner_deployment.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)

@@ -58,8 +58,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version**   | glibc version                        | CUDA Version |
 | :----------------- | :------------ | :----------------------------------- | :----------- |
-| ai-dynamo          | 0.4.1         | >=2.28                               |              |
-| ai-dynamo-runtime  | 0.4.1         | >=2.28 (Python 3.12 has known issues)|              |
+| ai-dynamo          | 0.5.0         | >=2.28                               |              |
+| ai-dynamo-runtime  | 0.5.0         | >=2.28 (Python 3.12 has known issues)|              |
 | NIXL               | 0.4.1         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
@@ -85,7 +85,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 
 > [!Caution]
-> ¹ There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8080 for frontend).
+> ¹ There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
 
 
 ## Build Support

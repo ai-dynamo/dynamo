@@ -45,7 +45,7 @@ python components/planner/src/dynamo/planner/utils/perf_interpolation.py \
   --profile_results_dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
   --isl 3000 \
   --osl 300 \
-  --ttft 0.1 \
+  --ttft 0.2 \
   --itl 0.01
 
 # output:
@@ -54,7 +54,7 @@ TTFT=0.1s, ITL=0.01s
 Using profile results from tests/planner/profiling_results/H200_TP1P_TP1D/
 
 Interpolating prefill performance ...
-        Estimated TTFT=0.060s <= target TTFT=0.100s. Requests can queue 0.040s maximally while meeting TTFT SLA.
+        Estimated TTFT=0.060s <= target TTFT=0.200s. Requests can queue 0.140s maximally while meeting TTFT SLA.
         Estimated throughput: 49481.09 tokens/s/gpu. Request rate at 16.49 requests/s will saturate one GPU.
 
 Interpolating decode performance ...
@@ -74,17 +74,17 @@ For TP1 H200 engine, planner should scale between 1P1D and 3P3D.
 ```bash
 python benchmarks/sin_load_generator/sin_synth.py \
   --time-duration 1800 \
-  --request-rate-min 12 \
-  --request-rate-max 36 \
+  --request-rate-min 5 \
+  --request-rate-max 45 \
   --request-rate-period 600 \
   --isl1 3000 \
   --osl1 300 \
   --isl2 3000 \
   --osl2 300 \
-  --output-file rr-12-36_i3000o300.jsonl
+  --output-file rr-5-45_i3000o300.jsonl
 ```
 
-The dataset starts at 12 requests/s, increases to 36 requests/s at t=300s, decreases back to 12 requests/s at t=600s, and repeats.
+The dataset starts at 5 requests/s, increases to 45 requests/s at t=300s, decreases back to 5 requests/s at t=600s, and repeats.
 The total duration is 30 minutes or 1800 seconds.
 
 ## Planner Dry Run
@@ -105,15 +105,15 @@ python components/planner/test/planner_sla_dryrun.py \
     --output-plot <path_to_output_plot>
 ```
 
-For example, to dry run SLA planner for the previous FP8 8B on H200 using the generated `rr-12-36_i3000o300.jsonl` dataset,
+For example, to dry run SLA planner for the previous FP8 8B on H200 using the generated `rr-5-45_i3000o300.jsonl` dataset,
 
 ```bash
 python components/planner/test/planner_sla_dryrun.py \
-    --ttft 0.1 \
+    --ttft 0.2 \
     --itl 0.01 \
     --adjustment-interval 60 \
     --profile-results-dir tests/planner/profiling_results/H200_TP1P_TP1D/ \
-    --dataset rr-12-36_i3000o300.jsonl \
+    --dataset rr-5-45_i3000o300.jsonl \
     --start-num-p 1 \
     --start-num-d 1 \
     --output-plot dryrun_plot.png
@@ -139,8 +139,9 @@ This directory contains comprehensive tests for validating the SLA planner's sca
 
 1. **Unit Tests** (`test_replica_calculation.py`) - Test the mathematical formulas for calculating prefill and decode replicas in isolation
 2. **End-to-End Tests** (`scaling/run_scaling_test.sh`) - Test complete workflow including Kubernetes deployment, load generation, and pod scaling validation
+3. **End-to-End Perf Tests** (see instructions below) - Compare performance (goodput and goodput/GPU) on deployments with and without sla planner
 
-### Quick Start
+### Quick Start for Unit Tests and End-to-End Tests
 
 #### Run Unit Tests Only
 Test the replica calculation logic without requiring Kubernetes:
@@ -189,6 +190,59 @@ The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D con
 - **Transition delay**: 30s between phases
 - **Total test duration**: ~7 minutes + scaling observation
 - **Smart cleanup**: Only removes deployment if test created it (preserves existing deployments)
+
+### Instructions for End-to-End Perf Tests
+
+In this test, we compare performance (goodput and goodput/GPU) on deployments on the following four deployments using the aforementioned 8b FP8 model on H200 and the dataset used in dryrun:
+- Config 1 with inefficient P/D ratio: 3xTP1P_1xTP1D_4GPU
+ `./perf_test_configs/disagg_8b_3p1d.yaml`
+- Config 2 with best static deployment: 2xTP1P_2xTP1D_4GPU
+ `./perf_test_configs/disagg_8b_2p2d.yaml`
+- Config 3 with inefficient parallelization mapping: 1xTP2P_1xTP2D_4GPU
+ `./perf_test_configs/disagg_8b_tp2.yaml`
+- Config 4 with sla planner: `./perf_test_configs/disagg_8b_planner.yaml`
+
+To run the test on each configuration, first deploy the corresponding DynamoGraphDeployment by
+
+```bash
+kubectl apply -f ./perf_test_configs/<config_file_name> -n <namespace>
+```
+
+When running deployment with sla-planner, to reduce the image pulling time, deploy a `DaemonSet` to cache the image in advance:
+
+```bash
+kubectl apply -f ./perf_test_configs/image_cache_daemonset.yaml -n <namespace>
+```
+
+Then, port-forward or shell into the frontend pod and run GenAI-Perf to get the goodput:
+
+```bash
+genai-perf profile \
+  --model nvidia/Llama-3.1-8B-Instruct-FP8 \
+  --tokenizer nvidia/Llama-3.1-8B-Instruct-FP8 \
+  --endpoint-type chat \
+  --url localhost:8000 \ # or the port-forwarded port
+  --streaming \
+  --input-file payload:/workspace/rr-5-45_i3000o300.jsonl \ # path to the generated load dataset \
+  --fixed-schedule True \
+  --goodput time_to_first_token:200 inter_token_latency:10 \
+  -- -v -max-threads 64 \
+```
+
+> [!NOTE]
+> Sometimes, when sla planner scales down the number of workers, a few requests will error out and cause GenAI-Perf to stuck. We are aware of this issue and are working on fixing it.
+
+#### E2E Perf Test Results
+
+![Results](./figures/sla_planner_perf.png)
+
+The table below shows the performance improvement of SLA planner across different deployment configurations:
+
+| Baseline | Goodput Improvement | Goodput/GPU Improvement |
+|---------------|-----------------|-------------------------|
+| Inefficient P/D ratio | 725% | 600% |
+| Inefficient parallelization mapping | 311% | 249% |
+| Best static deployment | 52% | 29% |`
 
 ### Prerequisites
 

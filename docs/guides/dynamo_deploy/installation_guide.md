@@ -15,11 +15,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo Kubernetes Platform
+# Installation Guide for Dynamo Kubernetes Platform
 
 Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestration and scaling, using the Dynamo Kubernetes Platform.
 
 ## Quick Start Paths
+
+Platform is installed using Dynamo Kubernetes Platform [helm chart](../../../deploy/cloud/helm/platform/README.md).
 
 **Path A: Production Install**
 Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
@@ -39,7 +41,8 @@ helm version             # v3.0+
 docker version           # Running daemon
 
 # Set your inference runtime image
-export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
 # Also available: sglang-runtime, tensorrtllm-runtime
 ```
 
@@ -53,16 +56,15 @@ Install from [NGC published artifacts](https://catalog.ngc.nvidia.com/orgs/nvidi
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-kubernetes
-export RELEASE_VERSION=0.5.0 # any version of Dynamo 0.3.2+
+export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
 # 2. Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
 helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 
 # 3. Install Platform
-kubectl create namespace ${NAMESPACE}
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
-helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
 > [!TIP]
@@ -88,22 +90,20 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 Build and deploy from source for customization.
 
-### Quick Deploy Script
-
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-cloud
 export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
 export DOCKER_USERNAME='$oauthtoken'
 export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
-export IMAGE_TAG=0.5.0
+export IMAGE_TAG=${RELEASE_VERSION}
 
 # 2. Build operator
 cd deploy/cloud/operator
 earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 cd -
 
-# 3. Create namespace and secrets
+# 3. Create namespace and secrets to be able to pull the operator image
 kubectl create namespace ${NAMESPACE}
 kubectl create secret docker-registry docker-imagepullsecret \
   --docker-server=${DOCKER_SERVER} \
@@ -111,31 +111,18 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --docker-password=${DOCKER_PASSWORD} \
   --namespace=${NAMESPACE}
 
-# 4. Deploy
+# 4. Install CRDs
+helm upgrade --install dynamo-crds ./crds/ --namespace default
+
+# 5. Install Platform
 helm repo add bitnami https://charts.bitnami.com/bitnami
-./deploy.sh --crds
-```
-
-### Manual Steps (Alternative)
-
-<details>
-<summary>Click to expand manual installation steps</summary>
-
-**Step 1: Install CRDs**
-```bash
-helm install dynamo-crds ./crds/ --namespace default
-```
-
-**Step 2: Install Platform**
-```bash
 helm dep build ./platform/
-helm install dynamo-platform ./platform/ \
+helm upgrade --install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
+  --set dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator \
+  --set dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG} \
+  --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```
-</details>
 
 → [Verify Installation](#verify-installation)
 
@@ -184,6 +171,18 @@ kubectl logs <pod-name> -n ${NAMESPACE}
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN=${HF_TOKEN} \
   -n ${NAMESPACE}
+```
+
+**Bitnami etcd "unrecognized" image?**
+
+```bash
+ERROR: Original containers have been substituted for unrecognized ones. Deploying this chart with non-standard containers is likely to cause degraded security and performance, broken chart features, and missing environment variables.
+```
+This error that you might encounter during helm install is due to bitnami changing their docker repository to a [secure one](https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog).
+
+just add the following to the helm install command:
+```bash
+--set "etcd.image.repository=bitnamilegacy/etcd" --set "etcd.global.security.allowInsecureImages=true"
 ```
 
 **Clean uninstall?**

@@ -2,9 +2,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::json_parser::try_tool_call_parse_json;
-use super::pythonic_parser::try_tool_call_parse_pythonic;
+use super::harmony::{detect_tool_call_start_harmony, parse_tool_calls_harmony};
+use super::json::{detect_tool_call_start_json, try_tool_call_parse_json};
+use super::pythonic::{detect_tool_call_start_pythonic, try_tool_call_parse_pythonic};
 use super::response::ToolCallResponse;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+static PARSER_MAP: OnceLock<HashMap<&'static str, ToolCallConfig>> = OnceLock::new();
+
+// Always update this parsermap when adding a new parser
+pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
+    PARSER_MAP.get_or_init(|| {
+        let mut map = HashMap::new();
+        map.insert("hermes", ToolCallConfig::hermes());
+        map.insert("nemotron_deci", ToolCallConfig::nemotron_deci());
+        map.insert("llama3_json", ToolCallConfig::llama3_json());
+        map.insert("mistral", ToolCallConfig::mistral());
+        map.insert("phi4", ToolCallConfig::phi4());
+        map.insert("pythonic", ToolCallConfig::pythonic());
+        map.insert("harmony", ToolCallConfig::harmony());
+        map.insert("deepseek_v3_1", ToolCallConfig::deepseek_v3_1());
+        map.insert("default", ToolCallConfig::default());
+        map
+    })
+}
+
+pub fn get_available_tool_parsers() -> Vec<&'static str> {
+    get_tool_parser_map().keys().copied().collect()
+}
 
 pub fn try_tool_call_parse(
     message: &str,
@@ -17,7 +43,8 @@ pub fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ToolCallParserType::Harmony => {
-            anyhow::bail!("Harmony parser not implemented");
+            let (results, normal_content) = parse_tool_calls_harmony(message, &config.json)?;
+            Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
             let (results, normal_content) = try_tool_call_parse_pythonic(message)?;
@@ -37,15 +64,8 @@ pub fn detect_and_parse_tool_call(
     message: &str,
     parser_str: Option<&str>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let mut parser_map: std::collections::HashMap<&str, ToolCallConfig> =
-        std::collections::HashMap::new();
-    parser_map.insert("hermes", ToolCallConfig::hermes());
-    parser_map.insert("nemotron_deci", ToolCallConfig::nemotron_deci());
-    parser_map.insert("llama3_json", ToolCallConfig::llama3_json());
-    parser_map.insert("mistral", ToolCallConfig::mistral());
-    parser_map.insert("phi4", ToolCallConfig::phi4());
-    parser_map.insert("pythonic", ToolCallConfig::pythonic());
-    parser_map.insert("default", ToolCallConfig::default()); // Add default key
+    // Get the tool parser map
+    let parser_map = get_tool_parser_map();
 
     // Handle None or empty string by defaulting to "default"
     let parser_key = match parser_str {
@@ -58,7 +78,38 @@ pub fn detect_and_parse_tool_call(
             let (results, normal_content) = try_tool_call_parse(message, config)?;
             Ok((results, normal_content))
         }
-        None => anyhow::bail!("Parser for the given config is not implemented"), // Original message
+        None => anyhow::bail!(
+            "Parser '{}' is not implemented. Available parsers: {:?}",
+            parser_key,
+            get_available_tool_parsers()
+        ),
+    }
+}
+
+pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::Result<bool> {
+    let parser_map = get_tool_parser_map();
+    let parser_key = match parser_str {
+        Some(s) if !s.is_empty() => s,
+        _ => "default", // None or empty string
+    };
+
+    match parser_map.get(parser_key) {
+        Some(config) => match config.format {
+            ToolCallParserType::Json => Ok(detect_tool_call_start_json(chunk, &config.json)),
+            ToolCallParserType::Harmony => Ok(detect_tool_call_start_harmony(chunk, &config.json)),
+            ToolCallParserType::Pythonic => Ok(detect_tool_call_start_pythonic(chunk)),
+            ToolCallParserType::Typescript => {
+                anyhow::bail!("Typescript parser not implemented");
+            }
+            ToolCallParserType::Xml => {
+                anyhow::bail!("Xml parser not implemented");
+            }
+        },
+        None => anyhow::bail!(
+            "Parser '{}' is not implemented. Available parsers: {:?}",
+            parser_key,
+            get_available_tool_parsers()
+        ),
     }
 }
 
@@ -72,6 +123,27 @@ mod tests {
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments).unwrap();
         (call.function.name, args)
+    }
+
+    #[test]
+    fn test_get_available_tool_parsers() {
+        let parsers = get_available_tool_parsers();
+        assert!(!parsers.is_empty());
+        // Update this list when adding a new parser
+        let available_parsers = [
+            "hermes",
+            "llama3_json",
+            "harmony",
+            "nemotron_deci",
+            "mistral",
+            "phi4",
+            "default",
+            "pythonic",
+            "deepseek_v3_1",
+        ];
+        for parser in available_parsers {
+            assert!(parsers.contains(&parser));
+        }
     }
 
     #[test]
@@ -1107,5 +1179,115 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "New York");
         assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_harmony_parser_basic() {
+        let input = r#"
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
+        <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
+        <|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>
+        "#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("harmony")).unwrap();
+        assert_eq!(
+            content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn test_deepseek_v3_1_parser_basic() {
+        let input = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3_1")).unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 2);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Tokyo");
+        let (name, args) = extract_name_and_args(result[1].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "Paris");
+    }
+
+    #[test]
+    fn test_hermes_parser_without_new_line() {
+        let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "celsius"}}</tool_call>"
+        "#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "celsius");
+    }
+}
+
+#[cfg(test)]
+// Just e2e tests to test the flow. Detailed tests are covered in the individual parsers
+mod detect_parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_harmony() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json"#;
+        let result = detect_tool_call_start(text, Some("harmony")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_hermes() {
+        let text = r#"{"name": "get_current_weather", "parameters": {"location": "Tokyo"}}"#;
+        let result = detect_tool_call_start(text, Some("hermes")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_pythonic() {
+        let text = r#"foo(a=1, b=2), bar(x=3)]"#;
+        let result = detect_tool_call_start(text, Some("pythonic")).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_nemotron_deci() {
+        let text = r#"<TOOLCALL>[{"name": "get_current_weather", "parameters": {"location": "Tokyo"}}]</TOOLCALL>"#;
+        let result = detect_tool_call_start(text, Some("nemotron_deci")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_phi4() {
+        let text =
+            r#"functools{"name": "get_current_weather", "parameters": {"location": "Tokyo"}}"#;
+        let result = detect_tool_call_start(text, Some("phi4")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_llama3_json() {
+        let text = r#"<|python_tag|>{ "name": "get_current_weather", "parameters": {"location": "Tokyo"}}"#;
+        let result = detect_tool_call_start(text, Some("llama3_json")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_mistral() {
+        let text =
+            r#"[TOOL_CALLS]{"name": "get_current_weather", "parameters": {"location": "Tokyo"}}"#;
+        let result = detect_tool_call_start(text, Some("mistral")).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_e2e_detect_tool_call_start_deepseek_v3_1() {
+        let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
+        let result = detect_tool_call_start(text, Some("deepseek_v3_1")).unwrap();
+        assert!(result);
     }
 }
