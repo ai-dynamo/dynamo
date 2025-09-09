@@ -35,8 +35,6 @@ ARG ARCH_ALT=x86_64
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
-ARG AWS_ACCESS_KEY_ID=""
-ARG AWS_SECRET_ACCESS_KEY=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF=v1.19.0
@@ -164,7 +162,9 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ##################################
 
 # Build and install UCX
-RUN rm -rf /opt/hpcx/ucx && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-key-id,env=AWS_SECRET_ACCESS_KEY \
+    rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
     cd /usr/local/src && \
@@ -214,7 +214,9 @@ ENV NIXL_SRC_DIR=/opt/nixl \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 
 # Build and install NIXL
-RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-key-id,env=AWS_SECRET_ACCESS_KEY \
+    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     if [ "$ARCH" = "arm64" ]; then \
         nixl_build_args="-Ddisable_gds_backend=true"; \
@@ -317,7 +319,9 @@ COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
 # Build wheels
-RUN uv build --wheel --out-dir /opt/dynamo/dist && \
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-key-id,env=AWS_SECRET_ACCESS_KEY \
+    uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
