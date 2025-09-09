@@ -1,4 +1,7 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
