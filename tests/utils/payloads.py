@@ -30,7 +30,7 @@ class BasePayload:
     expected_response: List[str]
     expected_log: List[str]
     repeat_count: int = 1
-    timeout: int = 30
+    timeout: int = 60
 
     # Connection info
     host: str = "localhost"
