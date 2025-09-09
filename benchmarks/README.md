@@ -61,6 +61,11 @@ The benchmarking framework supports:
 - Customizable concurrency levels (configurable via CONCURRENCIES env var), sequence lengths, and models
 - Automated performance plot generation with custom labels
 
+**Sequential GPU Usage:**
+- Models are deployed and benchmarked **sequentially**, not in parallel
+- Each deployment gets exclusive access to all available GPUs during its benchmark run
+- Ensures accurate performance measurements and fair comparison across configurations
+
 **Supported Backends:**
 - DynamoGraphDeployments
 - External HTTP endpoints (for comparison with non-Dynamo backends)

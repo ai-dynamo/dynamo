@@ -3,14 +3,18 @@
 
 import json
 import logging
-import time
-from typing import Any, Callable, Dict
+import os
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 import requests
 
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.payloads import BasePayload, check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
+
+FRONTEND_PORT = 8000
 
 
 class EngineResponseError(Exception):
@@ -19,107 +23,38 @@ class EngineResponseError(Exception):
     pass
 
 
+class EngineLogError(Exception):
+    """Custom exception for engine log validation errors"""
+
+    pass
+
+
+@dataclass
+class EngineConfig:
+    """Base configuration for engine test scenarios"""
+
+    name: str
+    directory: str
+    script_name: str
+    marks: List[Any]
+    request_payloads: List[BasePayload]
+    model: str
+
+    script_args: Optional[List[str]] = None
+    models_port: int = 8000
+    timeout: int = 600
+    delayed_start: int = 0
+    env: Dict[str, str] = field(default_factory=dict)
+    stragglers: list[str] = field(default_factory=list)
+
+
 class EngineProcess(ManagedProcess):
     """Base class for LLM engine processes (vLLM, TRT-LLM, etc.)"""
 
-    def _check_models_api(self, response):
-        """Check if models API is working and returns models"""
-        try:
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            return data.get("data") and len(data["data"]) > 0
-        except Exception:
-            return False
-
-    def get_metrics(self, port=8081):
-        """Curl the metrics endpoint and return the response."""
-
-        metrics_url = f"http://localhost:{port}/metrics"
-        logger.info(f"Curling metrics endpoint: {metrics_url}")
-
-        try:
-            response = requests.get(metrics_url, timeout=10)
-            logger.info(
-                f"Metrics endpoint responded with status: {response.status_code}"
-            )
-            return response
-        except requests.RequestException as e:
-            logger.error(f"Failed to curl metrics endpoint: {e}")
-            raise
-
-    def send_request(
-        self, url: str, payload: Dict[str, Any], timeout: float = 30.0
-    ) -> requests.Response:
-        """
-        Send a POST request to the engine with detailed logging.
-
-        Args:
-            url: The endpoint URL
-            payload: The request payload
-            timeout: Request timeout in seconds
-
-        Returns:
-            The response object
-
-        Raises:
-            requests.RequestException: If the request fails
-        """
-
-        # Log the request as a curl command for easy reproduction
-        payload_json = json.dumps(payload, indent=2)
-        curl_command = f'curl -X POST "{url}" \\\n  -H "Content-Type: application/json" \\\n  -d \'{payload_json}\''
-        logger.info("Sending request (curl equivalent):\n%s", curl_command)
-
-        start_time = time.time()
-        try:
-            response = requests.post(url, json=payload, timeout=timeout)
-            elapsed = time.time() - start_time
-
-            # Log response details
-            logger.info(
-                "Received response: status=%d, elapsed=%.2fs",
-                response.status_code,
-                elapsed,
-            )
-
-            logger.debug("Response headers: %s", dict(response.headers))
-
-            # Try to log response body (truncated if too long)
-            try:
-                if response.headers.get("content-type", "").startswith(
-                    "application/json"
-                ):
-                    response_data = response.json()
-                    response_str = json.dumps(response_data, indent=2)
-                    if len(response_str) > 1000:
-                        response_str = response_str[:1000] + "... (truncated)"
-                    logger.debug("Response body: %s", response_str)
-                else:
-                    response_text = response.text
-                    if len(response_text) > 1000:
-                        response_text = response_text[:1000] + "... (truncated)"
-                    logger.debug("Response body: %s", response_text)
-            except Exception as e:
-                logger.debug("Could not parse response body: %s", e)
-
-            return response
-
-        except requests.exceptions.Timeout:
-            logger.error("Request timed out after %.2f seconds", timeout)
-            raise
-        except requests.exceptions.ConnectionError as e:
-            logger.error("Connection error: %s", e)
-            raise
-        except requests.exceptions.RequestException as e:
-            logger.error("Request failed: %s", e)
-            raise
-
     def check_response(
         self,
-        payload: Any,
+        payload: BasePayload,
         response: requests.Response,
-        response_handler: Callable[[Any], str],
     ) -> None:
         """
         Check if the response is valid and contains expected content.
@@ -151,30 +86,93 @@ class EngineProcess(ManagedProcess):
 
             raise EngineResponseError(error_msg)
 
-        # Extract content using the handler
         try:
-            content = response_handler(response)
+            content = payload.process_response(response)
+
             logger.info(
                 "Extracted content: \n%s",
-                content[:200] + "..." if len(content) > 200 else content,
+                content[:200] + "..."
+                if isinstance(content, str) and len(content) > 200
+                else content,
             )
+        except AssertionError as e:
+            raise EngineResponseError(str(e))
         except Exception as e:
-            raise EngineResponseError(f"Failed to extract content from response: {e}")
+            raise EngineResponseError(f"Failed to handle response: {e}")
 
+        # Optionally validate expected log patterns after response handling
+        if payload.expected_log:
+            self.validate_expected_logs(payload.expected_log)
+
+    def validate_expected_logs(self, patterns: Any) -> None:
+        """Validate that all regex patterns are present in the current logs.
+
+        Reads the full log via ManagedProcess.read_logs and searches for each
+        provided regex pattern. Raises EngineLogError if any are missing.
+        """
+        import re  # local import to keep module load minimal
+
+        content = self.read_logs() or ""
         if not content:
-            raise EngineResponseError("Response contained empty content")
+            raise EngineLogError(
+                f"Log file not available or empty at path: {self.log_path}"
+            )
 
-        if hasattr(payload, "expected_response") and payload.expected_response:
-            missing_expected = []
-            for expected in payload.expected_response:
-                if expected not in content:
-                    missing_expected.append(expected)
+        compiled = [re.compile(p) for p in patterns]
+        missing = []
+        for pattern, rx in zip(patterns, compiled):
+            if not rx.search(content):
+                missing.append(pattern)
 
-            if missing_expected:
-                raise EngineResponseError(
-                    f"Expected content not found in response. Missing: {missing_expected}"
-                )
-            else:
-                logger.info(
-                    f"SUCCESS: All expected content ({payload.expected_response}) found in response"
-                )
+        if missing:
+            sample = content[-1000:] if len(content) > 1000 else content
+            raise EngineLogError(
+                f"Missing expected log patterns: {missing}\n\nLog sample:\n{sample}"
+            )
+        logger.info(f"SUCCESS: All expected log patterns: {patterns} found")
+
+    @classmethod
+    def from_script(
+        cls,
+        config: EngineConfig,
+        request: Any,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> "EngineProcess":
+        """Factory to create an EngineProcess configured to run a launch script."""
+        assert isinstance(config, EngineConfig), "Must use an instance of EngineConfig"
+
+        directory = config.directory
+        script_path = os.path.join(directory, "launch", config.script_name)
+
+        if not os.path.exists(script_path):
+            raise FileNotFoundError(f"Script not found: {script_path}")
+
+        command: List[str] = ["bash", script_path]
+        if config.script_args:
+            command.extend(config.script_args)
+
+        env = os.environ.copy()
+        if getattr(config, "env", None):
+            env.update(config.env)
+        if extra_env:
+            env.update(extra_env)
+
+        return cls(
+            command=command,
+            env=env,
+            timeout=config.timeout,
+            display_output=True,
+            working_dir=directory,
+            health_check_ports=[],
+            health_check_urls=[
+                (f"http://localhost:{config.models_port}/v1/models", check_models_api),
+                (
+                    f"http://localhost:{config.models_port}/health",
+                    check_health_generate,
+                ),
+            ],
+            delayed_start=config.delayed_start,
+            terminate_existing=False,
+            stragglers=config.stragglers,
+            log_dir=request.node.name,
+        )

@@ -33,7 +33,7 @@ The framework is a wrapper around `genai-perf` that:
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
-**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The actual model loaded is determined by your deployment manifests. Only one model can be benchmarked at a time across all inputs to ensure fair comparison. The default `--model` value in the benchmarking script is `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, but it must match the model in the manifest(s) and the model deployed at the endpoint(s).
+**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The actual model loaded is determined by your deployment manifests. Only one model can be benchmarked at a time across all inputs to ensure fair comparison. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model in the manifest(s) and the model deployed at the endpoint(s).
 
 ## Prerequisites
 
@@ -103,7 +103,7 @@ REQUIRED:
 
 OPTIONS:
   -h, --help                    Show help message and examples
-  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+  -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: Qwen/Qwen3-0.6B)
                                 NOTE: This must match the model configured in your deployment manifests and endpoints
   -i, --isl LENGTH              Input sequence length (default: 2000)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
@@ -130,6 +130,23 @@ The script automatically:
 4. **Generates** comparison plots using your custom labels in `./benchmarks/results/plots/`
 5. **Cleans up** deployments when complete
 
+### GPU Resource Usage
+
+**Important**: Models are deployed and benchmarked **sequentially**, not in parallel. This means:
+
+- **One deployment at a time**: Each DynamoGraphDeployment is deployed, benchmarked, and cleaned up before the next one starts
+- **Full GPU access**: Each deployment gets exclusive access to all available GPUs during its benchmark run
+- **Resource isolation**: No resource conflicts between different deployment configurations
+- **Fair comparison**: Each configuration is tested under identical resource conditions
+
+This sequential approach ensures:
+- **Accurate performance measurements** without interference between deployments
+- **Consistent resource allocation** for fair comparison across different configurations
+- **Simplified resource management** without complex GPU scheduling
+- **Reliable cleanup** between benchmark runs
+
+If you need to benchmark multiple configurations simultaneously, consider using separate Kubernetes namespaces or running benchmarks on different clusters.
+
 ### Results Clearing Behavior
 
 **Important**: The benchmark script automatically clears the output directory before each run to ensure clean, reproducible results. This means:
@@ -155,7 +172,7 @@ For direct control over the benchmark workflow:
 ```bash
 # Endpoint benchmarking
 python3 -u -m benchmarks.utils.benchmark \
-   --endpoint "http://your-endpoint:8000" \
+   --input trtllm=http://your-endpoint:8000 \
    --namespace $NAMESPACE \
    --isl 2000 \
    --std 10 \

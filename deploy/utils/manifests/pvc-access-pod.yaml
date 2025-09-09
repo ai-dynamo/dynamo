@@ -26,7 +26,7 @@ spec:
         - ALL
     volumeMounts:
     - name: profiling-storage
-      mountPath: /profiling_results
+      mountPath: /data
     resources:
       requests:
         memory: "128Mi"

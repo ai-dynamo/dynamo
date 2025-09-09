@@ -13,12 +13,17 @@ jobs:
   build-test:
     runs-on: gpu-l40-amd64
     strategy:
+      fail-fast: false
       matrix:
-        framework: [vllm]
+        framework: [vllm, sglang]
         include:
           - framework: vllm
             target: runtime
             pytest_marks: "e2e and vllm and gpu_1 and not slow"
+          - framework: sglang
+            target: runtime
+            pytest_marks: "e2e and sglang and gpu_1"
+
     # Do not cancel main branch runs
     concurrency:
       group: ${{ github.workflow }}-${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
