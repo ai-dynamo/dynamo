@@ -13,6 +13,7 @@ jobs:
   build-test:
     runs-on: gpu-l40-amd64
     strategy:
+      fail-fast: false
       matrix:
         framework: [vllm, sglang]
         include:
