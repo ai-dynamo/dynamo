@@ -269,7 +269,6 @@ where
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
             if let Some(err) = resp.err() {
-                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
                 if format!("{:?}", err) == STREAM_ERR_MSG {
                     tracing::warn!(STREAM_ERR_MSG);
                     send_complete_final = false;
