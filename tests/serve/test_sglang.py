@@ -26,10 +26,10 @@ sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang
 sglang_configs = {
     "aggregated": SGLangConfig(
         name="aggregated",
-        directory=sglang_dir,
-        script_name="agg.sh",
+        directory="/workspace/tests/serve",
+        script_name="sglang_agg.sh",
         marks=[pytest.mark.gpu_1],
-        model="Qwen/Qwen3-0.6B",
+        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         env={},
         models_port=8000,
         request_payloads=[chat_payload_default(), completion_payload_default()],
