@@ -185,6 +185,9 @@ class EngineProcess(ManagedProcess):
     @classmethod
     def _build_script_command(cls, config: EngineConfig) -> List[str]:
         """Build command from script configuration."""
+        assert (
+            config.script_name
+        ), "Must provide script_name to run fn _build_script_command"
         directory = config.directory
         script_path = os.path.join(directory, "launch", config.script_name)
 
