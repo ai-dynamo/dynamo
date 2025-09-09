@@ -81,7 +81,6 @@ def copy_manifest(namespace: str, manifest_path: Path, target_path: str) -> None
 
     print("✓ Manifest successfully copied to PVC")
     print(f"File details: {result.stdout.strip()}")
-    return target_path
 
 
 def main():
