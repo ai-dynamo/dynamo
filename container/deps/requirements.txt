@@ -49,3 +49,4 @@ transformers
 types-aiofiles
 types-PyYAML
 uvicorn
+aiofiles
