@@ -6,6 +6,8 @@
 package dynamo
 
 import (
+	"fmt"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -21,6 +23,19 @@ func NewPlannerDefaults() *PlannerDefaults {
 
 func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	container := p.getCommonContainer(context)
+	container.Ports = []corev1.ContainerPort{
+		{
+			Protocol:      corev1.ProtocolTCP,
+			Name:          commonconsts.DynamoMetricsPortName,
+			ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
+		},
+	}
+	container.Env = append(container.Env, []corev1.EnvVar{
+		{
+			Name:  "PROMETHEUS_PORT",
+			Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
+		},
+	}...)
 	return container, nil
 }
 

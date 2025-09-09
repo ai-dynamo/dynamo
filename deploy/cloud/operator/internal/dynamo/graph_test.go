@@ -1071,6 +1071,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					Grove: controller_common.GroveConfig{
 						TerminationDelay: 15 * time.Minute,
 					},
+					PrometheusEndpoint: "http://localhost:9090",
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1159,7 +1160,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"Planner": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									Replicas: &[]int32{2}[0],
+									Replicas:      &[]int32{2}[0],
+									ComponentType: commonconsts.ComponentTypePlanner,
 									Resources: &common.Resources{
 										Requests: &common.ResourceItem{
 											CPU:    "2",
@@ -1348,6 +1350,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "MODEL_EXPRESS_URL",
 														Value: "model-express-url",
 													},
+													{
+														Name:  "PROMETHEUS_ENDPOINT",
+														Value: "http://localhost:9090",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1384,6 +1390,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -1410,8 +1417,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										RestartPolicy:                 corev1.RestartPolicyAlways,
+
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1483,6 +1492,14 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "MODEL_EXPRESS_URL",
 														Value: "model-express-url",
 													},
+													{
+														Name:  "PROMETHEUS_ENDPOINT",
+														Value: "http://localhost:9090",
+													},
+													{
+														Name:  "PROMETHEUS_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1503,6 +1520,13 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: commonconsts.DefaultSharedMemoryMountPath,
+													},
+												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoMetricsPortName,
+														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 											},
@@ -1653,7 +1677,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"Planner": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									Replicas: &[]int32{2}[0],
+									ComponentType: commonconsts.ComponentTypePlanner,
+									Replicas:      &[]int32{2}[0],
 									Resources: &common.Resources{
 										Requests: &common.ResourceItem{
 											CPU:    "2",
@@ -2146,6 +2171,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2154,6 +2180,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
@@ -2241,6 +2268,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
 													},
+													{
+														Name:  "PROMETHEUS_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -2261,6 +2292,13 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "shared-memory",
 														MountPath: commonconsts.DefaultSharedMemoryMountPath,
+													},
+												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoMetricsPortName,
+														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 											},
@@ -2435,7 +2473,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							"Planner": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-									Replicas: &[]int32{2}[0],
+									ComponentType: commonconsts.ComponentTypePlanner,
+									Replicas:      &[]int32{2}[0],
 									Resources: &common.Resources{
 										Requests: &common.ResourceItem{
 											CPU:    "2",
@@ -2916,6 +2955,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
 									commonconsts.KubeLabelDynamoSelector:            "test-dynamo-graph-deployment-planner",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypePlanner,
 								},
 								Annotations: map[string]string{},
 								Spec: grovev1alpha1.PodCliqueSpec{
@@ -2924,6 +2964,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										Volumes: []corev1.Volume{
 											{
 												Name: "planner-pvc",
@@ -2982,6 +3023,13 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														},
 													},
 												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoMetricsPortName,
+														ContainerPort: int32(commonconsts.DynamoPlannerMetricsPort),
+													},
+												},
 												Env: []corev1.EnvVar{
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
@@ -3010,6 +3058,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:  "DYN_PARENT_DGD_K8S_NAMESPACE",
 														Value: "test-namespace",
+													},
+													{
+														Name:  "PROMETHEUS_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort),
 													},
 												},
 												Resources: corev1.ResourceRequirements{
