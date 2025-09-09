@@ -193,7 +193,7 @@ To download the results:
 
 ```bash
 # Download to directory
-python3 -m deploy.utils.inject_manifest.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
+python3 -m deploy.utils.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
 
 # Download without any of the auto-created config.yaml files used in profiling
 python3 -m deploy.utils.inject_manifest.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results --no-config
