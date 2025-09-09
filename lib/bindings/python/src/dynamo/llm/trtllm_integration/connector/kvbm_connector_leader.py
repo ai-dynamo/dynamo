@@ -33,9 +33,9 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
         leader = KvbmLeader(world_size, drt=self.drt)
 
-        print(f"KvConnectorLeader initialized with rank: {mappings.rank()}")
+        print(f"KvConnectorLeader initialized with rank: {mappings.rank}")
         self._connector = RustKvConnectorLeader(
-            mappings.rank(), self.drt, self.block_size, leader
+            mappings.rank, self.drt, self.block_size, leader
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:

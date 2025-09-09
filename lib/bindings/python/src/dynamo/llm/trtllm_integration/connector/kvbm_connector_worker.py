@@ -19,7 +19,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         self.drt = DistributedRuntime.detached()
 
         mappings = self._llm_args.parallel_config.to_mapping()
-        self.rank = mappings.rank()
+        self.rank = mappings.rank
 
         self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
 
