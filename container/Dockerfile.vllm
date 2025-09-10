@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10.0
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -135,6 +136,8 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # Install VLLM and related dependencies
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
         # TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
         # Should be able to select how you want your build to go
         cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
@@ -195,7 +198,9 @@ RUN apt-get update && \
         ninja-build \
         g++ \
         # prometheus dependencies
-        ca-certificates && \
+        ca-certificates \
+        # DeepGemm uses 'cuobjdump' which does not come with CUDA image
+        cuda-command-line-tools-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
@@ -222,7 +227,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
         arm64) PLATFORM=linux-arm64 ;; \
         *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
-    curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
+    curl -fsSL --retry 5 --retry-delay 5 "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
     | tar -xz -C /tmp && \
     mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
     chmod +x /usr/local/bin/prometheus && \
@@ -244,6 +249,10 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
+
+# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
+# is not properly set for complilation. Set CPATH to help nvcc find the headers.
+ENV CPATH=/usr/local/cuda/include:$CPATH
 
 ### VIRTUAL ENVIRONMENT SETUP ###
 
@@ -279,46 +288,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
-
-#######################################################################
-########## DEVELOPMENT TARGETS FEATURE MATRIX #########################
-#######################################################################
-# Feature              │ local-dev Target    │ dev Target
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Purpose              │ Dev Container       │ Command-line with
-#                      │ plugin use only     │ run.sh script
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Default User         │ ubuntu user         │ root user
-# ─────────────────────┼─────────────────────┼─────────────────────
-# User Setup           │ Full ubuntu user    │ No user setup
-#                      │ with UID/GID        │
-#                      │ mapping             │
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Permissions          │ ubuntu user with    │ Root-level
-#                      │ sudo privileges     │ permissions
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Home Directory       │ /home/ubuntu        │ /root
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Working Directory    │ /home/ubuntu/dynamo │ /workspace
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Rust Toolchain       │ User's home         │ System locations
-#                      │ (~/.rustup,         │ (/usr/local/rustup,
-#                      │  ~/.cargo)          │  /usr/local/cargo)
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Python Environment   │ User-owned venv     │ System location
-#                      │                     │ (/opt/dynamo/venv)
-# ─────────────────────┼─────────────────────┼─────────────────────
-# File Permissions     │ User-level with     │ Root-level
-#                      │ proper ownership    │ permissions
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Compatibility        │ MS Plug-in: Dev     │ Backward compatibility
-#                      │ Container workflow  │ with existing
-#                      │                     │ workflows
-#
-# USAGE GUIDELINES:
-# • Use local-dev: VS Code/Cursor Dev Container plugin only
-# • Use dev: run.sh script for command-line development
-
 
 #######################################################################
 ########## Development (Dev Container only) ###########################

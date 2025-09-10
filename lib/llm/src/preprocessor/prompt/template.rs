@@ -23,20 +23,34 @@ impl PromptFormatter {
             .as_ref()
             .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
         {
-            PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
+            PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
+                let Some(file) = checked_file.path() else {
+                    anyhow::bail!(
+                        "HfTokenizerConfigJson for {} is a URL, cannot load",
+                        mdc.display_name
+                    );
+                };
                 let content = std::fs::read_to_string(file)
-                    .with_context(|| format!("fs:read_to_string '{file}'"))?;
+                    .with_context(|| format!("fs:read_to_string '{}'", file.display()))?;
                 let mut config: ChatTemplate = serde_json::from_str(&content)?;
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
+                if let Some(PromptFormatterArtifact::HfChatTemplate(checked_file)) =
                     mdc.chat_template_file.as_ref()
                 {
-                    let chat_template = std::fs::read_to_string(chat_template_file)
-                        .with_context(|| format!("fs:read_to_string '{}'", chat_template_file))?;
+                    let Some(chat_template_file) = checked_file.path() else {
+                        anyhow::bail!(
+                            "HfChatTemplate for {} is a URL, cannot load",
+                            mdc.display_name
+                        );
+                    };
+                    let chat_template =
+                        std::fs::read_to_string(chat_template_file).with_context(|| {
+                            format!("fs:read_to_string '{}'", chat_template_file.display())
+                        })?;
                     // clean up the string to remove newlines
                     let chat_template = chat_template.replace('\n', "");
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));

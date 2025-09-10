@@ -14,24 +14,6 @@ limitations under the License.
 
 # Multimodal Support
 
-> [!Important]
-> There are some known issues in tensorrt_llm==1.0.0rc6 version for multimodal support
-> It is important to rebuild the dynamo container with a specific version of tensorrt_llm
-> commit to use multimodal feature.
-## Build Container
-
-```bash
-./container/build.sh --framework trtllm --tensorrtllm-commit b4065d8ca64a64eee9fdc64b39cb66d73d4be47c
-```
-
-## Run Container
-
-```bash
-./container/run.sh --framework trtllm -it
-```
-
-## Usage Guide
-
 TRTLLM supports multimodal models with dynamo. You can provide multimodal inputs in the following ways:
 
 - By sending image URLs

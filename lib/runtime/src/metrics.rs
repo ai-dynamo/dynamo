@@ -879,12 +879,21 @@ mod test_metricsregistry_prefixes {
         assert_eq!(component.parent_hierarchy().len(), 2);
         assert_eq!(endpoint.parent_hierarchy().len(), 3);
 
-        // Invalid namespace behavior (sanitization should still error after becoming "123")
+        // Invalid namespace behavior - sanitizes to "_123" and succeeds
+        // @ryanolson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
+        // so invalid characters are sanitized in MetricsRegistry rather than rejected.
         let invalid_namespace = drt.namespace("@@123").unwrap();
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
-        assert!(result.is_err());
-        if let Err(e) = &result {
-            assert!(e.to_string().contains("123"));
+        assert!(result.is_ok());
+        if let Ok(counter) = &result {
+            // Verify the namespace was sanitized to "_123" in the label
+            let desc = counter.desc();
+            let namespace_label = desc[0]
+                .const_label_pairs
+                .iter()
+                .find(|l| l.name() == "dynamo_namespace")
+                .expect("Should have dynamo_namespace label");
+            assert_eq!(namespace_label.value(), "_123");
         }
 
         // Valid namespace works

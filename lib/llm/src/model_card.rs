@@ -19,13 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::common::checked_file::CheckedFile;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
-use url::Url;
 
 use crate::gguf::{Content, ContentConfig, ModelConfigLike};
 use crate::protocols::TokenIdType;
@@ -39,14 +39,14 @@ const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
-    HfConfigJson(String),
+    HfConfigJson(CheckedFile),
     GGUF(PathBuf),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerKind {
-    HfTokenizerJson(String),
+    HfTokenizerJson(CheckedFile),
     GGUF(Box<HfTokenizer>),
 }
 
@@ -65,8 +65,8 @@ pub enum TokenizerKind {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
-    HfTokenizerConfigJson(String),
-    HfChatTemplate(String),
+    HfTokenizerConfigJson(CheckedFile),
+    HfChatTemplate(CheckedFile),
     GGUF(PathBuf),
 }
 
@@ -83,7 +83,7 @@ pub enum PromptContextMixin {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationConfig {
-    HfGenerationConfigJson(String),
+    HfGenerationConfigJson(CheckedFile),
     GGUF(PathBuf),
 }
 
@@ -223,8 +223,11 @@ impl ModelDeploymentCard {
 
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
-            Some(TokenizerKind::HfTokenizerJson(file)) => {
-                HfTokenizer::from_file(file).map_err(anyhow::Error::msg)
+            Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
+                let p = checked_file.path().ok_or_else(||
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?}); call move_from_nats() before tokenizer_hf()", checked_file.url())
+                )?;
+                HfTokenizer::from_file(p).map_err(anyhow::Error::msg)
             }
             Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
             None => {
@@ -253,22 +256,23 @@ impl ModelDeploymentCard {
 
         macro_rules! nats_upload {
             ($field:expr, $enum_variant:path, $filename:literal) => {
-                if let Some($enum_variant(src_file)) = $field.take() {
-                    if !nats::is_nats_url(&src_file) {
-                        let target = format!("nats://{nats_addr}/{bucket_name}/{}", $filename);
-                        nats_client
-                            .object_store_upload(
-                                &std::path::PathBuf::from(&src_file),
-                                url::Url::parse(&target)?,
-                            )
-                            .await?;
-                        $field = Some($enum_variant(target));
-                    }
+                if let Some($enum_variant(src_file)) = $field.as_mut()
+                    && let Some(path) = src_file.path()
+                {
+                    let target = format!("nats://{nats_addr}/{bucket_name}/{}", $filename);
+                    let dest = url::Url::parse(&target)?;
+                    nats_client.object_store_upload(path, &dest).await?;
+                    src_file.move_to_url(dest);
                 }
             };
         }
 
         nats_upload!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
+        nats_upload!(
+            self.gen_config,
+            GenerationConfig::HfGenerationConfigJson,
+            "generation_config.json"
+        );
         nats_upload!(
             self.prompt_formatter,
             PromptFormatterArtifact::HfTokenizerConfigJson,
@@ -283,11 +287,6 @@ impl ModelDeploymentCard {
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
             "tokenizer.json"
-        );
-        nats_upload!(
-            self.gen_config,
-            GenerationConfig::HfGenerationConfigJson,
-            "generation_config.json"
         );
 
         Ok(())
@@ -310,19 +309,29 @@ impl ModelDeploymentCard {
 
         macro_rules! nats_download {
             ($field:expr, $enum_variant:path, $filename:literal) => {
-                if let Some($enum_variant(src_url)) = $field.take() {
-                    if nats::is_nats_url(&src_url) {
-                        let target = target_dir.path().join($filename);
-                        nats_client
-                            .object_store_download(Url::parse(&src_url)?, &target)
-                            .await?;
-                        $field = Some($enum_variant(target.display().to_string()));
+                if let Some($enum_variant(src_file)) = $field.as_mut()
+                    && let Some(src_url) = src_file.url()
+                {
+                    let target = target_dir.path().join($filename);
+                    nats_client.object_store_download(src_url, &target).await?;
+                    if !src_file.checksum_matches(&target) {
+                        anyhow::bail!(
+                            "Invalid {} in NATS for {}, checksum does not match.",
+                            $filename,
+                            self.display_name
+                        );
                     }
+                    src_file.move_to_disk(target);
                 }
             };
         }
 
         nats_download!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
+        nats_download!(
+            self.gen_config,
+            GenerationConfig::HfGenerationConfigJson,
+            "generation_config.json"
+        );
         nats_download!(
             self.prompt_formatter,
             PromptFormatterArtifact::HfTokenizerConfigJson,
@@ -337,11 +346,6 @@ impl ModelDeploymentCard {
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
             "tokenizer.json"
-        );
-        nats_download!(
-            self.gen_config,
-            GenerationConfig::HfGenerationConfigJson,
-            "generation_config.json"
         );
 
         Ok(target_dir)
@@ -499,7 +503,7 @@ impl ModelDeploymentCard {
             })?;
 
             Some(PromptFormatterArtifact::HfChatTemplate(
-                template_path.display().to_string(),
+                CheckedFile::from_disk(template_path)?,
             ))
         } else {
             PromptFormatterArtifact::chat_template_from_repo(repo_id)?
@@ -563,8 +567,13 @@ pub trait ModelInfo: Send + Sync {
 impl ModelInfoType {
     pub fn get_model_info(&self) -> Result<Arc<dyn ModelInfo>> {
         match self {
-            Self::HfConfigJson(info) => HFConfig::from_json_file(info),
-            Self::GGUF(path) => HFConfig::from_gguf(path),
+            Self::HfConfigJson(checked_file) => {
+                let Some(path) = checked_file.path() else {
+                    anyhow::bail!("model info is not a local path: {checked_file:?}");
+                };
+                Ok(HFConfig::from_json_file(path)?)
+            }
+            Self::GGUF(path) => Ok(HFConfig::from_gguf(path)?),
         }
     }
     pub fn is_gguf(&self) -> bool {
@@ -615,9 +624,9 @@ struct HFTextConfig {
 }
 
 impl HFConfig {
-    fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
-        let file_pathbuf = PathBuf::from(file);
-        let contents = std::fs::read_to_string(file)?;
+    fn from_json_file<P: AsRef<Path>>(file: P) -> Result<Arc<dyn ModelInfo>> {
+        let file_path = file.as_ref();
+        let contents = std::fs::read_to_string(file_path)?;
         let mut config: Self = serde_json::from_str(&contents)?;
         if config.text_config.is_none() {
             let text_config: HFTextConfig = serde_json::from_str(&contents)?;
@@ -630,17 +639,15 @@ impl HFConfig {
             );
         };
 
+        let gencfg_path = file_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("generation_config.json");
         if text_config.bos_token_id.is_none() {
-            let bos_token_id = crate::file_json_field::<TokenIdType>(
-                &Path::join(
-                    file_pathbuf.parent().unwrap_or(&PathBuf::from("")),
-                    "generation_config.json",
-                ),
-                "bos_token_id",
-            )
-            .context(
-                "missing bos_token_id in generation_config.json and config.json, cannot load",
-            )?;
+            let bos_token_id = crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id")
+                .context(
+                    "missing bos_token_id in generation_config.json and config.json, cannot load",
+                )?;
             text_config.bos_token_id = Some(bos_token_id);
         }
         // Now that we have it for sure, set it in the non-Option field
@@ -672,7 +679,7 @@ impl HFConfig {
                 } else {
                     tracing::error!(
                         ?v,
-                        file,
+                        path = %file_path.display(),
                         "eos_token_id is not a number or an array, cannot use"
                     );
                     None
@@ -680,13 +687,7 @@ impl HFConfig {
             })
             .or_else(|| {
                 // Maybe it's in generation_config.json
-                crate::file_json_field(
-                    &Path::join(
-                        file_pathbuf.parent().unwrap_or(&PathBuf::from("")),
-                        "generation_config.json",
-                    ),
-                    "eos_token_id",
-                )
+                crate::file_json_field(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
@@ -794,12 +795,17 @@ fn capitalize(s: &str) -> String {
 
 impl ModelInfoType {
     pub fn from_repo(repo_id: &str) -> Result<Self> {
-        Self::try_is_hf_repo(repo_id)
-            .with_context(|| format!("unable to extract model info from repo {}", repo_id))
+        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("config.json"))
+            .with_context(|| format!("unable to extract config.json from repo {repo_id}"))?;
+        Ok(Self::HfConfigJson(f))
     }
+}
 
-    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfConfigJson(check_for_file(repo, "config.json")?))
+impl GenerationConfig {
+    pub fn from_repo(repo_id: &str) -> Result<Self> {
+        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("generation_config.json"))
+            .with_context(|| format!("unable to extract generation_config from repo {repo_id}"))?;
+        Ok(Self::HfGenerationConfigJson(f))
     }
 }
 
@@ -807,68 +813,26 @@ impl PromptFormatterArtifact {
     pub fn from_repo(repo_id: &str) -> Result<Option<Self>> {
         // we should only error if we expect a prompt formatter and it's not found
         // right now, we don't know when to expect it, so we just return Ok(Some/None)
-        Ok(Self::try_is_hf_repo(repo_id)
-            .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
-            .ok())
+        match CheckedFile::from_disk(PathBuf::from(repo_id).join("tokenizer_config.json")) {
+            Ok(f) => Ok(Some(Self::HfTokenizerConfigJson(f))),
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn chat_template_from_repo(repo_id: &str) -> Result<Option<Self>> {
-        Ok(Self::chat_template_try_is_hf_repo(repo_id)
-            .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
-            .ok())
-    }
-
-    fn chat_template_try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfChatTemplate(check_for_file(
-            repo,
-            "chat_template.jinja",
-        )?))
-    }
-
-    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfTokenizerConfigJson(check_for_file(
-            repo,
-            "tokenizer_config.json",
-        )?))
+        match CheckedFile::from_disk(PathBuf::from(repo_id).join("chat_template.jinja")) {
+            Ok(f) => Ok(Some(Self::HfChatTemplate(f))),
+            Err(_) => Ok(None),
+        }
     }
 }
 
 impl TokenizerKind {
     pub fn from_repo(repo_id: &str) -> Result<Self> {
-        Self::try_is_hf_repo(repo_id)
-            .with_context(|| format!("unable to extract tokenizer kind from repo {}", repo_id))
+        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("tokenizer.json"))
+            .with_context(|| format!("unable to extract tokenizer kind from repo {repo_id}"))?;
+        Ok(Self::HfTokenizerJson(f))
     }
-
-    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfTokenizerJson(check_for_file(
-            repo,
-            "tokenizer.json",
-        )?))
-    }
-}
-
-impl GenerationConfig {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        Self::try_is_hf_repo(repo_id)
-            .with_context(|| format!("unable to extract generation config from repo {repo_id}"))
-    }
-
-    fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
-        Ok(Self::HfGenerationConfigJson(check_for_file(
-            repo,
-            "generation_config.json",
-        )?))
-    }
-}
-
-/// Checks if the provided path contains the expected file.
-fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<String> {
-    let p = PathBuf::from(repo_id).join(file);
-    let name = p.display().to_string();
-    if !p.exists() {
-        anyhow::bail!("File not found: {name}")
-    }
-    Ok(name)
 }
 
 /// Checks if the provided path is a valid local repository path.
@@ -905,7 +869,7 @@ mod tests {
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
-        let config = HFConfig::from_json_file(&config_file.display().to_string())?;
+        let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 128000);
         Ok(())
     }
@@ -914,7 +878,7 @@ mod tests {
     pub fn test_config_json_llama4() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
-        let config = HFConfig::from_json_file(&config_file.display().to_string())?;
+        let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 200000);
         Ok(())
     }

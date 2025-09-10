@@ -140,7 +140,6 @@ COPY --from=trtllm_wheel . /trtllm_wheel/
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
-# Locking triton version to 3.3.1 as 3.4.0 breaks tensorrt-llm 1.0.0rc6
 RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     pip uninstall -y tensorrt && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
@@ -148,9 +147,6 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
         WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
         if [ -n "$WHEEL_FILE" ]; then \
             pip install "$WHEEL_FILE"; \
-            if [ "$ARCH" = "amd64" ]; then \
-                pip install "triton==3.3.1"; \
-            fi; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
@@ -158,9 +154,6 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     else \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
-        if [ "$ARCH" = "amd64" ]; then \
-            pip install "triton==3.3.1"; \
-        fi; \
     fi
 
 # Install test dependencies
@@ -477,12 +470,7 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 # NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
 # is also specified. So set the configurable index as a --extra-index-url for prioritization.
-# NOTE: locking triton version to 3.3.1 as 3.4.0 breaks tensorrt-llm 1.0.0rc6
-# NOTE: locking cuda-python version to <13 to avoid breaks with tensorrt-llm 1.0.0rc6. This
-#       can be removed after https://github.com/NVIDIA/TensorRT-LLM/pull/6703 is merged
-#       we upgrade to a published pip wheel containing this change.
-RUN python3 -m pip install --no-cache-dir --break-system-packages "cuda-python>=12,<13" && \
-    python3 -m pip install --no-cache-dir --break-system-packages --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
+RUN python3 -m pip install --no-cache-dir --break-system-packages --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
     python3 -m pip install --no-cache-dir --break-system-packages \
         /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
         /workspace/wheelhouse/ai_dynamo*any.whl \
@@ -497,6 +485,7 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTOR
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
+COPY deploy /workspace/deploy
 COPY components/backends/trtllm /workspace/components/backends/trtllm
 RUN python3 -m pip install --no-cache-dir --break-system-packages /workspace/benchmarks
 
