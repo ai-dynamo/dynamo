@@ -25,6 +25,8 @@ openmp = ["dynamo-engine-llamacpp/openmp"]
 
 tokio-console = ["dynamo-runtime/tokio-console"]
 
+modelexpress = ["dynamo-llm/modelexpress"]
+
 [dependencies]
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }

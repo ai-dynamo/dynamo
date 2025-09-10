@@ -1,31 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#![allow(unexpected_cfgs)]
 
 use hf_hub::api::tokio::ApiBuilder;
 use std::env;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "model-express")]
-use model_express_client::{
+#[cfg(feature = "modelexpress")]
+use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
-#[cfg(feature = "model-express")]
-use model_express_common::download as mx;
+#[cfg(feature = "modelexpress")]
+use modelexpress_common::download as mx;
 
+/// Example: export MODEL_EXPRESS_URL=http://localhost:8001
 const MODEL_EXPRESS_ENDPOINT_ENV_VAR: &str = "MODEL_EXPRESS_URL";
 const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
 
@@ -39,10 +26,10 @@ fn is_weight_file(filename: &str) -> bool {
 }
 
 /// Attempt to download a model from Hugging Face using ModelExpress client
-/// Only called when model-express feature is enabled, otherwise it will fall back to homonymous hf-hub function
+/// Only called when modelexpress feature is enabled, otherwise it will fall back to homonymous hf-hub function
 /// Returns the directory it is in
 /// If ignore_weights is true, model weight files will be skipped
-#[cfg(feature = "model-express")]
+#[cfg(feature = "modelexpress")]
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let model_name = name.display().to_string();
@@ -105,17 +92,17 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
 }
 
 /// Attempt to download a model from Hugging Face using hf-hub directly
-/// Called when model-express feature is not enabled
+/// Called when modelexpress feature is not enabled
 /// Returns the directory it is in
 /// If ignore_weights is true, model weight files will be skipped
-#[cfg(not(feature = "model-express"))]
+#[cfg(not(feature = "modelexpress"))]
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
     if env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).is_ok() {
         tracing::warn!(
-            "ModelExpress endpoint configured but model-express feature not enabled. Using hf-hub."
+            "ModelExpress endpoint configured but modelexpress feature not enabled. Using hf-hub."
         );
     }
 
@@ -124,7 +111,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
 }
 
 // Direct download using the ModelExpress client.
-#[cfg(feature = "model-express")]
+#[cfg(feature = "modelexpress")]
 async fn mx_download_direct(model_name: &str) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
     mx::download_model(model_name, MxModelProvider::HuggingFace, Some(cache_dir)).await
@@ -219,7 +206,7 @@ fn is_image_file(filename: &str) -> bool {
         || filename.ends_with("JPEG")
 }
 
-#[cfg(feature = "model-express")]
+#[cfg(feature = "modelexpress")]
 fn get_mx_model_path_from_cache(model_name: &str) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
     let model_dir = cache_dir.join(model_name);
@@ -234,7 +221,7 @@ fn get_mx_model_path_from_cache(model_name: &str) -> anyhow::Result<PathBuf> {
     Ok(model_dir)
 }
 
-#[cfg(feature = "model-express")]
+#[cfg(feature = "modelexpress")]
 fn get_model_express_cache_dir() -> PathBuf {
     if let Ok(cache_path) = env::var("HF_HUB_CACHE") {
         return PathBuf::from(cache_path);
@@ -260,7 +247,7 @@ mod tests {
         let _result: anyhow::Result<PathBuf> = from_hf(test_path, false).await;
     }
 
-    #[cfg(feature = "model-express")]
+    #[cfg(feature = "modelexpress")]
     #[test]
     fn test_get_model_express_cache_dir() {
         let cache_dir = get_model_express_cache_dir();
