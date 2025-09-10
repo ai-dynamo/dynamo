@@ -197,14 +197,14 @@ impl CriticalTaskExecutionHandle {
     /// Note: Both errors and panics trigger parent cancellation immediately via the monitor task.
     pub async fn join(mut self) -> Result<()> {
         self.detached = true;
-        let result = match self.result_receiver.take().unwrap().await {
+
+        match self.result_receiver.take().unwrap().await {
             Ok(task_result) => task_result,
             Err(_) => {
                 // This should rarely happen - means monitor task was dropped/cancelled
                 Err(anyhow::anyhow!("Critical task monitor was cancelled"))
             }
-        };
-        result
+        }
     }
 
     /// Detach the task. This allows the task to continue running after the handle is dropped.
@@ -224,8 +224,8 @@ impl Drop for CriticalTaskExecutionHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
     use tokio::time::timeout;
 

@@ -8,7 +8,7 @@ mod zmq;
 mod leader;
 mod worker;
 
-pub use leader::{KvbmLeader, KvbmLeaderConfig};
+pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
@@ -43,22 +43,22 @@ pub struct SchedulerRequest<T> {
 mod tests {
     use super::*;
 
-    use crate::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
+    use crate::block_manager::KvBlockManager;
     use crate::block_manager::block::BasicMetadata;
+    use crate::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
     use crate::block_manager::config::*;
     use crate::block_manager::locality::Logical;
     use crate::block_manager::storage::{
-        torch::{TorchDevice, TorchTensor},
         DeviceAllocator, Storage, StorageAllocator,
+        torch::{TorchDevice, TorchTensor},
     };
-    use crate::block_manager::KvBlockManager;
 
     use anyhow::Result;
     use rstest::*;
 
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use tokio_util::sync::CancellationToken;
 
@@ -130,21 +130,31 @@ mod tests {
                 vec![Arc::new(MockTensor::new(vec![2, NUM_BLOCKS, 4096]))];
 
             let config = KvbmWorkerConfig::builder()
-                .barrier_id(barrier_id.clone())
+                .barrier_id_prefix(barrier_id.clone())
                 .num_device_blocks(NUM_BLOCKS)
                 .tensors(tensors)
-                .worker_id(i)
+                .device_id(i)
                 .build()?;
 
-            let worker = KvbmWorker::new(config).await?;
+            let worker = KvbmWorker::new(config, false).await?;
             workers.push(worker);
         }
 
+        let host_blocks = KvbmLeaderNumBlocksConfig {
+            cache_size_in_gb: 1.0,
+            num_blocks_overriden: NUM_BLOCKS,
+        };
+
+        let disk_blocks = KvbmLeaderNumBlocksConfig {
+            cache_size_in_gb: 1.0,
+            num_blocks_overriden: NUM_BLOCKS,
+        };
+
         let leader_config = KvbmLeaderConfig::builder()
-            .barrier_id(barrier_id)
+            .barrier_id_prefix(barrier_id)
             .world_size(num_workers)
-            .num_host_blocks(NUM_BLOCKS)
-            .num_disk_blocks(NUM_BLOCKS)
+            .host_blocks_config(host_blocks)
+            .disk_blocks_config(disk_blocks)
             .build()?;
 
         // When/if this returns, we know that all the workers were also successful.

@@ -11,7 +11,7 @@ from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import KubernetesConnector
+from dynamo.planner import KubernetesConnector, VirtualConnector
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -64,11 +64,15 @@ class Planner:
 
         if not self.dryrun:
             self.runtime = runtime
-            self.namespace = SLAPlannerDefaults.namespace
+            self.namespace = args.namespace
 
             if not args.no_operation:
                 if args.environment == "kubernetes":
                     self.connector = KubernetesConnector(self.namespace)
+                elif args.environment == "virtual":
+                    self.connector = VirtualConnector(
+                        runtime, self.namespace, args.backend
+                    )
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
@@ -125,6 +129,15 @@ class Planner:
             self.no_correction = True
         else:
             self.no_correction = args.no_correction
+
+    async def _async_init(self):
+        """Async initialization for components that need it"""
+        if (
+            not self.dryrun
+            and hasattr(self, "connector")
+            and hasattr(self.connector, "_async_init")
+        ):
+            await self.connector._async_init()
 
     async def get_workers_info(self):
         if self.runtime is None:
@@ -259,16 +272,22 @@ class Planner:
         # compute how many replicas are needed for prefill
         # here we assume the prefill bias is purely due to request queueing
         # and we increase the number of prefill replicas linearly to account for the queueing delay
-        pred_prefill_load_per_gpu = (
+        pred_prefill_throughput = (
             next_num_req
             * next_isl
             / self.args.adjustment_interval
             * min(1, self.p_correction_factor)
         )
         next_num_p = math.ceil(
-            pred_prefill_load_per_gpu
+            pred_prefill_throughput
             / self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
             / self.args.prefill_engine_num_gpu
+        )
+
+        logger.info(
+            f"Prefill calculation: {pred_prefill_throughput:.2f}(p_thpt) / "
+            f"{self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl) * self.args.prefill_engine_num_gpu:.2f}(p_engine_cap) = "
+            f"{next_num_p}(num_p)"
         )
 
         # compute how many replicas are needed for decode
@@ -290,12 +309,17 @@ class Planner:
             itl=corrected_itl, context_length=next_isl + next_osl / 2
         )
         # 3. compute number of decode replicas needed
+        pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
         next_num_d = math.ceil(
-            next_num_req
-            * next_osl
-            / self.args.adjustment_interval
+            pred_decode_throughput
             / pred_decode_thpt_per_gpu
             / self.args.decode_engine_num_gpu
+        )
+
+        logger.info(
+            f"Decode calculation: {pred_decode_throughput:.2f}(d_thpt) / "
+            f"{pred_decode_thpt_per_gpu * self.args.decode_engine_num_gpu:.2f}(d_engine_cap) = "
+            f"{next_num_d}(num_d)"
         )
 
         # correct num_p and num_d based on the gpu budget
@@ -527,4 +551,5 @@ class Planner:
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
     planner = Planner(runtime, args)
+    await planner._async_init()
     await planner.run()

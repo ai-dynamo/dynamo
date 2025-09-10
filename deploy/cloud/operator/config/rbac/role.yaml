@@ -186,6 +186,13 @@ rules:
   - patch
   - update
 - apiGroups:
+  - scheduling.run.ai
+  resources:
+  - queues
+  verbs:
+  - get
+  - list
+- apiGroups:
   - scheduling.volcano.sh
   resources:
   - podgroups

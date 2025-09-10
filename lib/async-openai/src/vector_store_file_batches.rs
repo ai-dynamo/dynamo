@@ -11,12 +11,12 @@
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{
         CreateVectorStoreFileBatchRequest, ListVectorStoreFilesResponse, VectorStoreFileBatchObject,
     },
-    Client,
 };
 
 /// Vector store file batches represent operations to add multiple files to a vector store.

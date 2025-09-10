@@ -456,6 +456,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        tracing::debug!("find matching for sequence_hashes: {:?}", sequence_hashes);
         self._match_sequence_hashes(sequence_hashes)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -589,7 +590,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
 #[cfg(test)]
 mod tests {
     use crate::block_manager::block::{BasicMetadata, Blocks};
-    use crate::block_manager::layout::{tests::setup_layout, FullyContiguous, LayoutConfig};
+    use crate::block_manager::layout::{FullyContiguous, LayoutConfig, tests::setup_layout};
 
     use crate::block_manager::locality::Local;
     use crate::tokens::{TokenBlockSequence, Tokens};

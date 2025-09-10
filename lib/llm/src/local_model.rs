@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
@@ -18,7 +18,7 @@ use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
 use crate::mocker::protocols::MockEngineArgs;
 use crate::model_card::{self, ModelDeploymentCard};
-use crate::model_type::ModelType;
+use crate::model_type::{ModelInput, ModelType};
 use crate::request_template::RequestTemplate;
 
 mod network_name;
@@ -59,6 +59,8 @@ pub struct LocalModelBuilder {
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
+    custom_template_path: Option<PathBuf>,
+    namespace: Option<String>,
 }
 
 impl Default for LocalModelBuilder {
@@ -81,6 +83,8 @@ impl Default for LocalModelBuilder {
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
             user_data: Default::default(),
+            custom_template_path: Default::default(),
+            namespace: Default::default(),
         }
     }
 }
@@ -142,8 +146,18 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn namespace(&mut self, namespace: Option<String>) -> &mut Self {
+        self.namespace = namespace;
+        self
+    }
+
     pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
         self.template_file = template_file;
+        self
+    }
+
+    pub fn custom_template_path(&mut self, custom_template_path: Option<PathBuf>) -> &mut Self {
+        self.custom_template_path = custom_template_path;
         self
     }
 
@@ -189,6 +203,7 @@ impl LocalModelBuilder {
             .endpoint_id
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
+
         let template = self
             .template_file
             .as_deref()
@@ -202,6 +217,8 @@ impl LocalModelBuilder {
             );
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
+            card.runtime_config = self.runtime_config.clone();
+
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
@@ -213,6 +230,7 @@ impl LocalModelBuilder {
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
+                namespace: self.namespace.clone(),
             });
         }
 
@@ -234,7 +252,8 @@ impl LocalModelBuilder {
         // --model-config takes precedence over --model-path
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
-        let mut card = ModelDeploymentCard::load(&model_config_path).await?;
+        let mut card =
+            ModelDeploymentCard::load(model_config_path, self.custom_template_path.as_deref())?;
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {
@@ -262,21 +281,20 @@ impl LocalModelBuilder {
         }
 
         // Override runtime configs with mocker engine args
-        if self.is_mocker {
-            if let Some(path) = &self.extra_engine_args {
-                let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                    .expect("Failed to load mocker engine args for runtime config overriding.");
-                self.runtime_config.total_kv_blocks =
-                    Some(mocker_engine_args.num_gpu_blocks as u64);
-                self.runtime_config.max_num_seqs =
-                    mocker_engine_args.max_num_seqs.map(|v| v as u64);
-                self.runtime_config.max_num_batched_tokens =
-                    mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            }
+        if self.is_mocker
+            && let Some(path) = &self.extra_engine_args
+        {
+            let mocker_engine_args = MockEngineArgs::from_json_file(path)
+                .expect("Failed to load mocker engine args for runtime config overriding.");
+            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
+            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
+            self.runtime_config.max_num_batched_tokens =
+                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
         }
 
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
+        card.runtime_config = self.runtime_config.clone();
 
         Ok(LocalModel {
             card,
@@ -289,6 +307,7 @@ impl LocalModelBuilder {
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
+            namespace: self.namespace.clone(),
         })
     }
 }
@@ -305,6 +324,7 @@ pub struct LocalModel {
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
+    namespace: Option<String>,
 }
 
 impl LocalModel {
@@ -355,6 +375,10 @@ impl LocalModel {
         &self.runtime_config
     }
 
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+
     pub fn is_gguf(&self) -> bool {
         // GGUF is the only file (not-folder) we accept, so we don't need to check the extension
         // We will error when we come to parse it
@@ -378,6 +402,7 @@ impl LocalModel {
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
+        model_input: ModelInput,
     ) -> anyhow::Result<()> {
         // A static component doesn't have an etcd_client because it doesn't need to register
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
@@ -392,6 +417,7 @@ impl LocalModel {
         let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
+
         card_store
             .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
             .await?;
@@ -402,9 +428,10 @@ impl LocalModel {
         tracing::debug!("Registering with etcd as {network_name}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
-            endpoint: endpoint.id(),
+            endpoint_id: endpoint.id(),
             model_type,
             runtime_config: Some(self.runtime_config.clone()),
+            model_input,
         };
         etcd_client
             .kv_create(

@@ -20,7 +20,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -47,15 +47,12 @@ spec:
         failureThreshold: 10
       pvc:
         create: false
-        name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /workspace/profiling_results
+        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        mountPoint: /data/profiling_results
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/planner/src/dynamo/planner
-          ports:
-            - name: metrics
-              containerPort: 9085
           command:
             - /bin/sh
             - -c
@@ -65,8 +62,7 @@ spec:
               --environment=kubernetes
               --backend=vllm
               --adjustment-interval=60
-              --profile-results-dir=/workspace/profiling_results
-              --prometheus-port=9085
+              --profile-results-dir=/data/profiling_results
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
@@ -95,7 +91,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -118,13 +114,15 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
-            - -c
+            - python3
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3"
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -141,10 +139,13 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
           workingDir: /workspace/components/backends/vllm
           command:
-            - /bin/sh
-            - -c
+            - python3
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

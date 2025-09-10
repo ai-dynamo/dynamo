@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing;
 
-use dynamo_runtime::transports::etcd::WatchEvent;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::transports::etcd::WatchEvent;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DisaggRouterConf {
@@ -218,23 +218,23 @@ impl DisaggregatedRouter {
     }
 
     pub fn check_for_updates(&self) {
-        if let Some(watcher) = &self.config_watcher {
-            if watcher.has_changed().unwrap_or(false) {
-                let config = watcher.borrow().clone();
-                let new_value = config.max_local_prefill_length;
+        if let Some(watcher) = &self.config_watcher
+            && watcher.has_changed().unwrap_or(false)
+        {
+            let config = watcher.borrow().clone();
+            let new_value = config.max_local_prefill_length;
 
-                // Update the value using the mutex
-                let mut current_value = self.max_local_prefill_length.lock().unwrap();
-                let old_value = *current_value;
-                if old_value != new_value {
-                    *current_value = new_value;
-                    tracing::info!(
-                        "Applied config update for model {}: max_local_prefill_length changed from {} to {}",
-                        self.model_name,
-                        old_value,
-                        new_value
-                    );
-                }
+            // Update the value using the mutex
+            let mut current_value = self.max_local_prefill_length.lock().unwrap();
+            let old_value = *current_value;
+            if old_value != new_value {
+                *current_value = new_value;
+                tracing::info!(
+                    "Applied config update for model {}: max_local_prefill_length changed from {} to {}",
+                    self.model_name,
+                    old_value,
+                    new_value
+                );
             }
         }
     }
