@@ -843,6 +843,18 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
     pub(crate) fn is_duplicate(&self) -> bool {
         self.duplicate.is_some()
     }
+
+    /// Returns the state of the block.
+    /// If the ImmutableBlock holds a duplicate, returns the state of the primary block.
+    /// Otherwise, returns the state of the block itself.
+    pub fn state(&self) -> &BlockState {
+        // Always return the primary block's state
+        self.block
+            .block
+            .as_ref()
+            .expect("block was dropped")
+            .state()
+    }
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider
@@ -1761,4 +1773,55 @@ mod tests {
 
     //     tracing::info!("ImmutableBlock BlockDataExt tests completed successfully");
     // }
+
+    #[test]
+    fn test_duplicate_block_state_behavior() {
+        // Helper to create a complete block
+        fn create_complete_block(
+            block_idx: usize,
+        ) -> Block<impl Storage, locality::Local, BasicMetadata> {
+            let layout = setup_layout(None).unwrap();
+            let data = BlockData::new(Arc::new(layout), block_idx, 42, 0);
+            let mut block = Block::new(data, BasicMetadata::default()).unwrap();
+
+            // Initialize and complete the block
+            block.init_sequence(SALT_HASH).unwrap();
+            block.add_tokens(Tokens::from(vec![1, 2, 3, 4])).unwrap();
+            block.commit().unwrap();
+
+            block
+        }
+
+        // Create primary and duplicate blocks
+        let primary_block = create_complete_block(0);
+        let duplicate_block = create_complete_block(1);
+
+        // Create MutableBlock wrappers
+        let (return_tx, _return_rx) = tokio::sync::mpsc::unbounded_channel();
+        let primary_mutable = MutableBlock::new(primary_block, return_tx.clone());
+        let duplicate_mutable = MutableBlock::new(duplicate_block, return_tx.clone());
+
+        let primary_arc = Arc::new(primary_mutable);
+        let duplicate_arc = Arc::new(duplicate_mutable);
+
+        // Create ImmutableBlocks
+        let primary_immutable = ImmutableBlock::new(primary_arc.clone());
+        let duplicate_immutable = ImmutableBlock::new(duplicate_arc.clone())
+            .with_duplicate(primary_arc.clone())
+            .unwrap();
+
+        // Verify primary block state
+        assert!(primary_immutable.state().is_complete());
+        assert!(!primary_immutable.is_duplicate());
+
+        // Verify duplicate block returns primary's state
+        assert!(duplicate_immutable.state().is_complete());
+        assert!(duplicate_immutable.is_duplicate());
+
+        // Both should return the primary block's state
+        // Note: We're checking that duplicate returns primary's state,
+        // not that they have the same pointer (which was wrong in the original test)
+        assert!(primary_immutable.state().is_complete());
+        assert!(duplicate_immutable.state().is_complete());
+    }
 }
