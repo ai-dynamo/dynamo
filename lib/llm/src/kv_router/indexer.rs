@@ -558,7 +558,7 @@ impl KvIndexerMetrics {
         }
     }
 
-    /// Creates a new KvIndexerMetrics from a Component, memoizin the result in
+    /// Creates a new KvIndexerMetrics from a Component, memoizing the result in
     /// KV_INDEXER_METRICS to avoid duplicate registration issues.
     pub fn from_component(component: &Component) -> Arc<Self> {
         KV_INDEXER_METRICS.get_or_init(|| {
