@@ -139,6 +139,7 @@ addopts = [
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     "--ignore-glob=components/backends/sglang/src/dynamo/sglang/request_handlers/*",
+    "--ignore-glob=components/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
