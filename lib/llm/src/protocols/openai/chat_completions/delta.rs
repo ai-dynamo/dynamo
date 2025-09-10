@@ -64,7 +64,8 @@ pub struct DeltaGenerator {
 
     /// Reasoning Parser object
     /// This is used to parse reasoning content in the response.
-    reasoning_parser: ReasoningParserWrapper,
+    /// None means no reasoning parsing will be performed.
+    reasoning_parser: Option<ReasoningParserWrapper>,
 }
 
 impl DeltaGenerator {
@@ -96,17 +97,12 @@ impl DeltaGenerator {
         };
 
         // Reasoning parser type
-        // This is hardcoded for now, but can be made configurable later.
-        // TODO: Make parser type configurable once front-end integration is determined
-        // Change to GptOss to test GptOSS parser
-        // Reasoning parser wrapper
-        let reasoning_parser = ReasoningParserType::get_reasoning_parser_from_name(
-            options
-                .runtime_config
-                .reasoning_parser
-                .as_deref()
-                .unwrap_or("basic"),
-        );
+        // If no parser is specified (None), no reasoning parsing will be performed
+        let reasoning_parser = options
+            .runtime_config
+            .reasoning_parser
+            .as_deref()
+            .map(ReasoningParserType::get_reasoning_parser_from_name);
 
         let chatcmpl_id = format!("chatcmpl-{request_id}");
 
@@ -202,13 +198,15 @@ impl DeltaGenerator {
         text: &Option<String>,
         token_ids: &[u32],
     ) -> Option<ParserResult> {
+        // If no reasoning parser is configured, return None
+        let reasoning_parser = self.reasoning_parser.as_mut()?;
+
         let text_ref = text.as_deref().unwrap_or("");
         if text_ref.is_empty() && token_ids.is_empty() {
             return None;
         }
-        let parser_result = self
-            .reasoning_parser
-            .parse_reasoning_streaming_incremental(text_ref, token_ids);
+        let parser_result =
+            reasoning_parser.parse_reasoning_streaming_incremental(text_ref, token_ids);
 
         Some(parser_result)
     }
@@ -334,14 +332,15 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None => None,
         };
 
-        let reasoning_parser_result = self
-            .create_reasoning_content(&delta.text, &delta.token_ids)
-            .unwrap_or_default();
-
-        let (normal_text, reasoning_content) = (
-            reasoning_parser_result.get_some_normal_text(),
-            reasoning_parser_result.get_some_reasoning(),
-        );
+        // Handle reasoning parsing if enabled, otherwise treat all text as normal
+        let (normal_text, reasoning_content) =
+            match self.create_reasoning_content(&delta.text, &delta.token_ids) {
+                Some(reasoning_parser_result) => (
+                    reasoning_parser_result.get_some_normal_text(),
+                    reasoning_parser_result.get_some_reasoning(),
+                ),
+                None => (delta.text, None),
+            };
 
         // Create the streaming response.
         let index = 0;

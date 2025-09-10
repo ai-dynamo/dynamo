@@ -90,7 +90,7 @@ git clone https://github.com/ai-dynamo/dynamo.git
 cd dynamo
 ```
 
-2. Install Dynamo from Published Artifacts on NGC (see the [Dynamo Cloud guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md)):
+2. Install Dynamo from Published Artifacts on NGC (see the [Dynamo Cloud guide](../../../docs/guides/dynamo_deploy/installation_guide.md)):
 ```bash
 export NAMESPACE=dynamo-cloud
 export RELEASE_VERSION=0.3.2
@@ -124,7 +124,7 @@ dynamo-platform-nats-0                                            2/2     Runnin
 dynamo-platform-nats-box-5dbf45c748-kln82                         1/1     Running   0          2m51s
 ```
 
-There are other ways to install Dynamo, you can find them [here](../../../docs/guides/dynamo_deploy/dynamo_cloud.md).
+There are other ways to install Dynamo, you can find them [here](../../../docs/guides/dynamo_deploy/installation_guide.md).
 
 ### Task 4. Deploy a model
 

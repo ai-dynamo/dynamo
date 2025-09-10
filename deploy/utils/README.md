@@ -88,22 +88,35 @@ These scripts interact with the Persistent Volume Claim (PVC) that stores config
 
 ```bash
 # The profiling job reads your DGD config from the PVC
-python3 deploy/utils/inject_manifest.py \
+# IMPORTANT: All paths must start with /data/ for security reasons
+python3 -m deploy.utils.inject_manifest \
   --namespace $NAMESPACE \
   --src ./my-disagg.yaml \
-  --dest /configs/disagg.yaml
+  --dest /data/configs/disagg.yaml
 ```
 
 **Download benchmark/profiling results:**
 
 ```bash
 # After benchmarking or profiling completes, download results
-python3 deploy/utils/download_pvc_results.py \
+python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
   --output-dir ./pvc_files \
-  --folder /results \
+  --folder /data/results \
   --no-config   # optional: skip *.yaml/*.yml in the download
 ```
+
+#### Path Requirements
+
+**Important**: The PVC is mounted at `/data` in the access pod for security reasons. All destination paths must start with `/data/`.
+
+**Common path patterns:**
+- `/data/configs/` - Configuration files (DGD manifests)
+- `/data/results/` - Benchmark results
+- `/data/profiling_results/` - Profiling data
+- `/data/benchmarking/` - Benchmarking artifacts
+
+**User-friendly error messages**: If you forget the `/data/` prefix, the script will show a helpful error message with the correct path and example commands.
 
 #### Next Steps
 
