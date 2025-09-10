@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "ahash",
  "akin",
@@ -1394,6 +1394,7 @@ dependencies = [
  "nixl-sys",
  "offset-allocator",
  "oneshot",
+ "parking_lot",
  "prometheus",
  "rand 0.9.2",
  "rayon",
@@ -1424,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -1433,14 +1434,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "dynamo-py3"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "arc-swap",

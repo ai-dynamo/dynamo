@@ -1894,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "ahash",
  "akin",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2137,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -3941,7 +3941,7 @@ checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "axum 0.8.4",
  "clap 4.5.42",
@@ -6325,7 +6325,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "clap 4.5.42",
  "dynamo-llm",
