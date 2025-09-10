@@ -5,7 +5,7 @@
 Test suite for profile_sla dry-run functionality.
 
 This test ensures that the profile_sla script can successfully run in dry-run mode
-for both vllm and sglang backends with their respective disagg.yaml configurations.
+for vllm, sglang, and trtllm backends with their respective disagg.yaml configurations.
 """
 
 import sys
@@ -86,3 +86,35 @@ class TestProfileSLADryRun:
         """Test that profile_sla dry-run works for sglang backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
         await run_profile(sglang_args)
+
+    @pytest.fixture
+    def trtllm_args(self):
+        """Create arguments for trtllm backend dry-run test."""
+
+        class Args:
+            backend = "trtllm"
+            config = "components/backends/trtllm/deploy/disagg.yaml"
+            output_dir = "/tmp/test_profiling_results"
+            namespace = "test-namespace"
+            min_num_gpus_per_engine = 1
+            max_num_gpus_per_engine = 8
+            skip_existing_results = False
+            force_rerun = False
+            isl = 3000
+            osl = 500
+            ttft = 50
+            itl = 10
+            max_context_length = 16384
+            prefill_interpolation_granularity = 16
+            decode_interpolation_granularity = 6
+            service_name = ""
+            dry_run = True
+
+        return Args()
+
+    @pytest.mark.pre_merge
+    @pytest.mark.asyncio
+    async def test_trtllm_dryrun(self, trtllm_args):
+        """Test that profile_sla dry-run works for trtllm backend with disagg.yaml config."""
+        # Run the profile in dry-run mode - should complete without errors
+        await run_profile(trtllm_args)

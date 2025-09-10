@@ -42,7 +42,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/dynamo:my-tag
-          workingDir: /workspace/examples/runtime/hello_world/
+          workingDir: /workspace/examples/custom_backend/hello_world/
           command:
             - /bin/sh
             - -c
@@ -81,7 +81,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/dynamo:my-tag
-          workingDir: /workspace/examples/runtime/hello_world/
+          workingDir: /workspace/examples/custom_backend/hello_world/
           command:
             - /bin/sh
             - -c

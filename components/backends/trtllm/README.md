@@ -55,7 +55,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
 | [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | 🚧 | Planned |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | Planned |
 | [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | Planned |
 
