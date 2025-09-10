@@ -208,7 +208,7 @@ impl GrpcInferenceService for KserveService {
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to fold completions stream: {:?}", e);
-                    Status::internal("Failed to fold completions stream")
+                    Status::internal(format!("Failed to fold completions stream: {}", e))
                 })?;
 
             let reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
@@ -250,7 +250,7 @@ impl GrpcInferenceService for KserveService {
                     .await
                     .map_err(|e| {
                         tracing::error!("Failed to fold completions stream: {:?}", e);
-                        Status::internal("Failed to fold completions stream")
+                        Status::internal(format!("Failed to fold completions stream: {}", e))
                     })?;
 
             let reply: ModelInferResponse = completion_response.try_into().map_err(|e| {
@@ -377,7 +377,7 @@ impl GrpcInferenceService for KserveService {
                                     "Failed to fold completions stream: {:?}",
                                     e
                                 );
-                                Status::internal("Failed to fold completions stream")
+                                Status::internal(format!("Failed to fold completions stream: {}", e))
                             })?;
 
                         let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {

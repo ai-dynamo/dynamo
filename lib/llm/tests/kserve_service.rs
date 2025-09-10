@@ -1273,8 +1273,99 @@ pub mod kserve_test {
             ..Default::default()
         });
 
-        // [gluo WIP] failure but should hit tensor model handling
         let response = client.model_infer(request).await.unwrap();
+        validate_tensor_response(response, model_name, inputs);
+
+        // streaming response in model_infer(), expect failure
+        let repeat = inference::model_infer_request::InferInputTensor {
+            name: "repeat".into(),
+            datatype: "INT32".into(),
+            shape: vec![1],
+            contents: Some(inference::InferTensorContents {
+                int_contents: vec![2],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let inputs = vec![text_input.clone(), repeat.clone()];
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: model_name.into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: inputs.clone(),
+            ..Default::default()
+        });
+
+        let response = client.model_infer(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for trying to stream response in ModelInfer, get {}",
+            err
+        );
+        // assert "stream" in error message
+        assert!(
+            err.message()
+                .contains("Multiple responses in non-streaming mode"),
+            "Expected error message to contain 'Multiple responses in non-streaming mode', got: {}",
+            err.message()
+        );
+
+        // model_stream_infer()
+        {
+            let inputs = vec![text_input.clone(), repeat.clone()];
+            let outbound = async_stream::stream! {
+                let request_count = 1;
+                for _ in 0..request_count {
+                    let request = ModelInferRequest {
+                        model_name: model_name.into(),
+                        model_version: "1".into(),
+                        id: "1234".into(),
+                        inputs: vec![text_input.clone(), repeat.clone()],
+                        ..Default::default()
+                    };
+
+                    yield request;
+                }
+            };
+
+            let response = client
+                .model_stream_infer(Request::new(outbound))
+                .await
+                .unwrap();
+            let mut inbound = response.into_inner();
+
+            let mut response_idx = 0;
+            while let Some(response) = inbound.message().await.unwrap() {
+                assert!(
+                    response.error_message.is_empty(),
+                    "Expected successful inference"
+                );
+                assert!(
+                    response.infer_response.is_some(),
+                    "Expected successful inference"
+                );
+
+                if let Some(response) = &response.infer_response {
+                    validate_tensor_response(
+                        Response::new(response.clone()),
+                        model_name,
+                        inputs.clone(),
+                    );
+                }
+                response_idx += 1;
+            }
+            assert_eq!(response_idx, 2, "Expected 2 responses")
+        }
+    }
+
+    fn validate_tensor_response(
+        response: Response<ModelInferResponse>,
+        model_name: &str,
+        inputs: Vec<inference::model_infer_request::InferInputTensor>,
+    ) {
         assert_eq!(
             response.get_ref().model_name,
             model_name,
