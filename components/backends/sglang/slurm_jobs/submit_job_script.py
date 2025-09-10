@@ -29,7 +29,7 @@ def print_welcome_message(job_ids: list[str]):
     
     job_id = f"<{', '.join(job_ids)}>"
     print(f"""
-🚀 Welcome SA! We hope you enjoy your time on our GB200 NVL72.
+🚀 Welcome! We hope you enjoy your time on our GB200 NVL72.
 
 Your logs for this submitted job will be available in logs/{job_id}
 You can access them by running:
