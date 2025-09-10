@@ -62,11 +62,6 @@ spec:
           PERF_CSV=$(find $ARTIFACT_DIR -name profile_export_genai_perf.csv)
           cat $PERF_CSV
           echo "Benchmark completed successfully!"
-        resources:
-          limits:
-            cpu: "64"
-          requests:
-            cpu: "64"
         volumeMounts:
         - name: model-cache
           mountPath: /root/.cache/huggingface

@@ -18,13 +18,6 @@ spec:
         - name: model-download
           image: python:3.10-slim
           command: ["sh", "-c"]
-          resources:
-            requests:
-              cpu: "4"
-              memory: "5Gi"
-            limits:
-              cpu: "4"
-              memory: "5Gi"
           envFrom:
             - secretRef:
                 name: hf-token-secret

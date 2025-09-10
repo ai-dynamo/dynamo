@@ -52,10 +52,8 @@ spec:
       resources:
         limits:
           gpu: "2"
-          memory: 160Gi
         requests:
           gpu: "2"
-          memory: 160Gi
     VllmDecodeWorker:
       componentType: worker
       dynamoNamespace: llama3-70b-disagg-sn
@@ -89,7 +87,5 @@ spec:
       resources:
         limits:
           gpu: "4"
-          memory: 160Gi
         requests:
           gpu: "4"
-          memory: 160Gi
