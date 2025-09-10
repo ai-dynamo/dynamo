@@ -285,14 +285,52 @@ pub mod kserve_test {
             .add_completions_model("split", split.clone())
             .unwrap();
         manager
+            .save_model_entry("split", ModelEntry {
+            name: "split".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "split".to_string(),
+            },
+            model_type: ModelType::Completions,
+            model_input: ModelInput::Text,
+            runtime_config: None,
+        });
+
+        manager
             .add_chat_completions_model("failure", failure.clone())
             .unwrap();
         manager
             .add_completions_model("failure", failure.clone())
             .unwrap();
         manager
+            .save_model_entry("failure", ModelEntry {
+            name: "failure".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "failure".to_string(),
+            },
+            model_type: ModelType::Completions | ModelType::Chat,
+            model_input: ModelInput::Text,
+            runtime_config: None,
+        });
+        manager
             .add_completions_model("long_running", long_running.clone())
             .unwrap();
+        manager
+            .save_model_entry("failure", ModelEntry {
+            name: "failure".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "failure".to_string(),
+            },
+            model_type: ModelType::Completions,
+            model_input: ModelInput::Text,
+            runtime_config: None,
+        });
+
 
         (service, split, failure, long_running)
     }

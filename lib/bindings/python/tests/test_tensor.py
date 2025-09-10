@@ -22,8 +22,8 @@ async def test_register(runtime: DistributedRuntime):
 
     model_config = {
         "name": "tensor",
-        "inputs": [{"name": "input", "data_type": "Bool", "shape": [1]}],
-        "outputs": [],
+        "inputs": [{"name": "input", "data_type": "Int32", "shape": [-1]}],
+        "outputs": [{"name": "output", "data_type": "Int32", "shape": [-1]}],
     }
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_tensor_model_config(model_config)
@@ -47,7 +47,8 @@ async def test_register(runtime: DistributedRuntime):
 
 
 async def generate(request, context):
-    raise NotImplementedError
+    print(f"Received request: {request}")
+    yield {"model": request["model"], "tensors": request["tensors"]}
 
 
 if __name__ == "__main__":
