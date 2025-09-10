@@ -215,6 +215,14 @@ python3 -m dynamo.sglang ... --migration-limit=3
 
 This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
 
+## Hashing Consistency for KV Events
+
+When emitting KV events for KV-aware routing, ensure deterministic hashing across processes to prevent radix tree mismatches in the router:
+
+- Set `PYTHONHASHSEED=0` for all SGLang processes.
+- Ensure the block IDs published in events are deterministic across ranks and restarts.
+- See [KV Events & Hashing](../../../docs/guides/kv_events_hashing.md) for background and a reference test vector check to validate your environment.
+
 ## Advanced Examples
 
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!

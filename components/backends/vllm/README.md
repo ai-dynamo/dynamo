@@ -168,6 +168,19 @@ See `args.py` for the full list of configuration options and their defaults.
 
 The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the vLLM CLI args points to running 'vllm serve --help' to see what CLI args can be added. We use the same argument parser as vLLM.
 
+### Hashing Consistency for KV Events
+
+When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches:
+
+- Set `PYTHONHASHSEED=0` for all vLLM processes.
+- If your vLLM version supports it, configure a deterministic prefix caching algorithm, for example:
+
+```bash
+vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
+```
+
+The router uses a canonical xxh3-64 hash (seed=1337) for matching local blocks. See [KV Events & Hashing](../../../docs/guides/kv_events_hashing.md) for details and a reference test vector check.
+
 ## Request Migration
 
 You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:

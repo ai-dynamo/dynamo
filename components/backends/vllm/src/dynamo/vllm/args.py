@@ -133,6 +133,18 @@ def parse_args() -> Config:
         )
         engine_args.enable_prefix_caching = True
 
+    # Recommend deterministic hashing setup when prefix caching is enabled
+    if engine_args.enable_prefix_caching:
+        phs = os.environ.get("PYTHONHASHSEED")
+        if not phs or phs == "random":
+            logger.warning(
+                "PYTHONHASHSEED is unset or random. For deterministic KV block IDs across processes, set PYTHONHASHSEED=0."
+            )
+        # Best-effort guidance on vLLM hashing mode
+        logger.info(
+            "If your vLLM version supports it, consider setting --prefix-caching-algo sha256 to use a deterministic prefix hashing implementation."
+        )
+
     config = Config()
     config.model = args.model
     if args.served_model_name:

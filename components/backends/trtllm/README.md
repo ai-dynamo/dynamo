@@ -199,6 +199,14 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
+## Hashing Consistency for KV Events
+
+When using KV-aware routing with TensorRT-LLM, ensure deterministic event identifiers across processes and runs so the router can correctly apply parent links and removals:
+
+- Set a stable `--random-seed` where applicable.
+- Ensure the block IDs used in KV events are deterministic across ranks and restarts.
+- See [KV Events & Hashing](../../../docs/guides/kv_events_hashing.md) for details and a reference test vector check used by the router.
+
 
 ## Disaggregation Strategy
 

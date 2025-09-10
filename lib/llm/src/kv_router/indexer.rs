@@ -335,12 +335,24 @@ impl RadixTree {
                 let mut current = match current {
                     Some(current) => current.clone(),
                     None => {
-                        tracing::warn!(
-                            worker_id = worker_id.to_string(),
-                            id,
-                            parent_hash = ?op.parent_hash,
-                            "Failed to find parent block; skipping store operation"
-                        );
+                        let enforce = std::env::var("DYN_KV_ENFORCE_ENGINE_HASH_STABILITY")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        if enforce {
+                            tracing::error!(
+                                worker_id,
+                                id,
+                                parent_hash = ?op.parent_hash,
+                                "Missing parent block; skipping store. Likely inconsistent hashing across processes. Hint: set PYTHONHASHSEED=0 and use deterministic engine settings (e.g., vLLM --prefix-caching-algo sha256).",
+                            );
+                        } else {
+                            tracing::warn!(
+                                worker_id,
+                                id,
+                                parent_hash = ?op.parent_hash,
+                                "Missing parent block; skipping store. Set DYN_KV_ENFORCE_ENGINE_HASH_STABILITY=1 to log as error. Hint: set PYTHONHASHSEED=0 and use deterministic engine settings (e.g., vLLM --prefix-caching-algo sha256).",
+                            );
+                        }
                         return;
                     }
                 };
@@ -389,11 +401,22 @@ impl RadixTree {
                     let entry = match worker_lookup.get(&block) {
                         Some(entry) => entry.clone(),
                         None => {
-                            tracing::warn!(
-                                worker_id = worker_id.to_string(),
-                                id,
-                                "Failed to find block to remove; skipping remove operation"
-                            );
+                            let enforce = std::env::var("DYN_KV_ENFORCE_ENGINE_HASH_STABILITY")
+                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                .unwrap_or(false);
+                            if enforce {
+                                tracing::error!(
+                                    worker_id,
+                                    id,
+                                    "Missing block to remove; skipping removal. Likely inconsistent hashing across processes. Hint: set PYTHONHASHSEED=0 and use deterministic engine settings (e.g., vLLM --prefix-caching-algo sha256).",
+                                );
+                            } else {
+                                tracing::warn!(
+                                    worker_id,
+                                    id,
+                                    "Missing block to remove; skipping removal. Set DYN_KV_ENFORCE_ENGINE_HASH_STABILITY=1 to log as error. Hint: set PYTHONHASHSEED=0 and use deterministic engine settings (e.g., vLLM --prefix-caching-algo sha256).",
+                                );
+                            }
                             continue;
                         }
                     };
@@ -1161,6 +1184,16 @@ mod tests {
                 data: add_blocks(hashes, parent),
             },
         }
+    }
+
+    #[test]
+    fn test_block_hash_ref_vector() {
+        // Reference test vector check: tokens [1,2,3,4], kv_block_size=4
+        // Should equal the known xxh3-64(seed=1337) value below.
+        let tokens: Vec<u32> = vec![1, 2, 3, 4];
+        let hashes = compute_block_hash_for_seq(&tokens, 4);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].0, 14643705804678351452u64);
     }
 
     fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
