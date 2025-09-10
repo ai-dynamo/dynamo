@@ -67,6 +67,15 @@ pub struct LLMMetricAnnotation {
     pub chunk_tokens: usize,
 }
 
+pub struct JailState {
+    stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    is_jailed: bool,
+    tool_call_parser: Option<String>,
+    accumulated_content: HashMap<u32, String>, // choice index -> accumulated content
+    last_response_metadata: Option<NvCreateChatCompletionStreamResponse>, // for response structure
+    finished: bool,                            // Add this flag to track if stream is finished
+}
+
 impl LLMMetricAnnotation {
     /// Convert this metrics struct to an Annotated event
     pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
@@ -619,24 +628,14 @@ fn apply_tool_calling_jail_internal(
 ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
     let context = stream.context();
 
-    struct JailState {
-        stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        is_jailed: bool,
-        tool_call_parser: Option<String>,
-        accumulated_content: HashMap<u32, String>, // choice index -> accumulated content
-        last_response_metadata: Option<NvCreateChatCompletionStreamResponse>, // for response structure
-        finished: bool, // Add this flag to track if stream is finished
-    }
-
     let jail_state = JailState {
         stream,
         is_jailed: false,
         tool_call_parser,
         accumulated_content: HashMap::new(),
         last_response_metadata: None,
-        finished: false, // Initialize as not finished
+        finished: false,
     };
-
     // Transform the stream using unfold to maintain state
     let jailed_stream = stream::unfold(jail_state, |mut state| async move {
         // If already finished, return None immediately

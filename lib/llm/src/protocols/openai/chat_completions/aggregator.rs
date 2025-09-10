@@ -37,6 +37,7 @@ pub struct DeltaAggregator {
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
+#[derive(Debug)]
 struct DeltaChoice {
     /// The index of the choice in the completion.
     index: u32,
@@ -59,6 +60,28 @@ impl Default for DeltaAggregator {
     /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn convert_tool_chunk_to_message_tool_call(
+    chunk: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+) -> Option<dynamo_async_openai::types::ChatCompletionMessageToolCall> {
+    // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+    if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
+        if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
+            Some(dynamo_async_openai::types::ChatCompletionMessageToolCall {
+                id: id.clone(),
+                r#type: r#type.clone(),
+                function: dynamo_async_openai::types::FunctionCall {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            })
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -132,10 +155,9 @@ impl DeltaAggregator {
                                     tool_calls: None,
                                     reasoning_content: None,
                                 });
-
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content);
+                            state_choice.text.push_str(content.trim());
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -143,6 +165,27 @@ impl DeltaAggregator {
                                 .reasoning_content
                                 .get_or_insert_with(String::new)
                                 .push_str(reasoning_content);
+                        }
+
+                        // Since one tool call is one chunk, we don't need to aggregate them
+                        // We just need to convert the ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall and append to the state_choice.tool_calls
+                        if let Some(tool_calls) = &choice.delta.tool_calls {
+                            if !tool_calls.is_empty() {
+                                // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+                                let converted_tool_calls: Vec<
+                                    dynamo_async_openai::types::ChatCompletionMessageToolCall,
+                                > = tool_calls
+                                    .iter()
+                                    .filter_map(convert_tool_chunk_to_message_tool_call)
+                                    .collect();
+
+                                // Initialize and push the converted tool calls to state_choice.tool_calls
+                                if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
+                                    existing_tool_calls.extend(converted_tool_calls);
+                                } else {
+                                    state_choice.tool_calls = Some(converted_tool_calls);
+                                }
+                            }
                         }
 
                         // Update finish reason if provided.
@@ -178,12 +221,9 @@ impl DeltaAggregator {
             .await;
 
         // Return early if an error was encountered.
-        let aggregator = if let Some(error) = aggregator.error {
+        if let Some(error) = aggregator.error {
             return Err(error);
-        } else {
-            aggregator
-        };
-
+        }
 
         // Extract aggregated choices and sort them by index.
         let mut choices: Vec<_> = aggregator
@@ -298,13 +338,47 @@ mod tests {
         text: &str,
         role: Option<dynamo_async_openai::types::Role>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
+<<<<<<< HEAD
         logprob: Option<f32>,
+=======
+        tool_calls: Option<&str>,
+>>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
+
+        let tool_calls: Option<serde_json::Value> = if let Some(tool_calls) = tool_calls {
+            Some(serde_json::from_str(tool_calls).unwrap())
+        } else {
+            None
+        };
+
+        let tool_call_chunks = if let Some(tool_calls) = tool_calls {
+            vec![
+                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    index: 0,
+                    id: Some("test_id".to_string()),
+                    r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                    function: Some(dynamo_async_openai::types::FunctionCallStream {
+                        name: tool_calls["name"].as_str().map(|s| s.to_string()),
+                        arguments: tool_calls["arguments"].as_str().map(|s| s.to_string()),
+                    }),
+                },
+            ]
+        } else {
+            vec![
+                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    index: 0,
+                    id: None,
+                    r#type: None,
+                    function: None,
+                },
+            ]
+        };
+
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: Some(text.to_string()),
             function_call: None,
-            tool_calls: None,
+            tool_calls: Some(tool_call_chunks),
             role,
             refusal: None,
             reasoning_content: None,
@@ -415,14 +489,22 @@ mod tests {
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
             None,
+<<<<<<< HEAD
             Some(-0.1),
+=======
+            None,
+>>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
         let annotated_delta2 = create_test_delta(
             0,
             " world!",
             None,
             Some(dynamo_async_openai::types::FinishReason::Stop),
+<<<<<<< HEAD
             Some(-0.2),
+=======
+            None,
+>>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
 
         // Create a stream
@@ -565,7 +647,11 @@ mod tests {
             tool_call_json,
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+<<<<<<< HEAD
             None,
+=======
+            Some(tool_call_json),
+>>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
         let data = annotated_delta.data.unwrap();
 
@@ -626,7 +712,11 @@ mod tests {
             tool_call_json,
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+<<<<<<< HEAD
             None,
+=======
+            Some(tool_call_json),
+>>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
         let data = annotated_delta.data.unwrap();
 
