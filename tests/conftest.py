@@ -22,18 +22,22 @@ import pytest
 
 from tests.utils.managed_process import ManagedProcess
 
-# Custom format inspired by your example
+
+def pytest_configure(config):
+    # Defining model morker to avoid `'model' not found in `markers` configuration option`
+    # error when pyproject.toml is not available in the container
+    config.addinivalue_line("markers", "model: model id used by a test or parameter")
+
+
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
     datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
 
-# List of models used in tests
 TEST_MODELS = [
     "Qwen/Qwen3-0.6B",
     "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
