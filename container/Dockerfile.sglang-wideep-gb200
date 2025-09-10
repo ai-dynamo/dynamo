@@ -46,6 +46,7 @@ RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linu
 
 FROM base AS build-image
 
+# We are actively working on resolving some transient timeout issues with DeepEP before we move to ToT for f1f6825
 ARG SGLANG_COMMIT=ff1f68252c2b5b343aa6ef2aa14e6d4753ae4871
 ARG BUILD_TYPE=blackwell
 ARG DEEPEP_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0

@@ -63,6 +63,7 @@ RUN mkdir -p /deps && cd /deps \
 RUN ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
 
 FROM ubuntu:24.04 AS local_src
+# We are actively working on resolving some transient timeout issues with DeepEP before we move to ToT for f1f6825
 ARG SGLANG_COMMIT=ff1f68252c2b5b343aa6ef2aa14e6d4753ae4871
 
 RUN apt update -y \
