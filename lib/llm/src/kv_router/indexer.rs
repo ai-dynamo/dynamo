@@ -124,10 +124,12 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 //     let hash = xxh3::xxh3_64_with_seed(&bytes, XXH3_SEED);
 // }
 
-/// Compute local block hashes from tokens by:
-/// 1) splitting into `kv_block_size` chunks, 2) LE-serializing `u32` tokens,
-/// 3) hashing each full chunk with xxh3-64 + [`XXH3_SEED`]. Trailing partial
-/// chunk is ignored. Deterministic for identical inputs.
+/// Compute local block hashes from tokens.
+/// - Split into `kv_block_size` chunks.
+/// - LE-serialize `u32` tokens per chunk.
+/// - Hash each full chunk with xxh3-64 + [`XXH3_SEED`]; trailing partial chunk is ignored.
+///
+/// Deterministic for identical inputs.
 pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
     tokens
         .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
