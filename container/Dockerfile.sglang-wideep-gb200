@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG CUDA_VERSION=12.9.1
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS base
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS base
 
 # Set timezone and install all packages
 RUN apt-get update \
@@ -265,19 +265,6 @@ RUN wget --tries=3 --waitretry=5 \
     && rm rustup-init \
     && chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-ARG CARGO_BUILD_JOBS
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-
-COPY . ./dynamo
-RUN cd dynamo && cargo build --release
-
-RUN cd dynamo/lib/bindings/python \
-    && pip install --break-system-packages -e . \
-    && cd /sgl-workspace/dynamo \
-    && pip install --break-system-packages .
-
-RUN pip install --break-system-packages sglang-router==0.1.9
-
 RUN wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\
 nats-server-v2.10.28-arm64.deb && \
@@ -293,6 +280,17 @@ etcd-${ETCD_VERSION}-linux-arm64.tar.gz -O /tmp/etcd.tar.gz && \
     rm /tmp/etcd.tar.gz
 
 ENV PATH=/usr/local/bin/etcd:$PATH
+
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
+COPY . ./dynamo
+RUN cd dynamo && cargo build --release
+
+RUN cd dynamo/lib/bindings/python \
+    && pip install --break-system-packages -e . \
+    && cd /sgl-workspace/dynamo \
+    && pip install --break-system-packages .
 
 # Enable forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1
