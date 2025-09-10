@@ -90,7 +90,10 @@ impl HealthCheckManager {
         );
 
         // Cache it
-        self.router_cache.lock().unwrap().insert(cache_key, router.clone());
+        self.router_cache
+            .lock()
+            .unwrap()
+            .insert(cache_key, router.clone());
 
         Ok(router)
     }
@@ -266,7 +269,9 @@ impl HealthCheckManager {
         let endpoint = component.endpoint(&target.instance.endpoint);
 
         // Get or create router for this endpoint
-        let router = self.get_or_create_router(endpoint_subject, endpoint).await?;
+        let router = self
+            .get_or_create_router(endpoint_subject, endpoint)
+            .await?;
 
         // Create the request context
         let request: SingleIn<serde_json::Value> = Context::new(payload.clone());

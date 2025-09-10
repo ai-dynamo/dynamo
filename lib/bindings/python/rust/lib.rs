@@ -595,7 +595,7 @@ impl Endpoint {
         if let Some(ref payload) = health_payload_json {
             if !payload.is_object() {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
-                     "health_check_payload must be a JSON object (dict)",
+                    "health_check_payload must be a JSON object (dict)",
                 ));
             }
         }

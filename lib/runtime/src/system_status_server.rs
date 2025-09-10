@@ -84,15 +84,15 @@ pub async fn spawn_system_status_server(
         .system_health
         .lock()
         .unwrap()
-        .health_path
-        .clone();
+        .health_path()
+        .to_string();
     let live_path = server_state
         .drt()
         .system_health
         .lock()
         .unwrap()
-        .live_path
-        .clone();
+        .live_path()
+        .to_string();
 
     let app = Router::new()
         .route(
