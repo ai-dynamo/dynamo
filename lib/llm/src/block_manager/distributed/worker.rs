@@ -131,6 +131,8 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
 }
 
 pub struct KvbmWorker {
+    // Ensures the last DistributedRuntime drop happens here, not in a blocking thread.
+    drt_keepalive: Option<DistributedRuntime>,
     task: Option<CriticalTaskExecutionHandle>,
     block_transfer_handler_rx: Option<oneshot::Receiver<transfer::BlockTransferHandler>>,
 }
@@ -224,6 +226,9 @@ impl KvbmWorker {
 
         let layout_builder = layout_builder.clone();
 
+        // Hold one extra clone so the final drop doesn't happen inside a blocking thread.
+        let drt_keepalive = Some(config.drt.clone());
+
         let (task, handler_rx) = if layout_blocking {
             Self::run_blocking_layout_initialization(
                 config,
@@ -245,6 +250,7 @@ impl KvbmWorker {
         };
 
         Ok(Self {
+            drt_keepalive,
             task: Some(task),
             block_transfer_handler_rx: Some(handler_rx),
         })
@@ -263,25 +269,20 @@ impl KvbmWorker {
         let cancel_token = config.drt.primary_token().clone();
 
         // barrier sync with leader to get the leader data
-        let leader_data = tokio::task::block_in_place(|| {
-            // This is now synchronous blocking code
-            // We need a separate current-thread runtime to block_on async calls here
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                KvbmWorker::leader_barrier_sync(
-                    config.clone(),
-                    cancel_token.clone(),
-                    bytes_per_block,
-                )
-                .await
-            })
-        })?;
+        let leader_data =
+            KvbmWorker::leader_barrier_sync(config.clone(), cancel_token.clone(), bytes_per_block)
+                .await?;
+
+        let worker_id = config
+            .drt
+            .primary_lease()
+            .ok_or_else(|| {
+                anyhow::anyhow!("unable to get primary lease; check that drt is not static")
+            })?
+            .id() as usize;
 
         // establish a oneshot channel to get back the raw BlockTransferHandler
         let (handler_tx, handler_rx) = oneshot::channel();
-
-        // establish a oneshot channel to block on the main routine to wait for layout allocation readiness
-        let (layout_ready_tx, layout_ready_rx) = oneshot::channel::<String>();
 
         let scheduler_client = config.scheduler_client.clone();
 
@@ -294,10 +295,10 @@ impl KvbmWorker {
                     layout_builder,
                     leader_data,
                     layout_type,
-                    worker_config,
+                    worker_id,
+                    worker_config.device_id,
                     cancel_token,
                     handler_tx,
-                    layout_ready_tx,
                     scheduler_client,
                 )
             },
@@ -305,23 +306,11 @@ impl KvbmWorker {
             "kvbm-worker-task",
         )?;
 
-        // waiting for the worker layout allocation ready
-        match layout_ready_rx.await {
-            Ok(_) => tracing::info!("worker layout allocation finished."),
-            Err(_) => tracing::error!("Worker layout dropped without sending"),
-        }
-
         let worker_config = config.clone();
         let cancel_for_barrier = cancel_token.clone();
+
         // wait until the leader finished the initialization of all components
-        tokio::task::block_in_place(|| {
-            // This is now synchronous blocking code
-            // We need a separate current-thread runtime to block_on async calls here
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                KvbmWorker::leader_readiness_sync(worker_config, cancel_for_barrier).await
-            })
-        })?;
+        KvbmWorker::leader_readiness_sync(worker_config, cancel_for_barrier).await?;
 
         Ok((task, handler_rx))
     }
@@ -339,11 +328,16 @@ impl KvbmWorker {
         let cancel_token = config.drt.primary_token().clone();
         let scheduler_client = config.scheduler_client.clone();
 
+        let worker_id = config
+            .drt
+            .primary_lease()
+            .ok_or_else(|| {
+                anyhow::anyhow!("unable to get primary lease; check that drt is not static")
+            })?
+            .id() as usize;
+
         // channel to get BlockTransferHandler back to the caller
         let (handler_tx, handler_rx) = oneshot::channel::<transfer::BlockTransferHandler>();
-
-        // channel that the worker will use to signal layout readiness
-        let (layout_ready_tx, layout_ready_rx) = oneshot::channel::<String>();
 
         // clone what we need inside the orchestrator
         let worker_config = config.clone();
@@ -357,9 +351,12 @@ impl KvbmWorker {
 
                 async move {
                     // 1) barrier (must finish before worker_task starts)
-                    let leader_data =
-                        KvbmWorker::leader_barrier_sync(cfg.clone(), ct.clone(), bytes_per_block)
-                            .await?;
+                    let leader_data = KvbmWorker::leader_barrier_sync(
+                        worker_config.clone(),
+                        ct.clone(),
+                        bytes_per_block,
+                    )
+                    .await?;
 
                     // 2) start the long-running worker (after barrier)
                     //    Spawn it so the orchestrator can continue with readiness + waiting.
@@ -372,10 +369,10 @@ impl KvbmWorker {
                         lb,
                         leader_data,
                         lt,
-                        cfg.clone(),
+                        worker_id,
+                        worker_config.device_id,
                         ct.clone(),
                         handler_tx,
-                        layout_ready_tx,
                         scheduler,
                     );
 
@@ -385,12 +382,6 @@ impl KvbmWorker {
                             tracing::error!("worker_task exited with error: {e:#}");
                         }
                     });
-
-                    // 3) wait for the worker’s layout allocation readiness
-                    match layout_ready_rx.await {
-                        Ok(_) => tracing::info!("worker layout allocation finished."),
-                        Err(_) => tracing::warn!("worker layout readiness channel dropped"),
-                    }
 
                     // 4) wait for leader to finish its side of initialization
                     KvbmWorker::leader_readiness_sync(cfg.clone(), ct.clone()).await?;
@@ -553,26 +544,17 @@ impl KvbmWorker {
         mut layout_builder: LayoutConfigBuilder,
         leader_data: KvbmLeaderData,
         layout_type: LayoutType,
-        config: KvbmWorkerConfig,
+        worker_id: usize,
+        device_id: usize,
         cancel_token: CancellationToken,
         handler_tx: oneshot::Sender<BlockTransferHandler>,
-        layout_ready_tx: oneshot::Sender<String>,
         scheduler_client: Option<TransferSchedulerClient>,
     ) -> anyhow::Result<()> {
-        let drt = config.drt.clone();
-
-        let worker_id = drt
-            .primary_lease()
-            .ok_or(anyhow::anyhow!(
-                "unable to get primary lease; check that drt is not static"
-            ))?
-            .id() as usize;
-
         let agent = build_agent(worker_id, leader_data.num_disk_blocks > 0)?;
 
         let transfer_context = Arc::new(TransferContext::new(
             Arc::new(Some(agent)),
-            DeviceAllocator::new(config.device_id)
+            DeviceAllocator::new(device_id)
                 .unwrap()
                 .ctx()
                 .new_stream()
@@ -651,10 +633,6 @@ impl KvbmWorker {
             cancel_token.clone(),
         )?;
 
-        if layout_ready_tx.send("finished".to_string()).is_err() {
-            tracing::error!("worker receiver dropped before result was sent");
-        }
-
         // TODO: Some sort of fancy loop here.
         // For now, just wait for cancellation.
         cancel_token.cancelled().await;
@@ -668,6 +646,14 @@ impl Drop for KvbmWorker {
         if let Some(task) = self.task.take() {
             task.cancel();
             task.detach();
+        }
+
+        if let Some(drt) = self.drt_keepalive.take() {
+            if let Ok(_h) = tokio::runtime::Handle::try_current() {
+                std::thread::spawn(move || drop(drt)); // drop on plain OS thread
+            } else {
+                drop(drt);
+            }
         }
     }
 }
