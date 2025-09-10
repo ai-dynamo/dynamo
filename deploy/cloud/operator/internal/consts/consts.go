@@ -16,6 +16,9 @@ const (
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"
 
+	DynamoPlannerMetricsPort = 9085
+	DynamoMetricsPortName    = "metrics"
+
 	DynamoSystemPort     = 9090
 	DynamoSystemPortName = "system"
 

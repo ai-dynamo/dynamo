@@ -1,0 +1,112 @@
+{
+    "family": "Dynamo-tasks",
+    "containerDefinitions": [
+        {
+            "name": "etcd",
+            "image": "bitnami/etcd",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "name": "2379",
+                    "containerPort": 2379,
+                    "hostPort": 2379,
+                    "protocol": "tcp",
+                    "appProtocol": "http"
+                },
+                {
+                    "name": "2380",
+                    "containerPort": 2380,
+                    "hostPort": 2380,
+                    "protocol": "tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "ALLOW_NONE_AUTHENTICATION",
+                    "value": "YES"
+                }
+            ],
+            "environmentFiles": [],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "ulimits": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/Dynamo-tasks",
+                    "mode": "non-blocking",
+                    "awslogs-create-group": "true",
+                    "max-buffer-size": "25m",
+                    "awslogs-region": "us-east-2",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        },
+        {
+            "name": "nats",
+            "image": "nats",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "name": "4222",
+                    "containerPort": 4222,
+                    "hostPort": 4222,
+                    "protocol": "tcp"
+                },
+                {
+                    "name": "6222",
+                    "containerPort": 6222,
+                    "hostPort": 6222,
+                    "protocol": "tcp"
+                },
+                {
+                    "name": "8222",
+                    "containerPort": 8222,
+                    "hostPort": 8222,
+                    "protocol": "tcp"
+                }
+            ],
+            "essential": true,
+            "command": [
+                "-js",
+                "--trace"
+            ],
+            "environment": [],
+            "environmentFiles": [],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/Dynamo-tasks",
+                    "mode": "non-blocking",
+                    "awslogs-create-group": "true",
+                    "max-buffer-size": "25m",
+                    "awslogs-region": "us-east-2",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ],
+    "taskRoleArn": "arn:aws:iam::AWS_ID:role/ecsTaskExecutionRole",
+    "executionRoleArn": "arn:aws:iam::AWS_ID:role/ecsTaskExecutionRole",
+    "networkMode": "awsvpc",
+    "volumes": [],
+    "placementConstraints": [],
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "3072",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "enableFaultInjection": false
+}

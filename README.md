@@ -60,7 +60,7 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 | [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md) | ✅ | ✅ | ✅ |
 | [**Load Based Planner**](/docs/architecture/load_planner.md) | 🚧 | 🚧 | 🚧 |
 | [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | ✅ | 🚧 |
-| [**KVBM**](/docs/architecture/kvbm_architecture.md) | ✅ | ✅ | 🚧 |
+| [**KVBM**](/docs/architecture/kvbm_architecture.md) | ✅ | 🚧 | ✅ |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 - **[vLLM](components/backends/vllm/README.md)**
@@ -199,7 +199,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 
 > [!Note]
 > Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
-> For example, if you are using `tensorrt-llm==1.0.0rc6`, use the PyTorch container image version `25.06`.
+> For example, if you are using `tensorrt-llm==1.1.0rc3`, use the PyTorch container image version `25.06`.
 > To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
 
 > [!Important]

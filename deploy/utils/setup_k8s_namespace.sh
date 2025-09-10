@@ -60,7 +60,7 @@ Sets up Kubernetes namespace for Dynamo (one-time per namespace):
       * Installs/updates the operator Helm release using that image
       * If credentials (DOCKER_USERNAME/DOCKER_PASSWORD) are provided, creates/updates docker-imagepullsecret
       * If credentials are not provided, prompts interactively to create the pull secret
-  - Otherwise installs the operator using default image: nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.4.0
+  - Otherwise installs the operator using default image: nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.4.1
 
 Environment variables:
   NAMESPACE         Target Kubernetes namespace (default: default)
@@ -157,7 +157,7 @@ if [[ -n "$DOCKER_SERVER" && -n "$IMAGE_TAG" ]]; then
   fi
 else
   # Use default published image when custom not provided
-  DEFAULT_OPERATOR_IMAGE="nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.4.0"
+  DEFAULT_OPERATOR_IMAGE="nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.4.1"
   if ! command -v helm &>/dev/null; then warn "helm not found; skipping helm install"; else
     pushd "$REPO_ROOT/deploy/cloud/helm/platform" >/dev/null
     helm dep build
