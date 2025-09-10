@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::protocols::Annotated;
+use anyhow::Result;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -54,15 +57,18 @@ pub struct TensorModelConfig {
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct Tensor {
-    metadata: TensorMetadata,
+    pub metadata: TensorMetadata,
     // [gluo WIP] data type is determined by the enum variant.
     // verify if the request can be properly pass to Python side as
     // here is enum with data and there is no proper mapping in Python.
-    data: FlattenTensor,
+    pub data: FlattenTensor,
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateTensorRequest {
+    /// ID of the request
+    pub id: Option<String>,
+
     /// ID of the model to use.
     pub model: String,
 
@@ -77,6 +83,9 @@ pub struct NvCreateTensorRequest {
 /// `CreateChatCompletionResponse`.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateTensorResponse {
+    /// ID of the corresponding request.
+    pub id: Option<String>,
+
     /// ID of the model.
     pub model: String,
 
@@ -120,5 +129,53 @@ impl AnnotationsProvider for NvCreateTensorRequest {
             .and_then(|nvext| nvext.annotations.as_ref())
             .map(|annotations| annotations.contains(&annotation.to_string()))
             .unwrap_or(false)
+    }
+}
+
+pub struct DeltaAggregator {
+    response: Option<NvCreateTensorResponse>,
+    error: Option<String>,
+}
+
+impl NvCreateTensorResponse {
+    pub async fn from_annotated_stream(
+        stream: impl Stream<Item = Annotated<NvCreateTensorResponse>>,
+    ) -> Result<NvCreateTensorResponse> {
+        let aggregator = stream
+            .fold(
+                DeltaAggregator {
+                    response: None,
+                    error: None,
+                },
+                |mut aggregator, delta| async move {
+                    let delta = match delta.ok() {
+                        Ok(delta) => delta,
+                        Err(error) => {
+                            aggregator.error = Some(error);
+                            return aggregator;
+                        }
+                    };
+
+                    if aggregator.response.is_none() {
+                        if delta.data.is_some() {
+                            aggregator.response = Some(delta.data.unwrap());
+                        } else {
+                            aggregator.error = Some("No data in response".to_string());
+                        }
+                    } else {
+                        aggregator.error =
+                            Some("Multiple responses in non-streaming mode".to_string());
+                    }
+                    aggregator
+                },
+            )
+            .await;
+        if let Some(error) = aggregator.error {
+            Err(anyhow::anyhow!(error))
+        } else if let Some(response) = aggregator.response {
+            Ok(response)
+        } else {
+            Err(anyhow::anyhow!("No response received"))
+        }
     }
 }

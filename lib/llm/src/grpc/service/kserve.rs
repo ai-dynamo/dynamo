@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::grpc::service::kserve::inference::DataType;
@@ -11,6 +12,9 @@ use crate::http::service::Metrics;
 use crate::http::service::metrics;
 
 use crate::discovery::ModelManager;
+use crate::protocols::tensor::{
+    NvCreateTensorRequest, NvCreateTensorResponse, Tensor, TensorMetadata,
+};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -22,6 +26,7 @@ use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::grpc::service::openai::{completion_response_stream, get_parsing_options};
+use crate::grpc::service::tensor::tensor_response_stream;
 use tonic::{Request, Response, Status, transport::Server};
 
 use crate::protocols::openai::completions::{
@@ -187,55 +192,72 @@ impl GrpcInferenceService for KserveService {
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
         let model = request.get_ref().model_name.clone();
-        if self.state().is_tensor_model(&model) {
-            Err(Status::unimplemented(
-                "[gluo WIP] Model is a tensor model, need inference path",
-            ))?;
-        }
-
-        // Fallback handling by assuming the model is OpenAI Completions model
         let request = request.into_inner();
         let request_id = request.id.clone();
-        let mut completion_request: NvCreateCompletionRequest = request
-            .try_into()
-            .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
-        if completion_request.inner.stream.unwrap_or(false) {
-            // return error that streaming is not supported
-            return Err(Status::invalid_argument(
-                "Streaming is not supported for this endpoint",
-            ));
-        }
+        // [gluo TODO] refactor to reuse code, inference logic is largely the same
+        let mut reply = if self.state().is_tensor_model(&model) {
+            // Fallback handling by assuming the model is OpenAI Completions model
+            let tensor_request: NvCreateTensorRequest = request
+                .try_into()
+                .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
-        // Apply template values if present
-        if let Some(template) = self.request_template.as_ref() {
-            if completion_request.inner.model.is_empty() {
-                completion_request.inner.model = template.model.clone();
-            }
-            if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
-                completion_request.inner.temperature = Some(template.temperature);
-            }
-            if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
-                completion_request.inner.max_tokens = Some(template.max_completion_tokens);
-            }
-        }
+            let stream = tensor_response_stream(self.state_clone(), tensor_request, false).await?;
 
-        let model = completion_request.inner.model.clone();
-        let parsing_options = get_parsing_options(self.state.manager(), &model);
-
-        let stream = completion_response_stream(self.state_clone(), completion_request).await?;
-
-        let completion_response =
-            NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+            let tensor_response = NvCreateTensorResponse::from_annotated_stream(stream)
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to fold completions stream: {:?}", e);
                     Status::internal("Failed to fold completions stream")
                 })?;
 
-        let mut reply: ModelInferResponse = completion_response
-            .try_into()
-            .map_err(|e| Status::invalid_argument(format!("Failed to parse response: {}", e)))?;
+            let reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
+                Status::invalid_argument(format!("Failed to parse response: {}", e))
+            })?;
+            reply
+        } else {
+            // Fallback handling by assuming the model is OpenAI Completions model
+            let mut completion_request: NvCreateCompletionRequest = request
+                .try_into()
+                .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
+
+            if completion_request.inner.stream.unwrap_or(false) {
+                // return error that streaming is not supported
+                return Err(Status::invalid_argument(
+                    "Streaming is not supported for this endpoint",
+                ));
+            }
+
+            // Apply template values if present
+            if let Some(template) = self.request_template.as_ref() {
+                if completion_request.inner.model.is_empty() {
+                    completion_request.inner.model = template.model.clone();
+                }
+                if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+                    completion_request.inner.temperature = Some(template.temperature);
+                }
+                if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+                    completion_request.inner.max_tokens = Some(template.max_completion_tokens);
+                }
+            }
+
+            let parsing_options = get_parsing_options(self.state.manager(), &model);
+
+            let stream = completion_response_stream(self.state_clone(), completion_request).await?;
+
+            let completion_response =
+                NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to fold completions stream: {:?}", e);
+                        Status::internal("Failed to fold completions stream")
+                    })?;
+
+            let reply: ModelInferResponse = completion_response.try_into().map_err(|e| {
+                Status::invalid_argument(format!("Failed to parse response: {}", e))
+            })?;
+            reply
+        };
 
         reply.id = request_id;
 
@@ -273,37 +295,17 @@ impl GrpcInferenceService for KserveService {
                 };
 
                 let model = request.model_name.clone();
+
+                // [gluo TODO] refactor to reuse code, inference logic is largely the same
                 if state.is_tensor_model(&model) {
-                    Err(Status::unimplemented("[gluo WIP] Model is a tensor model, need inference path"))?;
-                }
+                    // Must keep track of 'request_id' which will be returned in corresponding response
+                    let request_id = request.id.clone();
+                    let tensor_request: NvCreateTensorRequest = request.try_into().map_err(|e| {
+                        Status::invalid_argument(format!("Failed to parse request: {}", e))
+                    })?;
 
-                // Must keep track of 'request_id' which will be returned in corresponding response
-                let request_id = request.id.clone();
-                let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
-                    Status::invalid_argument(format!("Failed to parse request: {}", e))
-                })?;
+                    let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
 
-                // Apply template values if present
-                if let Some(template) = &template {
-                    if completion_request.inner.model.is_empty() {
-                        completion_request.inner.model = template.model.clone();
-                    }
-                    if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
-                        completion_request.inner.temperature = Some(template.temperature);
-                    }
-                    if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
-                        completion_request.inner.max_tokens = Some(template.max_completion_tokens);
-                    }
-                }
-
-                let model = completion_request.inner.model.clone();
-                let parsing_options = get_parsing_options(state.manager(), &model);
-
-                let streaming = completion_request.inner.stream.unwrap_or(false);
-
-                let stream = completion_response_stream(state.clone(), completion_request).await?;
-
-                if streaming {
                     pin_mut!(stream);
                     while let Some(response) = stream.next().await {
                         match response.data {
@@ -322,24 +324,72 @@ impl GrpcInferenceService for KserveService {
                         }
                     }
                 } else {
-                    let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!(
-                                "Failed to fold completions stream: {:?}",
-                                e
-                            );
-                            Status::internal("Failed to fold completions stream")
-                        })?;
-
-                    let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
-                        Status::invalid_argument(format!("Failed to parse response: {}", e))
+                    // Fallback handling by assuming the model is OpenAI Completions model
+                    // Must keep track of 'request_id' which will be returned in corresponding response
+                    let request_id = request.id.clone();
+                    let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
+                        Status::invalid_argument(format!("Failed to parse request: {}", e))
                     })?;
-                    if response.infer_response.is_some() {
-                        response.infer_response.as_mut().unwrap().id = request_id.clone();
+
+                    // Apply template values if present
+                    if let Some(template) = &template {
+                        if completion_request.inner.model.is_empty() {
+                            completion_request.inner.model = template.model.clone();
+                        }
+                        if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+                            completion_request.inner.temperature = Some(template.temperature);
+                        }
+                        if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+                            completion_request.inner.max_tokens = Some(template.max_completion_tokens);
+                        }
                     }
-                    yield response;
+
+                    let model = completion_request.inner.model.clone();
+                    let parsing_options = get_parsing_options(state.manager(), &model);
+
+                    let streaming = completion_request.inner.stream.unwrap_or(false);
+
+                    let stream = completion_response_stream(state.clone(), completion_request).await?;
+
+                    if streaming {
+                        pin_mut!(stream);
+                        while let Some(response) = stream.next().await {
+                            match response.data {
+                                Some(data) => {
+                                    let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                        Status::invalid_argument(format!("Failed to parse response: {}", e))
+                                    })?;
+                                    if reply.infer_response.is_some() {
+                                        reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                    }
+                                    yield reply;
+                                },
+                                None => {
+                                    // Skip if no data is present, the response is for annotation
+                                },
+                            }
+                        }
+                    } else {
+                        let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                            .await
+                            .map_err(|e| {
+                                tracing::error!(
+                                    "Failed to fold completions stream: {:?}",
+                                    e
+                                );
+                                Status::internal("Failed to fold completions stream")
+                            })?;
+
+                        let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
+                            Status::invalid_argument(format!("Failed to parse response: {}", e))
+                        })?;
+                        if response.infer_response.is_some() {
+                            response.infer_response.as_mut().unwrap().id = request_id.clone();
+                        }
+                        yield response;
+                    }
                 }
+
             }
         };
 
@@ -359,36 +409,34 @@ impl GrpcInferenceService for KserveService {
             .find(|entry| request_model_name == &entry.name)
         {
             if entry.model_type.supports_tensor() {
-                if let Some(config) = entry.runtime_config.as_ref() {
-                    if let Some(tensor_model_config) = config.tensor_model_config.as_ref() {
-                        return Ok(Response::new(ModelMetadataResponse {
-                            name: tensor_model_config.name.clone(),
-                            versions: vec!["1".to_string()],
-                            platform: "dynamo".to_string(),
-                            inputs: tensor_model_config
-                                .inputs
-                                .iter()
-                                .map(|input| inference::model_metadata_response::TensorMetadata {
-                                    name: input.name.clone(),
-                                    datatype: input.data_type.to_string(),
-                                    shape: input.shape.clone(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            outputs: tensor_model_config
-                                .outputs
-                                .iter()
-                                .map(
-                                    |output| inference::model_metadata_response::TensorMetadata {
-                                        name: output.name.clone(),
-                                        datatype: output.data_type.to_string(),
-                                        shape: output.shape.clone(),
-                                        ..Default::default()
-                                    },
-                                )
-                                .collect(),
-                        }));
-                    }
+                if let Some(config) = entry.runtime_config.as_ref()
+                    && let Some(tensor_model_config) = config.tensor_model_config.as_ref()
+                {
+                    return Ok(Response::new(ModelMetadataResponse {
+                        name: tensor_model_config.name.clone(),
+                        versions: vec!["1".to_string()],
+                        platform: "dynamo".to_string(),
+                        inputs: tensor_model_config
+                            .inputs
+                            .iter()
+                            .map(|input| inference::model_metadata_response::TensorMetadata {
+                                name: input.name.clone(),
+                                datatype: input.data_type.to_string(),
+                                shape: input.shape.clone(),
+                            })
+                            .collect(),
+                        outputs: tensor_model_config
+                            .outputs
+                            .iter()
+                            .map(
+                                |output| inference::model_metadata_response::TensorMetadata {
+                                    name: output.name.clone(),
+                                    datatype: output.data_type.to_string(),
+                                    shape: output.shape.clone(),
+                                },
+                            )
+                            .collect(),
+                    }));
                 }
                 Err(Status::invalid_argument(format!(
                     "Model '{}' has type Tensor but no model config is provided",
@@ -443,38 +491,38 @@ impl GrpcInferenceService for KserveService {
             .find(|entry| request_model_name == &entry.name)
         {
             if entry.model_type.supports_tensor() {
-                if let Some(config) = entry.runtime_config.as_ref() {
-                    if let Some(tensor_model_config) = config.tensor_model_config.as_ref() {
-                        let model_config = ModelConfig {
-                            name: tensor_model_config.name.clone(),
-                            platform: "dynamo".to_string(),
-                            backend: "dynamo".to_string(),
-                            input: tensor_model_config
-                                .inputs
-                                .iter()
-                                .map(|input| ModelInput {
-                                    name: input.name.clone(),
-                                    data_type: input.data_type.to_kserve(),
-                                    dims: input.shape.clone(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            output: tensor_model_config
-                                .outputs
-                                .iter()
-                                .map(|output| ModelOutput {
-                                    name: output.name.clone(),
-                                    data_type: output.data_type.to_kserve(),
-                                    dims: output.shape.clone(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            ..Default::default()
-                        };
-                        return Ok(Response::new(ModelConfigResponse {
-                            config: Some(model_config.clone()),
-                        }));
-                    }
+                if let Some(config) = entry.runtime_config.as_ref()
+                    && let Some(tensor_model_config) = config.tensor_model_config.as_ref()
+                {
+                    let model_config = ModelConfig {
+                        name: tensor_model_config.name.clone(),
+                        platform: "dynamo".to_string(),
+                        backend: "dynamo".to_string(),
+                        input: tensor_model_config
+                            .inputs
+                            .iter()
+                            .map(|input| ModelInput {
+                                name: input.name.clone(),
+                                data_type: input.data_type.to_kserve(),
+                                dims: input.shape.clone(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        output: tensor_model_config
+                            .outputs
+                            .iter()
+                            .map(|output| ModelOutput {
+                                name: output.name.clone(),
+                                data_type: output.data_type.to_kserve(),
+                                dims: output.shape.clone(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    return Ok(Response::new(ModelConfigResponse {
+                        config: Some(model_config.clone()),
+                    }));
                 }
                 Err(Status::invalid_argument(format!(
                     "Model '{}' has type Tensor but no model config is provided",
@@ -728,24 +776,256 @@ impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
     }
 }
 
-impl tensor::DataType {
-    pub fn to_kserve(&self) -> i32 {
-        match self {
-            &tensor::DataType::Bool => DataType::TypeBool as i32,
-            &tensor::DataType::Uint32 => DataType::TypeUint32 as i32,
-            &tensor::DataType::Int32 => DataType::TypeInt32 as i32,
-            &tensor::DataType::Float32 => DataType::TypeFp32 as i32,
-            &tensor::DataType::Bytes => DataType::TypeString as i32,
+impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
+    type Error = Status;
+
+    fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
+        // Protocol requires if `raw_input_contents` is used to hold input data,
+        // it must be used for all inputs.
+        if !request.raw_input_contents.is_empty()
+            && request.inputs.len() != request.raw_input_contents.len()
+        {
+            return Err(Status::invalid_argument(
+                "`raw_input_contents` must be used for all inputs",
+            ));
+        }
+
+        let mut tensor_request = NvCreateTensorRequest {
+            id: if !request.id.is_empty() {
+                Some(request.id.clone())
+            } else {
+                None
+            },
+            model: request.model_name.clone(),
+            tensors: Vec::new(),
+            nvext: None,
+        };
+
+        // iterate through inputs
+        for (idx, input) in request.inputs.iter().enumerate() {
+            let mut tensor = Tensor {
+                metadata: TensorMetadata {
+                    name: input.name.clone(),
+                    data_type: tensor::DataType::from_str(&input.datatype)
+                        .map_err(|err| Status::invalid_argument(err.to_string()))?,
+                    shape: input.shape.clone(),
+                },
+                // Placeholder, will be filled below
+                data: tensor::FlattenTensor::Bool(Vec::new()),
+            };
+            tensor.data = match &input.contents {
+                Some(content) => match tensor.metadata.data_type {
+                    tensor::DataType::Bool => {
+                        tensor::FlattenTensor::Bool(content.bool_contents.clone())
+                    }
+                    tensor::DataType::Uint32 => {
+                        tensor::FlattenTensor::Uint32(content.uint_contents.clone())
+                    }
+                    tensor::DataType::Int32 => {
+                        tensor::FlattenTensor::Int32(content.int_contents.clone())
+                    }
+                    tensor::DataType::Float32 => {
+                        tensor::FlattenTensor::Float32(content.fp32_contents.clone())
+                    }
+                    tensor::DataType::Bytes => {
+                        tensor::FlattenTensor::Bytes(content.bytes_contents.clone())
+                    }
+                },
+                None => {
+                    let raw_input = request.raw_input_contents.get(idx).ok_or_else(|| {
+                        Status::invalid_argument(format!("Missing raw input for '{}'", input.name))
+                    })?;
+                    let data_size = match tensor.metadata.data_type {
+                        tensor::DataType::Bool => 1,
+                        tensor::DataType::Uint32 => 4,
+                        tensor::DataType::Int32 => 4,
+                        tensor::DataType::Float32 => 4,
+                        tensor::DataType::Bytes => 0,
+                    };
+                    // Non-bytes type, simply reinterpret cast the raw input bytes
+                    if data_size > 0 {
+                        let element_count = tensor
+                            .metadata
+                            .shape
+                            .iter()
+                            .map(|d| *d as usize)
+                            .product::<usize>();
+                        if raw_input.len() % data_size != 0 {
+                            return Err(Status::invalid_argument("Length must be a multiple of 4"));
+                        } else if raw_input.len() / data_size != element_count {
+                            return Err(Status::invalid_argument(format!(
+                                "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
+                                input.name,
+                                element_count,
+                                raw_input.len() / data_size
+                            )));
+                        }
+
+                        let ptr = raw_input.as_ptr();
+                        match tensor.metadata.data_type {
+                            tensor::DataType::Bool => tensor::FlattenTensor::Bool(unsafe {
+                                Vec::from_raw_parts(ptr as *mut bool, element_count, element_count)
+                            }),
+                            tensor::DataType::Uint32 => tensor::FlattenTensor::Uint32(unsafe {
+                                Vec::from_raw_parts(ptr as *mut u32, element_count, element_count)
+                            }),
+                            tensor::DataType::Int32 => tensor::FlattenTensor::Int32(unsafe {
+                                Vec::from_raw_parts(ptr as *mut i32, element_count, element_count)
+                            }),
+                            tensor::DataType::Float32 => tensor::FlattenTensor::Float32(unsafe {
+                                Vec::from_raw_parts(ptr as *mut f32, element_count, element_count)
+                            }),
+                            tensor::DataType::Bytes => {
+                                return Err(Status::internal(format!(
+                                    "Unexpected BYTES type in non-bytes branch for input '{}'",
+                                    input.name
+                                )));
+                            }
+                        }
+                    } else {
+                        // For BYTES type, we need to parse length-prefixed strings and properly slice them
+                        // into bytes of array.
+                        let mut bytes_contents = vec![];
+                        let mut offset = 0;
+                        while offset + 4 <= raw_input.len() {
+                            let len = u32::from_le_bytes(
+                                raw_input[offset..offset + 4].try_into().unwrap(),
+                            ) as usize;
+                            offset += 4;
+                            if offset + len > raw_input.len() {
+                                return Err(Status::invalid_argument(format!(
+                                    "Invalid length-prefixed BYTES input for '{}', length exceeds raw input size",
+                                    input.name
+                                )));
+                            }
+                            bytes_contents.push(raw_input[offset..offset + len].to_vec());
+                            offset += len;
+                        }
+                        if offset != raw_input.len() {
+                            return Err(Status::invalid_argument(format!(
+                                "Invalid length-prefixed BYTES input for '{}', extra bytes at the end",
+                                input.name
+                            )));
+                        }
+                        tensor::FlattenTensor::Bytes(bytes_contents)
+                    }
+                }
+            };
+            tensor_request.tensors.push(tensor);
+        }
+        Ok(tensor_request)
+    }
+}
+
+impl TryFrom<NvCreateTensorResponse> for ModelInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateTensorResponse) -> Result<Self, Self::Error> {
+        let mut infer_response = ModelInferResponse {
+            model_name: response.model,
+            model_version: "1".to_string(),
+            id: response.id.unwrap_or_default(),
+            outputs: vec![],
+            parameters: ::std::collections::HashMap::<String, InferParameter>::new(),
+            raw_output_contents: vec![],
+        };
+        for tensor in &response.tensors {
+            infer_response
+                .outputs
+                .push(inference::model_infer_response::InferOutputTensor {
+                    name: tensor.metadata.name.clone(),
+                    datatype: tensor.metadata.data_type.to_string(),
+                    shape: tensor.metadata.shape.clone(),
+                    contents: match &tensor.data {
+                        tensor::FlattenTensor::Bool(data) => Some(inference::InferTensorContents {
+                            bool_contents: data.clone(),
+                            ..Default::default()
+                        }),
+                        tensor::FlattenTensor::Uint32(data) => {
+                            Some(inference::InferTensorContents {
+                                uint_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+                        tensor::FlattenTensor::Int32(data) => {
+                            Some(inference::InferTensorContents {
+                                int_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+                        tensor::FlattenTensor::Float32(data) => {
+                            Some(inference::InferTensorContents {
+                                fp32_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+                        tensor::FlattenTensor::Bytes(data) => {
+                            Some(inference::InferTensorContents {
+                                bytes_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+                    },
+                    ..Default::default()
+                });
+        }
+
+        Ok(infer_response)
+    }
+}
+
+impl TryFrom<NvCreateTensorResponse> for ModelStreamInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateTensorResponse) -> Result<Self, Self::Error> {
+        match ModelInferResponse::try_from(response) {
+            Ok(response) => Ok(ModelStreamInferResponse {
+                infer_response: Some(response),
+                ..Default::default()
+            }),
+            Err(e) => Ok(ModelStreamInferResponse {
+                infer_response: None,
+                error_message: format!("Failed to convert response: {}", e),
+            }),
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
-        match self {
-            &tensor::DataType::Bool => "BOOL".to_string(),
-            &tensor::DataType::Uint32 => "UINT32".to_string(),
-            &tensor::DataType::Int32 => "INT32".to_string(),
-            &tensor::DataType::Float32 => "FP32".to_string(),
-            &tensor::DataType::Bytes => "BYTES".to_string(),
+impl tensor::DataType {
+    pub fn to_kserve(&self) -> i32 {
+        match *self {
+            tensor::DataType::Bool => DataType::TypeBool as i32,
+            tensor::DataType::Uint32 => DataType::TypeUint32 as i32,
+            tensor::DataType::Int32 => DataType::TypeInt32 as i32,
+            tensor::DataType::Float32 => DataType::TypeFp32 as i32,
+            tensor::DataType::Bytes => DataType::TypeString as i32,
+        }
+    }
+}
+
+impl std::fmt::Display for tensor::DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            tensor::DataType::Bool => write!(f, "BOOL"),
+            tensor::DataType::Uint32 => write!(f, "UINT32"),
+            tensor::DataType::Int32 => write!(f, "INT32"),
+            tensor::DataType::Float32 => write!(f, "FP32"),
+            tensor::DataType::Bytes => write!(f, "BYTES"),
+        }
+    }
+}
+
+impl FromStr for tensor::DataType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "BOOL" => Ok(tensor::DataType::Bool),
+            "UINT32" => Ok(tensor::DataType::Uint32),
+            "INT32" => Ok(tensor::DataType::Int32),
+            "FP32" => Ok(tensor::DataType::Float32),
+            "BYTES" => Ok(tensor::DataType::Bytes),
+            _ => Err(anyhow::anyhow!("Invalid data type")),
         }
     }
 }

@@ -199,9 +199,37 @@ pub mod kserve_test {
     {
         async fn generate(
             &self,
-            _request: SingleIn<NvCreateTensorRequest>,
+            request: SingleIn<NvCreateTensorRequest>,
         ) -> Result<ManyOut<Annotated<NvCreateTensorResponse>>, Error> {
-            Err(Error::msg("Always fail"))?
+            // Echo input tensor in response, additionally check if there is input tensor
+            // name "repeat", if so, send the same response as many time as the value of the tensor
+            let (request, context) = request.transfer(());
+            let ctx = context.context();
+
+            let repeat_count = request
+                .tensors
+                .iter()
+                .find_map(|t| {
+                    if t.metadata.name == "repeat"
+                        && let tensor::FlattenTensor::Int32(data) = &t.data
+                        && !data.is_empty()
+                    {
+                        return Some(data[0]);
+                    }
+                    None
+                })
+                .unwrap_or(1);
+            let stream = async_stream::stream! {
+                for _ in 0..repeat_count {
+                    yield Annotated::from_data(NvCreateTensorResponse {
+                        id: request.id.clone(),
+                        model: request.model.clone(),
+                        tensors: request.tensors.clone(),
+                    });
+                }
+            };
+
+            Ok(ResponseStream::new(Box::pin(stream), ctx))
         }
     }
 
@@ -1236,23 +1264,64 @@ pub mod kserve_test {
         }
 
         let model_name = "tensor";
+        let inputs = vec![text_input.clone()];
         let request = tonic::Request::new(ModelInferRequest {
             model_name: model_name.into(),
             model_version: "1".into(),
             id: "1234".into(),
-            inputs: vec![text_input.clone()],
+            inputs: inputs.clone(),
             ..Default::default()
         });
 
         // [gluo WIP] failure but should hit tensor model handling
-        let response = client.model_infer(request).await;
-        assert!(response.is_err());
-        let err = response.unwrap_err();
+        let response = client.model_infer(request).await.unwrap();
         assert_eq!(
-            err.code(),
-            tonic::Code::Unimplemented,
-            "Expected Unimplemented error for unregistered model, get {}",
-            err
+            response.get_ref().model_name,
+            model_name,
+            "Expected response of the same model name",
         );
+        assert_eq!(
+            response.get_ref().model_version,
+            "1",
+            "Expected response of the same model version"
+        );
+        assert_eq!(
+            response.get_ref().id,
+            "1234",
+            "Expected response of the same request ID"
+        );
+        assert_eq!(
+            response.get_ref().outputs.len(),
+            inputs.len(),
+            "Expected the same number of outputs as inputs",
+        );
+        for output in &response.get_ref().outputs {
+            let mut found = false;
+            for input in &inputs {
+                if input.name != output.name {
+                    continue;
+                }
+                assert_eq!(
+                    output.name, input.name,
+                    "Expected output name to be '{}', got '{}'",
+                    input.name, output.name
+                );
+                assert_eq!(
+                    output.datatype, input.datatype,
+                    "Expected output datatype to be '{}', got '{}'",
+                    input.datatype, output.datatype
+                );
+                assert_eq!(
+                    output.shape, input.shape,
+                    "Expected output shape to be '{:?}', got '{:?}'",
+                    input.shape, output.shape
+                );
+                found = true;
+                break;
+            }
+            if !found {
+                panic!("Unexpected output name: {}", output.name);
+            }
+        }
     }
 }
