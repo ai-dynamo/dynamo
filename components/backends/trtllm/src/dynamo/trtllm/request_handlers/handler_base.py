@@ -100,6 +100,42 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
+    def request_perf_metrics_to_json(self, perf_metrics):
+        timing_metrics = perf_metrics.timing_metrics
+        kv_cache_metrics = perf_metrics.kv_cache_metrics
+        speculative_decoding = perf_metrics.speculative_decoding
+        metrics_json = {
+            "first_iter": perf_metrics.first_iter,
+            "last_iter": perf_metrics.last_iter,
+            # exclude perf_metrics.iter since it is only meaningful when the request is not finished
+        }
+        metrics_json["timing_metrics"] = {
+            "arrival_time": timing_metrics.arrival_time.total_seconds(),
+            "first_scheduled_time": timing_metrics.first_scheduled_time.total_seconds(),
+            "first_token_time": timing_metrics.first_token_time.total_seconds(),
+            "last_token_time": timing_metrics.last_token_time.total_seconds(),
+        }
+        metrics_json["kv_cache_metrics"] = {
+            "num_total_allocated_blocks": kv_cache_metrics.num_total_allocated_blocks,
+            "num_new_allocated_blocks": kv_cache_metrics.num_new_allocated_blocks,
+            "num_reused_blocks": kv_cache_metrics.num_reused_blocks,
+            "num_missed_blocks": kv_cache_metrics.num_missed_blocks,
+        }
+        if timing_metrics.kv_cache_size > 0:
+            metrics_json["timing_metrics"].update({
+                # TODO: move to kv_cache_metrics
+                "kv_cache_size": timing_metrics.kv_cache_size,
+                "kv_cache_transfer_start": timing_metrics.kv_cache_transfer_start.total_seconds(),
+                "kv_cache_transfer_end": timing_metrics.kv_cache_transfer_end.total_seconds(),
+            })
+        if speculative_decoding.total_draft_tokens > 0:
+            metrics_json["speculative_decoding"] = {
+                "acceptance_rate": speculative_decoding.acceptance_rate,
+                "total_accepted_draft_tokens": speculative_decoding.total_accepted_draft_tokens,
+                "total_draft_tokens": speculative_decoding.total_draft_tokens,
+            }
+        return metrics_json
+
     async def generate_locally(
         self, request: dict, embeddings: Optional[Union[torch.Tensor, dict]] = None
     ):
@@ -207,13 +243,24 @@ class HandlerBase:
             # Upon completion, send a final chunk with "stop" as the finish reason.
             # This signals to the client that the stream has ended.
             if res.finished and self.disaggregation_mode != DisaggregationMode.PREFILL:
+                final_out = {}
+                output = res.outputs[0]
+                if output.request_perf_metrics:
+                    json_perf_metrics = self.request_perf_metrics_to_json(output.request_perf_metrics)
+                    final_out["request_perf_metrics"] = json_perf_metrics
+                    logging.debug(f"Request perf metrics: {json_perf_metrics}")
+                if output.disaggregated_params:
+                    final_out["ctx_request_id"] = output.disaggregated_params.ctx_request_id
+
                 if self.multimodal_processor:
-                    final_out = self.multimodal_processor.get_stop_response(
+                    final_out.update(self.multimodal_processor.get_stop_response(
                         request_id, model_name
-                    )
+                    ))
                     yield final_out
                 else:
-                    yield {"finish_reason": "stop", "token_ids": []}
+                    item = {"finish_reason": "stop", "token_ids": []} 
+                    final_out.update(item)
+                    yield final_out
                 break
 
             if not res.outputs:

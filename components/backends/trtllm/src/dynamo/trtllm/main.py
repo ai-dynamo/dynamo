@@ -192,18 +192,53 @@ async def init(runtime: DistributedRuntime, config: Config):
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
+
+        # TODO: Remove this section of code once 
+        # https://github.com/NVIDIA/TensorRT-LLM/pull/7576 is merged.
+        # This is a bridge since there are fields which get 
+        # converted from their class structure, like KvCacheConfig,
+        # to a python dictionary.
+        kv_cache_config = arg_map.get("kv_cache_config") 
+        if kv_cache_config is not None and not isinstance(kv_cache_config, KvCacheConfig):
+            kv_cache_config_object = KvCacheConfig()
+            for key, value in kv_cache_config.items():
+                if hasattr(kv_cache_config_object, key):
+                    setattr(kv_cache_config_object, key, value)
+                else:
+                    logging.warn(f"KvCacheConfig object has no field {key}. Skipping assignment of {value}!")
+            arg_map["kv_cache_config"] = kv_cache_config_object
+        
+        scheduler_config = arg_map.get("scheduler_config") 
+        if scheduler_config is not None and not isinstance(scheduler_config, SchedulerConfig):
+            scheduler_config_object = SchedulerConfig()
+            for key, value in scheduler_config.items():
+                if hasattr(scheduler_config_object, key):
+                    setattr(scheduler_config_object, key, value)
+                else:
+                    logging.warn(f"SchedulerConfig object has no field {key}. Skipping assignment of {value}!")
+            arg_map["scheduler_config"] = scheduler_config_object
+
+        dynamic_batch_config = arg_map.get("dynamic_batch_config")  
+        if dynamic_batch_config is not None and not isinstance(dynamic_batch_config, DynamicBatchConfig):
+            dynamic_batch_config_object = DynamicBatchConfig()
+            for key, value in dynamic_batch_config.items():
+                if hasattr(dynamic_batch_config_object, key):
+                    setattr(dynamic_batch_config_object, key, value)
+                else:
+                    logging.warn(f"DynamicBatchConfig object has no field {key}. Skipping assignment of {value}!")
+            arg_map["dynamic_batch_config"] = dynamic_batch_config_object
+
+        # BuildConfig is already parsed correctly, do nothing.
+        # END TODO section
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         kv_cache_config = None
         if "kv_cache_config" not in arg_map:
-            kv_cache_config = {}
-            kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            kv_cache_config = KvCacheConfig(event_buffer_max_size=DEFAULT_KV_EVENT_BUFFER_MAX_SIZE)
         else:
             kv_cache_config = arg_map["kv_cache_config"]
-            if "event_buffer_max_size" not in kv_cache_config:
-                kv_cache_config[
-                    "event_buffer_max_size"
-                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            kv_cache_config.event_buffer_max_size = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         arg_map["kv_cache_config"] = kv_cache_config
 
         # Only pytorch backend is supported for now to publish events and metrics.
