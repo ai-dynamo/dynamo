@@ -137,6 +137,43 @@ def find_arg_index(args: list[str]) -> int:
     return idx
 
 
+def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
+    """
+    Parse and extract --override-engine-args from argument list.
+
+    Returns:
+        tuple: (override_dict, modified_args) where override_dict is the parsed JSON
+               and modified_args is the args list with --override-engine-args removed
+    """
+    override_dict = {}
+    try:
+        idx = args.index("--override-engine-args")
+        if idx + 1 < len(args):
+            # Parse existing override
+            override_dict = json.loads(args[idx + 1])
+            # Remove the old override args
+            del args[idx : idx + 2]
+    except (ValueError, json.JSONDecodeError):
+        pass  # No existing override or invalid JSON
+
+    return override_dict, args
+
+
+def deep_update(target: dict, source: dict) -> None:
+    """
+    Recursively update nested dictionaries.
+
+    Args:
+        target: Dictionary to update
+        source: Dictionary with new values
+    """
+    for key, value in source.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            deep_update(target[key], value)
+        else:
+            target[key] = value
+
+
 class ConfigModifierProtocol(Protocol):
     @classmethod
     def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
@@ -190,7 +227,7 @@ class VllmV1ConfigModifier:
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    "Missing extraPodSpec or mainContainer in worker service"
+                    f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{WORKER_COMPONENT_NAMES['vllm'].decode_worker_k8s_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -221,7 +258,7 @@ class VllmV1ConfigModifier:
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    "Missing extraPodSpec or mainContainer in worker service"
+                    f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{WORKER_COMPONENT_NAMES['vllm'].decode_worker_k8s_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -269,7 +306,9 @@ class VllmV1ConfigModifier:
             not worker_service.extraPodSpec
             or not worker_service.extraPodSpec.mainContainer
         ):
-            raise ValueError("Missing extraPodSpec or mainContainer in worker service")
+            raise ValueError(
+                f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{WORKER_COMPONENT_NAMES['vllm'].decode_worker_k8s_name}'"
+            )
         args = worker_service.extraPodSpec.mainContainer.args
 
         args = break_arguments(args)
@@ -395,7 +434,7 @@ class SGLangConfigModifier:
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    "Missing extraPodSpec or mainContainer in worker service"
+                    f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -425,7 +464,7 @@ class SGLangConfigModifier:
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    "Missing extraPodSpec or mainContainer in worker service"
+                    f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -475,7 +514,9 @@ class SGLangConfigModifier:
             not worker_service.extraPodSpec
             or not worker_service.extraPodSpec.mainContainer
         ):
-            raise ValueError("Missing extraPodSpec or mainContainer in worker service")
+            raise ValueError(
+                f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
+            )
         args = worker_service.extraPodSpec.mainContainer.args
 
         args = break_arguments(args)
@@ -593,7 +634,7 @@ class TrtllmConfigModifier:
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    "Missing extraPodSpec or mainContainer in worker service"
+                    "Missing extraPodSpec or mainContainer in TRTLLM worker service 'TRTLLMWorker'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -605,16 +646,7 @@ class TrtllmConfigModifier:
 
             # Keep the original extra-engine-args (prefill.yaml) which may contain user settings
             # Check if user already has override-engine-args and merge with our changes
-            override_dict = {}
-            try:
-                idx = args.index("--override-engine-args")
-                if idx + 1 < len(args):
-                    # Parse existing override
-                    override_dict = json.loads(args[idx + 1])
-                    # Remove the old override args
-                    del args[idx : idx + 2]
-            except (ValueError, json.JSONDecodeError):
-                pass  # No existing override or invalid JSON
+            override_dict, args = parse_override_engine_args(args)
 
             # Merge our overrides for converting prefill-only disagg to aggregated:
             # - Disable enable_block_reuse (no KV reuse for prefill-only)
@@ -655,7 +687,7 @@ class TrtllmConfigModifier:
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    "Missing extraPodSpec or mainContainer in worker service"
+                    "Missing extraPodSpec or mainContainer in TRTLLM worker service 'TRTLLMWorker'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -667,16 +699,7 @@ class TrtllmConfigModifier:
 
             # Keep the original extra-engine-args (decode.yaml) which may contain user settings
             # Check if user already has override-engine-args and merge with our changes
-            override_dict = {}
-            try:
-                idx = args.index("--override-engine-args")
-                if idx + 1 < len(args):
-                    # Parse existing override
-                    override_dict = json.loads(args[idx + 1])
-                    # Remove the old override args
-                    del args[idx : idx + 2]
-            except (ValueError, json.JSONDecodeError):
-                pass  # No existing override or invalid JSON
+            override_dict, args = parse_override_engine_args(args)
 
             # Merge our overrides for converting decode-only disagg to aggregated:
             # - Enable enable_block_reuse (to skip prefill in decode-only)
@@ -723,7 +746,9 @@ class TrtllmConfigModifier:
             not worker_service.extraPodSpec
             or not worker_service.extraPodSpec.mainContainer
         ):
-            raise ValueError("Missing extraPodSpec or mainContainer in worker service")
+            raise ValueError(
+                "Missing extraPodSpec or mainContainer in TRTLLM worker service 'TRTLLMWorker'"
+            )
         args = worker_service.extraPodSpec.mainContainer.args
 
         # Break arguments to handle both joined strings and lists
@@ -731,16 +756,7 @@ class TrtllmConfigModifier:
 
         # For TRT-LLM, we need to update the override-engine-args
         # to set the tensor_parallel_size
-        override_dict = {}
-        try:
-            idx = args.index("--override-engine-args")
-            if idx + 1 < len(args):
-                # Parse existing override dict
-                override_dict = json.loads(args[idx + 1])
-                # Remove the old override args
-                del args[idx : idx + 2]
-        except (ValueError, json.JSONDecodeError):
-            pass  # No existing override or invalid JSON
+        override_dict, args = parse_override_engine_args(args)
 
         # Add/update tensor_parallel_size in the override
         override_dict["tensor_parallel_size"] = tp_size

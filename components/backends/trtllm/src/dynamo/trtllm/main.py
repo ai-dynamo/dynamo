@@ -23,6 +23,7 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+from benchmarks.profiler.utils.config import deep_update
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -199,18 +200,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         try:
             overrides = json.loads(config.override_engine_args)
             logging.info(f"Applying engine arg overrides: {overrides}")
-
-            # Function to recursively update nested dictionaries
-            def deep_update(target, source):
-                for key, value in source.items():
-                    if (
-                        isinstance(value, dict)
-                        and key in target
-                        and isinstance(target[key], dict)
-                    ):
-                        deep_update(target[key], value)
-                    else:
-                        target[key] = value
 
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
