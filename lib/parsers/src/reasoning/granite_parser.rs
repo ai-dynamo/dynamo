@@ -38,7 +38,7 @@ impl Default for GraniteReasoningParser {
 }
 
 impl ReasoningParser for GraniteReasoningParser {
-    fn detect_and_parse_reasoning(&mut self, text: &str, _token_ids: &[u32]) -> ParserResult {
+    fn detect_and_parse_reasoning(&mut self, text: &str, _: &[u32]) -> ParserResult {
         let think_start_token = self
             .think_start_tokens
             .iter()
@@ -91,7 +91,7 @@ impl ReasoningParser for GraniteReasoningParser {
     fn parse_reasoning_streaming_incremental(
         &mut self,
         text: &str,
-        _token_ids: &[u32],
+        _: &[u32],
     ) -> ParserResult {
         // Implement streaming parsing logic specific to Granite format
 
