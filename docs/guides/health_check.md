@@ -47,14 +47,11 @@ curl -s localhost:8080/live -q | jq
 
 ## Frontend Health Check
 
-The frontend health endpoint reports a status of `healthy` once a
-model has been registered. During initial startup the frontend will
-report `unhealthy` with a HTTP status code of `HTTP/1.1 503 Service Unavailable`
-until workers have been initialized and registered
-with the frontend. Once workers have been registered, the `health`
-endpoint will also list registered endpoints and instances and return an HTTP status code of `HTTP/1.1 200 OK`.
+The frontend health endpoint reports a status of `healthy` as long as
+the service is running.  Once workers have been registered, the
+`health` endpoint will also list registered endpoints and instances.
 
-> **Note**: Frontend health depends only on endpoints (workers) being registered. It doesn't depend on worker health or liveness.
+> **Note**: Frontend liveness doesn't depend on worker health or liveness only on the Frontend service itself.
 
 #### Example Request
 
@@ -67,7 +64,7 @@ curl -v localhost:8080/health -q | jq
 Before workers are registered:
 
 ```
-HTTP/1.1 503 Service Unavailable
+HTTP/1.1 200 OK
 content-type: application/json
 content-length: 72
 date: Wed, 03 Sep 2025 13:31:44 GMT
