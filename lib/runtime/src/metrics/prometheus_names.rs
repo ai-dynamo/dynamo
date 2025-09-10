@@ -45,9 +45,8 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of requests waiting in HTTP queue before receiving a response.
-    /// This can measure the engine pool exhaustion if the engine is not able to process requests fast enough.
-    pub const HTTP_QUEUE: &str = "http_queue";
+    /// Number of requests waiting in HTTP queue before receiving the first response.
+    pub const HTTP_QUEUED_REQUESTS: &str = "http_queued_requests";
 
     /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
