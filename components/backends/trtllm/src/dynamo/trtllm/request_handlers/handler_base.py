@@ -21,8 +21,8 @@ from enum import Enum
 from typing import Optional, Union
 
 import torch
-from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector

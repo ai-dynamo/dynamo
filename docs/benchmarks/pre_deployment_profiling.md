@@ -102,7 +102,7 @@ Use the injector utility to place your DGD manifest into the PVC. The profiling 
 
 ```bash
 # Inject your disagg manifest
-python3 deploy/utils/inject_manifest.py \
+python3 -m deploy.utils.inject_manifest \
   --namespace $NAMESPACE \
   --src components/backends/vllm/deploy/disagg.yaml \
   --dest /data/configs/disagg.yaml
@@ -127,13 +127,13 @@ Use the default pre-built image and inject custom configurations via PVC:
 2. **Inject your custom disagg configuration:**
    ```bash
    # Use default disagg.yaml config
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
+   python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
 
    # Or use a custom disagg config file
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
+   python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/configs/disagg.yaml
 
    # Or specify a custom target path in the PVC
-   python3 deploy/utils/inject_manifest.py --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/profiling_results/my-disagg.yaml
+   python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src my-custom-disagg.yaml --dest /data/profiling_results/my-disagg.yaml
    ```
 
    > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
@@ -193,10 +193,10 @@ To download the results:
 
 ```bash
 # Download to directory
-python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
+python3 -m deploy.utils.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results
 
 # Download without any of the auto-created config.yaml files used in profiling
-python3 deploy/utils/download_pvc_results.py --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results --no-config
+python3 -m deploy.utils.download_pvc_results --namespace $NAMESPACE --output-dir ./results --folder /data/profiling_results --no-config
 ```
 
 The script will:

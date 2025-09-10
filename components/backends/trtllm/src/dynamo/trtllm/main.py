@@ -8,7 +8,6 @@ import signal
 import sys
 
 import uvloop
-from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import (
     BuildConfig,
     CapacitySchedulerPolicy,
@@ -16,6 +15,7 @@ from tensorrt_llm.llmapi import (
     KvCacheConfig,
     SchedulerConfig,
 )
+from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
