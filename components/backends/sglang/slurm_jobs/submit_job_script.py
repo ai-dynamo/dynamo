@@ -218,9 +218,10 @@ def main(input_args: list[str] | None = None):
 
     # parse profiler configs
     profiler_config = {}
-    for key_val_pair in args.profiler.split("; "):
-        key, val = key_val_pair.split("=")
-        profiler_config[key] = val
+    if args.profiler:
+        for key_val_pair in args.profiler.split("; "):
+            key, val = key_val_pair.split("=")
+            profiler_config[key] = val
 
     # validate profiler configs
     if profiler_config == {} or profiler_config["type"] == "manual":
