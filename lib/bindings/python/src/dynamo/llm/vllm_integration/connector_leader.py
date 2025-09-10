@@ -142,13 +142,22 @@ class KvConnectorLeader:
             scheduler_output.scheduled_cached_reqs.new_block_ids,
             scheduler_output.scheduled_cached_reqs.num_computed_tokens,
         ):
-            output.add_cached_request(
-                request_id=req_id,
-                resumed_from_preemption=resumed_from_preemption,
-                new_token_ids=new_token_ids,
-                new_block_ids=new_block_ids[0],
-                num_computed_tokens=num_computed_tokens,
-            )
+            if new_block_ids is not None:
+                output.add_cached_request(
+                    request_id=req_id,
+                    resumed_from_preemption=resumed_from_preemption,
+                    new_token_ids=new_token_ids,
+                    new_block_ids=new_block_ids[0],
+                    num_computed_tokens=num_computed_tokens,
+                )
+            else:
+                output.add_cached_request(
+                    request_id=req_id,
+                    resumed_from_preemption=resumed_from_preemption,
+                    new_token_ids=new_token_ids,
+                    new_block_ids=[],
+                    num_computed_tokens=num_computed_tokens,
+                )
 
         output.add_num_scheduled_tokens(scheduler_output.num_scheduled_tokens)
 
