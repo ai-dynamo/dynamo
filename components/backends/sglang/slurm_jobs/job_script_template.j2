@@ -10,6 +10,7 @@
 #SBATCH --partition={{ partition }}
 
 # Constants
+set -x
 PREFILL_NODES={{ prefill_nodes }}
 DECODE_NODES={{ decode_nodes }}
 PREFILL_WORKERS={{ prefill_workers }}
@@ -18,7 +19,7 @@ TOTAL_NODES=$((PREFILL_NODES + DECODE_NODES))
 GPUS_PER_NODE={{ gpus_per_node }}
 PREFILL_NODES_PER_WORKER=$((PREFILL_NODES / PREFILL_WORKERS))
 DECODE_NODES_PER_WORKER=$((DECODE_NODES / DECODE_WORKERS))
-LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}/"
+LOG_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}"
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
 OUTPUT_DIR="${SLURM_SUBMIT_DIR}/outputs"
 MODEL_DIR="{{ model_dir }}"
@@ -26,6 +27,7 @@ CONFIG_DIR="{{ config_dir }}"
 CONTAINER_IMAGE="{{ container_image }}"
 NETWORK_INTERFACE="{{ network_interface }}"
 GPU_TYPE="{{ gpu_type | default('h100') }}"
+set +x
 
 {% raw %}
 
@@ -173,6 +175,12 @@ WORKER_ARGS="--gpu_type ${GPU_TYPE} --gpus_per_node ${GPUS_PER_NODE} --master_ip
 WORKER_ARGS="$WORKER_ARGS --multiple-frontends-enabled"
 {% endraw %}
 {% endif %}
+{% if use_init_location %}
+{% raw %}
+# Add multiple frontends flag for worker setup
+WORKER_ARGS="$WORKER_ARGS --use_init_locations"
+{% endraw %}
+{% endif %}
 {% raw %}
 
 {% endraw %}
@@ -186,14 +194,14 @@ $cmd &
 
 # Launch frontend on master node (node 1) - this will also start NATS/ETCD
 echo "Launching frontend + NATS/ETCD on master node ${MASTER_NODE}"
-cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$MASTER_NODE --output=${LOG_DIR}/${MASTER_NODE}_frontend.out --error=${LOG_DIR}/${MASTER_NODE}_frontend.err python /scripts/worker_setup.py --worker_type frontend --worker_idx 0 ${WORKER_ARGS}"
+cmd="srun --overlap $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$MASTER_NODE --output=${LOG_DIR}/${MASTER_NODE}_frontend_0.out --error=${LOG_DIR}/${MASTER_NODE}_frontend.err python /scripts/worker_setup.py --worker_type frontend --worker_idx 0 ${WORKER_ARGS}"
 echo "$cmd"
 $cmd &
 
 # Launch additional frontends on designated nodes
 if [ "$ADDITIONAL_FRONTENDS" -gt 0 ]; then
     frontend_idx=1  # Start from 1 since node 1 is frontend 0
-    nodes_per_frontend=$(( (TOTAL_NODES - 1 + ADDITIONAL_FRONTENDS - 1) / ADDITIONAL_FRONTENDS ))
+    nodes_per_frontend=$(( (TOTAL_NODES - 2 + ADDITIONAL_FRONTENDS - 1) / ADDITIONAL_FRONTENDS ))
     frontend_node_idx=2
     
     for i in $(seq 1 $ADDITIONAL_FRONTENDS); do
@@ -280,8 +288,22 @@ echo ""
 echo "Make sure to cancel the job at the end:"
 echo "scancel $SLURM_JOB_ID"
 
-# Wait for all tasks to complete
-wait
-echo "Script finished at $(date)"
+# Instead of waiting for all tasks to complete, wait for profile.sh to complete and then exit. 
 
+{% endraw %}
+
+PROFILER_TYPE={{ profiler_type }}
+PROFILER_ARGS="{{ profiler_arg }}"
+
+{% if do_profile %}
+{% raw %}
+srun --nodes=1 --ntasks=1 $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${nodes[0]} --output=${LOG_DIR}/profile.out --error=${LOG_DIR}/profile.err --overlap bash /scripts/${PROFILER_TYPE}/bench.sh $PREFILL_WORKERS $DECODE_WORKERS ${PROFILER_ARGS} &
+{% endraw %}
+{% endif %}
+
+{% raw %}
+wait -n
+first_exit_code=$?
+echo "Script finished at $(date) with exit code ${first_exit_code}"
+exit $first_exit_code
 {% endraw %}
