@@ -235,7 +235,12 @@ impl KvRouter {
         let runtime_configs_rx = runtime_configs_watcher.receiver();
 
         let indexer = if kv_router_config.use_kv_events {
-            Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
+            let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(&component);
+            Indexer::KvIndexer(KvIndexer::new(
+                cancellation_token.clone(),
+                block_size,
+                kv_indexer_metrics,
+            ))
         } else {
             // hard code 120 seconds for now
             Indexer::ApproxKvIndexer(ApproxKvIndexer::new(
