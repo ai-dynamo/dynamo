@@ -290,51 +290,6 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
 #######################################################################
-########## DEVELOPMENT TARGETS FEATURE MATRIX #########################
-#######################################################################
-# Feature           │ dev + run.sh          │ local-dev + run.sh       │ local-dev + Dev Container
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Default User      │ root                  │ ubuntu                   │ ubuntu
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# User Setup        │ None                  │ Matches UID/GID of       │ Matches UID/GID of
-#                   │                       │ build.sh user            │ build.sh user
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Permissions       │ root                  │ ubuntu with sudo         │ ubuntu with sudo
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Home Directory    │ /root                 │ /home/ubuntu             │ /home/ubuntu
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Working Directory │ /workspace            │ /workspace               │ /home/ubuntu/dynamo
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Rust Toolchain    │ System install        │ User install (~/.rustup, │ User install (~/.rustup,
-#                   │ (/usr/local/rustup,   │  ~/.cargo)               │  ~/.cargo)
-#                   │  /usr/local/cargo)    │                          │
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Python Env        │ root owned            │ User owned venv          │ User owned venv
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# File Permissions  │ root-level            │ user-level, safe         │ user-level, safe
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-# Compatibility     │ Legacy workflows,     │ workspace writable on NFS│workspace writable on NFS
-#                   │   workspace not       │                          │
-#                   │   writable on NFS     │                          │
-# ──────────────────┼───────────────────────┼──────────────────────────┼────────────────────────────
-#
-# USAGE GUIDELINES:
-# • Use dev + run.sh: run.sh script for command-line development by root user
-# • Use local-dev + run.sh: run.sh script for command-line development using your local user ID
-# • Use local-dev + Dev Container: VS Code/Cursor Dev Container Plugin, using your local user ID
-#
-# EXAMPLE COMMANDS:
-# 1. dev + run.sh:
-#    run.sh --mount-workspace ...
-#
-# 2. local-dev + run.sh:
-#    run.sh --mount-workspace --image dynamo:latest-vllm-local-dev ...
-#
-# 3. local-dev + Dev Container:
-#    Use VS Code/Cursor Dev Container plugin with devcontainer.json configuration
-
-
-#######################################################################
 ########## Development (Dev Container only) ###########################
 #######################################################################
 #
