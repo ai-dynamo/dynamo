@@ -21,9 +21,8 @@ import signal
 import sys
 from typing import AsyncIterator, Tuple
 
-import torch
 import uvloop
-from transformers import AutoImageProcessor, LlavaForConditionalGeneration
+from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
@@ -33,7 +32,9 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.encode_utils import encode_image_embeddings, get_encoder_components
 from utils.image_loader import ImageLoader
+from utils.model import load_vision_model
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
@@ -70,12 +71,13 @@ class VllmEncodeWorker:
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.model, trust_remote_code=True
         )
-        # self.vision_model = load_vision_model(self.model)
-        self.vision_model = LlavaForConditionalGeneration.from_pretrained(
-            self.model, device_map="auto", torch_dtype=torch.float16
-        ).eval()
-
+        self.vision_model = load_vision_model(self.model)
         self.min_workers = 1
+
+        # Get encoder components for the model
+        self.vision_encoder, self.projector = get_encoder_components(
+            self.model, self.vision_model
+        )
 
     def cleanup(self):
         pass
@@ -104,59 +106,41 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.image_loader.load_image(request.image_url)
+            if not request.multimodal_input.image_url:
+                raise ValueError("image_url is required for the encode worker.")
+
+            image = await self.image_loader.load_image(
+                request.multimodal_input.image_url
+            )
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
-            # [gluo NOTE] The commented section is for VLM generalization support,
-            # will use more generic approach once utils/model.py is fixed,
-            # see utils/models.py for details.
-            # # Add a batch dimension to everything
-            # for item in image_embeds:
-            #     image_embeds[item] = image_embeds[item].unsqueeze(0).to(DEVICE)
-            # logger.debug(f"Image embeds: {image_embeds}")
 
-            # image_grid_thw = (
-            #     image_embeds["image_grid_thw"].tolist()
-            #     if "image_grid_thw" in image_embeds
-            #     else None
-            # )
-            # image_sizes = (
-            #     image_embeds["image_sizes"].tolist()
-            #     if "image_sizes" in image_embeds
-            #     else [image.size]
-            # )
-            # logger.debug(
-            #     f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
-            # )
+            # Encode the image embeddings using model-specific encoder
+            embeddings = encode_image_embeddings(
+                model_name=self.model,
+                image_embeds=image_embeds,
+                vision_encoder=self.vision_encoder,
+                projector=self.projector,
+            )
 
-            # with torch.no_grad():
-            #     embeddings = self.vision_model.get_multimodal_embeddings(**image_embeds)
-            #     if isinstance(embeddings, tuple) or isinstance(embeddings, list):
-            #         # The result multimodal_embeddings may be a list or tuple of tensors, with each
-            #         # tensor corresponding to a multimodal data item (image or video).
-            #         # TODO: for multi-image support, this result will contain multiple tensors.
-            #         embeddings = embeddings[0].unsqueeze(0)
-            #     logger.debug(
-            #         f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
-            #     )
+            image_grid_thw = (
+                image_embeds["image_grid_thw"].tolist()
+                if "image_grid_thw" in image_embeds
+                else None
+            )
+            logger.debug(
+                f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
+            )
 
-            with torch.no_grad():
-                logger.debug(f"Vision model device: {self.vision_model.device}")
-                vision_outputs = self.vision_model.vision_tower(
-                    image_embeds["pixel_values"].to(self.vision_model.device)
-                )
-                logger.debug("Vision model completed.")
-
-                embeddings = vision_outputs.last_hidden_state
-                embeddings = self.vision_model.multi_modal_projector(embeddings)
-
+            request.image_grid_thw = image_grid_thw
+            request.embeddings_shape = tuple(embeddings.shape)
             descriptor = connect.Descriptor(embeddings)
 
             with self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.metadata()
                 # Clear the image URL as hint that the image is passed as embeddings.
-                request.image_url = None
+                request.multimodal_input.image_url = None
 
                 logger.debug(f"Request: {request.model_dump_json()}")
 
@@ -277,7 +261,9 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")

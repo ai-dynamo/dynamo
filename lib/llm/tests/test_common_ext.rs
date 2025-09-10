@@ -25,6 +25,52 @@ fn test_chat_completions_ignore_eos_from_common() {
 
     assert_eq!(request.common.ignore_eos, Some(true));
     assert_eq!(request.common.min_tokens, Some(100));
+    assert_eq!(request.common.include_stop_str_in_output, None);
+}
+
+#[test]
+fn test_chat_completions_include_stop_str_in_output_from_common() {
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "include_stop_str_in_output": true
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(request.common.include_stop_str_in_output, Some(true));
+    assert_eq!(request.get_include_stop_str_in_output(), Some(true));
+}
+
+#[test]
+fn test_completions_include_stop_str_in_output_from_common() {
+    let json_str = r#"{
+        "model": "test-model",
+        "prompt": "Hello world",
+        "include_stop_str_in_output": true
+    }"#;
+
+    let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
+    assert_eq!(request.common.include_stop_str_in_output, Some(true));
+    // When exposed on completions, this should also be available via the provider
+    assert_eq!(request.get_include_stop_str_in_output(), Some(true));
+}
+
+#[test]
+fn test_sampling_parameters_include_stop_str_in_output_extraction() {
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+
+    let request = NvCreateChatCompletionRequest {
+        inner: Default::default(),
+        common: CommonExt::builder()
+            .include_stop_str_in_output(true)
+            .build()
+            .unwrap(),
+        nvext: None,
+    };
+
+    let sampling = request.extract_sampling_options().unwrap();
+    assert_eq!(sampling.include_stop_str_in_output, Some(true));
 }
 
 #[test]
@@ -136,6 +182,40 @@ fn test_chat_completions_common_overrides_nvext() {
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.ignore_eos, Some(false)); // common value takes precedence
     assert_eq!(stop_conditions.min_tokens, Some(50));
+}
+
+#[test]
+fn test_max_thinking_tokens_extraction() {
+    // Test that max_thinking_tokens is extracted from nvext to StopConditions
+    let json_str = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "nvext": {
+            "max_thinking_tokens": 1024
+        }
+    }"#;
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+
+    // Verify nvext parsing
+    assert_eq!(
+        request.nvext.as_ref().unwrap().max_thinking_tokens,
+        Some(1024)
+    );
+
+    // Verify extraction to StopConditions
+    let stop_conditions = request.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions.max_thinking_tokens, Some(1024));
+
+    // Test with None value
+    let json_str_none = r#"{
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}]
+    }"#;
+
+    let request_none: NvCreateChatCompletionRequest = serde_json::from_str(json_str_none).unwrap();
+    let stop_conditions_none = request_none.extract_stop_conditions().unwrap();
+    assert_eq!(stop_conditions_none.max_thinking_tokens, None);
 }
 
 #[test]
@@ -279,4 +359,27 @@ fn test_min_tokens_only_at_root_level() {
     // Verify through stop conditions extraction
     let stop_conditions = request.extract_stop_conditions().unwrap();
     assert_eq!(stop_conditions.min_tokens, Some(150));
+}
+
+#[test]
+fn test_sampling_parameters_extraction() {
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_llm::protocols::openai::common_ext::CommonExt;
+
+    // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
+    let request = NvCreateChatCompletionRequest {
+        inner: Default::default(),
+        common: CommonExt::builder()
+            .top_k(42)
+            .repetition_penalty(1.3)
+            .build()
+            .unwrap(),
+        nvext: None,
+    };
+
+    let sampling_options = request.extract_sampling_options().unwrap();
+
+    assert_eq!(sampling_options.top_k, Some(42));
+    assert_eq!(sampling_options.repetition_penalty, Some(1.3));
 }

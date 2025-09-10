@@ -19,6 +19,56 @@ limitations under the License.
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
 
+```mermaid
+graph TB
+    subgraph "Developer Laptop"
+        subgraph IDE["Cursor/VS Code"]
+            EXT["Dev Container Extension"]
+            SSHEXT["Remote-SSH Extension"]
+        end
+        TERM["iTerm/Terminal"]
+    end
+
+    subgraph WS["Linux Workstation"]
+        DIR["~/dynamo<br/>(host directory)"]
+        HFCACHE["~/.cache/huggingface<br/>(host cache)"]
+        GITCONFIG["~/.gitconfig<br/>(host git config)"]
+
+        subgraph CONTAINER["Docker Container<br/>vsc-dynamo-SHA-uid<br/>Running as: ubuntu user"]
+            MOUNT["/home/ubuntu/dynamo<br/>(mounted directory)"]
+            HFMOUNT["/home/ubuntu/.cache/huggingface<br/>(mounted cache)"]
+            GITCONFIGCOPY["/home/ubuntu/.gitconfig<br/>(via Dev Container setting)"]
+            TOOLS["rust-analyzer<br/>cargo<br/>etc."]
+        end
+
+        IMAGE["Docker Image<br/>dynamo:latest-vllm-local-dev"]
+
+        IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
+    end
+
+    TERM -->|"SSH Connection"| DIR
+    SSHEXT -->|"1. Remote-SSH"| DIR
+    EXT -->|"2. Dev Container:<br/>Open Folder (via ssh)"| IMAGE
+    EXT -->|"3. IDE/shell via<br/>ssh+docker exec"| CONTAINER
+    DIR <-.->|"Volume Mount<br/>(bidirectional)"| MOUNT
+    HFCACHE <-.->|"Volume Mount<br/>(HF cache)"| HFMOUNT
+    GITCONFIG -->|"Copy"| GITCONFIGCOPY
+
+    style IDE fill:#e1f5fe
+    style EXT fill:#cfe2ff
+    style SSHEXT fill:#cfe2ff
+    style TERM fill:#e1f5fe
+    style DIR fill:#fff3e0
+    style HFCACHE fill:#fff3e0
+    style GITCONFIG fill:#fff3e0
+    style IMAGE fill:#f3e5f5
+    style CONTAINER fill:#d4edda
+    style MOUNT fill:#fff9c4
+    style HFMOUNT fill:#fff9c4
+    style GITCONFIGCOPY fill:#fff9c4
+    style TOOLS fill:#ffebee
+```
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed:
@@ -41,11 +91,10 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 
 ### Step 1: Build the Development Container Image
 
-Build `dynamo:latest-vllm-local-dev` from scratch from the source:
-- Note that currently, `local-dev` are only implemented for `--framework VLLM` and `--framework SGLANG`, for now.
+Build `dynamo:latest-vllm` from scratch from the source:
 
 ```bash
-./container/build.sh --target local-dev
+./container/build.sh --target dev --framework VLLM
 ```
 
 The container will be built and give certain file permissions to your local uid and gid.
@@ -145,13 +194,6 @@ File Structure:
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit preserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
-## Customization
-Edit `.devcontainer/devcontainer.json` to modify:
-- VS Code settings and extensions
-- Environment variables
-- Container configuration
-- Custom Mounts
-
 ## Documentation
 
 To look at the docs run:
@@ -192,6 +234,31 @@ cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 ```
 
 Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
+
+### SGLANG Custom devcontainer.json Configuration (EXPERIMENTAL)
+
+This is experimental. Please update/fix if you encounter problems. For sglang Dev Container, you first need to build `dynamo:latest-sglang-local-dev` image like this (wait about half an hour):
+
+```bash
+./container/build.sh --framework SGLANG --target local-dev
+```
+
+Then, make a copy of the `devcontainer.json file` to a directory of your choice. For this example, we'll just call it `sglang`:
+
+```bash
+mkdir .devcontainer/sglang/
+cp -a .devcontainer/devcontainer.json .devcontainer/sglang/
+```
+
+Afterwards, edit your `.devcontainer/sglang/devcontainer.json` so that the name and image correspond to SGLANG. Example:
+```json
+    "name": "[sglang] This is my amazing custom Dev Container Development",
+    ...
+    "image": "dynamo:latest-sglang-local-dev",
+```
+
+Now, go to **Dev Containers: Open Folder in Container** and select `[sglang] This is my amazing custom Dev Container Development`. The post-create.sh script should be running.
+
 
 ### SSH Keys for Git Operations
 

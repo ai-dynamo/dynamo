@@ -6,8 +6,10 @@
 package dynamo
 
 import (
+	"fmt"
 	"testing"
 
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -46,10 +48,14 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					"/bin/sh",
 					"-c",
 				},
+				Ports: []corev1.ContainerPort{
+					{Name: commonconsts.DynamoMetricsPortName, ContainerPort: commonconsts.DynamoPlannerMetricsPort, Protocol: corev1.ProtocolTCP},
+				},
 				Env: []corev1.EnvVar{
 					{Name: "DYN_NAMESPACE", Value: "dynamo-namespace"},
 					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},
 					{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "namespace"},
+					{Name: "PROMETHEUS_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoPlannerMetricsPort)},
 				},
 			},
 		},

@@ -3,11 +3,11 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
 import uvloop
-from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import (
     BuildConfig,
     CapacitySchedulerPolicy,
@@ -15,12 +15,14 @@ from tensorrt_llm.llmapi import (
     KvCacheConfig,
     SchedulerConfig,
 )
+from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
 from transformers import AutoConfig
 
-from dynamo.llm import ModelRuntimeConfig, ModelType, register_llm
+import dynamo.nixl_connect as nixl_connect
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
@@ -121,6 +123,21 @@ async def init(runtime: DistributedRuntime, config: Config):
             .client()
         )
 
+    encode_client = None
+    if config.encode_endpoint:
+        logging.info(
+            f"Initializing encode worker client for endpoint: {config.encode_endpoint}"
+        )
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            config.encode_endpoint
+        )
+        encode_client = (
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
+            .client()
+        )
+
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
@@ -206,38 +223,53 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params = SamplingParams()
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
-    modelType = ModelType.Backend
+    model_input = ModelInput.Tokens
+    model_type = ModelType.Chat | ModelType.Completions
     multimodal_processor = None
+
+    if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        # We need to initialize the tokenizer for the test logits processor
+        # But detokenizing still happens in the rust engine, so we do _not_ want
+        # to set default_sampling_params.detokenize to True.
+        engine_args["skip_tokenizer_init"] = False
 
     if modality == "multimodal":
         engine_args["skip_tokenizer_init"] = False
-        modelType = ModelType.Chat
+        model_input = ModelInput.Text
         model_config = AutoConfig.from_pretrained(
             config.model_path, trust_remote_code=True
         )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model_path,
+            max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
+            allowed_local_media_path=config.allowed_local_media_path,
         )
 
     else:
         # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
         default_sampling_params.detokenize = False
 
+    connector = None
+    logging.info("Initializing NIXL Connect.")
+    connector = nixl_connect.Connector()
+    await connector.initialize()
+
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
-        if is_first_worker(config):
-            # Register the model with runtime config
-            await register_llm(
-                modelType,
-                endpoint,
-                config.model_path,
-                config.served_model_name,
-                kv_cache_block_size=config.kv_block_size,
-                migration_limit=config.migration_limit,
-            )
+        # should ideally call get_engine_runtime_config
+        # this is because we don't have a good way to
+        # get total_kv_blocks from the engine yet without calling get_stats_async
+        # This causes an issue because get_stats_async doesn't work when no requests are sent to the engine
+        # So for now, we just set the parsers from the config
+        # TODO: fix this once we have a better way to get total_kv_blocks
+        runtime_config = ModelRuntimeConfig()
+
+        runtime_config.reasoning_parser = config.reasoning_parser
+        runtime_config.tool_call_parser = config.tool_call_parser
+
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -247,8 +279,29 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            encode_client=encode_client,
             multimodal_processor=multimodal_processor,
+            connector=connector,
         )
+
+        if next_client:
+            logging.info(
+                f"Waiting for the next endpoint to be ready: {config.next_endpoint}"
+            )
+            await next_client.wait_for_instances()
+
+        if is_first_worker(config):
+            # Register the model with runtime config
+            await register_llm(
+                model_input,
+                model_type,
+                endpoint,
+                config.model_path,
+                config.served_model_name,
+                kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
+                runtime_config=runtime_config,
+            )
 
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
@@ -256,16 +309,20 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
+            metrics_labels = [("model", config.served_model_name)]
             async with get_publisher(
                 component,
                 engine,
                 kv_listener,
                 int(endpoint.lease_id()),
                 config.kv_block_size,
+                metrics_labels,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                await endpoint.serve_endpoint(handler.generate)
+                await endpoint.serve_endpoint(
+                    handler.generate, metrics_labels=metrics_labels
+                )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(handler.generate)

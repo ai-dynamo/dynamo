@@ -32,7 +32,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import FlexibleArgumentParser
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -40,12 +40,15 @@ from dynamo.runtime.logging import configure_dynamo_logging
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
+from utils.protocol import (
+    MultiModalInput,
+    MultiModalRequest,
+    MyRequestOutput,
+    vLLMMultimodalRequest,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-prompt_template = "USER: <image>\n<prompt> ASSISTANT:"
 
 
 class RequestType(Enum):
@@ -134,7 +137,7 @@ class Processor(ProcessMixIn):
     async def _generate(
         self,
         raw_request: Union[CompletionRequest, ChatCompletionRequest],
-        image: str,
+        multimodal_input: MultiModalInput,
         request_type: RequestType,
     ):
         request_id = str(uuid.uuid4().hex)
@@ -151,7 +154,7 @@ class Processor(ProcessMixIn):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
-            image_url=image,
+            multimodal_input=multimodal_input,
         )
 
         # model_dump_json() serializes the request to JSON string
@@ -233,16 +236,23 @@ class Processor(ProcessMixIn):
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
         )
-        image_url = None
+        multimodal_input = MultiModalInput()
 
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    image_url = item.image_url.url
-        if image_url is None:
-            raise ValueError("Image URL is required")
+                    multimodal_input.image_url = item.image_url.url
+                elif item.type == "video_url":
+                    if multimodal_input.image_url is not None:
+                        raise ValueError("Cannot provide both image and video URLs")
+                    multimodal_input.video_url = item.video_url.url
 
-        async for response in self._generate(chat_request, image_url, RequestType.CHAT):
+        if multimodal_input.image_url is None and multimodal_input.video_url is None:
+            raise ValueError("Either image URL or video URL is required")
+
+        async for response in self._generate(
+            chat_request, multimodal_input, RequestType.CHAT
+        ):
             logger.debug(
                 f"Generated response type {type(response)}, content: {response}"
             )
@@ -311,7 +321,8 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelType.Chat,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelType.Chat,
         generate_endpoint,
         config.model,
         config.served_model_name,
@@ -322,7 +333,9 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")

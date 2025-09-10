@@ -138,6 +138,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
 		labels[commonconsts.KubeLabelDynamoNamespace] = graphDynamoNamespace
+		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
 
 		// Propagate metrics annotation from parent deployment if present
 		if parentDynamoGraphDeployment.Annotations != nil {
@@ -659,19 +660,35 @@ func isWorkerComponent(componentType string) bool {
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
 func addStandardEnvVars(container *corev1.Container, controllerConfig controller_common.Config) {
+	standardEnvVars := []corev1.EnvVar{}
 	if controllerConfig.NatsAddress != "" {
-		container.Env = append(container.Env, corev1.EnvVar{
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
 			Name:  "NATS_SERVER",
 			Value: controllerConfig.NatsAddress,
 		})
 	}
 
 	if controllerConfig.EtcdAddress != "" {
-		container.Env = append(container.Env, corev1.EnvVar{
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
 			Name:  "ETCD_ENDPOINTS",
 			Value: controllerConfig.EtcdAddress,
 		})
 	}
+
+	if controllerConfig.ModelExpressURL != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "MODEL_EXPRESS_URL",
+			Value: controllerConfig.ModelExpressURL,
+		})
+	}
+	if controllerConfig.PrometheusEndpoint != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "PROMETHEUS_ENDPOINT",
+			Value: controllerConfig.PrometheusEndpoint,
+		})
+	}
+	// merge the env vars to allow users to override the standard env vars
+	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
@@ -881,6 +898,17 @@ func GenerateGrovePodGangSet(
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
+
+	// Validate kai-scheduler queue once if kai-scheduler is enabled
+	var validatedQueueName string
+	if controllerConfig.Grove.Enabled && controllerConfig.KaiScheduler.Enabled {
+		var err error
+		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+		}
+	}
+
 	dynamoNamespace, err := getDynamoNamespace(dynamoDeployment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get the graph dynamo namespace: %w", err)
@@ -934,6 +962,10 @@ func GenerateGrovePodGangSet(
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
 			clique.Annotations = annotations
+
+			// Inject kai-scheduler settings if enabled
+			injectKaiSchedulerIfEnabled(clique, controllerConfig, validatedQueueName)
+
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
@@ -960,6 +992,7 @@ func GenerateGrovePodGangSet(
 func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDynamoComponentName(dynamoDeployment, componentName)
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
 	}

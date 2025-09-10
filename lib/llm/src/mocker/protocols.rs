@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -105,6 +93,10 @@ pub struct MockEngineArgs {
 
     #[builder(default = "1")]
     pub dp_size: u32,
+
+    /// Optional startup time in seconds to simulate engine initialization delay
+    #[builder(default = "None")]
+    pub startup_time: Option<f64>,
 }
 
 impl Default for MockEngineArgs {
@@ -139,6 +131,7 @@ impl MockEngineArgs {
             "watermark",
             "speedup_ratio",
             "dp_size",
+            "startup_time",
         ]
         .iter()
         .cloned()
@@ -212,6 +205,12 @@ impl MockEngineArgs {
             && let Some(num) = value.as_u64()
         {
             builder = builder.dp_size(num as u32);
+        }
+
+        if let Some(value) = extra_args.get("startup_time")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.startup_time(Some(num));
         }
 
         // Build the MockEngineArgs with either defaults or overridden values
