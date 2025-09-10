@@ -30,9 +30,19 @@ distributed tracing.
 | ----------------------------------- | --------------------------------------------| ---------------------------------------------------- |
 | `DYN_LOGGING_JSONL`                | Enable JSONL logging format (default: READABLE)                  | `DYN_LOGGING_JSONL=true`                          |
 | `DYN_LOG_USE_LOCAL_TZ`             | Use local timezone for logging timestamps (default: UTC)         | `DYN_LOG_USE_LOCAL_TZ=1`                       |
-| `DYN_LOG`                          | Log levels per target (comma-separated key-value pairs)             | `DYN_LOG=info,dynamo_runtime::system_status_server:trace`  |
+| `DYN_LOG`                          | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>`             | `DYN_LOG=info,dynamo_runtime::system_status_server:trace`  |
 | `DYN_LOGGING_CONFIG_PATH`          | Path to custom TOML logging configuration file            | `DYN_LOGGING_CONFIG_PATH=/path/to/config.toml`|
 
+
+## Available Logging Levels
+
+| **Logging Levels (Least to Most Verbose)** | **Description**                                                                 |
+|-------------------------------------------|---------------------------------------------------------------------------------|
+| **ERROR**                                 | Critical errors (e.g., unrecoverable failures, resource exhaustion)              |
+| **WARN**                                  | Unexpected or degraded situations (e.g., retries, recoverable errors)           |
+| **INFO**                                  | Operational information (e.g., startup/shutdown, major events)                 |
+| **DEBUG**                                 | General debugging information (e.g., variable values, flow control)            |
+| **TRACE**                                 | Very low-level, detailed information (e.g., internal algorithm steps)           |
 
 ## Example Readable Format
 
