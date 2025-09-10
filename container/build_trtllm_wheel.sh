@@ -40,11 +40,6 @@ if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="/tmp/trtllm_wheel"
 fi
 
-# Git LFS tries to pull LFS objects during clone,
-# which can hit rate limits. Skip pulling large files
-# during "git clone", and explicitly run "git lfs pull" when needed.
-export GIT_LFS_SKIP_SMUDGE=1
-
 # Set default TensorRT-LLM git URL if not specified
 if [ -z "$TRTLLM_GIT_URL" ]; then
     TRTLLM_GIT_URL="https://github.com/NVIDIA/TensorRT-LLM.git"
