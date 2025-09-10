@@ -157,7 +157,7 @@ impl DeltaAggregator {
                                 });
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content.trim());
+                            state_choice.text.push_str(content.trim_end());
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -169,22 +169,22 @@ impl DeltaAggregator {
 
                         // Since one tool call is one chunk, we don't need to aggregate them
                         // We just need to convert the ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall and append to the state_choice.tool_calls
-                        if let Some(tool_calls) = &choice.delta.tool_calls {
-                            if !tool_calls.is_empty() {
-                                // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
-                                let converted_tool_calls: Vec<
-                                    dynamo_async_openai::types::ChatCompletionMessageToolCall,
-                                > = tool_calls
-                                    .iter()
-                                    .filter_map(convert_tool_chunk_to_message_tool_call)
-                                    .collect();
+                        if let Some(tool_calls) = &choice.delta.tool_calls
+                            && !tool_calls.is_empty()
+                        {
+                            // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+                            let converted_tool_calls: Vec<
+                                dynamo_async_openai::types::ChatCompletionMessageToolCall,
+                            > = tool_calls
+                                .iter()
+                                .filter_map(convert_tool_chunk_to_message_tool_call)
+                                .collect();
 
-                                // Initialize and push the converted tool calls to state_choice.tool_calls
-                                if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
-                                    existing_tool_calls.extend(converted_tool_calls);
-                                } else {
-                                    state_choice.tool_calls = Some(converted_tool_calls);
-                                }
+                            // Initialize and push the converted tool calls to state_choice.tool_calls
+                            if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
+                                existing_tool_calls.extend(converted_tool_calls);
+                            } else {
+                                state_choice.tool_calls = Some(converted_tool_calls);
                             }
                         }
 
@@ -343,11 +343,8 @@ mod tests {
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
 
-        let tool_calls: Option<serde_json::Value> = if let Some(tool_calls) = tool_calls {
-            Some(serde_json::from_str(tool_calls).unwrap())
-        } else {
-            None
-        };
+        let tool_calls: Option<serde_json::Value> =
+            tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
 
         let tool_call_chunks = if let Some(tool_calls) = tool_calls {
             vec![
@@ -357,7 +354,7 @@ mod tests {
                     r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
                     function: Some(dynamo_async_openai::types::FunctionCallStream {
                         name: tool_calls["name"].as_str().map(|s| s.to_string()),
-                        arguments: tool_calls["arguments"].as_str().map(|s| s.to_string()),
+                        arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
                 },
             ]
@@ -447,6 +444,7 @@ mod tests {
             0,
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
+            None,
             None,
             None,
         );
@@ -635,7 +633,7 @@ mod tests {
         // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
         let annotated_delta = create_test_delta(
             0,
-            tool_call_json,
+            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?",
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
             None,
@@ -675,73 +673,9 @@ mod tests {
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
 
-        // The content should be cleared (None) after tool call parsing
-        assert!(choice.message.content.is_none());
-
-        // The finish_reason should be ToolCalls
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
-        );
-        assert_eq!(
-            choice.message.role,
-            dynamo_async_openai::types::Role::Assistant
-        );
-    }
-
-    #[tokio::test]
-    async fn test_tool_calling_output_with_normal_text() {
-        // Simulate a delta with a tool call in the content
-        let tool_call_json = r#"Hey, I'm a normal text! {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-
-        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
-        let annotated_delta = create_test_delta(
-            0,
-            tool_call_json,
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
-            None,
-            Some(tool_call_json),
-        );
-        let data = annotated_delta.data.unwrap();
-
-        // Wrap it in Annotated and create a stream
-        let annotated_delta = Annotated {
-            data: Some(data),
-            id: Some("test_id".to_string()),
-            event: None,
-            comment: None,
-        };
-        let stream = Box::pin(stream::iter(vec![annotated_delta]));
-
-        // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
-
-        // Check the result
-        assert!(result.is_ok());
-        let response = result.unwrap();
-
-        // There should be one choice
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
-
-        // The tool_calls field should be present and parsed
-        assert!(choice.message.tool_calls.is_some());
-        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
-        assert_eq!(tool_calls.len(), 1);
-
-        let tool_call = &tool_calls[0];
-        assert_eq!(tool_call.function.name, "get_weather");
-        // The arguments should be a JSON string containing the expected keys
-        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
-        assert_eq!(args["location"], "San Francisco, CA");
-        assert_eq!(args["unit"], "fahrenheit");
-
-        // The content should be the normal text
-        assert!(choice.message.content.is_some());
         assert_eq!(
             choice.message.content.as_ref().unwrap(),
-            "Hey, I'm a normal text!"
+            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?"
         );
 
         // The finish_reason should be ToolCalls

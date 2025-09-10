@@ -652,52 +652,54 @@ fn apply_tool_calling_jail_internal(
                     state.last_response_metadata = Some(chat_response.clone());
 
                     // Extract text content from the response
-                    if let Some(choice) = chat_response.choices.first() {
-                        if let Some(ref content) = choice.delta.content {
-                            // Check for tool call start
-                            match detect_tool_call_start(content, state.tool_call_parser.as_deref())
-                            {
-                                Ok(should_jail) => {
-                                    if should_jail {
-                                        tracing::debug!("Tool call detected, jailing stream");
-                                        state.is_jailed = true;
+                    if let Some(choice) = chat_response.choices.first()
+                        && let Some(ref content) = choice.delta.content
+                    {
+                        // Check for tool call start
+                        match detect_tool_call_start(content, state.tool_call_parser.as_deref()) {
+                            Ok(should_jail) => {
+                                if should_jail {
+                                    tracing::debug!("Tool call detected, jailing stream");
+                                    state.is_jailed = true;
 
-                                        // Start accumulating content for this choice
-                                        state
-                                            .accumulated_content
-                                            .insert(choice.index, content.clone());
+                                    // Start accumulating content for this choice
+                                    state
+                                        .accumulated_content
+                                        .insert(choice.index, content.clone());
 
-                                        // Create possible tool call annotation with token information
-                                        let possible_annotation = PossibleToolCallAnnotation {
-                                            possible_tokens: 1, // This chunk contains tokens being processed
-                                            possible_content: content.clone(),
-                                            parser_used: state.tool_call_parser.clone(),
-                                        };
+                                    // Create possible tool call annotation with token information
+                                    let possible_annotation = PossibleToolCallAnnotation {
+                                        possible_tokens: 1, // This chunk contains tokens being processed
+                                        possible_content: content.clone(),
+                                        parser_used: state.tool_call_parser.clone(),
+                                    };
 
-                                        // Create annotated response instead of empty response
-                                        let mut annotated_response = response.clone();
-                                        if let Ok(possible_annotated) = possible_annotation.to_annotation::<NvCreateChatCompletionStreamResponse>() {
-                                            // Set annotation event and comment
-                                            annotated_response.event = possible_annotated.event;
-                                            annotated_response.comment = possible_annotated.comment;
-                                        }
-
-                                        // Modify the response to have empty content but keep metadata
-                                        annotated_response =
-                                            annotated_response.map_data(|mut chat_response| {
-                                                // Clear the content but keep choice structure for ITL measurement
-                                                for choice in &mut chat_response.choices {
-                                                    choice.delta.content = Some(String::new()); // Empty content
-                                                }
-                                                Ok(chat_response)
-                                            });
-
-                                        return Some((annotated_response, state));
+                                    // Create annotated response instead of empty response
+                                    let mut annotated_response = response.clone();
+                                    if let Ok(possible_annotated) =
+                                        possible_annotation
+                                            .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                                    {
+                                        // Set annotation event and comment
+                                        annotated_response.event = possible_annotated.event;
+                                        annotated_response.comment = possible_annotated.comment;
                                     }
+
+                                    // Modify the response to have empty content but keep metadata
+                                    annotated_response =
+                                        annotated_response.map_data(|mut chat_response| {
+                                            // Clear the content but keep choice structure for ITL measurement
+                                            for choice in &mut chat_response.choices {
+                                                choice.delta.content = Some(String::new()); // Empty content
+                                            }
+                                            Ok(chat_response)
+                                        });
+
+                                    return Some((annotated_response, state));
                                 }
-                                Err(e) => {
-                                    tracing::warn!("Error detecting tool call start: {}", e);
-                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Error detecting tool call start: {}", e);
                             }
                         }
                     }
@@ -707,42 +709,42 @@ fn apply_tool_calling_jail_internal(
                 if let Some(ref chat_response) = response.data {
                     // Extract content for annotation and accumulation
                     for choice in &chat_response.choices {
-                        if let Some(ref content) = choice.delta.content {
-                            if !content.is_empty() {
-                                // Accumulate content for this choice
-                                state
-                                    .accumulated_content
-                                    .entry(choice.index)
-                                    .or_insert_with(String::new)
-                                    .push_str(content);
+                        if let Some(ref content) = choice.delta.content
+                            && !content.is_empty()
+                        {
+                            // Accumulate content for this choice
+                            state
+                                .accumulated_content
+                                .entry(choice.index)
+                                .or_default()
+                                .push_str(content);
 
-                                // Create possible tool call annotation
-                                let possible_annotation = PossibleToolCallAnnotation {
-                                    possible_tokens: 1,
-                                    possible_content: content.clone(),
-                                    parser_used: state.tool_call_parser.clone(),
-                                };
+                            // Create possible tool call annotation
+                            let possible_annotation = PossibleToolCallAnnotation {
+                                possible_tokens: 1,
+                                possible_content: content.clone(),
+                                parser_used: state.tool_call_parser.clone(),
+                            };
 
-                                // Create annotated response
-                                let mut annotated_response = response.clone();
-                                if let Ok(possible_annotated) = possible_annotation
-                                    .to_annotation::<NvCreateChatCompletionStreamResponse>(
-                                ) {
-                                    annotated_response.event = possible_annotated.event;
-                                    annotated_response.comment = possible_annotated.comment;
-                                }
-
-                                // Clear content but keep structure
-                                annotated_response =
-                                    annotated_response.map_data(|mut chat_response| {
-                                        for choice in &mut chat_response.choices {
-                                            choice.delta.content = Some(String::new());
-                                        }
-                                        Ok(chat_response)
-                                    });
-
-                                return Some((annotated_response, state));
+                            // Create annotated response
+                            let mut annotated_response = response.clone();
+                            if let Ok(possible_annotated) = possible_annotation
+                                .to_annotation::<NvCreateChatCompletionStreamResponse>(
+                            ) {
+                                annotated_response.event = possible_annotated.event;
+                                annotated_response.comment = possible_annotated.comment;
                             }
+
+                            // Clear content but keep structure
+                            annotated_response =
+                                annotated_response.map_data(|mut chat_response| {
+                                    for choice in &mut chat_response.choices {
+                                        choice.delta.content = Some(String::new());
+                                    }
+                                    Ok(chat_response)
+                                });
+
+                            return Some((annotated_response, state));
                         }
                     }
                 }
@@ -757,82 +759,86 @@ fn apply_tool_calling_jail_internal(
                 state.is_jailed = false;
 
                 // Parse accumulated content for tool calls
-                if !state.accumulated_content.is_empty() {
-                    if let Some(base_response) = state.last_response_metadata.take() {
-                        // Try to parse tool calls from accumulated content for each choice
-                        let mut final_response = base_response.clone();
+                if !state.accumulated_content.is_empty()
+                    && let Some(base_response) = state.last_response_metadata.take()
+                {
+                    // Try to parse tool calls from accumulated content for each choice
+                    let mut final_response = base_response.clone();
 
-                        for (choice_index, accumulated_text) in &state.accumulated_content {
-                            if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
-                                accumulated_text,
-                                state.tool_call_parser.as_deref(),
-                            ) {
-                                if !tool_calls.is_empty() {
-                                    // Found tool calls, create a final response with them
-                                    tracing::debug!(
-                                        "Parsed {} tool calls from accumulated content",
-                                        tool_calls.len()
-                                    );
+                    for (choice_index, accumulated_text) in &state.accumulated_content {
+                        if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
+                            accumulated_text,
+                            state.tool_call_parser.as_deref(),
+                        ) && !tool_calls.is_empty()
+                        {
+                            // Found tool calls, create a final response with them
+                            tracing::debug!(
+                                "Parsed {} tool calls from accumulated content",
+                                tool_calls.len()
+                            );
 
-                                    for tool_call in &tool_calls {
-                                        tracing::debug!(
-                                            tool_call_id = %tool_call.id,
-                                            function_name = %tool_call.function.name,
-                                            arguments = %tool_call.function.arguments,
-                                            "Parsed structured tool call from accumulated content in jail"
-                                        );
-                                    }
+                            for tool_call in &tool_calls {
+                                tracing::debug!(
+                                    tool_call_id = %tool_call.id,
+                                    function_name = %tool_call.function.name,
+                                    arguments = %tool_call.function.arguments,
+                                    "Parsed structured tool call from accumulated content in jail"
+                                );
+                            }
 
-                                    // Convert ChatCompletionMessageToolCall to ChatCompletionMessageToolCallChunk for streaming
-                                    let tool_call_chunks: Vec<dynamo_async_openai::types::ChatCompletionMessageToolCallChunk> = tool_calls
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(|(idx, tool_call)| dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
-                                            index: idx as u32,
-                                            id: Some(tool_call.id),
-                                            r#type: Some(tool_call.r#type),
-                                            function: Some(dynamo_async_openai::types::FunctionCallStream {
+                            // Convert ChatCompletionMessageToolCall to ChatCompletionMessageToolCallChunk for streaming
+                            let tool_call_chunks: Vec<
+                                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+                            > = tool_calls
+                                .into_iter()
+                                .enumerate()
+                                .map(|(idx, tool_call)| {
+                                    dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                                        index: idx as u32,
+                                        id: Some(tool_call.id),
+                                        r#type: Some(tool_call.r#type),
+                                        function: Some(
+                                            dynamo_async_openai::types::FunctionCallStream {
                                                 name: Some(tool_call.function.name),
                                                 arguments: Some(tool_call.function.arguments),
-                                            }),
-                                        })
-                                        .collect();
-
-                                    // Create a choice with tool calls
-                                    #[allow(deprecated)]
-                                    let final_choice = dynamo_async_openai::types::ChatChoiceStream {
-                                        index: *choice_index,
-                                        delta: dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-                                            role: Some(dynamo_async_openai::types::Role::Assistant),
-                                            content: if let Some(text) = normal_text.filter(|t| !t.is_empty()) {
-                                                Some(text)
-                                            } else {
-                                                None
                                             },
-                                            tool_calls: Some(tool_call_chunks.clone()),
-                                            function_call: None,
-                                            refusal: None,
-                                            reasoning_content: None,
-                                        },
-                                        finish_reason: Some(dynamo_async_openai::types::FinishReason::ToolCalls),
-                                        logprobs: None,
-                                    };
+                                        ),
+                                    }
+                                })
+                                .collect();
 
-                                    // Update the response choices
-                                    final_response.choices = vec![final_choice];
+                            // Create a choice with tool calls
+                            #[allow(deprecated)]
+                            let final_choice = dynamo_async_openai::types::ChatChoiceStream {
+                                index: *choice_index,
+                                delta:
+                                    dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
+                                        role: Some(dynamo_async_openai::types::Role::Assistant),
+                                        content: normal_text.filter(|t| !t.is_empty()),
+                                        tool_calls: Some(tool_call_chunks.clone()),
+                                        function_call: None,
+                                        refusal: None,
+                                        reasoning_content: None,
+                                    },
+                                finish_reason: Some(
+                                    dynamo_async_openai::types::FinishReason::ToolCalls,
+                                ),
+                                logprobs: None,
+                            };
 
-                                    // Create final annotated response
-                                    let final_annotated = Annotated {
-                                        data: Some(final_response),
-                                        id: None,
-                                        event: None,
-                                        comment: None,
-                                    };
+                            // Update the response choices
+                            final_response.choices = vec![final_choice];
 
-                                    state.finished = true; // Mark as finished before returning
-                                    return Some((final_annotated, state));
-                                }
-                            }
+                            // Create final annotated response
+                            let final_annotated = Annotated {
+                                data: Some(final_response),
+                                id: None,
+                                event: None,
+                                comment: None,
+                            };
+
+                            state.finished = true; // Mark as finished before returning
+                            return Some((final_annotated, state));
                         }
                     }
                 }
@@ -1190,7 +1196,7 @@ mod tests {
                     .delta
                     .content
                     .as_ref()
-                    .map_or(true, |c| c.is_empty()),
+                    .is_none_or(|c| c.is_empty()),
                 "First chunk should have empty content after jailing"
             );
             // Should have annotation event indicating possible tool call
@@ -1232,22 +1238,22 @@ mod tests {
         }
 
         // The last result might be the parsed tool call result when stream ends and unjails
-        if let Some(last_result) = results.last() {
-            if let Some(ref response_data) = last_result.data {
-                // Check if tool calls were parsed and included after unjailing
-                if let Some(ref tool_calls) = response_data.choices[0].delta.tool_calls {
-                    assert!(!tool_calls.is_empty(), "Should have parsed tool calls");
-                    assert_eq!(
-                        tool_calls[0]
-                            .function
-                            .as_ref()
-                            .unwrap()
-                            .name
-                            .as_ref()
-                            .unwrap(),
-                        "get_weather"
-                    );
-                }
+        if let Some(last_result) = results.last()
+            && let Some(ref response_data) = last_result.data
+        {
+            // Check if tool calls were parsed and included after unjailing
+            if let Some(ref tool_calls) = response_data.choices[0].delta.tool_calls {
+                assert!(!tool_calls.is_empty(), "Should have parsed tool calls");
+                assert_eq!(
+                    tool_calls[0]
+                        .function
+                        .as_ref()
+                        .unwrap()
+                        .name
+                        .as_ref()
+                        .unwrap(),
+                    "get_weather"
+                );
             }
         }
     }
@@ -1302,13 +1308,13 @@ mod tests {
         }
 
         // Last chunk should be the final response with finish reason
-        if let Some(last_result) = results.last() {
-            if let Some(ref response_data) = last_result.data {
-                assert_eq!(
-                    response_data.choices[0].finish_reason,
-                    Some(OAIFinishReason::Stop)
-                );
-            }
+        if let Some(last_result) = results.last()
+            && let Some(ref response_data) = last_result.data
+        {
+            assert_eq!(
+                response_data.choices[0].finish_reason,
+                Some(OAIFinishReason::Stop)
+            );
         }
     }
 
@@ -1410,18 +1416,18 @@ mod tests {
         assert!(!results.is_empty(), "Should have results for hermes parser");
 
         // First chunk should pass through normally (no tool call pattern)
-        if let Some(ref first_result) = results.first() {
-            if let Some(ref response_data) = first_result.data {
-                assert_eq!(
-                    response_data.choices[0].delta.content.as_deref(),
-                    Some("I'll help you with that. "),
-                    "First chunk should pass through normally"
-                );
-                assert!(
-                    first_result.event.is_none(),
-                    "First chunk should not have annotation"
-                );
-            }
+        if let Some(first_result) = results.first()
+            && let Some(ref response_data) = first_result.data
+        {
+            assert_eq!(
+                response_data.choices[0].delta.content.as_deref(),
+                Some("I'll help you with that. "),
+                "First chunk should pass through normally"
+            );
+            assert!(
+                first_result.event.is_none(),
+                "First chunk should not have annotation"
+            );
         }
 
         // Second chunk should trigger jailing
@@ -1433,7 +1439,7 @@ mod tests {
                         .delta
                         .content
                         .as_ref()
-                        .map_or(true, |c| c.is_empty()),
+                        .is_none_or(|c| c.is_empty()),
                     "Second chunk should be jailed (empty content)"
                 );
                 assert!(
