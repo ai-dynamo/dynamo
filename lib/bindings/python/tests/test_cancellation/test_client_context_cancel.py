@@ -38,9 +38,11 @@ async def test_client_context_cancel(server, client):
         if iteration_count >= 2:
             print("Cancelling after 2 responses...")
             context.stop_generating()
-            break
 
         iteration_count += 1
+
+    # Verify we received exactly 3 responses (0, 1, 2)
+    assert iteration_count == 3
 
     # Give server a moment to process the cancellation
     await asyncio.sleep(0.2)
