@@ -217,11 +217,10 @@ This allows a request to be migrated up to 3 times before failing. See the [Requ
 
 ## Hashing Consistency for KV Events
 
-When emitting KV events for KV-aware routing, ensure deterministic hashing across processes to prevent radix tree mismatches in the router:
+When emitting KV events for KV-aware routing, ensure event identifiers are deterministic across processes and restarts so the router can correctly apply parent links and removals:
 
-- Set `PYTHONHASHSEED=0` for all SGLang processes.
 - Ensure the block IDs published in events are deterministic across ranks and restarts.
-- See [KV Events & Hashing](../../../docs/guides/kv_events_hashing.md) for background and a reference test vector check to validate your environment.
+- See the high-level notes in [KV Cache Routing](../../../docs/architecture/kv_cache_routing.md) on deterministic event IDs.
 
 ## Advanced Examples
 

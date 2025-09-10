@@ -170,16 +170,15 @@ The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html
 
 ### Hashing Consistency for KV Events
 
-When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches:
+When using KV-aware routing, ensure deterministic hashing across processes to avoid radix tree mismatches. Choose one of the following:
 
-- Set `PYTHONHASHSEED=0` for all vLLM processes.
+- Set `PYTHONHASHSEED=0` for all vLLM processes when relying on Python's builtin hashing for prefix caching.
 - If your vLLM version supports it, configure a deterministic prefix caching algorithm, for example:
 
 ```bash
 vllm serve ... --enable-prefix-caching --prefix-caching-algo sha256
 ```
-
-The router uses a canonical xxh3-64 hash (seed=1337) for matching local blocks. See [KV Events & Hashing](../../../docs/guides/kv_events_hashing.md) for details and a reference test vector check.
+See the high-level notes in [KV Cache Routing](../../../docs/architecture/kv_cache_routing.md) on deterministic event IDs.
 
 ## Request Migration
 

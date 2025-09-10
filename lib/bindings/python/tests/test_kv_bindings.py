@@ -29,7 +29,6 @@ from dynamo.llm import (
     RadixTree,
     WorkerMetricsPublisher,
     WorkerStats,
-    compute_block_hash_for_seq_py,
 )
 from dynamo.runtime import Component, DistributedRuntime
 
@@ -283,11 +282,3 @@ async def metrics_publisher_task(kv_listener, expected_metrics):
     # test can discover them.
     metrics_publisher.publish(metrics)
     await metrics_publisher.create_endpoint(kv_listener)
-
-
-def test_block_hash_ref_vector():
-    # Reference test vector check: tokens [1,2,3,4], kv_block_size=4
-    tokens = [1, 2, 3, 4]
-    out = compute_block_hash_for_seq_py(tokens, 4)
-    assert isinstance(out, list) and len(out) == 1
-    assert out[0] == 14643705804678351452

@@ -65,7 +65,6 @@ Quickstart
    Router <components/router/README>
    Planner <architecture/planner_intro>
    KVBM <architecture/kvbm_intro>
-   KV Events & Hashing <guides/kv_events_hashing.md>
 
 .. toctree::
    :hidden:
