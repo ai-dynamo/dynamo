@@ -33,15 +33,15 @@ for max_concurrency in ${chosen_concurrencies[@]}; do
     chosen_n_requests=$((5*max_concurrency))
 
     command=(
-        python3 -m sglang.bench_serving 
-        --base-url "http://${head_node}:${head_port}" 
+        python3 -m sglang.bench_serving
+        --base-url "http://${head_node}:${head_port}"
         --model ${SERVED_MODEL_NAME} --tokenizer ${MODEL_PATH}
-        --backend sglang-oai 
-        --dataset-name random --random-input ${chosen_isl} --random-output ${chosen_osl} 
-        --random-range-ratio 1 
+        --backend sglang-oai
+        --dataset-name random --random-input ${chosen_isl} --random-output ${chosen_osl}
+        --random-range-ratio 1
         --num-prompts ${chosen_n_requests} --request-rate ${chosen_req_rate} --max-concurrency ${max_concurrency}
     )
-    
+
     echo "Running command ${command[@]}"
 
     ${command[@]}

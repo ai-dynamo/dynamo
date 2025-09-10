@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Example script adapted from https://github.com/kedarpotdar-nv/bench_serving/tree/dynamo-fix. 
+# Example script adapted from https://github.com/kedarpotdar-nv/bench_serving/tree/dynamo-fix.
 
 model_name="deepseek-ai/DeepSeek-R1"
 model_path="/model/"

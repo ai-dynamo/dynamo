@@ -205,7 +205,9 @@ def _validate_args(args: argparse.Namespace) -> None:
     """Validate command line arguments"""
     if args.worker_type in ["prefill", "decode"]:
         if args.worker_idx is None or args.worker_idx < 0:
-            raise ValueError("Worker index must be provided and non-negative for prefill/decode")
+            raise ValueError(
+                "Worker index must be provided and non-negative for prefill/decode"
+            )
 
     if args.worker_type in ["prefill", "decode"]:
         if args.local_rank is None or args.local_rank < 0:
@@ -241,7 +243,7 @@ def setup_env_vars_for_gpu_script(
     os.environ["TOTAL_GPUS"] = str(total_gpus)
     os.environ["RANK"] = str(local_rank)
     os.environ["TOTAL_NODES"] = str(total_nodes)
-    os.environ['USE_INIT_LOCATIONS'] = str(use_init_locations)
+    os.environ["USE_INIT_LOCATIONS"] = str(use_init_locations)
 
     logging.info(f"Set HOST_IP: {host_ip}")
     logging.info(f"Set PORT: {port}")
@@ -282,13 +284,14 @@ def setup_head_prefill_node(prefill_host_ip: str) -> None:
     if not etcd_process:
         raise RuntimeError("Failed to start etcd")
 
+
 def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
     """Setup nginx load balancer"""
     logging.info("Setting up nginx load balancer")
-    
+
     if not nginx_config or not os.path.exists(nginx_config):
         raise ValueError(f"Nginx config file not found: {nginx_config}")
-    
+
     nginx_cmd = f"apt-get update && apt-get install -y nginx && nginx -c {nginx_config} && sleep 86400"
     return run_command(nginx_cmd)
 
@@ -296,17 +299,15 @@ def setup_nginx_worker(master_ip: str, nginx_config: str) -> int:
 def setup_frontend_worker(worker_idx: int, master_ip: str) -> int:
     """Setup a frontend worker"""
     logging.info(f"Setting up frontend worker {worker_idx}")
-    
+
     # First frontend (worker_idx 0) also sets up NATS/ETCD
     if worker_idx == 0:
         setup_head_prefill_node(master_ip)
     else:
-        logging.info(
-            f"Setting up additional frontend worker {worker_idx}"
-        )
+        logging.info(f"Setting up additional frontend worker {worker_idx}")
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
-    
+
     # All frontends run the ingress server
     frontend_cmd = "python3 -m dynamo.frontend --http-port=8000"
     return run_command(frontend_cmd)
@@ -331,14 +332,18 @@ def setup_prefill_worker(
     if not multiple_frontends_enabled and worker_idx == 0 and local_rank == 0:
         setup_head_prefill_node(master_ip)
     else:
-        logging.info(
-            f"Setting up prefill worker {worker_idx}, local rank {local_rank}"
-        )
+        logging.info(f"Setting up prefill worker {worker_idx}, local rank {local_rank}")
         if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
-    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker, use_init_locations=use_init_locations)
+    setup_env_vars_for_gpu_script(
+        leader_ip,
+        local_rank,
+        total_gpus,
+        nodes_per_worker,
+        use_init_locations=use_init_locations,
+    )
 
     # Use appropriate GPU script instead of generating command directly
     cmd_to_run = get_gpu_command("prefill", gpu_type)
@@ -365,7 +370,13 @@ def setup_decode_worker(
         raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
-    setup_env_vars_for_gpu_script(leader_ip, local_rank, total_gpus, nodes_per_worker, use_init_locations=use_init_locations)
+    setup_env_vars_for_gpu_script(
+        leader_ip,
+        local_rank,
+        total_gpus,
+        nodes_per_worker,
+        use_init_locations=use_init_locations,
+    )
 
     # Use appropriate GPU script instead of generating command directly
     cmd_to_run = get_gpu_command("decode", gpu_type)
@@ -402,7 +413,7 @@ def main(input_args: list[str] | None = None):
     logging.info(f"Use init locations?: {args.use_init_locations}")
 
     setup_env(args.master_ip)
-    
+
     if args.worker_type == "nginx":
         if not args.nginx_config:
             raise ValueError("--nginx_config is required for nginx worker type")

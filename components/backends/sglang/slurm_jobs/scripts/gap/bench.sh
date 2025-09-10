@@ -57,7 +57,7 @@ for concurrency in ${concurrency_list[@]}; do
         --warmup-request-count $(( 2*genai_perf_warmup_workers ))
         --request-count $(( 5*concurrency ))
 
-        --synthetic-input-tokens-mean ${chosen_isl} --synthetic-input-tokens-stddev 0 
+        --synthetic-input-tokens-mean ${chosen_isl} --synthetic-input-tokens-stddev 0
         --output-tokens-mean ${chosen_osl} --output-tokens-stddev 0
         --extra-inputs "max_tokens:${chosen_osl}" --extra-inputs "min_tokens:${chosen_osl}"
 

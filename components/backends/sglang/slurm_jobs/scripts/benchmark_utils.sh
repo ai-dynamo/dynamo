@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 wait_for_model() {
-    
+
     local model_host=$1
     local model_port=$2
     local poll=${3:-1}
@@ -19,15 +19,15 @@ wait_for_model() {
     while :; do
         curl_result=$(curl ${health_addr} 2>/dev/null)
         health=$(grep '"status":"healthy"' <<< $curl_result)
-        if [[ -n $health ]]; then 
+        if [[ -n $health ]]; then
             echo "Model is alive. Health response: ${curl_result}; "
-            return 0; 
+            return 0;
         fi
-        
+
         time_now=$(date +%s)
         if [[ $((time_now - start_ts)) -ge $timeout ]]; then
             echo "Model did not get healthy in ${timeout} seconds"
-            exit 2; 
+            exit 2;
         fi
 
         if [[ $((time_now - report_ts)) -ge $report_every ]]; then
@@ -52,17 +52,17 @@ warmup_model() {
     num_prompts=${config_list[2]}
     concurrency=${config_list[3]}
     request_rate=${config_list[4]}
-    
+
     command=(
-        python3 -m sglang.bench_serving 
-        --base-url "http://${service_host}:${service_port}" 
+        python3 -m sglang.bench_serving
+        --base-url "http://${service_host}:${service_port}"
         --model ${served_model_name} --tokenizer ${model_path}
-        --backend sglang-oai 
-        --dataset-name random --random-input ${isl} --random-output ${osl} 
-        --random-range-ratio 1 
+        --backend sglang-oai
+        --dataset-name random --random-input ${isl} --random-output ${osl}
+        --random-range-ratio 1
         --num-prompts ${num_prompts} --request-rate ${request_rate} --max-concurrency ${concurrency}
     )
-    
+
     echo "Config ${config}. Running command ${command[@]}"
 
     ${command[@]}
