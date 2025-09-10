@@ -12,6 +12,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelInput,
     ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
@@ -84,8 +85,12 @@ async def worker(runtime: DistributedRuntime):
 
     if config.is_prefill_worker:
         await init_prefill(runtime, config)
+        logger.debug("init_prefill completed")
     else:
         await init(runtime, config)
+        logger.debug("init completed")
+
+    logger.debug("Worker function completed, exiting...")
 
 
 def setup_vllm_engine(config, stat_logger=None):
@@ -142,9 +147,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     # TODO register_prefill in similar vein to register_llm
 
-    handler = PrefillWorkerHandler(component, engine_client, default_sampling_params)
+    handler = PrefillWorkerHandler(
+        runtime, component, engine_client, default_sampling_params
+    )
 
     try:
+        logger.debug("Starting serve_endpoint for prefill worker")
         await asyncio.gather(
             # for prefill, we want to shutdown the engine after all prefill requests are finished because
             #     (temp reason): we don't support re-routing prefill requests
@@ -159,10 +167,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
             ),
         )
+        logger.debug("serve_endpoint completed for prefill worker")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        logger.debug("Cleaning up prefill worker")
         handler.cleanup()
 
 
@@ -201,7 +211,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     logger.info(f"VllmWorker for {config.model} has been initialized")
 
     handler = DecodeWorkerHandler(
-        component, engine_client, default_sampling_params, prefill_worker_client
+        runtime,
+        component,
+        engine_client,
+        default_sampling_params,
+        prefill_worker_client,
     )
 
     if config.engine_args.enable_prefix_caching:
@@ -238,32 +252,37 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.reasoning_parser = config.reasoning_parser
 
         await register_llm(
-            ModelType.Backend,
+            ModelInput.Tokens,
+            ModelType.Chat | ModelType.Completions,
             generate_endpoint,
             config.model,
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
             migration_limit=config.migration_limit,
             runtime_config=runtime_config,
+            custom_template_path=config.custom_jinja_template,
         )
 
     try:
+        logger.debug("Starting serve_endpoint for decode worker")
         await asyncio.gather(
             # for decode, we want to transfer the in-flight requests to other decode engines,
             # because waiting them to finish can take a long time for long OSLs
             generate_endpoint.serve_endpoint(
                 handler.generate,
-                graceful_shutdown=False,
+                graceful_shutdown=config.migration_limit <= 0,
                 metrics_labels=[("model", config.model)],
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
             ),
         )
+        logger.debug("serve_endpoint completed for decode worker")
     except Exception as e:
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        logger.debug("Cleaning up decode worker")
         # Cleanup background tasks
         handler.cleanup()
 

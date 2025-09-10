@@ -57,6 +57,7 @@ repos:
   - id: check-toml
   - id: check-yaml
     exclude: ^.*/templates/.*\.yaml$ #ignore all yaml files in helm chart templates
+    args: ['--allow-multiple-documents']
   - id: check-shebang-scripts-are-executable
   - id: end-of-file-fixer
     types_or: [c, c++, cuda, proto, textproto, java, python]

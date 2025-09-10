@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod context;
+pub mod context;
 mod cuda;
 mod memcpy;
 mod nixl;

@@ -429,6 +429,10 @@ show_help() {
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
     echo "  [--sccache-bucket S3 bucket name for sccache (required with --use-sccache)]"
     echo "  [--sccache-region S3 region for sccache (required with --use-sccache)]"
+    echo ""
+    echo "  Note: When using --use-sccache, AWS credentials must be set:"
+    echo "        export AWS_ACCESS_KEY_ID=your_access_key"
+    echo "        export AWS_SECRET_ACCESS_KEY=your_secret_key"
     exit 0
 }
 
@@ -442,7 +446,6 @@ error() {
 }
 
 get_options "$@"
-
 
 # Automatically set ARCH and ARCH_ALT if PLATFORM is linux/arm64
 ARCH="amd64"
@@ -580,6 +583,11 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
+if [[ $FRAMEWORK == "VLLM" ]]; then
+    echo "Forcing enable_kvbm to true in vLLM image build"
+    ENABLE_KVBM=true
+fi
+
 if [  ! -z ${ENABLE_KVBM} ]; then
     echo "Enabling the KVBM in the ai-dynamo-runtime"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
@@ -594,8 +602,8 @@ if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
     BUILD_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     BUILD_ARGS+=" --build-arg SCCACHE_REGION=${SCCACHE_REGION}"
-
-
+    BUILD_ARGS+=" --build-arg AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+    BUILD_ARGS+=" --build-arg AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

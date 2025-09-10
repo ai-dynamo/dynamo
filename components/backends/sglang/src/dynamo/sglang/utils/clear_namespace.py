@@ -26,4 +26,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", type=str, required=True)
     args = parser.parse_args()
+    assert (
+        args.namespace
+    ), "Missing namespace, either pass --namespace or set DYN_NAMESPACE"
     asyncio.run(clear_namespace(args.namespace))

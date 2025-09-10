@@ -100,7 +100,7 @@ if ! grep -q "# Unset empty tokens" ~/.bashrc; then
     echo '[ -z "$SSH_AUTH_SOCK" ] && unset SSH_AUTH_SOCK' >> ~/.bashrc
 fi
 
-$HOME/dynamo/deploy/dynamo_check.py --import-check-only
+$HOME/dynamo/deploy/dynamo_check.py
 
 { set +x; } 2>/dev/null
 

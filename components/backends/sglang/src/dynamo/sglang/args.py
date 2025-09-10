@@ -14,7 +14,11 @@ from typing import Any, Dict, Optional
 
 from sglang.srt.server_args import ServerArgs
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
+
+configure_dynamo_logging()
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
@@ -33,13 +37,15 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--dyn-tool-call-parser"],
         "type": str,
         "default": None,
-        "help": "Tool call parser name for the model. Available options: 'hermes', 'nemotron_deci', 'llama3_json', 'mistral', 'phi4', 'pythonic'.",
+        "choices": get_tool_parser_names(),
+        "help": "Tool call parser name for the model.",
     },
     "reasoning-parser": {
         "flags": ["--dyn-reasoning-parser"],
         "type": str,
         "default": None,
-        "help": "Reasoning parser name for the model. Available options: 'basic', 'deepseek_r1', 'gpt_oss', 'kimi', 'step3', 'qwen3', 'nemotron_deci', 'mistral'.",
+        "choices": get_reasoning_parser_names(),
+        "help": "Reasoning parser name for the model.",
     },
 }
 
@@ -77,6 +83,36 @@ class Config:
             return DisaggregationMode.DECODE
 
 
+def _set_parser(
+    sglang_str: Optional[str],
+    dynamo_str: Optional[str],
+    arg_name: str = "tool-call-parser",
+) -> Optional[str]:
+    # If both are present, give preference to dynamo_str
+    if sglang_str is not None and dynamo_str is not None:
+        logging.warning(
+            f"--dyn-{arg_name} and --{arg_name} are both set. Giving preference to --dyn-{arg_name}"
+        )
+        return dynamo_str
+    # If dynamo_str is not set, use try to use sglang_str if it matches with the allowed parsers
+    elif sglang_str is not None:
+        logging.warning(f"--dyn-{arg_name} is not set. Using --{arg_name}.")
+        if arg_name == "tool-call-parser" and sglang_str not in get_tool_parser_names():
+            raise ValueError(
+                f"--{arg_name} is not a valid tool call parser. Valid parsers are: {get_tool_parser_names()}"
+            )
+        elif (
+            arg_name == "reasoning-parser"
+            and sglang_str not in get_reasoning_parser_names()
+        ):
+            raise ValueError(
+                f"--{arg_name} is not a valid reasoning parser. Valid parsers are: {get_reasoning_parser_names()}"
+            )
+        return sglang_str
+    else:
+        return dynamo_str
+
+
 def parse_args(args: list[str]) -> Config:
     """
     Parse all arguments and return Config with server_args and dynamo_args
@@ -94,6 +130,7 @@ def parse_args(args: list[str]) -> Config:
             type=info["type"],
             default=info["default"] if "default" in info else None,
             help=info["help"],
+            choices=info.get("choices", None),
         )
 
     # SGLang args
@@ -111,7 +148,7 @@ def parse_args(args: list[str]) -> Config:
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
     endpoint = parsed_args.endpoint
     if endpoint is None:
@@ -134,13 +171,24 @@ def parse_args(args: list[str]) -> Config:
 
     parsed_namespace, parsed_component_name, parsed_endpoint_name = endpoint_parts
 
+    tool_call_parser = _set_parser(
+        parsed_args.tool_call_parser,
+        parsed_args.dyn_tool_call_parser,
+        "tool-call-parser",
+    )
+    reasoning_parser = _set_parser(
+        parsed_args.reasoning_parser,
+        parsed_args.dyn_reasoning_parser,
+        "reasoning-parser",
+    )
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
         endpoint=parsed_endpoint_name,
         migration_limit=parsed_args.migration_limit,
-        tool_call_parser=parsed_args.dyn_tool_call_parser,
-        reasoning_parser=parsed_args.dyn_reasoning_parser,
+        tool_call_parser=tool_call_parser,
+        reasoning_parser=reasoning_parser,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 

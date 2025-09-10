@@ -92,7 +92,7 @@ class VLLMProcess(EngineProcess):
     """Simple process manager for vllm shell scripts"""
 
     def __init__(self, config: VLLMConfig, request):
-        self.port = 8080
+        self.port = 8000
         self.config = config
         self.dir = config.directory
         script_path = os.path.join(self.dir, "launch", config.script_name)

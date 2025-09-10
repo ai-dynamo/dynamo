@@ -50,7 +50,7 @@ Quickstart
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../guides/dynamo_deploy/dynamo_cloud.md>
+   Quickstart (K8s) <../guides/dynamo_deploy/README.md>
    Dynamo Operator <../guides/dynamo_deploy/dynamo_operator.md>
    Metrics <../guides/dynamo_deploy/metrics.md>
    Logging <../guides/dynamo_deploy/logging.md>

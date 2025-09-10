@@ -97,4 +97,4 @@ For practical examples of Grove-based multinode deployments in action, see the [
 
 For the latest updates on Grove, refer to the [official project on GitHub](https://github.com/NVIDIA/grove).
 
-Dynamo Cloud also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Cloud Deployment Guide](dynamo_cloud.md) for more details.
+Dynamo Cloud also allows you to install Grove and KAI Scheduler as part of the platform installation. See the [Dynamo Cloud Deployment Installation Guide](installation_guide.md) for more details.

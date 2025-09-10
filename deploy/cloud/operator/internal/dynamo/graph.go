@@ -673,6 +673,13 @@ func addStandardEnvVars(container *corev1.Container, controllerConfig controller
 			Value: controllerConfig.EtcdAddress,
 		})
 	}
+
+	if controllerConfig.ModelExpressURL != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "MODEL_EXPRESS_URL",
+			Value: controllerConfig.ModelExpressURL,
+		})
+	}
 }
 
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
