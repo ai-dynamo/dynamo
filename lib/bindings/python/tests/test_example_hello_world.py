@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Tests for the hello_world example in examples/runtime/hello_world
+Tests for the hello_world example in examples/custom_backend/hello_world
 """
 
 import asyncio
@@ -21,7 +21,7 @@ def example_dir():
     test_dir = os.path.dirname(os.path.abspath(__file__))
     # Navigate to the hello_world example directory relative to this test
     return os.path.normpath(
-        os.path.join(test_dir, "../../../../examples/runtime/hello_world")
+        os.path.join(test_dir, "../../../../examples/custom_backend/hello_world")
     )
 
 
