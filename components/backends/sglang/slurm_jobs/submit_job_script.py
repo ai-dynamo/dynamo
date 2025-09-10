@@ -225,6 +225,7 @@ def main(input_args: list[str] | None = None):
     # validate profiler configs
     if profiler_config == {} or profiler_config["type"] == "manual":
         parsable_config = ""
+        profiler_config["type"] = "manual"
     elif profiler_config["type"] in ["sglang", "vllm", "gap"]:
         parsable_config = ""
         need_keys = ["isl", "osl", "concurrencies"]
@@ -281,8 +282,9 @@ def main(input_args: list[str] | None = None):
             x for x in args.extra_slurm_args if "dependency" not in x
         ]
         for _ in range(args.retries):
+            dependencies = ",".join([f"afternotok:{job}" for job in submitted_job_ids])
             slurm_args = extra_slurm_args_without_dependencies + [
-                f"dependency=afternotok:{job_id}"
+                f"dependency={dependencies}"
             ]
             job_id = submit_job(temp_file.name, slurm_args)
             submitted_job_ids.append(job_id)
