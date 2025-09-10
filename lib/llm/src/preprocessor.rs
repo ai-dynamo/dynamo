@@ -255,18 +255,8 @@ impl OpenAIPreprocessor {
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
                 if let Some(token_input) = request.extract_tokens() {
-                    match token_input {
-                        TokenInput::Single(tokens) => {
-                            builder.token_ids(tokens);
-                        }
-                        TokenInput::Batch(token_batches) => {
-                            if token_batches.len() == 1 {
-                                builder.token_ids(token_batches[0].clone());
-                            } else {
-                                builder.batch_token_ids(Some(token_batches));
-                                builder.token_ids(vec![]);
-                            }
-                        }
+                    TokenInput::Single(tokens) => {
+                        builder.token_ids(tokens);
                     }
                 }
             }
@@ -324,18 +314,6 @@ impl OpenAIPreprocessor {
                             }
 
                             builder.token_ids(tokens_vec);
-                        }
-                        TextInput::Batch(texts) => {
-                            let token_batches: Vec<Vec<u32>> = texts
-                                .par_iter()
-                                .map(|text| {
-                                    self.tokenizer
-                                        .encode(text)
-                                        .map(|encoded| encoded.token_ids().to_vec())
-                                })
-                                .collect::<Result<Vec<_>>>()?;
-                            builder.batch_token_ids(Some(token_batches));
-                            builder.token_ids(vec![]);
                         }
                     }
                 }
