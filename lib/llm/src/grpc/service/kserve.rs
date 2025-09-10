@@ -21,7 +21,8 @@ use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::grpc::service::openai::{completion_response_stream, get_parsing_options};
+use crate::grpc::service::openai::completion_response_stream;
+use crate::http::service::metrics::get_parsing_options;
 use tonic::{Request, Response, Status, transport::Server};
 
 use crate::protocols::openai::completions::{

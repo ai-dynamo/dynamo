@@ -45,7 +45,10 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of inflight requests
+    /// Number of requests waiting in HTTP queue before receiving the first response.
+    pub const HTTP_QUEUED_REQUESTS: &str = "http_queued_requests";
+
+    /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
     /// Duration of LLM requests
