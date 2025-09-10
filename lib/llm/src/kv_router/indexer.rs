@@ -1272,8 +1272,6 @@ mod tests {
             },
         }
     }
-
-
     fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
         RouterEvent {
             worker_id,
