@@ -150,6 +150,16 @@ ENV LD_LIBRARY_PATH=\
 $LD_LIBRARY_PATH
 
 
+# Workarounds for gpt-oss
+ENV TIKTOKEN_ENCODINGS_BASE=/opt/encodings
+RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    cp /tmp/deps/vllm/gptoss.sh /tmp/gptoss.sh && \
+    chmod +x /tmp/gptoss.sh && \
+    /tmp/gptoss.sh;
+
 ##################################################
 ########## Runtime Image ########################
 ##################################################
