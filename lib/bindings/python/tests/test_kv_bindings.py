@@ -21,7 +21,6 @@ import pytest
 
 from dynamo.llm import (
     ApproxKvIndexer,
-    compute_block_hash_for_seq_py,
     ForwardPassMetrics,
     KvEventPublisher,
     KvIndexer,
@@ -30,6 +29,7 @@ from dynamo.llm import (
     RadixTree,
     WorkerMetricsPublisher,
     WorkerStats,
+    compute_block_hash_for_seq_py,
 )
 from dynamo.runtime import Component, DistributedRuntime
 
