@@ -25,7 +25,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](../../../deploy/cloud/operator/docs/api_reference.md)**
+**📖 [Dynamo CRD API Reference](/docs/guides/dynamo_deploy/api_reference.md)**
 
 ## Installation
 
