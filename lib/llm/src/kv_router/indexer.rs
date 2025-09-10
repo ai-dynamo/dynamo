@@ -760,6 +760,15 @@ impl KvIndexer {
     pub fn event_sender(&self) -> mpsc::Sender<RouterEvent> {
         self.event_tx.clone()
     }
+
+    /// Get a sender for dump requests (snapshot events).
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `DumpRequest`s.
+    pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
+        self.dump_tx.clone()
+    }
 }
 
 #[async_trait]
@@ -1382,10 +1391,11 @@ mod tests {
         let worker_0 = 0;
         let worker_1 = 1;
 
-        assert!(trie
-            .find_matches(vec![LocalBlockHash(0)], false)
-            .scores
-            .is_empty());
+        assert!(
+            trie.find_matches(vec![LocalBlockHash(0)], false)
+                .scores
+                .is_empty()
+        );
 
         trie.apply_event(create_store_event(worker_0, 0, vec![0], None));
         trie.apply_event(create_store_event(worker_1, 0, vec![0], None));
@@ -1406,10 +1416,11 @@ mod tests {
         let worker_0 = 0;
         let worker_1 = 1;
 
-        assert!(trie
-            .find_matches(vec![LocalBlockHash(0)], false)
-            .scores
-            .is_empty());
+        assert!(
+            trie.find_matches(vec![LocalBlockHash(0)], false)
+                .scores
+                .is_empty()
+        );
 
         // Test clearing an empty worker
         trie.clear_all_blocks(worker_0);

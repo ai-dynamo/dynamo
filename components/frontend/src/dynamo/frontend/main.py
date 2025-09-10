@@ -23,6 +23,7 @@
 
 import argparse
 import asyncio
+import logging
 import os
 import pathlib
 import re
@@ -41,6 +42,10 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 
 from . import __version__
+
+DYNAMO_NAMESPACE_ENV_VAR = "DYN_NAMESPACE"
+
+logger = logging.getLogger(__name__)
 
 
 def validate_static_endpoint(value):
@@ -96,7 +101,7 @@ def parse_args():
     parser.add_argument(
         "--http-port",
         type=int,
-        default=int(os.environ.get("DYN_HTTP_PORT", "8080")),
+        default=int(os.environ.get("DYN_HTTP_PORT", "8000")),
         help="HTTP port for the engine (u16). Can be set via DYN_HTTP_PORT env var.",
     )
     parser.add_argument(
@@ -131,23 +136,36 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--kv-events",
-        action="store_true",
-        dest="use_kv_events",
-        help=" KV Router: Whether to use KV events to maintain the view of cached blocks. If false, would use ApproxKvRouter for predicting block creation / deletion based only on incoming requests at a timer.",
-    )
-    parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
-        help=" KV Router. Disable KV events.",
+        default=True,
+        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests at a timer. By default, KV events are enabled.",
     )
-    parser.set_defaults(use_kv_events=True)
+    parser.add_argument(
+        "--namespace",
+        type=str,
+        default=os.environ.get(DYNAMO_NAMESPACE_ENV_VAR),
+        help="Dynamo namespace for model discovery scoping. If specified, models will only be discovered from this namespace. If not specified, discovers models from all namespaces (global discovery).",
+    )
     parser.add_argument(
         "--router-replica-sync",
         action="store_true",
         default=False,
         help="KV Router: Enable replica synchronization across multiple router instances. When true, routers will publish and subscribe to events to maintain consistent state.",
+    )
+    parser.add_argument(
+        "--router-snapshot-threshold",
+        type=int,
+        default=10000,
+        help="KV Router: Number of messages in stream before triggering a snapshot. Defaults to 10000.",
+    )
+    parser.add_argument(
+        "--router-reset-states",
+        action="store_true",
+        dest="router_reset_states",
+        default=False,
+        help="KV Router: Reset router state on startup, purging stream and object store. By default, states are persisted. WARNING: This can affect existing router replicas.",
     )
     parser.add_argument(
         "--busy-threshold",
@@ -175,6 +193,12 @@ def parse_args():
         type=str,
         default=None,
         help="Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var or 'dynamo_frontend'.",
+    )
+    parser.add_argument(
+        "--kserve-grpc-server",
+        action="store_true",
+        default=False,
+        help="Start KServe gRPC server.",
     )
 
     flags = parser.parse_args()
@@ -206,6 +230,8 @@ async def async_main():
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
             router_replica_sync=flags.router_replica_sync,
+            router_snapshot_threshold=flags.router_snapshot_threshold,
+            router_reset_states=flags.router_reset_states,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
@@ -225,6 +251,7 @@ async def async_main():
 
     if flags.static_endpoint:
         kwargs["endpoint_id"] = flags.static_endpoint
+
     if flags.model_name:
         kwargs["model_name"] = flags.model_name
     if flags.model_path:
@@ -233,6 +260,8 @@ async def async_main():
         kwargs["tls_cert_path"] = flags.tls_cert_path
     if flags.tls_key_path:
         kwargs["tls_key_path"] = flags.tls_key_path
+    if flags.namespace:
+        kwargs["namespace"] = flags.namespace
 
     if is_static:
         # out=dyn://<static_endpoint>
@@ -246,6 +275,8 @@ async def async_main():
     try:
         if flags.interactive:
             await run_input(runtime, "text", engine)
+        elif flags.kserve_grpc_server:
+            await run_input(runtime, "grpc", engine)
         else:
             await run_input(runtime, "http", engine)
     except asyncio.exceptions.CancelledError:

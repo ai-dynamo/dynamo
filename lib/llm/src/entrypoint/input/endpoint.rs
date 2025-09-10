@@ -6,21 +6,21 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use crate::{
     backend::Backend,
     engines::StreamingEngineAdapter,
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
     preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
+        Annotated,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        Annotated,
     },
 };
 
 use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
-    network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
+    Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source, network::Ingress,
 };
-use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime};
+use dynamo_runtime::{DistributedRuntime, protocols::EndpointId};
 
 use crate::entrypoint::EngineConfig;
 
@@ -55,7 +55,9 @@ pub async fn run(
             >::for_engine(engine)?;
 
             if !is_static {
-                model.attach(&endpoint, ModelType::Chat).await?;
+                model
+                    .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                    .await?;
             }
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
@@ -71,9 +73,7 @@ pub async fn run(
                 SingleIn<PreprocessedRequest>,
                 ManyOut<Annotated<BackendOutput>>,
             >::new();
-            let backend = Backend::from_mdc(model.card().clone())
-                .await?
-                .into_operator();
+            let backend = Backend::from_mdc(model.card()).into_operator();
             let engine = ServiceBackend::from_engine(inner_engine);
             let pipeline = frontend
                 .link(backend.forward_edge())?
@@ -83,8 +83,13 @@ pub async fn run(
             let ingress = Ingress::for_pipeline(pipeline)?;
 
             if !is_static {
-                model.attach(&endpoint, ModelType::Backend).await?;
+                // Default to supporting both Chat and Completions endpoints
+                let model_type = ModelType::Chat | ModelType::Completions;
+                model
+                    .attach(&endpoint, model_type, ModelInput::Tokens)
+                    .await?;
             }
+
             let fut = endpoint.endpoint_builder().handler(ingress).start();
 
             (Box::pin(fut), Some(model.card().clone()))
@@ -125,13 +130,12 @@ pub async fn run(
     result?;
 
     // Cleanup on shutdown
-    if let Some(mut card) = card {
-        if let Err(err) = card
+    if let Some(mut card) = card
+        && let Err(err) = card
             .delete_from_nats(distributed_runtime.nats_client())
             .await
-        {
-            tracing::error!(%err, "delete_from_nats error on shutdown");
-        }
+    {
+        tracing::error!(%err, "delete_from_nats error on shutdown");
     }
 
     Ok(())
@@ -141,7 +145,7 @@ pub async fn run(
 #[cfg(feature = "integration")]
 mod integration_tests {
     use super::*;
-    use dynamo_runtime::protocols::Endpoint as EndpointId;
+    use dynamo_runtime::protocols::EndpointId;
 
     async fn create_test_environment() -> anyhow::Result<(DistributedRuntime, EngineConfig)> {
         // Create a minimal distributed runtime and engine config for testing

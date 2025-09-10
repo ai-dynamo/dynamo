@@ -32,22 +32,21 @@
 use crate::{
     config::HealthStatus,
     discovery::Lease,
-    metrics::{prometheus_names, MetricsRegistry},
+    metrics::{MetricsRegistry, prometheus_names},
     service::ServiceSet,
     transports::etcd::EtcdPath,
 };
 
 use super::{
-    error,
+    DistributedRuntime, Result, Runtime, error,
     traits::*,
     transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
     transports::nats::Slug,
     utils::Duration,
-    DistributedRuntime, Result, Runtime,
 };
 
-use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
-use crate::protocols::Endpoint as EndpointId;
+use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
+use crate::protocols::EndpointId;
 use crate::service::ComponentNatsServerPrometheusMetrics;
 use async_nats::{
     rustls::quic,
@@ -274,13 +273,12 @@ impl Component {
     /// Add Prometheus metrics for this component's NATS service stats.
     ///
     /// Starts a background task that periodically requests service statistics from NATS
-    /// and updates the corresponding Prometheus metrics. The scraping interval is set to
-    /// approximately 873ms (MAX_DELAY_MS), which is arbitrary but any value less than a second
-    /// is fair game. This frequent scraping provides real-time service statistics updates.
+    /// and updates the corresponding Prometheus metrics. The first scrape happens immediately,
+    /// then subsequent scrapes occur at a fixed interval of 9.8 seconds (MAX_WAIT_MS),
+    /// which should be near or smaller than typical Prometheus scraping intervals to ensure
+    /// metrics are fresh when Prometheus collects them.
     pub fn start_scraping_nats_service_component_metrics(&self) -> Result<()> {
-        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
-            std::time::Duration::from_millis(300);
-        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(873);
+        const MAX_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(9800); // Should be <= Prometheus scrape interval
 
         // If there is another component with the same service name, this will fail.
         let component_metrics = ComponentNatsServerPrometheusMetrics::new(self)?;
@@ -288,11 +286,13 @@ impl Component {
         let component_clone = self.clone();
         let mut hierarchies = self.parent_hierarchy();
         hierarchies.push(self.hierarchy());
-        debug_assert!(hierarchies
-            .last()
-            .map(|x| x.as_str())
-            .unwrap_or_default()
-            .eq_ignore_ascii_case(&self.service_name())); // it happens that in component, hierarchy and service name are the same
+        debug_assert!(
+            hierarchies
+                .last()
+                .map(|x| x.as_str())
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(&self.service_name())
+        ); // it happens that in component, hierarchy and service name are the same
 
         // Start a background task that scrapes stats every 5 seconds
         let m = component_metrics.clone();
@@ -307,8 +307,8 @@ impl Component {
         // By using the DRT's own runtime handle, we ensure the task runs in the
         // correct runtime that will persist for the lifetime of the component.
         c.drt().runtime().secondary().spawn(async move {
-            let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
-            let mut interval = tokio::time::interval(MAX_DELAY_MS);
+            let timeout = std::time::Duration::from_millis(500);
+            let mut interval = tokio::time::interval(MAX_WAIT_MS);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -325,6 +325,7 @@ impl Component {
                         m.reset_to_zeros();
                     }
                 }
+
                 interval.tick().await;
             }
         });
@@ -572,39 +573,11 @@ impl Namespace {
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
-        let component = ComponentBuilder::from_runtime(self.runtime.clone())
+        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
             .is_static(self.is_static)
-            .build()?;
-
-        // Register the metrics callback for this component.
-        // If registration fails, log a warning but do not propagate the error,
-        // as metrics are not mission critical and should not block component creation.
-        if let Err(err) = component.start_scraping_nats_service_component_metrics() {
-            let error_str = err.to_string();
-
-            // Check if this is a duplicate metrics registration (expected in some cases)
-            // or a different error (unexpected)
-            if error_str.contains("Duplicate metrics") {
-                // This is not a critical error because it's possible for multiple Components
-                // with the same service_name to register metrics callbacks.
-                tracing::debug!(
-                    "Duplicate metrics registration for component '{}' (expected when multiple components share the same service_name): {}",
-                    component.service_name(),
-                    error_str
-                );
-            } else {
-                // This is unexpected and should be more visible
-                tracing::warn!(
-                    "Failed to start scraping metrics for component '{}': {}",
-                    component.service_name(),
-                    err
-                );
-            }
-        }
-
-        Ok(component)
+            .build()?)
     }
 
     /// Create a [`Namespace`] in the parent namespace

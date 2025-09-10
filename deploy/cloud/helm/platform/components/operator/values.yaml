@@ -75,14 +75,10 @@ controllerManager:
     annotations: {}
 
 dynamo:
-  imageBuilder:
-    serviceAccount:
-      annotations: {}
   components:
     serviceAccount:
       annotations: {}
 
-  enableLWS: false
   groveTerminationDelay: 15m
 
   internalImages:
@@ -100,6 +96,9 @@ dynamo:
     existingSecretName: ''
     secure: true
 
+  metrics:
+    prometheusEndpoint: ""
+
 
 #imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
@@ -113,3 +112,5 @@ metricsService:
 
 natsAddr: ""
 etcdAddr: ""
+modelExpressURL: ""
+

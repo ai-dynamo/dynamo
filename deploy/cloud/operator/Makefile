@@ -266,6 +266,31 @@ $(HELMIFY): $(LOCALBIN)
 helm: manifests kustomize helmify
 	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
+######################### CRD Reference Docs
+CRD_REF_DOCS_VERSION ?= v0.0.12
+CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
+
+.PHONY: crd-ref-docs
+crd-ref-docs: $(CRD_REF_DOCS) ## Download crd-ref-docs locally if necessary.
+$(CRD_REF_DOCS): $(LOCALBIN)
+	@echo "Installing crd-ref-docs $(CRD_REF_DOCS_VERSION)"
+	@GOBIN=$(LOCALBIN) go install github.com/elastic/crd-ref-docs@$(CRD_REF_DOCS_VERSION)
+	@echo "✅ crd-ref-docs $(CRD_REF_DOCS_VERSION) installed successfully"
+
+.PHONY: generate-api-docs
+generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRDs
+	@echo "📚 Generating CRD API reference documentation..."
+	@mkdir -p docs
+	@$(CRD_REF_DOCS) \
+		--source-path=api \
+		--config=docs/crd-ref-docs-config.yaml \
+		--renderer=markdown \
+		--output-path=./docs/api_reference.md
+	@echo "✅ Generated API reference at ./docs/api_reference.md"
+	# concatenate header.md and api_reference.md
+	cat docs/header.md ./docs/api_reference.md > ../../../docs/guides/dynamo_deploy/api_reference.md
+	rm ./docs/api_reference.md
+	@echo "✅ Concatenated header.md and api_reference.md"
 
 .PHONY: coverage
 coverage: test

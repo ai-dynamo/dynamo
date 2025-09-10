@@ -12,10 +12,10 @@ use bytes::Bytes;
 use serde::Serialize;
 
 use crate::{
+    Client,
     config::Config,
     error::OpenAIError,
     types::{CreateFileRequest, DeleteFileResponse, ListFilesResponse, OpenAIFile},
-    Client,
 };
 
 /// Files are used to upload documents that can be used with features like Assistants and Fine-tuning.

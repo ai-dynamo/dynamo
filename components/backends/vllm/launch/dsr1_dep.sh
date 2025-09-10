@@ -47,8 +47,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --gpus-per-node L     Number of GPUs per node (required, int)"
             echo "  --master-addr ADDR    Master node address (default: localhost)"
             echo "  --log-dir DIR         Directory for log files (default: ./logs)"
-            echo "  --model MODEL    Model name to use (default: deepseek-ai/DeepSeek-R1)"
-            echo "  -h, --help           Show this help message"
+            echo "  --model MODEL         Model name to use (default: ${MODEL})"
+            echo "  -h, --help            Show this help message"
             exit 0
             ;;
         *)
@@ -83,7 +83,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress if it's node 0
 if [ $NODE_RANK -eq 0 ]; then
-    DYN_LOG=debug python -m dynamo.frontend --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
+    DYN_LOG=debug python -m dynamo.frontend --router-mode kv --http-port=8000 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
 fi
 
 mkdir -p $LOG_DIR

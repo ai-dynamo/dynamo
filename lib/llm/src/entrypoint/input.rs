@@ -16,8 +16,9 @@ use std::{
 
 pub mod batch;
 mod common;
-pub use common::build_routed_pipeline;
+pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
 pub mod endpoint;
+pub mod grpc;
 pub mod http;
 pub mod text;
 
@@ -43,6 +44,9 @@ pub enum Input {
 
     /// Batch mode. Run all the prompts, write the outputs, exit.
     Batch(PathBuf),
+
+    // Run an KServe compatible gRPC server
+    Grpc,
 }
 
 impl FromStr for Input {
@@ -59,6 +63,7 @@ impl TryFrom<&str> for Input {
     fn try_from(s: &str) -> anyhow::Result<Self> {
         match s {
             "http" => Ok(Input::Http),
+            "grpc" => Ok(Input::Grpc),
             "text" => Ok(Input::Text),
             "stdin" => Ok(Input::Stdin),
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
@@ -77,6 +82,7 @@ impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
             Input::Http => "http",
+            Input::Grpc => "grpc",
             Input::Text => "text",
             Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
@@ -112,6 +118,9 @@ pub async fn run_input(
     match in_opt {
         Input::Http => {
             http::run(runtime, engine_config).await?;
+        }
+        Input::Grpc => {
+            grpc::run(runtime, engine_config).await?;
         }
         Input::Text => {
             text::run(runtime, None, engine_config).await?;

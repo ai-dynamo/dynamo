@@ -101,11 +101,14 @@ spec:
         {{- if .Values.dynamo.virtualServiceSupportsHTTPS }}
           - --virtual-service-supports-https={{ .Values.dynamo.virtualServiceSupportsHTTPS }}
         {{- end }}
-        {{- if .Values.dynamo.enableLWS }}
-          - --enable-lws
-        {{- end }}
         {{- if .Values.dynamo.groveTerminationDelay }}
           - --grove-termination-delay={{ .Values.dynamo.groveTerminationDelay }}
+        {{- end }}
+        {{- if .Values.modelExpressURL }}
+          - --model-express-url={{ .Values.modelExpressURL }}
+        {{- end }}
+        {{- if .Values.dynamo.metrics.prometheusEndpoint }}
+          - --prometheus-endpoint={{ .Values.dynamo.metrics.prometheusEndpoint }}
         {{- end }}
         command:
         - /manager

@@ -4,10 +4,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::logging::TraceParent;
 use crate::protocols::LeaseId;
-use crate::SystemHealth;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
@@ -66,7 +66,7 @@ impl PushEndpoint {
 
                 // process shutdown
                 _ = self.cancellation_token.cancelled() => {
-                    tracing::info!("Shutting down service");
+                    tracing::info!("PushEndpoint received cancellation signal, shutting down service");
                     if let Err(e) = endpoint.stop().await {
                         tracing::warn!("Failed to stop NATS service: {:?}", e);
                     }
@@ -77,7 +77,10 @@ impl PushEndpoint {
             if let Some(req) = req {
                 let response = "".to_string();
                 if let Err(e) = req.respond(Ok(response.into())).await {
-                    tracing::warn!("Failed to respond to request; this may indicate the request has shutdown: {:?}", e);
+                    tracing::warn!(
+                        "Failed to respond to request; this may indicate the request has shutdown: {:?}",
+                        e
+                    );
                 }
 
                 let ingress = self.service_handler.clone();

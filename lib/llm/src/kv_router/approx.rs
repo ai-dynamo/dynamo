@@ -26,14 +26,13 @@ use tokio_util::sync::CancellationToken;
 use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 use crate::kv_router::indexer::{
-    compute_block_hash_for_seq, DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores,
-    RadixTree, WorkerId,
+    DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores, RadixTree, RouterEvent,
+    WorkerId, compute_block_hash_for_seq,
 };
 use crate::kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use crate::kv_router::RouterEvent;
 
 #[derive(Debug)]
 struct MatchRequest {

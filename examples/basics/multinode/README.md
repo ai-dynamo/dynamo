@@ -315,6 +315,7 @@ Send multiple new conversations to see them distributed across replicas:
 ```python
 import asyncio
 from openai import AsyncOpenAI
+import os
 
 if os.environ.get("DYN_FRONTEND_IP"):
     frontend_ip=os.environ.get("DYN_FRONTEND_IP")
@@ -381,8 +382,6 @@ python -m dynamo.frontend \
 ```
 
 However, for maximum performance with shared prefixes and multi-turn conversations, KV routing provides significant advantages by minimizing redundant computation.
-
-For detailed router configuration and tuning options, see the [KV Router Documentation](../../../docs/components/router/README.md).
 
 ## Monitoring and Debugging
 

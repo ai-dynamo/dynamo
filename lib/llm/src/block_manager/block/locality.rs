@@ -16,7 +16,7 @@
 
 use super::*;
 use crate::block_manager::block::transfer::{
-    handle_local_transfer, TransferContext, TransferError, WriteToStrategy,
+    TransferContext, TransferError, WriteToStrategy, handle_local_transfer,
 };
 use crate::block_manager::storage::{self, nixl::NixlDescriptor};
 

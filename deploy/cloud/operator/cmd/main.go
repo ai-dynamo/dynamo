@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"net/url"
 	"os"
 	"time"
 
@@ -129,8 +130,9 @@ func main() {
 	var ingressControllerClassName string
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
-	var enableLWS bool
 	var groveTerminationDelay time.Duration
+	var modelExpressURL string
+	var prometheusEndpoint string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -156,22 +158,38 @@ func main() {
 		"The name of the ingress controller TLS secret to use")
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
-	flag.BoolVar(&enableLWS, "enable-lws", false,
-		"If set, enable leader worker set")
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
 		"The termination delay for Grove PodGangSets")
+	flag.StringVar(&modelExpressURL, "model-express-url", "",
+		"URL of the Model Express server to inject into all pods")
+	flag.StringVar(&prometheusEndpoint, "prometheus-endpoint", "",
+		"URL of the Prometheus endpoint to use for metrics")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Validate modelExpressURL if provided
+	if modelExpressURL != "" {
+		if _, err := url.Parse(modelExpressURL); err != nil {
+			setupLog.Error(err, "invalid model-express-url provided", "url", modelExpressURL)
+			os.Exit(1)
+		}
+		setupLog.Info("Model Express URL configured", "url", modelExpressURL)
+	}
+
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
-		EnableLWS:           enableLWS,
 		Grove: commonController.GroveConfig{
 			Enabled:          false, // Will be set after Grove discovery
 			TerminationDelay: groveTerminationDelay,
+		},
+		LWS: commonController.LWSConfig{
+			Enabled: false, // Will be set after LWS discovery
+		},
+		KaiScheduler: commonController.KaiSchedulerConfig{
+			Enabled: false, // Will be set after Kai-scheduler discovery
 		},
 		EtcdAddress: etcdAddr,
 		NatsAddress: natsAddr,
@@ -181,6 +199,8 @@ func main() {
 			IngressControllerTLSSecret: ingressControllerTLSSecretName,
 			IngressHostSuffix:          ingressHostSuffix,
 		},
+		ModelExpressURL:    modelExpressURL,
+		PrometheusEndpoint: prometheusEndpoint,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -240,10 +260,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Detect Grove availability using discovery client
+	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")
 	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
 	ctrlConfig.Grove.Enabled = groveEnabled
+	setupLog.Info("Detecting LWS availability...")
+	lwsEnabled := commonController.DetectLWSAvailability(mainCtx, mgr)
+	ctrlConfig.LWS.Enabled = lwsEnabled
+
+	// Detect Kai-scheduler availability using discovery client
+	setupLog.Info("Detecting Kai-scheduler availability...")
+	kaiSchedulerEnabled := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
+	ctrlConfig.KaiScheduler.Enabled = kaiSchedulerEnabled
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{

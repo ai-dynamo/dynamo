@@ -1,21 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::{collections::HashMap, pin::Pin, time::Duration};
 
-use crate::{protocols::Endpoint, slug::Slug, transports::nats::Client};
+use crate::{protocols::EndpointId, slug::Slug, transports::nats::Client};
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -24,7 +12,7 @@ use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
 #[derive(Clone)]
 pub struct NATSStorage {
     client: Client,
-    endpoint: Endpoint,
+    endpoint: EndpointId,
 }
 
 pub struct NATSBucket {
@@ -58,7 +46,7 @@ impl KeyValueStore for NATSStorage {
 }
 
 impl NATSStorage {
-    pub fn new(client: Client, endpoint: Endpoint) -> Self {
+    pub fn new(client: Client, endpoint: EndpointId) -> Self {
         NATSStorage { client, endpoint }
     }
 
@@ -91,8 +79,10 @@ impl NATSStorage {
                 },
             )
             .await;
+        let nats_store = create_result
+            .map_err(|err| StorageError::KeyValueError(err.to_string(), bucket_name.clone()))?;
         tracing::debug!("Created bucket {bucket_name}");
-        create_result.map_err(|err| StorageError::KeyValueError(err.to_string(), bucket_name))
+        Ok(nats_store)
     }
 
     async fn get_key_value(
