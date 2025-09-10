@@ -39,6 +39,9 @@ To use KVBM in TensorRT-LLM, you can follow the steps below:
 docker compose -f deploy/docker-compose.yml up -d
 
 # Build a container that includes TensorRT-LLM and KVBM. Note: KVBM integration is only available in TensorRT-LLM commit dcd110cfac07e577ce01343c455917832b0f3d5e or newer.
+# When building with the --tensorrtllm-commit option, you may notice that https://github.com keeps prompting for a username and password.
+# This happens because cloning TensorRT-LLM can hit GitHub’s rate limit.
+# To work around this, you can keep pressing "Enter" or "Return."
 ./container/build.sh --framework trtllm --tensorrtllm-commit dcd110cfac07e577ce01343c455917832b0f3d5e --enable-kvbm
 
 # launch the container
