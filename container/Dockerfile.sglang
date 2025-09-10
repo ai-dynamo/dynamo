@@ -237,6 +237,7 @@ COPY components/ /workspace/components/
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
 COPY examples /workspace/examples
+COPY deploy /workspace/deploy
 RUN uv pip install /workspace/benchmarks
 
 # Copy benchmarks, backends and tests for CI

@@ -279,6 +279,12 @@ pub const KVSTATS_METRICS: &[&str] = &[
     kvstats::GPU_PREFIX_CACHE_HIT_RATE,
 ];
 
+// KvRouter (including KvInexer) Prometheus metric names
+pub mod kvrouter {
+    /// Number of KV cache events applied to the index (including status)
+    pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
+
 // Shared regex patterns for Prometheus sanitization
 static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
