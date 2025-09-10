@@ -8,9 +8,9 @@ use crate::ReasoningParser;
 pub struct GraniteReasoningParser {
     think_start_tokens: Vec<String>,
     think_end_tokens: Vec<String>,
-    _buffer: String,
-    _stripped_think_start: bool,
-    _in_reasoning: bool,
+    buffer: String,
+    stripped_think_start: bool,
+    in_reasoning: bool,
 }
 
 impl GraniteReasoningParser {
@@ -24,9 +24,9 @@ impl GraniteReasoningParser {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            _buffer: String::new(),
-            _stripped_think_start: false,
-            _in_reasoning: false,
+            buffer: String::new(),
+            stripped_think_start: false,
+            in_reasoning: false,
         }
     }
 }
@@ -43,15 +43,15 @@ impl ReasoningParser for GraniteReasoningParser {
             .think_start_tokens
             .iter()
             .find(|&token| text.contains(token))
-            .unwrap_or(self.think_start_tokens.first().unwrap());
+            .unwrap_or_else(|| self.think_start_tokens.first().unwrap());
 
         let think_end_token = self
             .think_end_tokens
             .iter()
             .find(|&token| text.contains(token))
-            .unwrap_or(self.think_end_tokens.first().unwrap());
+            .unwrap_or_else(|| self.think_end_tokens.first().unwrap());
         // Implement parsing logic specific to Granite format
-        let in_reasoning = self._in_reasoning
+        let in_reasoning = self.in_reasoning
             || self
                 .think_start_tokens
                 .iter()
@@ -96,8 +96,8 @@ impl ReasoningParser for GraniteReasoningParser {
         // Implement streaming parsing logic specific to Granite format
 
         // Incrementally parse the streaming text
-        self._buffer.push_str(text);
-        let mut current_text = self._buffer.to_string();
+        self.buffer.push_str(text);
+        let mut current_text = self.buffer.to_string();
         // If the current text is a prefix of the think token, keep buffering
 
         for think_start_token in &self.think_start_tokens {
@@ -125,31 +125,31 @@ impl ReasoningParser for GraniteReasoningParser {
             .think_start_tokens
             .iter()
             .find(|&token| current_text.contains(token))
-            .unwrap_or(self.think_start_tokens.first().unwrap());
+            .unwrap_or_else(|| self.think_start_tokens.first().unwrap());
 
         let think_end_token = self
             .think_end_tokens
             .iter()
             .find(|&token| current_text.contains(token))
-            .unwrap_or(self.think_end_tokens.first().unwrap());
+            .unwrap_or_else(|| self.think_end_tokens.first().unwrap());
 
-        if !self._stripped_think_start && current_text.contains(think_start_token) {
+        if !self.stripped_think_start && current_text.contains(think_start_token) {
             current_text = current_text.replacen(think_start_token, "", 1);
-            self._buffer = current_text.to_string();
-            self._stripped_think_start = true;
-            self._in_reasoning = true;
+            self.buffer = current_text.to_string();
+            self.stripped_think_start = true;
+            self.in_reasoning = true;
         }
         // Handle end of reasoning block
         let mut think_end_idx = current_text.len();
-        if self._in_reasoning {
+        if self.in_reasoning {
             think_end_idx = current_text
                 .find(think_end_token)
                 .unwrap_or(current_text.len());
         }
-        if self._in_reasoning && think_end_idx < current_text.len() {
+        if self.in_reasoning && think_end_idx < current_text.len() {
             let reasoning_text = &current_text[..think_end_idx];
-            self._buffer.clear();
-            self._in_reasoning = false;
+            self.buffer.clear();
+            self.in_reasoning = false;
             let start_idx = think_end_idx + think_end_token.len();
             let normal_text = if start_idx < current_text.len() {
                 &current_text[start_idx..]
@@ -162,26 +162,20 @@ impl ReasoningParser for GraniteReasoningParser {
             };
         }
         // Continue with reasoning content
-        if self._in_reasoning {
+        if self.in_reasoning {
             // Stream the content immediately
             let reasoning_text = current_text;
-            self._buffer.clear();
+            self.buffer.clear();
             ParserResult {
                 normal_text: String::new(),
                 reasoning_text,
             }
-        } else if !self._in_reasoning {
+        } else {
             // If we're not in a reasoning block return as normal text
             let normal_text = current_text;
-            self._buffer.clear();
+            self.buffer.clear();
             ParserResult {
                 normal_text,
-                reasoning_text: String::new(),
-            }
-        } else {
-            // If we are in a reasoning block but no end token is found, return the current buffer
-            ParserResult {
-                normal_text: String::new(),
                 reasoning_text: String::new(),
             }
         }
