@@ -290,46 +290,6 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
 #######################################################################
-########## DEVELOPMENT TARGETS FEATURE MATRIX #########################
-#######################################################################
-# Feature              │ local-dev Target    │ dev Target
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Purpose              │ Dev Container       │ Command-line with
-#                      │ plugin use only     │ run.sh script
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Default User         │ ubuntu user         │ root user
-# ─────────────────────┼─────────────────────┼─────────────────────
-# User Setup           │ Full ubuntu user    │ No user setup
-#                      │ with UID/GID        │
-#                      │ mapping             │
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Permissions          │ ubuntu user with    │ Root-level
-#                      │ sudo privileges     │ permissions
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Home Directory       │ /home/ubuntu        │ /root
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Working Directory    │ /home/ubuntu/dynamo │ /workspace
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Rust Toolchain       │ User's home         │ System locations
-#                      │ (~/.rustup,         │ (/usr/local/rustup,
-#                      │  ~/.cargo)          │  /usr/local/cargo)
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Python Environment   │ User-owned venv     │ System location
-#                      │                     │ (/opt/dynamo/venv)
-# ─────────────────────┼─────────────────────┼─────────────────────
-# File Permissions     │ User-level with     │ Root-level
-#                      │ proper ownership    │ permissions
-# ─────────────────────┼─────────────────────┼─────────────────────
-# Compatibility        │ MS Plug-in: Dev     │ Backward compatibility
-#                      │ Container workflow  │ with existing
-#                      │                     │ workflows
-#
-# USAGE GUIDELINES:
-# • Use local-dev: VS Code/Cursor Dev Container plugin only
-# • Use dev: run.sh script for command-line development
-
-
-#######################################################################
 ########## Development (Dev Container only) ###########################
 #######################################################################
 #
