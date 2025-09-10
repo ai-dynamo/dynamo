@@ -3,7 +3,6 @@
 
 accelerate==1.6.0
 aiofiles
-aiofiles
 av==15.0.0
 fastapi==0.115.6
 ftfy
