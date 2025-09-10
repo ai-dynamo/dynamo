@@ -185,7 +185,7 @@ kubectl get jobs -n $NAMESPACE
 kubectl logs job/profile-sla -n $NAMESPACE
 ```
 
-### Viewing Profiling Results 
+### Viewing Profiling Results
 
 After the profiling job completes successfully, the results are stored in the persistent volume claim (PVC) created during Step 2.
 

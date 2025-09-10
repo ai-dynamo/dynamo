@@ -223,7 +223,7 @@ def cmd_line_args():
         "--override-engine-args",
         type=str,
         default="",
-        help="Python dictionary string to override specific engine arguments from the YAML file. Example: '{\"tensor_parallel_size\": 2, \"kv_cache_config\": {\"enable_block_reuse\": false}}'",
+        help='Python dictionary string to override specific engine arguments from the YAML file. Example: \'{"tensor_parallel_size": 2, "kv_cache_config": {"enable_block_reuse": false}}\'',
     )
     parser.add_argument(
         "--publish-events-and-metrics",

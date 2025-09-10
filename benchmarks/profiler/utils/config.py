@@ -579,12 +579,14 @@ class TrtllmConfigModifier:
             # Merge prefill worker config into a single worker
             if "TRTLLMPrefillWorker" in cfg.spec.services:
                 # Rename prefill worker to generic worker
-                cfg.spec.services["TRTLLMWorker"] = cfg.spec.services["TRTLLMPrefillWorker"]
+                cfg.spec.services["TRTLLMWorker"] = cfg.spec.services[
+                    "TRTLLMPrefillWorker"
+                ]
                 del cfg.spec.services["TRTLLMPrefillWorker"]
-            
-            # Remove decode worker 
+
+            # Remove decode worker
             del cfg.spec.services["TRTLLMDecodeWorker"]
-            
+
             worker_service = cfg.spec.services["TRTLLMWorker"]
             if (
                 not worker_service.extraPodSpec
@@ -594,13 +596,13 @@ class TrtllmConfigModifier:
                     "Missing extraPodSpec or mainContainer in worker service"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
-            
+
             args = break_arguments(args)
-            
+
             # Remove disaggregation args
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-strategy")
-            
+
             # Keep the original extra-engine-args (prefill.yaml) which may contain user settings
             # Check if user already has override-engine-args and merge with our changes
             override_dict = {}
@@ -610,10 +612,10 @@ class TrtllmConfigModifier:
                     # Parse existing override
                     override_dict = json.loads(args[idx + 1])
                     # Remove the old override args
-                    del args[idx:idx + 2]
+                    del args[idx : idx + 2]
             except (ValueError, json.JSONDecodeError):
                 pass  # No existing override or invalid JSON
-            
+
             # Merge our overrides for converting prefill-only disagg to aggregated:
             # - Disable enable_block_reuse (no KV reuse for prefill-only)
             # - Enable overlap scheduler (disabled in prefill.yaml but needed for agg)
@@ -621,12 +623,16 @@ class TrtllmConfigModifier:
             if "kv_cache_config" not in override_dict:
                 override_dict["kv_cache_config"] = {}
             override_dict["kv_cache_config"]["enable_block_reuse"] = False
-            override_dict["disable_overlap_scheduler"] = False  # Enable overlap scheduler for agg
-            override_dict["cache_transceiver_config"] = None  # Remove cache transceiver for agg
-            
+            override_dict[
+                "disable_overlap_scheduler"
+            ] = False  # Enable overlap scheduler for agg
+            override_dict[
+                "cache_transceiver_config"
+            ] = None  # Remove cache transceiver for agg
+
             override_str = json.dumps(override_dict)
             args = append_argument(args, ["--override-engine-args", override_str])
-            
+
             worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         elif target == "decode":
@@ -634,13 +640,15 @@ class TrtllmConfigModifier:
             # Use decode worker as the main worker
             if "TRTLLMDecodeWorker" in cfg.spec.services:
                 # Rename decode worker to generic worker
-                cfg.spec.services["TRTLLMWorker"] = cfg.spec.services["TRTLLMDecodeWorker"]
+                cfg.spec.services["TRTLLMWorker"] = cfg.spec.services[
+                    "TRTLLMDecodeWorker"
+                ]
                 del cfg.spec.services["TRTLLMDecodeWorker"]
-            
+
             # Remove prefill worker if exists
             if "TRTLLMPrefillWorker" in cfg.spec.services:
                 del cfg.spec.services["TRTLLMPrefillWorker"]
-            
+
             worker_service = cfg.spec.services["TRTLLMWorker"]
             if (
                 not worker_service.extraPodSpec
@@ -650,13 +658,13 @@ class TrtllmConfigModifier:
                     "Missing extraPodSpec or mainContainer in worker service"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
-            
+
             args = break_arguments(args)
-            
+
             # Remove disaggregation args
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-strategy")
-            
+
             # Keep the original extra-engine-args (decode.yaml) which may contain user settings
             # Check if user already has override-engine-args and merge with our changes
             override_dict = {}
@@ -666,21 +674,23 @@ class TrtllmConfigModifier:
                     # Parse existing override
                     override_dict = json.loads(args[idx + 1])
                     # Remove the old override args
-                    del args[idx:idx + 2]
+                    del args[idx : idx + 2]
             except (ValueError, json.JSONDecodeError):
                 pass  # No existing override or invalid JSON
-            
+
             # Merge our overrides for converting decode-only disagg to aggregated:
             # - Enable enable_block_reuse (to skip prefill in decode-only)
             # - Remove cache_transceiver_config (not needed in agg mode)
             if "kv_cache_config" not in override_dict:
                 override_dict["kv_cache_config"] = {}
             override_dict["kv_cache_config"]["enable_block_reuse"] = True
-            override_dict["cache_transceiver_config"] = None  # Remove cache transceiver for agg
-            
+            override_dict[
+                "cache_transceiver_config"
+            ] = None  # Remove cache transceiver for agg
+
             override_str = json.dumps(override_dict)
             args = append_argument(args, ["--override-engine-args", override_str])
-            
+
             worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         # Set num workers to 1
@@ -728,10 +738,10 @@ class TrtllmConfigModifier:
                 # Parse existing override dict
                 override_dict = json.loads(args[idx + 1])
                 # Remove the old override args
-                del args[idx:idx + 2]
+                del args[idx : idx + 2]
         except (ValueError, json.JSONDecodeError):
             pass  # No existing override or invalid JSON
-        
+
         # Add/update tensor_parallel_size in the override
         override_dict["tensor_parallel_size"] = tp_size
         override_str = json.dumps(override_dict)
@@ -746,7 +756,7 @@ class TrtllmConfigModifier:
         cfg = Config.model_validate(config)
         worker_name = "TRTLLMWorker"
         worker_service = cfg.spec.services.get(worker_name)
-        
+
         # Also check for disagg worker names
         if not worker_service:
             worker_name = "TRTLLMPrefillWorker"
@@ -754,13 +764,13 @@ class TrtllmConfigModifier:
         if not worker_service:
             worker_name = "TRTLLMDecodeWorker"
             worker_service = cfg.spec.services.get(worker_name)
-            
+
         if not worker_service:
             logger.warning(
                 f"Worker service not found, using default model name: {DEFAULT_MODEL_NAME}"
             )
             return DEFAULT_MODEL_NAME
-            
+
         if (
             not worker_service.extraPodSpec
             or not worker_service.extraPodSpec.mainContainer
@@ -806,18 +816,25 @@ class TrtllmConfigModifier:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
                     # Look for the specific TRT-LLM KV cache allocation log
-                    if "Allocated" in line and "for max tokens in paged KV cache" in line:
+                    if (
+                        "Allocated" in line
+                        and "for max tokens in paged KV cache" in line
+                    ):
                         # Extract the number in parentheses at the end
                         match = re.search(r"paged KV cache \((\d+)\)", line)
                         if match:
                             max_tokens = int(match.group(1))
-                            logger.info(f"Found TRT-LLM KV cache max tokens: {max_tokens}")
+                            logger.info(
+                                f"Found TRT-LLM KV cache max tokens: {max_tokens}"
+                            )
                             return max_tokens
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
-        
+
         # Return a reasonable default if we couldn't find the KV cache size in logs
-        logger.warning(f"Could not find KV cache size in TRT-LLM logs, using default value of 100000")
+        logger.warning(
+            "Could not find KV cache size in TRT-LLM logs, using default value of 100000"
+        )
         return 100000  # Default fallback value for TRT-LLM
 
 
