@@ -338,11 +338,8 @@ mod tests {
         text: &str,
         role: Option<dynamo_async_openai::types::Role>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-<<<<<<< HEAD
         logprob: Option<f32>,
-=======
         tool_calls: Option<&str>,
->>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
 
@@ -489,22 +486,16 @@ mod tests {
             "Hello,",
             Some(dynamo_async_openai::types::Role::User),
             None,
-<<<<<<< HEAD
             Some(-0.1),
-=======
             None,
->>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
         let annotated_delta2 = create_test_delta(
             0,
             " world!",
             None,
             Some(dynamo_async_openai::types::FinishReason::Stop),
-<<<<<<< HEAD
             Some(-0.2),
-=======
             None,
->>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
 
         // Create a stream
@@ -647,11 +638,8 @@ mod tests {
             tool_call_json,
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
-<<<<<<< HEAD
             None,
-=======
             Some(tool_call_json),
->>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
         let data = annotated_delta.data.unwrap();
 
@@ -712,11 +700,8 @@ mod tests {
             tool_call_json,
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
-<<<<<<< HEAD
             None,
-=======
             Some(tool_call_json),
->>>>>>> ebda040a7 (chore: fix aggregator - clippy to be fixed)
         );
         let data = annotated_delta.data.unwrap();
 
