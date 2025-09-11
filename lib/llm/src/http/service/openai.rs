@@ -211,12 +211,54 @@ fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 async fn handler_completions(
-    State(state): State<Arc<service_v2::State>>,
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
+    body: String,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    // Parse JSON as Value first, apply template, then deserialize
+    let mut json_value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    error: format!("Invalid JSON: {}", e),
+                }),
+            )
+        })?;
+    
+    // Apply template values to JSON before deserialization
+    if let Some(template) = &template {
+        if let Some(obj) = json_value.as_object_mut() {
+            // Apply model from template if not present or empty
+            if !obj.contains_key("model") || obj.get("model").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+                obj.insert("model".to_string(), serde_json::Value::String(template.model.clone()));
+            }
+            
+            // Apply temperature from template if not present or zero
+            if !obj.contains_key("temperature") || obj.get("temperature").and_then(|v| v.as_f64()).map_or(true, |t| t == 0.0) {
+                obj.insert("temperature".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(template.temperature as f64).unwrap()));
+            }
+            
+            // Apply max_tokens from template if not present or zero
+            if !obj.contains_key("max_tokens") || obj.get("max_tokens").and_then(|v| v.as_u64()).map_or(true, |t| t == 0) {
+                obj.insert("max_tokens".to_string(), serde_json::Value::Number(serde_json::Number::from(template.max_completion_tokens)));
+            }
+        }
+    }
+    
+    // Now deserialize the modified JSON
+    let request: NvCreateCompletionRequest = serde_json::from_value(json_value)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    error: format!("Invalid request format: {}", e),
+                }),
+            )
+        })?;
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -229,11 +271,11 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
+    let response = tokio::spawn(completions(state, template, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
+                "Failed to await completions task: {:?}",
                 e,
             ))
         })?;
@@ -248,6 +290,7 @@ async fn handler_completions(
 #[tracing::instrument(skip_all)]
 async fn completions(
     state: Arc<service_v2::State>,
+    _template: Option<RequestTemplate>,
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
@@ -255,6 +298,7 @@ async fn completions(
     check_ready(&state)?;
 
     let request_id = request.id().to_string();
+    tracing::trace!("Received completions request: {:?}", request.inner);
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -1025,6 +1069,7 @@ fn process_event_converter<T: Serialize>(
 /// If not path is provided, the default path is `/v1/completions`
 pub fn completions_router(
     state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/completions".to_string());
@@ -1032,7 +1077,7 @@ pub fn completions_router(
     let router = Router::new()
         .route(&path, post(handler_completions))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
-        .with_state(state);
+        .with_state((state, template));
     (vec![doc], router)
 }
 
