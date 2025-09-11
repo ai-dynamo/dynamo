@@ -126,6 +126,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn extract_text(&self) -> Option<TextInput> {
         Some(TextInput::Single(String::new()))
     }
+
+    fn chat_template_kwargs(&self) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        self.chat_template_kwargs.clone()
+    }
 }
 
 impl OAIChatLikeRequest for NvCreateCompletionRequest {
@@ -219,9 +223,13 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             ..mixins
         };
 
-        let ctx = context! { ..ctx, ..context! {
-
-        }};
+        // Merge any additional kwargs into the context last so they take precedence
+        let ctx = if let Some(kwargs) = req.chat_template_kwargs() {
+            let extra = Value::from_serialize(kwargs);
+            context! { ..ctx, ..extra }
+        } else {
+            ctx
+        };
 
         let tmpl: minijinja::Template<'_, '_> = if has_tools {
             self.env.get_template("tool_use")?
