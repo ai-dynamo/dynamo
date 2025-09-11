@@ -173,9 +173,8 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         if let Some(channel) = self.parser.current_channel() {
-            tracing::debug!("Current channel: {}", channel);
+            tracing::debug!("Current channel {}", channel);
             if channel == "final" {
-                tracing::debug!("In final channel, processing normal text");
                 // If we're in the final channel, we should not parse reasoning
                 if let Some(current) = self.parser.last_content_delta().unwrap_or_default() {
                     tracing::debug!("Got normal text delta of {} chars", current.len());
@@ -186,6 +185,54 @@ impl ReasoningParser for GptOssReasoningParser {
                 }
                 tracing::debug!("No content delta in final channel");
                 ParserResult::default()
+            } else if channel == "commentary" {
+                // If we're in the commentary channel, we should return raw token content and recover content that is been comsumed by the parser
+                // so that the tool parser can process it properly
+                if let Ok(enc) = get_harmony_encoding() {
+                    let raw_content = self.parser.current_content().unwrap_or_default();
+                    let mut final_text = _text.to_string();
+
+                    // need to recover content in commentary that is been comsumed by the parser
+                    if raw_content.is_empty() {
+                        let tokens = self.parser.tokens();
+
+                        // Get the token id for " <|channel|>"
+                        let start_token_id = enc
+                            .tokenizer()
+                            .encode_with_special_tokens("<|channel|>")
+                            .last()
+                            .copied();
+
+                        // Find the last occurrence of the <|channel|> token (id 20005) in the tokens vector
+                        let last_channel_toke_idx = start_token_id
+                            .and_then(|token_id| {
+                                tokens.iter().rposition(|token| *token == token_id)
+                            })
+                            .unwrap_or(0);
+
+                        // then get the generate text between the last  <|channel|> to the end of self.parser.tokens()
+                        let end_token_idx = self.parser.tokens().len();
+                        // using the harmony decode_utf8 to translate the tokens to text
+                        let generated_text = enc
+                            .tokenizer()
+                            .decode_utf8(
+                                &self.parser.tokens()[last_channel_toke_idx..end_token_idx],
+                            )
+                            .unwrap();
+
+                        final_text = generated_text;
+
+                        // Mark as processed to prevent running this again
+                    }
+
+                    ParserResult {
+                        normal_text: final_text,
+                        reasoning_text: String::new(),
+                    }
+                } else {
+                    tracing::warn!("Failed to get harmony encoding for raw token decoding");
+                    ParserResult::default()
+                }
             } else {
                 tracing::debug!("In reasoning channel: {}", channel);
                 if let Some(current) = self.parser.last_content_delta().unwrap_or_default() {

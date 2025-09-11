@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony::{detect_tool_call_start_harmony, parse_tool_calls_harmony};
+use super::harmony::{detect_tool_call_start_harmony, parse_tool_calls_harmony_complete};
 use super::json::{detect_tool_call_start_json, try_tool_call_parse_json};
 use super::pythonic::{detect_tool_call_start_pythonic, try_tool_call_parse_pythonic};
 use super::response::ToolCallResponse;
@@ -43,7 +43,8 @@ pub fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ToolCallParserType::Harmony => {
-            let (results, normal_content) = parse_tool_calls_harmony(message, &config.json)?;
+            let (results, normal_content) =
+                parse_tool_calls_harmony_complete(message, &config.json)?;
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
@@ -1183,21 +1184,14 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[test]
     fn test_harmony_parser_basic() {
-        let input = r#"
-        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
-        <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
-        <|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>
-        "#;
+        let input = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony")).unwrap();
-        assert_eq!(
-            content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
-        assert_eq!(args["unit"], "fahrenheit");
+        assert_eq!(args["format"], "celsius");
     }
 
     #[test]

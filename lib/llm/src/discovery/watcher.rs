@@ -287,6 +287,12 @@ impl ModelWatcher {
             let Some(mut card) = card else {
                 anyhow::bail!("Missing model deployment card");
             };
+
+            // Ensure runtime_config is populated: prefer entry value if present
+            if let Some(rc) = model_entry.runtime_config.clone() {
+                card.runtime_config = rc;
+            }
+
             // Download tokenizer.json etc to local disk
             // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
             // OpenAIPreprocessor::new loads the files, so we can delete them after this
