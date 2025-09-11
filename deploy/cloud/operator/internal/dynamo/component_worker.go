@@ -76,10 +76,6 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 			Value: "true",
 		},
 		{
-			Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-			Value: "[\"generate\"]",
-		},
-		{
 			Name:  "DYN_SYSTEM_PORT",
 			Value: fmt.Sprintf("%d", commonconsts.DynamoSystemPort),
 		},

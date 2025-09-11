@@ -565,24 +565,51 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self
+
+        // Convert Python dict to serde_json::Value if provided and validate it's an object
+        let health_payload_json = health_check_payload
+            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .transpose()
+            .map_err(|err| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Failed to convert health_check_payload: {}",
+                    err
+                ))
+            })?;
+
+        // Require an object/dict
+        if let Some(ref payload) = health_payload_json {
+            if !payload.is_object() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "health_check_payload must be a JSON object (dict)",
+                ));
+            }
+        }
+
+        let mut builder = self
             .inner
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
+
+        if let Some(payload) = health_payload_json {
+            builder = builder.health_check_payload(payload);
+        }
+
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder

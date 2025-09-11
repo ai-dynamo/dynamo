@@ -74,12 +74,10 @@ impl DistributedRuntime {
             None
         };
         let starting_health_status = config.starting_health_status.clone();
-        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let health_endpoint_path = config.system_health_path.clone();
         let live_endpoint_path = config.system_live_path.clone();
         let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
             starting_health_status,
-            use_endpoint_health_status,
             health_endpoint_path,
             live_endpoint_path,
         )));
@@ -165,6 +163,31 @@ impl DistributedRuntime {
             tracing::debug!(
                 "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
             );
+        }
+
+        // Start health check manager if enabled
+        if config.health_check_enabled {
+            let health_check_config = crate::health_check::HealthCheckConfig {
+                canary_wait_time: std::time::Duration::from_secs(config.canary_wait_time_secs),
+                request_timeout: std::time::Duration::from_secs(
+                    config.health_check_request_timeout_secs,
+                ),
+            };
+
+            // Start the health check manager (spawns per-endpoint monitoring tasks)
+            match crate::health_check::start_health_check_manager(
+                distributed_runtime.clone(),
+                Some(health_check_config),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(
+                    "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
+                    config.canary_wait_time_secs,
+                    config.health_check_request_timeout_secs
+                ),
+                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+            }
         }
 
         Ok(distributed_runtime)
