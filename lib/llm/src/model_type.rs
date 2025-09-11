@@ -46,6 +46,7 @@ bitflags! {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
+        const Tensor = 1 << 3;
     }
 }
 
@@ -63,6 +64,9 @@ impl ModelType {
     pub fn supports_embedding(&self) -> bool {
         self.contains(ModelType::Embedding)
     }
+    pub fn supports_tensor(&self) -> bool {
+        self.contains(ModelType::Tensor)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -74,6 +78,9 @@ impl ModelType {
         }
         if self.supports_embedding() {
             result.push("embedding");
+        }
+        if self.supports_tensor() {
+            result.push("tensor");
         }
         result
     }
@@ -91,6 +98,9 @@ impl ModelType {
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
         }
+        // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
+        // current use of endpoint type is LLM specific and so does the HTTP
+        // server that uses it.
         endpoint_types
     }
 }
@@ -107,6 +117,8 @@ pub enum ModelInput {
     Text,
     /// Pre-processed input
     Tokens,
+    /// Tensor input
+    Tensor,
 }
 
 impl ModelInput {
@@ -114,6 +126,7 @@ impl ModelInput {
         match self {
             Self::Text => "text",
             Self::Tokens => "tokens",
+            Self::Tensor => "tensor",
         }
     }
 }
