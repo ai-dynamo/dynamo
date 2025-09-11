@@ -15,6 +15,7 @@
 
 import logging
 import re
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List
@@ -188,6 +189,9 @@ def check_models_api(response):
         if response.status_code != 200:
             return False
         data = response.json()
+        time.sleep(
+            1
+        )  # temporary to avoid /completions race condition where we get 404 error
         return data.get("data") and len(data["data"]) > 0
     except Exception:
         return False
@@ -210,12 +214,18 @@ def check_health_generate(response):
         endpoints = data.get("endpoints", []) or []
         for ep in endpoints:
             if isinstance(ep, str) and "generate" in ep:
+                time.sleep(
+                    1
+                )  # temporary to avoid /completions race condition where we get 404 error
                 return True
 
         # Check instances for an entry with endpoint == 'generate'
         instances = data.get("instances", []) or []
         for inst in instances:
             if isinstance(inst, dict) and inst.get("endpoint") == "generate":
+                time.sleep(
+                    1
+                )  # temporary to avoid /completions race condition where we get 404 error
                 return True
 
         return False
