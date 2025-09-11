@@ -5,7 +5,7 @@ This guide demonstrates two setups.
 - The basic setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
 - The EPP-aware setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker.
 
-EPP’s default approach is token-aware only `by approximation` because it relies on the non-tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+EPP’s default approach is token-aware only `by approximation` because it relies on the non-model tokenized text in the prompt. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -87,6 +87,28 @@ kubectl apply -f agg.yaml -n my-model
 ```
 Take a note of or change the DYNAMO_IMAGE in the model deployment file.
 
+
+Do not forget docker registry secret if needed.
+```bash
+kubectl create secret docker-registry docker-imagepullsecret \
+  --docker-server=$DOCKER_SERVER \
+  --docker-username=$DOCKER_USERNAME \
+  --docker-password=$DOCKER_PASSWORD \
+  --namespace=$NAMESPACE
+```
+
+Do not forget to include the the HuggingFace token if required.
+```bash
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
+```
+
+Create a model configuraiont file similar to the vllm_agg_qwen.yaml for you model.
+This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../components/backends/vllm/deploy/agg.yaml)
+
+
 ### 4. Install Dynamo GAIE helm chart ###
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
@@ -106,7 +128,6 @@ helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
 
 ##### 1. Build the custom EPP image #####
 
-We provide git patches for you to use.
 
 ##### 1.1 Clone the official GAIE repo in a separate folder #####
 
@@ -116,29 +137,22 @@ cd gateway-api-inference-extension
 git checkout v0.5.1
 ```
 
-##### 1.2 Apply patch(es) #####
+##### 1.2 Run the script to build Dynamo Custom EPP #####
 
 ```bash
-git apply <dynamo-folder>/deploy/inference-gateway/epp-patches/v0.5.1-1/epp-v0.5.1-dyn1.patch
+# Use your custom paths
+cd deploy/inference-gateway
+export DYNAMO_DIR=/path/to/dynamo
+export EPP_DIR=/path/to/gateway-api-inference-extension-dynamo
+
+# Run the script
+./build-epp-dynamo.sh
 ```
 
-##### 1.3 Build the custom EPP image #####
+Under the hood the script applies the Dynamo Patch to the EPP code base; creates a Dynamo Router static library and builds a custom EPP image with it.
+Retag the freshly built image and push it to your registry.
 
-```bash
-# Build the image <your-docker-registry/dynamo-custom-epp:<your-tag> and then manually push
-make image-local-load \
-  IMAGE_REGISTRY=<your-docker-registry> \
-  IMAGE_NAME=dynamo-custom-epp \
-  EXTRA_TAG=<your-tag>
-
-# Or run the command below to build push to your registry
-make image-local-push \
-  IMAGE_REGISTRY=<your-docker-registry> \
-  IMAGE_NAME=dynamo-custom-epp \
-  EXTRA_TAG=<your-tag>
-```
-
-##### 2. Install through helm #####
+##### 2. Deploy through helm #####
 
 ```bash
 cd deploy/inference-gateway
@@ -152,8 +166,7 @@ helm upgrade --install dynamo-gaie ./helm/dynamo-gaie \
   -f ./vllm_agg_qwen.yaml \
   -f ./values-epp-aware.yaml \
   --set eppAware.enabled=true \
-  --set-string eppAware.eppImage=$EPP_IMAGE \
-  --set-string eppAware.sidecar.image=$DYNAMO_IMAGE
+  --set-string eppAware.eppImage=$EPP_IMAGE
 ```
 
 
