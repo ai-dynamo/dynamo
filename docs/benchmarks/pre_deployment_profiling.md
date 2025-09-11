@@ -89,7 +89,7 @@ SLA planner can work with any interpolation data that follows the above format. 
 
 ## Running the Profiling Script in Kubernetes
 
-Set up your Kubernetes namespace (one-time per namespace). Follow the instructions [here](../../deploy/utils/README.md#kubernetes-setup-one-time-per-namespace). If your namespace is already set up, skip this step.
+Set up your Kubernetes namespace for profiling (one-time per namespace). First ensure Dynamo Cloud platform is installed by following the [main installation guide](../../deploy/README.md), then set up profiling resources using [deploy/utils/README](../../deploy/utils/README.md). If your namespace is already set up, skip this step.
 
 **Prerequisites**: Ensure all dependencies are installed. If you ran the setup script above, dependencies are already installed. Otherwise, install them manually:
 ```bash
