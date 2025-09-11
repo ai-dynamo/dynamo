@@ -118,7 +118,7 @@ data:
             "options": [],
             "query": "label_values(namespace)",
             "refresh": 1,
-            "regex": "",
+            "regex": ".+",
             "skipUrlSync": false,
             "sort": 1,
             "type": "query"
