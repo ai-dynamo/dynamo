@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpt-oss-agg-trtllmworker
+spec:
+  selector:
+    nvidia.com/selector: gpt-oss-agg-trtllmworker
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
