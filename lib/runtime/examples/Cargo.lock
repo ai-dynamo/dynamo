@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.4.1"
+version = "0.5.1+rc0-pre1"
 dependencies = [
  "anyhow",
  "arc-swap",

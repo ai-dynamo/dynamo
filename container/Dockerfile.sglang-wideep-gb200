@@ -1,0 +1,299 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG CUDA_VERSION=12.9.1
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS base
+
+# Set timezone and install all packages
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        tzdata \
+        software-properties-common netcat-openbsd kmod unzip openssh-server \
+        curl wget lsof zsh ccache tmux htop git-lfs tree \
+        python3 python3-pip python3-dev libpython3-dev python3-venv \
+        build-essential cmake \
+        libopenmpi-dev libnuma1 libnuma-dev \
+        libibverbs-dev libibverbs1 libibumad3 \
+        librdmacm1 libnl-3-200 libnl-route-3-200 libnl-route-3-dev libnl-3-dev \
+        ibverbs-providers infiniband-diags perftest \
+        libgoogle-glog-dev libgtest-dev libjsoncpp-dev libunwind-dev \
+        libboost-all-dev libssl-dev \
+        libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
+        pybind11-dev \
+        libhiredis-dev libcurl4-openssl-dev \
+        libczmq4 libczmq-dev \
+        libfabric-dev \
+        patchelf \
+        nvidia-dkms-550 \
+        devscripts debhelper fakeroot dkms check libsubunit0 libsubunit-dev \
+ && ln -sf /usr/bin/python3 /usr/bin/python \
+ && rm -rf /var/lib/apt/lists/* \
+ && apt-get clean
+
+# Install SGLang missing package for blackwell build type
+RUN python3 -m pip install openai httpx
+
+# GDRCopy installation
+RUN mkdir -p /tmp/gdrcopy && cd /tmp \
+ && git clone https://github.com/NVIDIA/gdrcopy.git -b v2.4.4 \
+ && cd gdrcopy/packages \
+ && CUDA=/usr/local/cuda ./build-deb-packages.sh \
+ && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
+ && cd / && rm -rf /tmp/gdrcopy
+
+# Fix DeepEP IBGDA symlink
+RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
+
+FROM base AS build-image
+
+# We are actively working on resolving some transient timeout issues with DeepEP before we move to ToT for f1f6825
+ARG SGLANG_COMMIT=ff1f68252c2b5b343aa6ef2aa14e6d4753ae4871
+ARG BUILD_TYPE=blackwell
+ARG DEEPEP_COMMIT=1b14ad661c7640137fcfe93cccb2694ede1220b0
+ARG CMAKE_BUILD_PARALLEL_LEVEL=2
+ARG SGL_KERNEL_VERSION=0.3.4
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda \
+    GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/ \
+    NVSHMEM_DIR=/sgl-workspace/nvshmem/install \
+    BUILD_TYPE=${BUILD_TYPE} \
+    TORCH_CUDA_ARCH_LIST="10.0 12.0"
+
+# Clone and install SGLang
+WORKDIR /sgl-workspace
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel html5lib six \
+    && git clone --depth 1 https://github.com/sgl-project/sglang.git \
+    && cd sglang \
+    && git fetch --depth=1 origin ${SGLANG_COMMIT} \
+    && git checkout ${SGLANG_COMMIT} \
+    && case "$CUDA_VERSION" in \
+        12.9.1) CUINDEX=129 ;; \
+        *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
+    esac \
+    && if [ "$CUDA_VERSION" = "12.9.1" ]; then \
+        python3 -m pip install --no-cache-dir nvidia-nccl-cu12==2.27.6 --force-reinstall --no-deps ; \
+        python3 -m pip install --no-cache-dir https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu129-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps ; \
+    fi \
+    && python3 -m pip install --no-cache-dir -e "python[${BUILD_TYPE}]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX} \
+    && python3 -m flashinfer --download-cubin
+
+# Download source files
+RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
+    git clone https://github.com/fzyzcjy/DeepEP.git && \
+    cd DeepEP && git checkout ${DEEPEP_COMMIT} && cd .. && \
+    tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
+    mv nvshmem_src nvshmem && \
+    rm -f /sgl-workspace/nvshmem_src_cuda12-all-all-3.3.9.tar.gz
+
+# Build and install NVSHMEM
+RUN cd /sgl-workspace/nvshmem && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_DIR} -DCMAKE_CUDA_ARCHITECTURES="90;100;120" && \
+    cmake --build build --target install -j${CMAKE_BUILD_PARALLEL_LEVEL}
+
+# Install DeepEP
+RUN cd /sgl-workspace/DeepEP && \
+    NVSHMEM_DIR=${NVSHMEM_DIR} pip install .
+
+# Python tools
+RUN python3 -m pip install --no-cache-dir \
+    datamodel_code_generator \
+    mooncake-transfer-engine==0.3.5 \
+    pre-commit \
+    pytest \
+    black \
+    isort \
+    icdiff \
+    wheel \
+    scikit-build-core
+
+# Install nixl kv transfer backend
+RUN python3 -m pip install --no-cache-dir \
+    nixl
+
+# Install development tools and utilities
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    gdb \
+    ninja-build \
+    vim \
+    tmux \
+    htop \
+    wget \
+    curl \
+    locales \
+    lsof \
+    git \
+    git-lfs \
+    zsh \
+    tree \
+    silversearcher-ag \
+    cloc \
+    unzip \
+    pkg-config \
+    libssl-dev \
+    bear \
+    ccache \
+    less \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        rdma-core infiniband-diags openssh-server perftest ibverbs-providers libibumad3 libibverbs1 libnl-3-200 libnl-route-3-200 librdmacm1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+RUN apt update -y \
+    && DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends gnupg \
+    && echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2004/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) /" | tee /etc/apt/sources.list.d/nvidia-devtools.list \
+    && apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "x86_64"; fi)/7fa2af80.pub \
+    && apt update -y \
+    && DEBIAN_FRONTEND=noninteractive apt install nsight-systems-cli -y
+
+# Set up locale
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
+# Install minimal Python packages
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    pytest \
+    black \
+    isort \
+    icdiff \
+    scikit_build_core \
+    pre-commit \
+    pandas \
+    matplotlib \
+    tabulate
+
+# Install clang-format
+RUN curl -LSso /usr/local/bin/clang-format https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/master-32d3ac78/clang-format-16_linux-amd64 \
+    && chmod +x /usr/local/bin/clang-format
+
+# Install clangd
+RUN curl -L https://github.com/clangd/clangd/releases/download/18.1.3/clangd-linux-18.1.3.zip -o clangd.zip \
+    && unzip clangd.zip \
+    && cp -r clangd_18.1.3/bin/* /usr/local/bin/ \
+    && cp -r clangd_18.1.3/lib/* /usr/local/lib/ \
+    && rm -rf clangd_18.1.3 clangd.zip
+
+# Install CMake
+RUN CMAKE_VERSION=3.31.1 \
+    && ARCH=$(uname -m) \
+    && CMAKE_INSTALLER="cmake-${CMAKE_VERSION}-linux-${ARCH}" \
+    && wget "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_INSTALLER}.tar.gz" \
+    && tar -xzf "${CMAKE_INSTALLER}.tar.gz" \
+    && cp -r "${CMAKE_INSTALLER}/bin/"* /usr/local/bin/ \
+    && cp -r "${CMAKE_INSTALLER}/share/"* /usr/local/share/ \
+    && rm -rf "${CMAKE_INSTALLER}" "${CMAKE_INSTALLER}.tar.gz"
+
+# Set workspace directory
+WORKDIR /sgl-workspace/sglang
+
+FROM build-image AS sglang-wideep
+
+ARG MODE="hopper"
+ARG ARCH="amd64"
+ARG ARCH_ALT="x86_64"
+ARG NIXL_UCX_REF="v1.19.0"
+ARG NIXL_TAG="0.5.0"
+ARG CMAKE_VERSION="3.31.8"
+ARG RUST_VERSION="1.89.0"
+ARG CARGO_BUILD_JOBS="16"
+
+RUN apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends\
+      cmake meson ninja-build pybind11-dev patchelf net-tools \
+      build-essential protobuf-compiler libssl-dev pkg-config \
+      clang libclang-dev git rapidjson-dev zlib1g-dev && \
+    pip install --break-system-packages meson-python wheel build
+
+# Build UCX + NIXL for x86/hopper until its fully tested on GB200
+RUN if [ "$MODE" = "hopper" ]; then \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends\
+        libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+        libnuma-dev librdmacm-dev ibverbs-providers autoconf libtool && \
+      # UCX from source
+      rm -rf /opt/hpcx/ucx /usr/local/ucx && \
+      cd /usr/local/src && \
+      git clone https://github.com/openucx/ucx.git && \
+      cd ucx && git checkout $NIXL_UCX_REF && \
+      ./autogen.sh && \
+      ./configure \
+        --prefix=/usr/local/ucx \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-devel-headers \
+        --with-cuda=/usr/local/cuda \
+        --with-verbs \
+        --with-efa \
+        --with-dm \
+        --with-gdrcopy=/usr/local \
+        --enable-mt && \
+      make -j && make install-strip && ldconfig && \
+      # NIXL
+      git clone https://github.com/ai-dynamo/nixl.git /opt/nixl && \
+      cd /opt/nixl && git checkout $NIXL_TAG && \
+      pip install --break-system-packages . \
+        --config-settings="setup-args=-Ducx_path=/usr/local/ucx"; \
+    fi
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+
+# Dynamo
+WORKDIR /sgl-workspace
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN wget --tries=3 --waitretry=5 \
+    "https://static.rust-lang.org/rustup/archive/1.28.1/$(uname -m)-unknown-linux-gnu/rustup-init" \
+    && chmod +x rustup-init \
+    &&./rustup-init -y \
+        --no-modify-path \
+        --profile minimal \
+        --default-toolchain $RUST_VERSION \
+        --default-host $(uname -m)-unknown-linux-gnu \
+    && rm rustup-init \
+    && chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+RUN wget --tries=3 --waitretry=5 \
+      https://github.com/nats-io/nats-server/releases/download/v2.10.28/\
+nats-server-v2.10.28-arm64.deb && \
+    dpkg -i nats-server-v2.10.28-arm64.deb && rm nats-server-v2.10.28-arm64.deb
+
+ENV ETCD_VERSION="v3.5.21"
+RUN wget --tries=3 --waitretry=5 \
+      https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/\
+etcd-${ETCD_VERSION}-linux-arm64.tar.gz -O /tmp/etcd.tar.gz && \
+    mkdir -p /usr/local/bin/etcd && \
+    tar -xzf /tmp/etcd.tar.gz \
+        -C /usr/local/bin/etcd --strip-components=1 && \
+    rm /tmp/etcd.tar.gz
+
+ENV PATH=/usr/local/bin/etcd:$PATH
+
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
+COPY . ./dynamo
+RUN cd dynamo && cargo build --release
+
+RUN cd dynamo/lib/bindings/python \
+    && pip install --break-system-packages -e . \
+    && cd /sgl-workspace/dynamo \
+    && pip install --break-system-packages .
+
+# Enable forceful shutdown of inflight requests
+ENV SGL_FORCE_SHUTDOWN=1
+
+WORKDIR /sgl-workspace/dynamo/components/backends/sglang
