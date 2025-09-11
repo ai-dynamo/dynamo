@@ -398,7 +398,7 @@ impl VllmConnectorSlot {
             SlotState::SkippedPrefill => Ok(()), // already skipped
             SlotState::SkippedDecode => Ok(()),  // already skipped
             _ => {
-                tracing::warn!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
+                tracing::debug!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
                 Ok(())
             }
         }

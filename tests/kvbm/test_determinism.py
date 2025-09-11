@@ -996,12 +996,6 @@ class TestDeterminism:
 
                 # Wait for 10 seconds to make sure all transfers are complete
                 time.sleep(10)
-                # Reset cache
-                print("\n" + "=" * 50)
-                print("RESETTING CACHE AFTER WARMUP")
-                print("=" * 50)
-                tester.reset_prefix_cache()
-                time.sleep(10)
             else:
                 print("Skipping warmup (already done in previous phase)")
 

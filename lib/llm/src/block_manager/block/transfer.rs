@@ -26,8 +26,6 @@ use crate::block_manager::storage::{
     nixl::{NixlRegisterableStorage, NixlStorage},
 };
 
-use cudarc::driver::CudaStream;
-
 use nixl_sys::NixlDescriptor;
 use nixl_sys::XferOp::{Read, Write};
 use std::ops::Range;
@@ -35,7 +33,7 @@ use tokio::sync::oneshot;
 
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
-pub use context::TransferContext;
+pub use context::{PoolConfig, TransferContext};
 
 /// A block that can be the target of a write
 pub trait Writable {}
@@ -174,12 +172,32 @@ where
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
         | TransferStrategy::CudaAsyncD2D => {
-            for (src, dst) in sources.iter().zip(targets.iter_mut()) {
-                cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
-            }
+            tracing::debug!(
+                "Transfer: Using CUDA strategy: {:?}",
+                RB::write_to_strategy()
+            );
+            if RB::write_to_strategy() == TransferStrategy::CudaAsyncH2D
+                || RB::write_to_strategy() == TransferStrategy::CudaAsyncD2H
+            {
+                // Use simplified single kernel approach - let CUDA handle large transfers
+                let selected_stream = ctx.stream();
+                cuda::copy_blocks_with_customized_kernel(
+                    sources,
+                    targets,
+                    selected_stream.as_ref(),
+                    &ctx,
+                )?;
+                ctx.cuda_event(tx)?;
 
-            ctx.cuda_event(tx)?;
-            Ok(rx)
+                Ok(rx)
+            } else {
+                // Fall back to individual copy for D2Dblocks
+                for (src, dst) in sources.iter().zip(targets.iter_mut()) {
+                    cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
+                }
+                ctx.cuda_event(tx)?;
+                Ok(rx)
+            }
         }
         TransferStrategy::Nixl(transfer_type) => {
             let transfer_fut = nixl::write_blocks_to(sources, targets, &ctx, transfer_type)?;

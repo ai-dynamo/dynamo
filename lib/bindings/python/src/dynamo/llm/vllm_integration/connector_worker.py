@@ -64,9 +64,7 @@ class KvConnectorWorker:
         Args: kv_caches:
             dictionary of layer names, kv cache
         """
-        print(
-            f"KvConnectorWorker.register_kv_caches called with {len(kv_caches)} kv_caches"
-        )
+
         cache_config = self.vllm_config.cache_config
 
         # Create ordered list of (layer_name, tensor) tuples sorted by layer index

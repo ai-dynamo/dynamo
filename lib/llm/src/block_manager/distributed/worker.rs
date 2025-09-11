@@ -11,9 +11,13 @@ use zmq::*;
 
 use crate::block_manager::{
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
-    block::{Block, layout_to_blocks, locality, transfer::TransferContext},
+    block::{
+        Block, layout_to_blocks, locality,
+        transfer::{PoolConfig, TransferContext},
+    },
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
+    offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
     storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
@@ -570,6 +574,14 @@ impl KvbmWorker {
 
         let agent = build_agent(worker_id, leader_data.num_disk_blocks > 0)?;
 
+        let pool_config = PoolConfig {
+            enable_pool: true,
+            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
+            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            num_outer_components: device_layout.config().outer_dim,
+            num_layers: device_layout.config().num_layers,
+        };
+
         let transfer_context = Arc::new(TransferContext::new(
             Arc::new(Some(agent)),
             DeviceAllocator::new(config.device_id)
@@ -578,6 +590,7 @@ impl KvbmWorker {
                 .new_stream()
                 .unwrap(),
             Handle::current(),
+            Some(pool_config),
         ));
 
         // Build our device, host, and disk block lists.
@@ -622,7 +635,6 @@ impl KvbmWorker {
             None
         };
 
-        // Create the handler for our active message worker.
         let block_transfer_handler = BlockTransferHandler::new(
             device_blocks,
             host_blocks,
