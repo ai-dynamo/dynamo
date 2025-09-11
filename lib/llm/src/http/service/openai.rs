@@ -1324,6 +1324,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            chat_template_kwargs: None,
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
@@ -1351,6 +1352,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            chat_template_kwargs: None,
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
