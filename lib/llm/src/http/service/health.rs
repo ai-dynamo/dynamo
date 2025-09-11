@@ -65,27 +65,16 @@ async fn health_handler(
         vec![]
     };
 
-    if model_entries.is_empty() {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "unhealthy",
-                "message": "No endpoints available",
-                "instances": instances
-            })),
-        )
-    } else {
-        let endpoints: Vec<String> = model_entries
-            .iter()
-            .map(|entry| entry.endpoint_id.as_url())
-            .collect();
-        (
-            StatusCode::OK,
-            Json(json!({
-                "status": "healthy",
-                "endpoints": endpoints,
-                "instances": instances
-            })),
-        )
-    }
+    let endpoints: Vec<String> = model_entries
+        .iter()
+        .map(|entry| entry.endpoint_id.as_url())
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "healthy",
+            "endpoints": endpoints,
+            "instances": instances
+        })),
+    )
 }
