@@ -282,6 +282,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         let target_pool = target_pool.as_ref().unwrap();
 
         let mut queue = BTreeSet::new();
+        let mut blocks_to_offload = vec![];
 
         loop {
             if cancellation_token.is_cancelled() {
@@ -303,7 +304,8 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
 
             // If there is a request, process it.
-            if let Some(request) = queue.pop_first() {
+            let empty = queue.is_empty();
+            while let Some(request) = queue.pop_first() {
                 pool_metrics.gauge("offload_queue_size").dec();
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
@@ -326,36 +328,32 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         continue;
                     }
 
-                    let target_block = 'target_block: {
-                        if let Ok(blocks) = target_pool.allocate_blocks(1).await
-                            && let Some(block) = blocks.into_iter().next()
-                        {
-                            break 'target_block Some(block);
-                        }
-
-                        tracing::warn!(
-                            "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
-                        );
-                        None
-                    };
-
-                    if let Some(target_block) = target_block {
-                        pool_metrics.counter("offload_processed").inc();
-                        tracing::debug!(
-                            "Offloading block with sequence hash {} to target pool.",
-                            request.sequence_hash
-                        );
-                        transfer_manager
-                            .enqueue_transfer(PendingTransfer::new(
-                                vec![block],
-                                vec![target_block],
-                                None,
-                                target_pool.clone(),
-                            ))
-                            .await?;
-                    }
+                    blocks_to_offload.push(block);
+                } else {
+                    break;
                 }
-            } else {
+            }
+
+            if blocks_to_offload.len() > 0 {
+                if let Ok(target_blocks) =
+                    target_pool.allocate_blocks(blocks_to_offload.len()).await
+                {
+                    transfer_manager
+                        .enqueue_transfer(PendingTransfer::new(
+                            blocks_to_offload.drain(..).collect(),
+                            target_blocks,
+                            None,
+                            target_pool.clone(),
+                        ))
+                        .await?;
+                } else {
+                    tracing::warn!(
+                        "Target pool full. Skipping offload. This should only ever happen with very small pool sizes."
+                    );
+                };
+            }
+
+            if empty {
                 // Await the next request.
                 tokio::select! {
                     _ = cancellation_token.cancelled() => return Ok(()),
