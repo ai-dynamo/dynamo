@@ -87,6 +87,25 @@ kubectl apply -f agg.yaml -n my-model
 ```
 Take a note of or change the DYNAMO_IMAGE in the model deployment file.
 
+
+Do not forget docker registry secret if needed.
+```bash
+kubectl create secret docker-registry docker-imagepullsecret \
+  --docker-server=$DOCKER_SERVER \
+  --docker-username=$DOCKER_USERNAME \
+  --docker-password=$DOCKER_PASSWORD \
+  --namespace=$NAMESPACE
+```
+
+Do not forget to include the the HuggingFace token if required.
+```bash
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
+```
+
+
 ### 4. Install Dynamo GAIE helm chart ###
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.

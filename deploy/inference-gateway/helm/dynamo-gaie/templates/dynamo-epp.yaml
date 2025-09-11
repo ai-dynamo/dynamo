@@ -71,6 +71,12 @@ spec:
               readOnly: true
         {{- end }}
         env:
+        {{- if .Values.eppAware.enabled }}
+          - name: ETCD_ENDPOINTS
+            value: "dynamo-platform-etcd.{{ .Release.Namespace }}:2379"  # Dynamic namespace from Helm
+          - name: NATS_SERVER
+            value: "nats://dynamo-platform-nats.{{ .Release.Namespace }}:4222"  # Dynamic namespace from Helm
+        {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
             value: {{ .value | quote }}
@@ -93,27 +99,6 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
 
-      {{- if .Values.eppAware.enabled }}
-      - name: {{ .Values.eppAware.sidecar.name }}
-        image: {{ .Values.eppAware.sidecar.image }}
-        imagePullPolicy: {{ .Values.eppAware.sidecar.imagePullPolicy | default "IfNotPresent" }}
-        command: {{- toYaml .Values.eppAware.sidecar.command | nindent 8 }}
-        args: {{- toYaml .Values.eppAware.sidecar.args | nindent 8 }}
-        env:
-        {{- range .Values.eppAware.sidecar.env }}
-          {{- if .valueFromDynamoNamespace }}
-          - name: {{ .name }}
-            value: "{{ $.Values.dynamoNamespace }}"
-          {{- else }}
-          - name: {{ .name }}
-            value: {{ .value | quote }}
-          {{- end }}
-        {{- end }}
-        ports:
-        {{- toYaml .Values.eppAware.sidecar.ports | nindent 8 }}
-        resources:
-        {{- toYaml .Values.eppAware.sidecar.resources | nindent 10 }}
-      {{- end }}
       {{- if .Values.eppAware.enabled }}
       volumes:
         - name: epp-config
