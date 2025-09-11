@@ -17,16 +17,14 @@ import logging
 import os
 import shutil
 import tempfile
-import time
 
 import pytest
 
+from tests.utils.constants import TEST_MODELS
 from tests.utils.managed_process import ManagedProcess
 
 
 def pytest_configure(config):
-    time.sleep(28800)  # 8 hour sleep for debugging
-
     # Defining model morker to avoid `'model' not found in `markers` configuration option`
     # error when pyproject.toml is not available in the container
     config.addinivalue_line("markers", "model: model id used by a test or parameter")
@@ -40,12 +38,6 @@ logging.basicConfig(
     format=LOG_FORMAT,
     datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
-
-TEST_MODELS = [
-    "Qwen/Qwen3-0.6B",
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "llava-hf/llava-1.5-7b-hf",
-]
 
 
 def download_models(model_list=None, ignore_weights=False):

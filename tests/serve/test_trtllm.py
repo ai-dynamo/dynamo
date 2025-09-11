@@ -105,7 +105,6 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm_marker
-@pytest.mark.slow
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
 ):
