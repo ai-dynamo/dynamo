@@ -66,9 +66,9 @@ class AggregatedHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context):
         # Implement all steps locally.
-        async for res in self.generate_locally(request):
+        async for res in self.generate_locally(request, context=context):
             yield res
 
 
@@ -122,11 +122,11 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
-    async def remote_decode(self, request: dict):
-        async for res in await self.next_client.round_robin(request):
+    async def remote_decode(self, request: dict, context):
+        async for res in await self.next_client.round_robin(request, context=context):
             yield res.data()
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context):
         logging.debug(f"PrefillHandler.generate received request: {request}")
         embeddings_tensor = None
 
@@ -145,7 +145,9 @@ class PrefillHandler(HandlerBase):
         prefill_request = copy.deepcopy(request)
         prefill_response = None
         response_count = 0
-        async for res in self.generate_locally(prefill_request, embeddings_tensor):
+        async for res in self.generate_locally(
+            prefill_request, embeddings_tensor, context=context
+        ):
             prefill_response = res
             response_count += 1
             if response_count > 1:
@@ -161,7 +163,7 @@ class PrefillHandler(HandlerBase):
                 request["disaggregated_params"] = prefill_response[
                     "disaggregated_params"
                 ]
-            async for res in self.remote_decode(request):
+            async for res in self.remote_decode(request, context):
                 yield res
         else:
             # Return response to the decode handler.
@@ -176,11 +178,11 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def remote_prefill(self, request: dict):
-        async for res in await self.next_client.round_robin(request):
+    async def remote_prefill(self, request: dict, context):
+        async for res in await self.next_client.round_robin(request, context=context):
             yield res
 
-    async def generate(self, request: dict):
+    async def generate(self, request: dict, context):
         if self.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST:
             prefill_response = None
             # If operating under decode_first strategy, the decode handler needs to trigger
@@ -188,7 +190,7 @@ class DecodeHandler(HandlerBase):
             response_count = 0
             # Do not yield the prefill response directly.
             # Instead, capture it and extract the state.
-            async for res in self.remote_prefill(request):
+            async for res in self.remote_prefill(request, context):
                 prefill_response = res
                 response_count += 1
                 if response_count > 1:
@@ -204,5 +206,5 @@ class DecodeHandler(HandlerBase):
             if prefill_response is not None and response_data is not None:
                 request["disaggregated_params"] = response_data["disaggregated_params"]
 
-        async for res in self.generate_locally(request):
+        async for res in self.generate_locally(request, context=context):
             yield res

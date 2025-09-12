@@ -22,7 +22,7 @@ class DynamoFrontendProcess(ManagedProcess):
     """Process manager for Dynamo frontend"""
 
     def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend"]
+        command = ["python", "-m", "dynamo.frontend", "--http-port=8000"]
 
         # Set debug logging environment
         env = os.environ.copy()
