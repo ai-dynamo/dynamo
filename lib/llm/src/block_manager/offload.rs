@@ -45,8 +45,8 @@
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
 use super::block::{
-    BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
-    locality::LocalityProvider, transfer::TransferContext,
+    BlockError, BlockMetadata, ImmutableBlock, MutableBlock, locality::LocalityProvider,
+    transfer::TransferContext,
 };
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::{BlockPool, BlockPoolError};
@@ -429,13 +429,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         block: &ImmutableBlock<S, Locality, Metadata>,
         priority: u64,
     ) -> core::result::Result<(), BlockPoolError> {
-        match block.state() {
-            BlockState::Registered(_, _) => {}
-            _ => {
-                return Err(BlockPoolError::BlockError(BlockError::InvalidState(
-                    "Block is not registered.".to_string(),
-                )));
-            }
+        if !block.is_registered() {
+            return Err(BlockPoolError::BlockError(BlockError::InvalidState(
+                "Block is not registered.".to_string(),
+            )));
         }
 
         let mut tick = self.tick.lock().await;
@@ -494,15 +491,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         let (tx, rx) = oneshot::channel();
         for block in &blocks {
-            match block.state() {
-                BlockState::Registered(_, _) => {}
-                _ => {
-                    tx.send(Err(BlockPoolError::BlockError(BlockError::InvalidState(
-                        "Block is not registered.".to_string(),
-                    ))))
-                    .unwrap();
-                    return rx;
-                }
+            if !block.is_registered() {
+                tx.send(Err(BlockPoolError::BlockError(BlockError::InvalidState(
+                    "Block is not registered.".to_string(),
+                ))))
+                .unwrap();
+                return rx;
             }
         }
 
@@ -1067,10 +1061,7 @@ mod tests {
             immutable_host_block.sequence_hash()
         );
         // Check that the block is registered.
-        assert!(matches!(
-            onboarded_blocks[0].state(),
-            BlockState::Registered(_, _)
-        ));
+        assert!(onboarded_blocks[0].is_registered());
 
         check_block_contents(&immutable_host_block, &onboarded_blocks[0], 42)?;
 
@@ -1161,10 +1152,7 @@ mod tests {
             onboarded_blocks[0].sequence_hash(),
             immutable_host_block.sequence_hash()
         );
-        assert!(matches!(
-            onboarded_blocks[0].state(),
-            BlockState::Registered(_, _)
-        ));
+        assert!(onboarded_blocks[0].is_registered());
 
         check_block_contents(&immutable_host_block, &onboarded_blocks[0], 42)?;
 

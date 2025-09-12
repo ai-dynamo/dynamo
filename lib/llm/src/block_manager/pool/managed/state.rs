@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use crate::block_manager::{
-    block::{BlockState, PrivateBlockExt, registry::BlockRegistrationError},
+    block::{PrivateBlockExt, registry::BlockRegistrationError},
     events::Publisher,
 };
 
@@ -135,8 +135,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     ) -> Block<S, L, M> {
         while let Some(block) = return_rx.recv().await {
-            if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
-            {
+            if block.is_registered() && block.sequence_hash().ok() == Some(sequence_hash) {
                 return block;
             }
             self.handle_return_block(block);
@@ -201,7 +200,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 let immutable = if duplication_setting
                     == BlockRegistrationDuplicationSetting::Allowed
                 {
-                    immutable.with_duplicate(block.into()).expect("incompatible immutable block; only primary should be returned from match_sequence_hash")
+                    ImmutableBlock::from_duplicate(block, immutable).expect("incompatible immutable block; only primary should be returned from match_sequence_hash")
                 } else {
                     // immediate return the block to the pool if duplicates are disabled
                     if let Some(blocks) = block.try_take_block(private::PrivateToken) {
@@ -219,7 +218,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             let (mutable, duplicate) =
                 if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
                     // We already have a match, so our block is a duplicate.
-                    assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+                    assert!(raw_block.is_registered());
                     (
                         MutableBlock::new(raw_block, self.return_tx.clone()),
                         Some(block),
@@ -260,8 +259,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             match duplication_setting {
                 BlockRegistrationDuplicationSetting::Allowed => {
                     if let Some(duplicate) = duplicate {
-                        immutable = immutable
-                            .with_duplicate(duplicate.into())
+                        immutable = ImmutableBlock::from_duplicate(duplicate, immutable)
                             .expect("incompatible immutable block; only primary should be returned from ActiveBlockPool::register");
                     }
                 }
@@ -320,7 +318,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 };
 
             // this assert allows us to skip the error checking on the active pool registration step
-            assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+            assert!(raw_block.is_registered());
 
             let mutable = MutableBlock::new(raw_block, self.return_tx.clone());
 
@@ -371,11 +369,11 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         self.inactive.return_block(block);
     }
 
-    fn publisher(&self) -> Publisher {
+    pub fn publisher(&self) -> Publisher {
         Publisher::new(self.event_manager.clone())
     }
 
-    fn status(&self) -> BlockPoolStatus {
+    pub fn status(&self) -> BlockPoolStatus {
         let active = self.active.status();
         let (inactive, empty) = self.inactive.status();
         BlockPoolStatus {
@@ -385,7 +383,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
     }
 
-    fn try_reset_blocks(&mut self, sequence_hashes: &[SequenceHash]) -> ResetBlocksResponse {
+    pub fn try_reset_blocks(&mut self, sequence_hashes: &[SequenceHash]) -> ResetBlocksResponse {
         let mut reset_blocks = Vec::new();
         let mut not_found = Vec::new();
         let mut not_reset = Vec::new();

@@ -39,7 +39,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
         &mut self,
         mut block: MutableBlock<S, L, M>,
     ) -> Result<ImmutableBlock<S, L, M>, BlockPoolError> {
-        if !block.state().is_registered() {
+        if !block.is_registered() {
             return Err(BlockPoolError::InvalidMutableBlock(
                 "block is not registered".to_string(),
             ));

@@ -190,7 +190,6 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         // apply the token blocks to the mutable blocks
         for (mut mutable_block, token_block) in zipped_blocks {
             mutable_block
-                .state_mut()
                 .apply_token_block(token_block.clone())
                 .map_err(|e| {
                     SlotError::from_str(&format!("failed to apply token block: {:?}", e))

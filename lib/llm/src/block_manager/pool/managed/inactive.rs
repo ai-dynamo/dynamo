@@ -15,7 +15,7 @@
 
 use std::sync::atomic::AtomicU64;
 
-use crate::block_manager::block::{BlockState, locality::LocalityProvider};
+use crate::block_manager::block::locality::LocalityProvider;
 
 use super::*;
 use priority_key::PriorityKey;
@@ -137,30 +137,24 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     /// # Arguments
     ///
     /// * `block` - The block to insert ([`Block<S, M>`]).
-    #[instrument(level = "trace", skip(self, block), fields(block_state = ?block.state()))]
+    #[instrument(level = "trace", skip(self, block))]
     fn insert(&mut self, block: Block<S, L, M>) {
         tracing::trace!("Inserting block into available pool");
 
         // If we already have an entry for this sequence hash or the block is reset,
         // we need to move it to the uninitialized set
-        match block.state() {
-            BlockState::Reset => {
-                self.uninitialized_set.push_back(block);
-            }
-            BlockState::Partial(_) => {
-                let mut block = block;
-                block.reset();
-                self.uninitialized_set.push_back(block);
-            }
-            BlockState::Complete(_) => {
-                let mut block = block;
-                block.reset();
-                self.uninitialized_set.push_back(block);
-            }
-            BlockState::Registered(state, _) => {
-                let sequence_hash = state.sequence_hash();
-                self.insert_with_sequence_hash(block, sequence_hash);
-            }
+        if block.is_reset() {
+            self.uninitialized_set.push_back(block);
+        } else if block.is_registered() {
+            let sequence_hash = block
+                .sequence_hash()
+                .expect("registered block must have sequence hash");
+            self.insert_with_sequence_hash(block, sequence_hash);
+        } else {
+            // Block is Partial or Complete (but not Registered)
+            let mut block = block;
+            block.reset();
+            self.uninitialized_set.push_back(block);
         }
 
         self.available_blocks.fetch_add(1, Ordering::Relaxed);
@@ -548,7 +542,7 @@ pub(crate) mod tests {
     use crate::{
         block_manager::{
             block::{
-                Blocks, PrivateBlockExt, locality::Local, registry::BlockRegistry,
+                BlockState, Blocks, PrivateBlockExt, locality::Local, registry::BlockRegistry,
                 state::CompleteState,
             },
             events::NullEventManager,
@@ -683,12 +677,12 @@ pub(crate) mod tests {
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
         for (block, token_block) in blocks.iter_mut().zip(token_blocks.into_iter()) {
-            assert!(block.state().is_reset()); // Start with empty blocks
+            assert!(block.is_reset()); // Start with empty blocks
             block.update_state(BlockState::Complete(CompleteState::new(token_block)));
             block
                 .register(&mut registry)
                 .expect("Failed to register block in test helper");
-            assert!(block.state().is_registered()); // Ensure registration worked
+            assert!(block.is_registered()); // Ensure registration worked
         }
 
         blocks
@@ -726,7 +720,7 @@ pub(crate) mod tests {
 
         // all matched blocks should be in the complete or registered state
         for block in &mut matched_blocks {
-            assert!(block.state().is_registered());
+            assert!(block.is_registered());
         }
 
         // drain the matched blocks from the token_blocks
@@ -743,14 +737,14 @@ pub(crate) mod tests {
         assert_eq!(unmatched_blocks.len(), token_blocks.len());
 
         for unmatched in &unmatched_blocks {
-            assert!(unmatched.state().is_reset());
+            assert!(unmatched.is_reset());
         }
 
         for (unmatched, token_block) in unmatched_blocks.iter_mut().zip(token_blocks.into_iter()) {
-            assert!(unmatched.state().is_reset());
+            assert!(unmatched.is_reset());
             unmatched.update_state(BlockState::Complete(CompleteState::new(token_block)));
             unmatched.register(&mut registry).unwrap();
-            assert!(unmatched.state().is_registered());
+            assert!(unmatched.is_registered());
         }
 
         let mut blocks = matched_blocks;
@@ -834,7 +828,7 @@ pub(crate) mod tests {
 
         let blocks = pool.acquire_free_blocks(10).unwrap();
         for block in &blocks {
-            assert!(block.state().is_reset());
+            assert!(block.is_reset());
         }
     }
 
