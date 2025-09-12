@@ -511,20 +511,20 @@ impl WorkerSelector for DefaultWorkerSelector {
                 .unwrap_or(1024) as f64)
                 / block_size as f64; // Max ISL tokens considered for cost calculation
 
-            let is_pd_separated: bool = workers
-                .get(worker_id)
-                .and_then(|cfg| cfg.as_ref())
-                .map(|cfg| cfg.runtime_data.get("disaggregation_mode") != Some(&serde_json::Value::from("prefill_and_decode")))
-                .unwrap_or(false); // 默认为 false，如果没有配置
+            // let is_pd_separated: bool = workers
+            //     .get(worker_id)
+            //     .and_then(|cfg| cfg.as_ref())
+            //     .map(|cfg| cfg.runtime_data.get("disaggregation_mode") != Some(&serde_json::Value::from("prefill_and_decode")))
+            //     .unwrap_or(false); // 默认为 false，如果没有配置
             
-            if is_pd_separated {
-                // compute remaining capacity up to max_isl_blocks, avoid negative values
-                isl_blocks = (max_isl_blocks - isl_blocks).max(0.0);
-                logit = logit + isl_blocks;
-            } else {
-                isl_blocks = isl_blocks.min(max_isl_blocks);
-                logit = logit + isl_blocks;
-            }
+            // if is_pd_separated {
+            //     // compute remaining capacity up to max_isl_blocks, avoid negative values
+            //     isl_blocks = (max_isl_blocks - isl_blocks).max(0.0);
+            //     logit = logit + isl_blocks;
+            // } else {
+            //     isl_blocks = isl_blocks.min(max_isl_blocks);
+            //     logit = logit + isl_blocks;
+            // }
             
 
             max_logit = max_logit.max(logit);
