@@ -548,8 +548,8 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="vllm",
-        choices=["vllm", "sglang"],
-        help="backend type, currently support [vllm, sglang]",
+        choices=["vllm", "sglang", "trtllm"],
+        help="backend type, currently support [vllm, sglang, trtllm]",
     )
     parser.add_argument(
         "--config",

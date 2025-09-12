@@ -4,12 +4,16 @@
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
+
+import pytest
 
 from tests.utils.client import send_request
 from tests.utils.engine_process import EngineConfig, EngineProcess
 
 DEFAULT_TIMEOUT = 10
+SERVE_TEST_DIR = "/workspace/tests/serve"
 
 
 def run_serve_deployment(
@@ -58,3 +62,16 @@ def run_serve_deployment(
                     method=payload_item.method,
                 )
                 server_process.check_response(payload_item, response)
+
+
+def params_with_model_mark(configs: Mapping[str, EngineConfig]):
+    """Return pytest params for a config dict, adding a model marker per param.
+
+    This enables simple model collection after pytest filtering.
+    """
+    params = []
+    for config_name, cfg in configs.items():
+        marks = list(getattr(cfg, "marks", []))
+        marks.append(pytest.mark.model(cfg.model))
+        params.append(pytest.param(config_name, marks=marks))
+    return params
