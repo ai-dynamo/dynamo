@@ -130,7 +130,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
-		
+
 		// Ensure all components inherit the graph's dynamo namespace
 		deployment.Spec.DynamoNamespace = &graphDynamoNamespace
 		labels := make(map[string]string)
@@ -193,7 +193,7 @@ func getDynamoNamespace(parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeploym
 	graphDynamoNamespace := ""
 	componentsWithNamespace := make([]string, 0)
 	componentsWithoutNamespace := make([]string, 0)
-	
+
 	// First pass: collect components with explicit namespace settings
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		dynamoNamespace := ""
@@ -203,23 +203,23 @@ func getDynamoNamespace(parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeploym
 		} else {
 			componentsWithoutNamespace = append(componentsWithoutNamespace, componentName)
 		}
-		
+
 		// Check for conflicts between explicitly set namespaces
 		if graphDynamoNamespace != "" && dynamoNamespace != "" && graphDynamoNamespace != dynamoNamespace {
 			return "", fmt.Errorf("namespace mismatch for component %s: graph uses namespace %s but component specifies %s", componentName, graphDynamoNamespace, dynamoNamespace)
 		}
-		
+
 		// Set the graph namespace from the first component with an explicit namespace
 		if graphDynamoNamespace == "" && dynamoNamespace != "" {
 			graphDynamoNamespace = dynamoNamespace
 		}
 	}
-	
+
 	// If no components have explicit namespace, use default
 	if graphDynamoNamespace == "" {
 		graphDynamoNamespace = GetDefaultDynamoNamespace(parentDynamoGraphDeployment)
 	}
-	
+
 	return graphDynamoNamespace, nil
 }
 
