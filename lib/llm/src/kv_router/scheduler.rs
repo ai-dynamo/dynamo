@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, watch};
+use std::env;
 
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
@@ -502,15 +503,39 @@ impl WorkerSelector for DefaultWorkerSelector {
                 .unwrap_or(self.kv_router_config.overlap_score_weight);
 
             // Calculate logit (lower is better)
-            let logit = overlap_weight * potential_prefill_block + decode_block;
+            let mut logit = overlap_weight * potential_prefill_block + decode_block;
+            let mut isl_blocks: f64 = isl as f64 / block_size as f64;
+            let max_isl_blocks: f64 = (env::var("MAX_ISL_TOKENS")
+                .unwrap_or_else(|_| "1024".to_string())
+                .parse::<u16>()
+                .unwrap_or(1024) as f64)
+                / block_size as f64; // Max ISL tokens considered for cost calculation
+
+            let is_pd_separated: bool = workers
+                .get(worker_id)
+                .and_then(|cfg| cfg.as_ref())
+                .map(|cfg| cfg.runtime_data.get("disaggregation_mode") != Some(&serde_json::Value::from("prefill_and_decode")))
+                .unwrap_or(false); // 默认为 false，如果没有配置
+            
+            if is_pd_separated {
+                // compute remaining capacity up to max_isl_blocks, avoid negative values
+                isl_blocks = (max_isl_blocks - isl_blocks).max(0.0);
+                logit = logit + isl_blocks;
+            } else {
+                isl_blocks = isl_blocks.min(max_isl_blocks);
+                logit = logit + isl_blocks;
+            }
+            
+
             max_logit = max_logit.max(logit);
 
             worker_logits.insert(*worker_id, logit);
 
             tracing::info!(
                 "Formula for {worker_id} with {overlap} cached blocks: {logit:.3} \
-                 = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}"
+                 = {overlap_weight:.1} * prefill_blocks + decode_blocks + isl_blocks \
+                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3} + {isl_blocks:.3} \
+                 "
             );
         }
 

@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import json
 
 import uvloop
 from tensorrt_llm import SamplingParams
@@ -253,8 +254,8 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     connector = None
     logging.info("Initializing NIXL Connect.")
-    connector = nixl_connect.Connector()
-    await connector.initialize()
+#    connector = nixl_connect.Connector()
+#    await connector.initialize()
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
@@ -269,6 +270,11 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
+        # Use the Python binding helper to set engine-specific runtime data.
+        # set_engine_specific expects a JSON string so serialize the value first.
+        runtime_config.set_engine_specific(
+            "disaggregation_mode", json.dumps(config.disaggregation_mode.value)
+        )
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
@@ -301,6 +307,9 @@ async def init(runtime: DistributedRuntime, config: Config):
                 kv_cache_block_size=config.kv_block_size,
                 migration_limit=config.migration_limit,
                 runtime_config=runtime_config,
+            )
+            logging.info(
+                f"Registered model {config.served_model_name} with endpoint {config.endpoint} and runtime config {runtime_config}"
             )
 
         if config.publish_events_and_metrics and is_first_worker(config):
