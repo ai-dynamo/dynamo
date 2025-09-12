@@ -124,6 +124,26 @@ pub struct RuntimeConfig {
     #[builder(default = "DEFAULT_SYSTEM_LIVE_PATH.to_string()")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_live_path: String,
+
+    /// Number of threads for the Rayon compute pool
+    /// If not set, defaults to num_cpus / 2
+    /// Set this at runtime with environment variable DYN_COMPUTE_THREADS
+    #[builder(default = "None")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub compute_threads: Option<usize>,
+
+    /// Stack size for compute threads in bytes
+    /// Defaults to 2MB (2097152 bytes)
+    /// Set this at runtime with environment variable DYN_COMPUTE_STACK_SIZE
+    #[builder(default = "Some(2 * 1024 * 1024)")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub compute_stack_size: Option<usize>,
+
+    /// Thread name prefix for compute pool threads
+    /// Set this at runtime with environment variable DYN_COMPUTE_THREAD_PREFIX
+    #[builder(default = "\"compute\".to_string()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub compute_thread_prefix: String,
 }
 
 impl fmt::Display for RuntimeConfig {
@@ -194,6 +214,23 @@ impl RuntimeConfig {
                     _ => None,
                 }
             }))
+            .merge(Env::prefixed("DYN_COMPUTE_").filter_map(|k| {
+                let full_key = format!("DYN_COMPUTE_{}", k.as_str());
+                // filters out empty environment variables
+                match std::env::var(&full_key) {
+                    Ok(v) if !v.is_empty() => {
+                        // Map DYN_COMPUTE_* to the correct field names
+                        let mapped_key = match k.as_str() {
+                            "THREADS" => "compute_threads",
+                            "STACK_SIZE" => "compute_stack_size",
+                            "THREAD_PREFIX" => "compute_thread_prefix",
+                            _ => k.as_str(),
+                        };
+                        Some(mapped_key.into())
+                    }
+                    _ => None,
+                }
+            }))
     }
 
     /// Load the runtime configuration from the environment and configuration files
@@ -227,6 +264,9 @@ impl RuntimeConfig {
             use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
+            compute_threads: Some(1),
+            compute_stack_size: Some(2 * 1024 * 1024),
+            compute_thread_prefix: "compute".to_string(),
         }
     }
 
@@ -256,6 +296,9 @@ impl Default for RuntimeConfig {
             use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
+            compute_threads: None,
+            compute_stack_size: Some(2 * 1024 * 1024),
+            compute_thread_prefix: "compute".to_string(),
         }
     }
 }

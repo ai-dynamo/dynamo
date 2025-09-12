@@ -444,21 +444,21 @@ mod integration_tests {
 
                 // Prepare test cases
                 let mut test_cases = vec![];
-                if custom_health_path.is_none() {
-                    // When using default paths, test the default paths
-                    test_cases.push(("/health", expected_status, expected_body));
-                } else {
+                if let Some(health_path) = custom_health_path {
                     // When using custom paths, default paths should not exist
                     test_cases.push(("/health", 404, "Route not found"));
-                    test_cases.push((custom_health_path.unwrap(), expected_status, expected_body));
-                }
-                if custom_live_path.is_none() {
-                    // When using default paths, test the default paths
-                    test_cases.push(("/live", expected_status, expected_body));
+                    test_cases.push((health_path, expected_status, expected_body));
                 } else {
+                    // When using default paths, test the default paths
+                    test_cases.push(("/health", expected_status, expected_body));
+                }
+                if let Some(live_path) = custom_live_path {
                     // When using custom paths, default paths should not exist
                     test_cases.push(("/live", 404, "Route not found"));
-                    test_cases.push((custom_live_path.unwrap(), expected_status, expected_body));
+                    test_cases.push((live_path, expected_status, expected_body));
+                } else {
+                    // When using default paths, test the default paths
+                    test_cases.push(("/live", expected_status, expected_body));
                 }
                 test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
                 assert_eq!(test_cases.len(), expected_num_tests);
