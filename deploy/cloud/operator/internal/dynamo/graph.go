@@ -130,8 +130,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
-
-		// Ensure all components inherit the graph's dynamo namespace
 		deployment.Spec.DynamoNamespace = &graphDynamoNamespace
 		labels := make(map[string]string)
 		// add the labels in the spec in order to label all sub-resources
