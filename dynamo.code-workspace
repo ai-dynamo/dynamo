@@ -10,6 +10,7 @@
             "launch/dynamo-run/Cargo.toml",
             "lib/bindings/python/Cargo.toml"
         ],
+        "rust-analyzer.cargo.features": [],
         "rust-analyzer.procMacro.enable": true,
     },
     "extensions": {

@@ -92,7 +92,7 @@ impl LogicalResources for DistributedLeaderWorkerResources {
         targets: &mut [WB],
         // TODO: This transfer context is only ever used in the `Local` locality.
         _ctx: Arc<TransferContext>,
-    ) -> Result<oneshot::Receiver<()>, TransferError>
+    ) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
@@ -116,7 +116,22 @@ impl LogicalResources for DistributedLeaderWorkerResources {
             let (tx, rx) = oneshot::channel();
             transfer_tx.send((request, tx)).unwrap();
 
-            Ok(rx)
+            // Wrap the receiver to match the new return type
+            let (result_tx, result_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                match rx.await {
+                    Ok(()) => {
+                        let _ = result_tx.send(Ok(()));
+                    }
+                    Err(_) => {
+                        let _ = result_tx.send(Err(TransferError::ExecutionError(
+                            "Transfer channel was dropped".to_string(),
+                        )));
+                    }
+                }
+            });
+
+            Ok(result_rx)
         } else {
             panic!("Block transfer functionality is disabled.");
         }
