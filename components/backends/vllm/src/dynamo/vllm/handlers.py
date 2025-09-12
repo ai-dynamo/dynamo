@@ -60,12 +60,6 @@ class BaseWorkerHandler(ABC):
                 async for res in gen:
                     # res is vllm's RequestOutput
 
-                    # This is the expected way for a request to end.
-                    # The new token ID will be eos, don't forward it.
-                    if res.finished:
-                        yield {"finish_reason": "stop", "token_ids": []}
-                        break
-
                     if not res.outputs:
                         yield {"finish_reason": "error", "token_ids": []}
                         break
