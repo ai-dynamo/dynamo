@@ -57,6 +57,8 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
     usage: dynamo_async_openai::types::CompletionUsage,
+    /// Tracks reasoning tokens separately for observability
+    reasoning_token_count: u32,
     /// Counter tracking the number of messages issued.
     msg_counter: u64,
     /// Configuration options for response generation.
@@ -114,6 +116,7 @@ impl DeltaGenerator {
             system_fingerprint: None,
             service_tier: None,
             usage,
+            reasoning_token_count: 0,
             msg_counter: 0,
             options,
             reasoning_parser,
@@ -126,6 +129,27 @@ impl DeltaGenerator {
     /// * `isl` - The number of prompt tokens used.
     pub fn update_isl(&mut self, isl: u32) {
         self.usage.prompt_tokens = isl;
+    }
+
+    /// Updates the reasoning token count based on the reasoning text and available token IDs.
+    ///
+    /// # Arguments
+    /// * `reasoning_text` - The reasoning text to count tokens for.
+    /// * `total_text` - The total text (reasoning + normal) from the delta.
+    /// * `token_ids` - The token IDs for the total text.
+    fn update_reasoning_tokens(&mut self, reasoning_text: &str, total_text: &str, token_ids: &[u32]) {
+        if !reasoning_text.is_empty() && !total_text.is_empty() {
+            // Estimate reasoning tokens based on the proportion of reasoning text to total text
+            // This is more accurate than word counting alone
+            let reasoning_chars = reasoning_text.chars().count() as f32;
+            let total_chars = total_text.chars().count() as f32;
+
+            if total_chars > 0.0 {
+                let reasoning_proportion = reasoning_chars / total_chars;
+                let estimated_reasoning_tokens = (token_ids.len() as f32 * reasoning_proportion).ceil() as u32;
+                self.reasoning_token_count += estimated_reasoning_tokens;
+            }
+        }
     }
 
     pub fn create_logprobs(
@@ -255,6 +279,14 @@ impl DeltaGenerator {
         let mut usage = self.usage.clone();
         if self.options.enable_usage {
             usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+
+            // Update completion_tokens_details with reasoning tokens if we have any
+            if self.reasoning_token_count > 0 {
+                // Preserve existing completion_tokens_details if they exist, or create new ones
+                let mut details = usage.completion_tokens_details.unwrap_or_default();
+                details.reasoning_tokens = Some(self.reasoning_token_count);
+                usage.completion_tokens_details = Some(details);
+            }
         }
 
         dynamo_async_openai::types::CreateChatCompletionStreamResponse {
@@ -341,6 +373,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 ),
                 None => (delta.text, None),
             };
+
+        // Update reasoning token count if we have reasoning content
+        if let Some(ref reasoning_text) = reasoning_content {
+            let total_text = delta.text.as_deref().unwrap_or("");
+            self.update_reasoning_tokens(reasoning_text, total_text, &delta.token_ids);
+        }
 
         // Create the streaming response.
         let index = 0;
