@@ -52,7 +52,9 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct KvConnectorLeader {
     slot_manager: Arc<OnceLock<ConnectorSlotManager<String>>>,
-    block_size: usize,
+    engine_page_size: usize,
+    #[allow(unused)]
+    offload_page_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
@@ -64,7 +66,8 @@ impl KvConnectorLeader {
     fn new(
         worker_id: u64,
         drt: PyDistributedRuntime,
-        page_size: usize,
+        engine_page_size: usize,
+        offload_page_size: usize,
         leader_py: PyKvbmLeader,
     ) -> Self {
         tracing::info!(
@@ -100,7 +103,8 @@ impl KvConnectorLeader {
                 let block_manager = match BlockManagerBuilder::new()
                     .worker_id(0)
                     .leader(leader_py)
-                    .page_size(page_size)
+                    .engine_page_size(engine_page_size)
+                    .offload_page_size(offload_page_size)
                     .disable_device_pool(false)
                     .build()
                     .await
@@ -131,7 +135,8 @@ impl KvConnectorLeader {
 
         Self {
             slot_manager: slot_manager_cell,
-            block_size: page_size,
+            engine_page_size,
+            offload_page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
@@ -168,7 +173,7 @@ impl Leader for KvConnectorLeader {
 
         // TRTLLM could match partial blocks if enable_partial_reuse = True,
         // immediately return 0 to simplify things.
-        if num_computed_tokens % self.block_size != 0 {
+        if num_computed_tokens % self.engine_page_size != 0 {
             return Ok((0, false));
         }
 
@@ -178,7 +183,7 @@ impl Leader for KvConnectorLeader {
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
         // early exit if we cannot match full block
-        if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
+        if (slot.sequence().total_tokens() - num_computed_tokens) < self.engine_page_size {
             let total_tokens = slot.sequence().total_tokens();
             tracing::debug!(
                 "total_tokens in sequence: {total_tokens}; num_computed_tokens: {num_computed_tokens}; can not match full block."
@@ -193,7 +198,7 @@ impl Leader for KvConnectorLeader {
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
-            debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            debug_assert!((num_computed_tokens + num_external_tokens) % self.engine_page_size == 0);
             tracing::debug!(
                 request_id = request_id,
                 "scheduling onboarding for {} external tokens",
@@ -442,15 +447,21 @@ pub struct PyTrtllmKvConnectorLeader {
 #[pymethods]
 impl PyTrtllmKvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, drt, page_size, leader))]
+    #[pyo3(signature = (worker_id, drt, engine_page_size, offload_page_size, leader))]
     pub fn new(
         worker_id: u64,
         drt: PyDistributedRuntime,
-        page_size: usize,
+        engine_page_size: usize,
+        offload_page_size: usize,
         leader: PyKvbmLeader,
     ) -> Self {
-        let connector_leader: Box<dyn Leader> =
-            Box::new(KvConnectorLeader::new(worker_id, drt, page_size, leader));
+        let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(
+            worker_id,
+            drt,
+            engine_page_size,
+            offload_page_size,
+            leader,
+        ));
         Self { connector_leader }
     }
 
