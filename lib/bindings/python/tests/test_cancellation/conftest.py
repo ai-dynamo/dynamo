@@ -111,6 +111,9 @@ class MockServer:
         self.context_is_stopped = context.is_stopped()
         self.context_is_killed = context.is_killed()
 
+        # Give time for cancellation to propagate before returning
+        await asyncio.sleep(0.1)
+
     async def _generate_and_raise_cancelled(self, request, context):
         """
         Generate method that yields numbers 0-1, and then raise asyncio.CancelledError
