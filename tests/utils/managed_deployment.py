@@ -114,6 +114,54 @@ class ServiceSpec:
             self._spec["resources"]["limits"] = {}
         self._spec["resources"]["limits"]["gpu"] = str(value)
 
+    @property
+    def tensor_parallel_size(self) -> int:
+        """Get tensor parallel size from vLLM arguments"""
+        try:
+            args_list = self._spec["extraPodSpec"]["mainContainer"]["args"]
+        except KeyError:
+            return 1  # Default tensor parallel size
+
+        args_str = " ".join(args_list)
+        parts = shlex.split(args_str)
+        for i, part in enumerate(parts):
+            if part == "--tensor-parallel-size":
+                return int(parts[i + 1]) if i + 1 < len(parts) else 1
+        return 1
+
+    @tensor_parallel_size.setter
+    def tensor_parallel_size(self, value: int):
+        if "extraPodSpec" not in self._spec:
+            return
+        if "mainContainer" not in self._spec["extraPodSpec"]:
+            return
+
+        args_list = self._spec["extraPodSpec"]["mainContainer"].get("args", [])
+        args_str = " ".join(args_list)
+        parts = shlex.split(args_str)
+
+        # Find existing tensor-parallel-size argument
+        tp_index = None
+        for i, part in enumerate(parts):
+            if part == "--tensor-parallel-size":
+                tp_index = i
+                break
+
+        if tp_index is not None:
+            # Update existing value
+            if tp_index + 1 < len(parts):
+                parts[tp_index + 1] = str(value)
+            else:
+                parts.append(str(value))
+        else:
+            # Add new argument
+            parts.extend(["--tensor-parallel-size", str(value)])
+
+        self._spec["extraPodSpec"]["mainContainer"]["args"] = [" ".join(parts)]
+
+        # Auto-adjust GPU count to match tensor parallel size
+        self.gpus = value
+
 
 class DeploymentSpec:
     def __init__(
@@ -180,6 +228,65 @@ class DeploymentSpec:
             services = [self[service_name]]
         for service in services:
             service.image = image
+
+    def set_tensor_parallel(self, tp_size: int, service_names: Optional[list] = None):
+        """Scale deployment for different tensor parallel configurations
+
+        Args:
+            tp_size: Target tensor parallel size
+            service_names: List of service names to update (defaults to worker services)
+        """
+        if service_names is None:
+            # Auto-detect worker services (services with GPU requirements)
+            service_names = [svc.name for svc in self.services if svc.gpus > 0]
+
+        for service_name in service_names:
+            service = self[service_name]
+            service.tensor_parallel_size = tp_size
+            service.gpus = tp_size
+
+    def set_logging(self, enable_jsonl: bool = True, log_level: str = "debug"):
+        """Configure logging for the deployment
+
+        Args:
+            enable_jsonl: Enable JSON line logging (sets DYN_LOGGING_JSONL=true)
+            log_level: Set log level (sets DYN_LOG to specified level)
+        """
+        spec = self._deployment_spec
+        if "envs" not in spec["spec"]:
+            spec["spec"]["envs"] = []
+
+        # Remove any existing logging env vars to avoid duplicates
+        spec["spec"]["envs"] = [
+            env
+            for env in spec["spec"]["envs"]
+            if env.get("name") not in ["DYN_LOGGING_JSONL", "DYN_LOG"]
+        ]
+
+        if enable_jsonl:
+            spec["spec"]["envs"].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
+
+        if log_level:
+            spec["spec"]["envs"].append({"name": "DYN_LOG", "value": log_level})
+
+    def get_logging_config(self) -> dict:
+        """Get current logging configuration
+
+        Returns:
+            dict with 'jsonl_enabled' and 'log_level' keys
+        """
+        envs = self._deployment_spec.get("spec", {}).get("envs", [])
+
+        jsonl_enabled = False
+        log_level = None
+
+        for env in envs:
+            if env.get("name") == "DYN_LOGGING_JSONL":
+                jsonl_enabled = env.get("value") in ["true", "1"]
+            elif env.get("name") == "DYN_LOG":
+                log_level = env.get("value")
+
+        return {"jsonl_enabled": jsonl_enabled, "log_level": log_level}
 
     @property
     def services(self) -> list:
@@ -639,6 +746,11 @@ async def main():
     deployment_spec.name = "foo"
 
     deployment_spec.set_image("nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1")
+
+    # Configure logging
+    deployment_spec.set_logging(enable_jsonl=True, log_level="debug")
+
+    print(f"Logging config: {deployment_spec.get_logging_config()}")
 
     async with ManagedDeployment(
         namespace="test", log_dir=".", deployment_spec=deployment_spec

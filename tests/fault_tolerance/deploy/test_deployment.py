@@ -151,6 +151,8 @@ async def test_fault_scenario(
     else:
         model = scenario.deployment["VllmDecodeWorker"].model
 
+    scenario.deployment.set_logging(True, "info")
+
     async with ManagedDeployment(
         namespace=namespace,
         log_dir=request.node.name,

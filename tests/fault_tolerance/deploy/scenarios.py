@@ -58,6 +58,38 @@ deployment_specs = {
     ),
 }
 
+# TP-2 scenarios
+deployment_specs["agg-tp-2-dp-1"] = DeploymentSpec(
+    "/workspace/components/backends/vllm/deploy/agg.yaml"
+)
+deployment_specs["agg-tp-2-dp-1"].set_tensor_parallel(2, ["VllmDecodeWorker"])
+
+deployment_specs["disagg-prefill-tp-2-decode-tp-2-dp-1"] = DeploymentSpec(
+    "/workspace/components/backends/vllm/deploy/disagg.yaml"
+)
+deployment_specs["disagg-prefill-tp-2-decode-tp-2-dp-1"][
+    "VllmPrefillWorker"
+].tensor_parallel_size = 2
+deployment_specs["disagg-prefill-tp-2-decode-tp-2-dp-1"][
+    "VllmDecodeWorker"
+].tensor_parallel_size = 2
+
+# TP-4 scenarios
+deployment_specs["agg-tp-4-dp-1"] = DeploymentSpec(
+    "/workspace/components/backends/vllm/deploy/agg.yaml"
+)
+deployment_specs["agg-tp-4-dp-1"].set_tensor_parallel(4, ["VllmDecodeWorker"])
+
+deployment_specs["disagg-prefill-tp-4-decode-tp-4-dp-1"] = DeploymentSpec(
+    "/workspace/components/backends/vllm/deploy/disagg.yaml"
+)
+deployment_specs["disagg-prefill-tp-4-decode-tp-4-dp-1"][
+    "VllmPrefillWorker"
+].tensor_parallel_size = 4
+deployment_specs["disagg-prefill-tp-4-decode-tp-4-dp-1"][
+    "VllmDecodeWorker"
+].tensor_parallel_size = 4
+
 # Derivative Specs With Incremented Replicats
 
 deployment_specs["agg-tp-1-dp-2"] = DeploymentSpec(
