@@ -89,7 +89,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="9d6e87aed37b6f0b3b2be097c5fafe1497190a71"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="ef0d06df5812b510f9d3a03b3cbb6fbf6a06406f"
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
