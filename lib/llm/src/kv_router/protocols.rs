@@ -23,10 +23,12 @@ impl Default for RouterRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RouterResponse {
-    pub worker_id: i64,
-    pub overlap_blocks: u32,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum RouterResponse {
+    New { worker_id: i64, overlap_blocks: u32 },
+    PrefillMarked { success: bool },
+    FreeMarked { success: bool },
 }
 
 #[derive(Debug)]

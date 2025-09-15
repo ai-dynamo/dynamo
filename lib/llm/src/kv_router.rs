@@ -376,7 +376,7 @@ impl KvRouter {
     }
 }
 
-// NOTE: KVRouter works like a PushRouter, 
+// NOTE: KVRouter works like a PushRouter,
 // but without the reverse proxy functionality, but based on contract of 3 request types
 #[async_trait]
 impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
@@ -393,7 +393,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                     .find_best_match(&context_id, &tokens, None, true)
                     .await?;
 
-                RouterResponse {
+                RouterResponse::New {
                     worker_id,
                     overlap_blocks,
                 }
@@ -401,17 +401,11 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
             RouterRequest::MarkPrefill {} => {
                 self.mark_prefill_completed(&context_id).await;
 
-                RouterResponse {
-                    worker_id: -1,
-                    overlap_blocks: 0,
-                }
+                RouterResponse::PrefillMarked { success: true }
             }
             RouterRequest::MarkFree {} => {
                 self.free(&context_id).await;
-                RouterResponse {
-                    worker_id: -1,
-                    overlap_blocks: 0,
-                }
+                RouterResponse::FreeMarked { success: true }
             }
         };
 
