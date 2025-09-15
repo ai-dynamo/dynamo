@@ -40,12 +40,19 @@ echo "  max_batch_size: ${max_batch_size}"
 echo "  max_seq_len: ${max_seq_len}"
 
 export TLLM_LOG_LEVEL=INFO
+# NOTE: This var is default behavior in recent trtllm commits, and can
+# be removed. Keeping it here in case the script is ran with older commits.
 export TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER=1
+# NOTE: This var was replaced with an LLM API / yaml engine config field
+# "moe_backend.use_low_precision_combine: true" in recent trtllm commits, and
+# can be removed. Keeping it here in case the script is ran with older commits.
+export TRTLLM_MOE_USE_LOW_PRECISION_COMBINE=1
 
 if [ "${enable_pdl}" = "true" ]; then
     export TRTLLM_ENABLE_PDL=1
 fi
 
+# NOTE: Set (or unset) these depending on what cluster you're using
 export TRTLLM_UCX_INTERFACE=enP6p9s0np0
 export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_3:1,mlx5_4:1,enP6p9s0np0
 
