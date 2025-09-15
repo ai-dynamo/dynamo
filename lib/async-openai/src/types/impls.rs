@@ -24,12 +24,13 @@ use crate::{
 use bytes::Bytes;
 
 use super::{
-    AddUploadPartRequest, AudioInput, AudioResponseFormat, ChatCompletionFunctionCall,
+    AddUploadPartRequest, AudioInput, AudioResponseFormat, AudioUrl, ChatCompletionFunctionCall,
     ChatCompletionFunctions, ChatCompletionNamedToolChoice, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestDeveloperMessage,
     ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestFunctionMessage,
     ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartAudio,
-    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestMessageContentPartAudioUrl, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartVideo,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
@@ -38,7 +39,7 @@ use super::{
     CreateSpeechResponse, CreateTranscriptionRequest, CreateTranslationRequest, DallE2ImageSize,
     EmbeddingInput, FileInput, FilePurpose, FunctionName, Image, ImageInput, ImageModel,
     ImageResponseFormat, ImageSize, ImageUrl, ImagesResponse, ModerationInput, Prompt, Role, Stop,
-    TimestampGranularity,
+    TimestampGranularity, VideoUrl,
     responses::{CodeInterpreterContainer, Input, InputContent, Role as ResponsesRole},
 };
 
@@ -765,6 +766,22 @@ impl From<ChatCompletionRequestMessageContentPartAudio>
     }
 }
 
+impl From<ChatCompletionRequestMessageContentPartVideo>
+    for ChatCompletionRequestUserMessageContentPart
+{
+    fn from(value: ChatCompletionRequestMessageContentPartVideo) -> Self {
+        ChatCompletionRequestUserMessageContentPart::VideoUrl(value)
+    }
+}
+
+impl From<ChatCompletionRequestMessageContentPartAudioUrl>
+    for ChatCompletionRequestUserMessageContentPart
+{
+    fn from(value: ChatCompletionRequestMessageContentPartAudioUrl) -> Self {
+        ChatCompletionRequestUserMessageContentPart::AudioUrl(value)
+    }
+}
+
 impl From<&str> for ChatCompletionRequestMessageContentPartText {
     fn from(value: &str) -> Self {
         ChatCompletionRequestMessageContentPartText { text: value.into() }
@@ -782,6 +799,7 @@ impl From<&str> for ImageUrl {
         Self {
             url: value.into(),
             detail: Default::default(),
+            uuid: None,
         }
     }
 }
@@ -791,6 +809,45 @@ impl From<String> for ImageUrl {
         Self {
             url: value,
             detail: Default::default(),
+            uuid: None,
+        }
+    }
+}
+
+impl From<&str> for VideoUrl {
+    fn from(value: &str) -> Self {
+        Self {
+            url: value.into(),
+            detail: Default::default(),
+            uuid: None,
+        }
+    }
+}
+
+impl From<String> for VideoUrl {
+    fn from(value: String) -> Self {
+        Self {
+            url: value,
+            detail: Default::default(),
+            uuid: None,
+        }
+    }
+}
+
+impl From<&str> for AudioUrl {
+    fn from(value: &str) -> Self {
+        Self {
+            url: value.into(),
+            uuid: None,
+        }
+    }
+}
+
+impl From<String> for AudioUrl {
+    fn from(value: String) -> Self {
+        Self {
+            url: value,
+            uuid: None,
         }
     }
 }

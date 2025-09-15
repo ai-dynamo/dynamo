@@ -210,6 +210,9 @@ pub struct ImageUrl {
     pub url: String,
     /// Specifies the detail level of the image. Learn more in the [Vision guide](https://platform.openai.com/docs/guides/vision/low-or-high-fidelity-image-understanding).
     pub detail: Option<ImageDetail>,
+    /// Optional unique identifier for the image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
@@ -223,6 +226,9 @@ pub struct VideoUrl {
     pub url: String,
     /// Specifies the detail level of the video processing.
     pub detail: Option<ImageDetail>,
+    /// Optional unique identifier for the video.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
@@ -243,6 +249,30 @@ pub struct ChatCompletionRequestMessageContentPartImage {
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ChatCompletionRequestMessageContentPartVideo {
     pub video_url: VideoUrl,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[builder(name = "AudioUrlArgs")]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct AudioUrl {
+    /// URL of the audio file
+    pub url: String,
+    /// Optional unique identifier for the audio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[builder(name = "ChatCompletionRequestMessageContentPartAudioUrlArgs")]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct ChatCompletionRequestMessageContentPartAudioUrl {
+    pub audio_url: AudioUrl,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -279,6 +309,7 @@ pub enum ChatCompletionRequestUserMessageContentPart {
     Text(ChatCompletionRequestMessageContentPartText),
     ImageUrl(ChatCompletionRequestMessageContentPartImage),
     VideoUrl(ChatCompletionRequestMessageContentPartVideo),
+    AudioUrl(ChatCompletionRequestMessageContentPartAudioUrl),
     InputAudio(ChatCompletionRequestMessageContentPartAudio),
 }
 
@@ -752,6 +783,10 @@ pub struct CreateChatCompletionRequest {
     /// See the [model endpoint compatibility](https://platform.openai.com/docs/models#model-endpoint-compatibility) table for details on which models work with the Chat API.
     pub model: String,
 
+    /// Multimodal processor configuration parameters
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mm_processor_kwargs: Option<serde_json::Value>,
+
     /// Whether or not to store the output of this chat completion request
     ///
     /// for use in our [model distillation](https://platform.openai.com/docs/guides/distillation) or [evals](https://platform.openai.com/docs/guides/evals) products.
@@ -1098,4 +1133,38 @@ pub struct CreateChatCompletionStreamResponse {
     /// An optional field that will only be present when you set `stream_options: {"include_usage": true}` in your request.
     /// When present, it contains a null value except for the last chunk which contains the token usage statistics for the entire request.
     pub usage: Option<CompletionUsage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn test_audio_url_content_part_json() {
+        let json = r#"{"type": "audio_url", "audio_url": {"url": "https://example.com/audio.mp3", "uuid": "test-123"}}"#;
+        let content_part: ChatCompletionRequestUserMessageContentPart =
+            serde_json::from_str(json).unwrap();
+
+        match content_part {
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => {
+                assert_eq!(part.audio_url.url, "https://example.com/audio.mp3");
+                assert_eq!(part.audio_url.uuid, Some("test-123".to_string()));
+            }
+            _ => panic!("Expected AudioUrl variant"),
+        }
+    }
+
+    #[test]
+    fn test_mm_processor_kwargs() {
+        let request = CreateChatCompletionRequest {
+            messages: vec![],
+            model: "test-model".to_string(),
+            mm_processor_kwargs: Some(serde_json::json!({"max_pixels": 768})),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("mm_processor_kwargs"));
+    }
 }
