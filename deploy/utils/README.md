@@ -1,76 +1,60 @@
-# Kubernetes utilities for Dynamo
+# Kubernetes utilities for Dynamo Benchmarking and Profiling
 
-This directory contains small utilities and manifests used by benchmarking and profiling flows.
+This directory contains utilities and manifests for Dynamo benchmarking and profiling workflows.
+
+## Prerequisites
+
+**Before using these utilities, you must first set up Dynamo Cloud following the main installation guide:**
+
+👉 **[Follow the Dynamo Cloud installation guide](../../guides/dynamo_deploy/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
+
+This includes:
+1. Installing the Dynamo CRDs
+2. Installing the Dynamo Platform (operator, etcd, NATS)
+3. Setting up your target namespace
 
 ## Contents
 
-- `setup_k8s_namespace.sh` — **fully encapsulated deployment setup** that provides one-time per Kubernetes namespace setup. Creates namespace (if missing), applies common manifests, installs CRDs, and deploys the Dynamo operator. If `DOCKER_SERVER`/`IMAGE_TAG` are provided, it installs your custom operator image; otherwise it installs the default published image. If your registry is private, provide `DOCKER_USERNAME`/`DOCKER_PASSWORD` or respond to the prompt to create an image pull secret.
+- `setup_benchmarking_resources.sh` — Sets up benchmarking and profiling resources in your existing Dynamo namespace
 - `manifests/`
-  - `serviceaccount.yaml` — ServiceAccount `dynamo-sa`
-  - `role.yaml` — Role `dynamo-role`
+  - `serviceaccount.yaml` — ServiceAccount `dynamo-sa` for benchmarking and profiling jobs
+  - `role.yaml` — Role `dynamo-role` with necessary permissions
   - `rolebinding.yaml` — RoleBinding `dynamo-binding`
-  - `pvc.yaml` — PVC `dynamo-pvc`
+  - `pvc.yaml` — PVC `dynamo-pvc` for storing profiler results and configurations
   - `pvc-access-pod.yaml` — short‑lived pod for copying profiler results from the PVC
-- `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC downloads).
+- `kubernetes.py` — helper used by tooling to apply/read resources (e.g., access pod for PVC downloads)
+- `inject_manifest.py` — utility for injecting deployment configurations into the PVC for profiling
+- `download_pvc_results.py` — utility for downloading benchmark/profiling results from the PVC
+- `dynamo_deployment.py` — utilities for working with DynamoGraphDeployment resources
+- `requirements.txt` — Python dependencies for benchmarking utilities
 
 ## Quick start
 
-### Kubernetes Setup (one-time per namespace)
+### Benchmarking Resource Setup
 
-Use the helper script to prepare a Kubernetes namespace with the common manifests and install the operator. This provides a **fully encapsulated deployment setup**.
-
-This script creates a Kubernetes namespace with the given name if it does not yet exist. It then applies common manifests (serviceaccount, role, rolebinding, pvc), installs CRDs, creates secrets, and deploys the Dynamo Cloud Operator to your namespace.
-If your namespace is already set up, you can skip this step.
+After setting up Dynamo Cloud, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
 
 ```bash
-export HF_TOKEN=<HF_TOKEN>
-export DOCKER_SERVER=<YOUR_DOCKER_SERVER>
+export NAMESPACE=your-dynamo-namespace
+export HF_TOKEN=<HF_TOKEN>  # Optional: for HuggingFace model access
 
-NAMESPACE=benchmarking HF_TOKEN=$HF_TOKEN DOCKER_SERVER=$DOCKER_SERVER deploy/utils/setup_k8s_namespace.sh
-
-# IF you want to build and push a new Docker image for the Dynamo Cloud Operator, include an IMAGE_TAG
-# NAMESPACE=benchmarking HF_TOKEN=$HF_TOKEN DOCKER_SERVER=$DOCKER_SERVER IMAGE_TAG=latest deploy/utils/setup_k8s_namespace.sh
+deploy/utils/setup_benchmarking_resources.sh
 ```
 
-This script applies the following manifests:
+This script applies the following manifests to your existing Dynamo namespace:
 
 - `deploy/utils/manifests/serviceaccount.yaml` - ServiceAccount `dynamo-sa`
 - `deploy/utils/manifests/role.yaml` - Role `dynamo-role`
 - `deploy/utils/manifests/rolebinding.yaml` - RoleBinding `dynamo-binding`
 - `deploy/utils/manifests/pvc.yaml` - PVC `dynamo-pvc`
 
-If `DOCKER_SERVER` and `IMAGE_TAG` are not both provided, the script deploys the operator using the default published image `nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.4.0`.
-To build/push and use a new image instead, pass both `DOCKER_SERVER` and `IMAGE_TAG`.
+If `HF_TOKEN` is provided, it also creates a secret for HuggingFace model access.
 
-This script also installs the Dynamo CRDs if not present.
-
-If the registry is private, either pass credentials or respond to the prompt:
+After running the setup script, verify the resources by checking:
 
 ```bash
-NAMESPACE=benchmarking \
-DOCKER_SERVER=my-registry.example.com \
-IMAGE_TAG=latest \
-DOCKER_USERNAME="$oauthtoken" \
-DOCKER_PASSWORD=<token> \
-deploy/utils/setup_k8s_namespace.sh
-```
-
-If `DOCKER_SERVER`/`IMAGE_TAG` are omitted, the script installs the default operator image `nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.4.0`.
-
-After running the setup script, verify the installation by checking the pods:
-
-```bash
-kubectl get pods -n $NAMESPACE
-```
-
-The output should look something like:
-
-```
-NAME                                                            READY   STATUS    RESTARTS   AGE
-dynamo-platform-dynamo-operator-controller-manager-xxxxx       2/2     Running   0          5m
-dynamo-platform-etcd-0                                          1/1     Running   0          5m
-dynamo-platform-nats-0                                          2/2     Running   0          5m
-dynamo-platform-nats-box-xxxxx                                  1/1     Running   0          5m
+kubectl get serviceaccount dynamo-sa -n $NAMESPACE
+kubectl get pvc dynamo-pvc -n $NAMESPACE
 ```
 
 ### PVC Manipulation Scripts
@@ -120,11 +104,11 @@ python3 -m deploy.utils.download_pvc_results \
 
 #### Next Steps
 
-For complete benchmarking workflows:
+For complete benchmarking and profiling workflows:
 - **Benchmarking Guide**: See [docs/benchmarks/benchmarking.md](../../docs/benchmarks/benchmarking.md) for comparing DynamoGraphDeployments and external endpoints
 - **Pre-Deployment Profiling**: See [docs/benchmarks/pre_deployment_profiling.md](../../docs/benchmarks/pre_deployment_profiling.md) for optimizing configurations before deployment
 
 ## Notes
 
-- Benchmarking scripts (`benchmarks/benchmark.sh`, `benchmarks/deploy_benchmark.sh`) call this setup automatically when present.
-- Profiling job manifest remains in `benchmarks/profiler/deploy/profile_sla_job.yaml` and now relies on the common ServiceAccount/PVC here.
+- Profiling job manifest remains in `benchmarks/profiler/deploy/profile_sla_job.yaml` and relies on the ServiceAccount/PVC created by the setup script.
+- This setup is focused on benchmarking and profiling resources only - the main Dynamo platform must be installed separately.
