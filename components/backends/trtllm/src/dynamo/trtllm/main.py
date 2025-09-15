@@ -253,9 +253,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         default_sampling_params.detokenize = False
 
     connector = None
-    logging.info("Initializing NIXL Connect.")
-#    connector = nixl_connect.Connector()
-#    await connector.initialize()
+    env_val = os.getenv("DYNAMO_ENABLE_NIXL_CONNECTOR")
+    if env_val is not None and env_val != "false":
+        logging.info("Initializing NIXL Connect.")
+        connector = nixl_connect.Connector()
+        await connector.initialize()
 
     async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
