@@ -115,11 +115,7 @@ fn create_mock_backend_stream(
         },
     ];
 
-    let stream = stream::iter(
-        outputs
-            .into_iter()
-            .map(|output| Annotated::from_data(output)),
-    );
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
 
     use dynamo_runtime::engine::ResponseStream;
     ResponseStream::new(Box::pin(stream), ctx)
@@ -217,8 +213,8 @@ async fn test_streaming_with_usage_compliance() {
     );
 
     // Verify first 3 chunks have usage: None and non-empty choices
-    for i in 0..3 {
-        if let Some(response) = &chunks[i].data {
+    for (i, chunk) in chunks.iter().take(3).enumerate() {
+        if let Some(response) = &chunk.data {
             assert!(
                 response.usage.is_none(),
                 "Content chunk {} should have usage: None",
