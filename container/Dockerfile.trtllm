@@ -270,7 +270,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Set PYTHONPATH to include workspace for benchmarks module, TODO: fix this to be more specific
-ENV PYTHONPATH=/workspace:/workspace/components/metrics/src:/workspace/components/frontend/src:/workspace/components/planner/src:/workspace/components/backends/mocker/src:/workspace/components/backends/trtllm/src:/workspace/components/backends/vllm/src:/workspace/components/backends/sglang/src:/workspace/components/backends/llama_cpp/src
+ENV PYTHONPATH=/workspace:/workspace/components/metrics/src:/workspace/components/frontend/src:/workspace/components/planner/src:/workspace/components/backends/trtllm/src
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
