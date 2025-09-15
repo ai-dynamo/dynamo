@@ -587,7 +587,7 @@ impl
         let mut response_generator = Box::new(response_generator);
 
         // set the runtime configuration
-        response_generator.set_runtime_config(self.runtime_config.clone());
+        response_generator.set_reasoning_parser(self.runtime_config.clone());
 
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;

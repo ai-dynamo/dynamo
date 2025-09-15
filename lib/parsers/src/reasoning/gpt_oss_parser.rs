@@ -150,7 +150,7 @@ impl ReasoningParser for GptOssReasoningParser {
 
     fn parse_reasoning_streaming_incremental(
         &mut self,
-        _text: &str,
+        text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
         tracing::debug!(
@@ -186,25 +186,30 @@ impl ReasoningParser for GptOssReasoningParser {
                 tracing::debug!("No content delta in final channel");
                 ParserResult::default()
             } else if channel == "commentary" {
-                // If we're in the commentary channel, we should return raw token content and recover content that is been comsumed by the parser
+                // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
                 // so that the tool parser can process it properly
                 if let Ok(enc) = get_harmony_encoding() {
-                    let raw_content = self.parser.current_content().unwrap_or_default();
-                    let mut final_text = _text.to_string();
+                    let current_content = self.parser.current_content().unwrap_or_default();
+                    let mut final_text = text.to_string();
 
-                    // need to recover content in commentary that is been comsumed by the parser
-                    if raw_content.is_empty() {
+                    // Need to recover commentary content consumed by the parser.
+                    // Example:
+                    //   <|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>
+                    // The part that needs recovery is everything between <|channel|> and the end of the message.
+
+                    // Recovery should only happen once, and only when `current_content` is empty.
+                    if current_content.is_empty() {
                         let tokens = self.parser.tokens();
 
                         // Get the token id for " <|channel|>"
-                        let start_token_id = enc
+                        let channel_token_id = enc
                             .tokenizer()
                             .encode_with_special_tokens("<|channel|>")
                             .last()
                             .copied();
 
                         // Find the last occurrence of the <|channel|> token (id 20005) in the tokens vector
-                        let last_channel_toke_idx = start_token_id
+                        let last_channel_token_idx = channel_token_id
                             .and_then(|token_id| {
                                 tokens.iter().rposition(|token| *token == token_id)
                             })
@@ -216,13 +221,11 @@ impl ReasoningParser for GptOssReasoningParser {
                         let generated_text = enc
                             .tokenizer()
                             .decode_utf8(
-                                &self.parser.tokens()[last_channel_toke_idx..end_token_idx],
+                                &self.parser.tokens()[last_channel_token_idx..end_token_idx],
                             )
-                            .unwrap();
+                            .unwrap_or_default();
 
                         final_text = generated_text;
-
-                        // Mark as processed to prevent running this again
                     }
 
                     ParserResult {

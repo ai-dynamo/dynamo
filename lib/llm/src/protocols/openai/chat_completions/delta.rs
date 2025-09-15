@@ -121,7 +121,7 @@ impl DeltaGenerator {
     }
 
     /// Update runtime configuration and reconfigure the reasoning parser accordingly.
-    pub fn set_runtime_config(&mut self, runtime_config: ModelRuntimeConfig) {
+    pub fn set_reasoning_parser(&mut self, runtime_config: ModelRuntimeConfig) {
         self.options.runtime_config = runtime_config.clone();
         match self.options.runtime_config.reasoning_parser.as_deref() {
             Some(name) => {

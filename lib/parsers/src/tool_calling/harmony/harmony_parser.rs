@@ -166,18 +166,18 @@ pub fn parse_tool_calls_harmony(
 /// or token-by-token streaming, making it more efficient for complete chunks.
 ///
 /// # Arguments
-/// * `text` - The complete Harmony Format text to parse
-/// * `config` - Parser configuration (currently unused but kept for API consistency)
+/// * `text` - The complete Harmony Format text to parse  
+///   Example:  
+///   `<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}`
+/// * `_config` - Parser configuration (currently unused but kept for API consistency)
 ///
 /// # Returns
 /// * `Ok((tool_calls, normal_text))` - Tuple containing extracted tool calls and any normal text
 /// * `Err(e)` - If parsing fails due to encoding or tokenization errors
-///   <|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}
 pub fn parse_tool_calls_harmony_complete(
     text: &str,
-    config: &JsonParserConfig,
+    _config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let _ = config;
     let enc = match get_harmony_encoding().as_ref() {
         Ok(e) => e,
         Err(e) => {
@@ -201,17 +201,18 @@ pub fn parse_tool_calls_harmony_complete(
     let mut normal_text = String::new();
 
     let mut res = Vec::with_capacity(messages.len());
-    let mut call_idx = 0usize; // Index of the tool call
+    let mut call_idx = 0; // Index of the tool call
 
     for message in messages.iter() {
-        if message.author.role == Role::Assistant
-            && message.channel.as_deref() == Some("commentary")
-            && message
-                .recipient
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("functions.")
-        {
+        if message.author.role != Role::Assistant {
+            continue;
+        }
+
+        let channel = message.channel.as_deref();
+        let recipient = message.recipient.as_deref().unwrap_or_default();
+
+        // Handle commentary channel
+        if channel == Some("commentary") && recipient.starts_with("functions.") {
             let Some(fname) = message
                 .recipient
                 .as_ref()
@@ -246,9 +247,8 @@ pub fn parse_tool_calls_harmony_complete(
                     },
                 });
             }
-        }
-        if message.author.role == Role::Assistant && message.channel.as_deref() == Some("analysis")
-        {
+        // Handle reasoning(analysis) channel
+        } else if channel == Some("analysis") {
             normal_text.push_str(match &message.content[0] {
                 Text(t) => &t.text,
                 _ => "",
