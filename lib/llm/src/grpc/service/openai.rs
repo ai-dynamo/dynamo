@@ -52,7 +52,8 @@ pub async fn completion_response_stream(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+    let (mut connection_handle, stream_handle) =
+        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
     let streaming = request.inner.stream.unwrap_or(false);
     // update the request to always stream

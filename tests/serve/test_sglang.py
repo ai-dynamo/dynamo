@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import run_serve_deployment
+from tests.serve.common import (
+    SERVE_TEST_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload_default, completion_payload_default
 
@@ -26,7 +30,7 @@ sglang_dir = os.environ.get("SGLANG_DIR", "/workspace/components/backends/sglang
 sglang_configs = {
     "aggregated": SGLangConfig(
         name="aggregated",
-        directory="/workspace/tests/serve",
+        directory=SERVE_TEST_DIR,
         script_name="sglang_agg.sh",
         marks=[pytest.mark.gpu_1],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
@@ -67,13 +71,7 @@ sglang_configs = {
 }
 
 
-@pytest.fixture(
-    params=[
-        pytest.param("aggregated", marks=[pytest.mark.gpu_1]),
-        pytest.param("disaggregated", marks=[pytest.mark.gpu_2]),
-        pytest.param("kv_events", marks=[pytest.mark.gpu_2]),
-    ]
-)
+@pytest.fixture(params=params_with_model_mark(sglang_configs))
 def sglang_config_test(request):
     """Fixture that provides different SGLang test configurations"""
     return sglang_configs[request.param]
@@ -81,7 +79,9 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-def test_sglang_deployment(sglang_config_test, request, runtime_services):
+def test_sglang_deployment(
+    sglang_config_test, request, runtime_services, predownload_models
+):
     """Test SGLang deployment scenarios using common helpers"""
     config = sglang_config_test
     run_serve_deployment(config, request)
@@ -90,7 +90,7 @@ def test_sglang_deployment(sglang_config_test, request, runtime_services):
 @pytest.mark.skip(
     reason="Requires 4 GPUs - enable when hardware is consistently available"
 )
-def test_sglang_disagg_dp_attention(request, runtime_services):
+def test_sglang_disagg_dp_attention(request, runtime_services, predownload_models):
     """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
 
     # Kept for reference; this test uses a different launch path and is skipped

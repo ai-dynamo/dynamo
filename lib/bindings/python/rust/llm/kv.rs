@@ -383,7 +383,7 @@ impl RadixTree {
             })?;
 
         let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
-        self.inner.apply_event(router_event);
+        let _ = self.inner.apply_event(router_event);
         Ok(())
     }
 
@@ -415,10 +415,13 @@ impl KvIndexer {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let cancellation_token = component.inner.drt().runtime().child_token();
+            let kv_indexer_metrics =
+                llm_rs::kv_router::indexer::KvIndexerMetrics::from_component(&component.inner);
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
                     cancellation_token.clone(),
                     kv_block_size as u32,
+                    kv_indexer_metrics,
                 )
                 .into();
 
