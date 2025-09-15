@@ -235,10 +235,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
     }
 
     fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
-        self.create_usage_chunk()
+        DeltaGenerator::create_usage_chunk(self)
     }
 
     fn is_usage_enabled(&self) -> bool {
-        self.is_usage_enabled()
+        DeltaGenerator::is_usage_enabled(self)
     }
 }

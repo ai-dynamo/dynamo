@@ -386,10 +386,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
     }
 
     fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
-        self.create_usage_chunk()
+        DeltaGenerator::create_usage_chunk(self)
     }
 
     fn is_usage_enabled(&self) -> bool {
-        self.is_usage_enabled()
+        DeltaGenerator::is_usage_enabled(self)
     }
 }
