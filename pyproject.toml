@@ -135,6 +135,7 @@ addopts = [
     "--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
+    "--ignore-glob=*trtllm_integration*",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
