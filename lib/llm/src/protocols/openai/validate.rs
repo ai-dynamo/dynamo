@@ -86,6 +86,10 @@ pub const MAX_METADATA_VALUE_LENGTH: usize = 512;
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
 /// Maximum allowed value for Prompt IntegerArray elements
 pub const MAX_PROMPT_TOKEN_ID: u32 = 50256;
+/// Minimum allowed value for `repetition_penalty`
+pub const MIN_REPETITION_PENALTY: f32 = 0.0;
+/// Maximum allowed value for `repetition_penalty`
+pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 
 //
 // Shared Fields
@@ -158,6 +162,20 @@ pub fn validate_presence_penalty(presence_penalty: Option<f32>) -> Result<(), an
             "Presence penalty must be between {} and {}, got {}",
             MIN_PRESENCE_PENALTY,
             MAX_PRESENCE_PENALTY,
+            penalty
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_repetition_penalty(repetition_penalty: Option<f32>) -> Result<(), anyhow::Error> {
+    if let Some(penalty) = repetition_penalty
+        && !(MIN_REPETITION_PENALTY..=MAX_REPETITION_PENALTY).contains(&penalty)
+    {
+        anyhow::bail!(
+            "Repetition penalty must be between {} and {}, got {}",
+            MIN_REPETITION_PENALTY,
+            MAX_REPETITION_PENALTY,
             penalty
         );
     }
