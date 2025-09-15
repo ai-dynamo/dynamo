@@ -14,7 +14,7 @@ Support matrix:
 | vLLM | MoE | 🚧 |
 | SGLang | Dense | ✅ |
 | SGLang | MoE | 🚧 |
-| TensorRT-LLM | Dense | 🚧 |
+| TensorRT-LLM | Dense | ✅ |
 | TensorRT-LLM | MoE | 🚧 |
 
 > [!NOTE]

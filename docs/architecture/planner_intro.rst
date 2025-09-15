@@ -44,7 +44,7 @@ Key features include:
      - ✅
      - vLLM
    * -
-     - ❌
+     - ✅
      - TensorRT-LLM
    * -
      - ❌
