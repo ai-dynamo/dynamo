@@ -224,7 +224,8 @@ async fn handler_completions(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+    let (mut connection_handle, stream_handle) =
+        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
@@ -419,7 +420,8 @@ async fn handler_chat_completions(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+    let (mut connection_handle, stream_handle) =
+        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
     let response =
         tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
@@ -651,7 +653,8 @@ async fn handler_responses(
     let context = request.context();
 
     // create the connection handles
-    let (mut connection_handle, _stream_handle) = create_connection_monitor(context.clone()).await;
+    let (mut connection_handle, _stream_handle) =
+        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
     let response = tokio::spawn(responses(state, template, request).in_current_span())
         .await

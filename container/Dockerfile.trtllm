@@ -322,6 +322,10 @@ RUN . /opt/dynamo/venv/bin/activate && \
 RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
 
+# Install common dependencies including aiofiles
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    pip install --requirement /tmp/requirements.txt
+
 ENV DYNAMO_HOME=/workspace
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

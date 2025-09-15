@@ -13,13 +13,14 @@ import aiohttp
 import pytest
 
 from dynamo._core import DistributedRuntime, KvPushRouter, KvRouterConfig
+from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = ROUTER_MODEL_NAME
 NUM_MOCKERS = 2
 BLOCK_SIZE = 16
 SPEEDUP_RATIO = 10.0
@@ -322,7 +323,8 @@ async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
 
 
 @pytest.mark.pre_merge
-def test_mocker_kv_router(request, runtime_services):
+@pytest.mark.model(MODEL_NAME)
+def test_mocker_kv_router(request, runtime_services, predownload_tokenizers):
     """
     Test KV router with multiple mocker engine instances.
     This test doesn't require GPUs and runs quickly for pre-merge validation.
@@ -379,7 +381,8 @@ def test_mocker_kv_router(request, runtime_services):
 
 
 @pytest.mark.pre_merge
-def test_mocker_two_kv_router(request, runtime_services):
+@pytest.mark.model(MODEL_NAME)
+def test_mocker_two_kv_router(request, runtime_services, predownload_tokenizers):
     """
     Test with two KV routers and multiple mocker engine instances.
     Alternates requests between the two routers to test load distribution.
@@ -446,8 +449,11 @@ def test_mocker_two_kv_router(request, runtime_services):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
-def test_mocker_kv_router_overload_503(request, runtime_services):
+def test_mocker_kv_router_overload_503(
+    request, runtime_services, predownload_tokenizers
+):
     """
     Test that KV router returns 503 when all workers are busy.
     This test uses limited resources to intentionally trigger the overload condition.
@@ -612,7 +618,8 @@ def test_mocker_kv_router_overload_503(request, runtime_services):
 
 
 @pytest.mark.pre_merge
-def test_kv_push_router_bindings(request, runtime_services):
+@pytest.mark.model(MODEL_NAME)
+def test_kv_push_router_bindings(request, runtime_services, predownload_tokenizers):
     """
     Test KvPushRouter Python bindings with mocker engines.
     This test creates KvPushRouter as a Python object and verifies
@@ -839,7 +846,8 @@ def test_kv_push_router_bindings(request, runtime_services):
 
 
 @pytest.mark.pre_merge
-def test_indexers_sync(request, runtime_services):
+@pytest.mark.model(MODEL_NAME)
+def test_indexers_sync(request, runtime_services, predownload_tokenizers):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
@@ -1066,7 +1074,10 @@ def test_indexers_sync(request, runtime_services):
 
 
 @pytest.mark.pre_merge
-def test_query_instance_id_returns_worker_and_tokens(request, runtime_services):
+@pytest.mark.model(MODEL_NAME)
+def test_query_instance_id_returns_worker_and_tokens(
+    request, runtime_services, predownload_tokenizers
+):
     """
     Test that the KV router correctly handles query_instance_id annotation.
 
