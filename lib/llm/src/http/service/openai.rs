@@ -598,12 +598,6 @@ pub fn validate_chat_completion_unsupported_fields(
         ));
     }
 
-    if inner.stream == Some(true) && inner.tools.is_some() {
-        return Err(ErrorMessage::not_implemented_error(
-            "`stream: true` is not supported when `tools` are provided.",
-        ));
-    }
-
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
             "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
