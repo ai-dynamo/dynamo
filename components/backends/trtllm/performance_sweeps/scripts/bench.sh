@@ -155,8 +155,9 @@ python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
         --random-output-len ${osl} \
         --random-range-ratio 0.8 \
         --ignore-eos \
-        --backend "dynamo" \
-        --endpoint "/v1/chat/completions" \
+        --use-chat-template \
+        --backend "openai" \
+        --endpoint "/v1/completions" \
         --percentile-metrics ttft,tpot,itl,e2el \
         --max-concurrency "1" \
         --host ${hostname} \
@@ -179,8 +180,9 @@ for concurrency in ${concurrency_list}; do
         --random-range-ratio 0.8 \
         --use-chat-template \
         --ignore-eos \
-        --backend "dynamo" \
-        --endpoint "/v1/chat/completions" \
+        --use-chat-template \
+        --backend "openai" \
+        --endpoint "/v1/completions" \
         --percentile-metrics ttft,tpot,itl,e2el \
         --max-concurrency "$concurrency" \
         --host ${hostname} \
