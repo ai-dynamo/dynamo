@@ -426,7 +426,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         // none for seed
 
         // Common Ext
-        validate::validate_repetition_penalty(self.common.repetition_penalty)?;
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
 
         Ok(())
     }

@@ -333,7 +333,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for function call
         // none for functions
         // Common Ext
-        validate::validate_repetition_penalty(self.common.repetition_penalty)?;
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
 
         Ok(())
     }
