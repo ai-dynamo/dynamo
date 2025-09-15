@@ -34,61 +34,10 @@ pub struct Metrics {
     inter_token_latency: HistogramVec,
 }
 
-/*
-This section explains the distinction between two key metrics used to track request processing:
-
-1. HTTP Queue: Tracks requests from HTTP handler start until first token generation begins
-2. Inflight: Tracks requests from HTTP handler start until the complete response is finished
-
-Example Request Flow:
-curl -s localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
-  "model": "Qwen/Qwen3-0.6B",
-  "prompt": "Hello let's talk about LLMs",
-  "stream": false,
-  "max_tokens": 1000
-}'
-
-Timeline:    0, 1, ...
-Client ────> Frontend:8000 ────────────────────> Dynamo component/backend (vLLM, SGLang, TRT)
-             │request start                     │received                              │
-             |                                  |                                      |
-             │                                  ├──> start prefill ──> first token ──> |last token
-             │                                  │     (not impl)       |               |
-             ├─────actual HTTP queue¹ ──────────┘                      │               |
-             │                                                         │               │
-             ├─────implemented HTTP queue ─────────────────────────────┘               |
-             │                                                                         │
-             └─────────────────────────────────── Inflight ────────────────────────────┘
-
-Concurrency Example:
-Suppose the backend allows 3 concurrent requests and there are 10 clients continuously hitting the frontend:
-- 3 requests will be actively processed (between first token and last token)
-- 7 requests will be in HTTP queue most of the time
-- All 10 requests will be counted as inflight (from start until complete response)
-
-Testing Setup:
-Try launching a frontend and a Mocker backend that allows 3 concurrent requests:
-$ python -m dynamo.frontend --http-port 8000
-$ python -m dynamo.mocker --model-path Qwen/Qwen3-0.6B --max-num-seqs 3
-# Launch your 10 concurrent clients here
-# Then check the http_queued_requests and inflight_requests metrics from the frontend:
-$ curl -s localhost:8000/metrics|grep -v '^#'|grep -E 'queue|inflight'
-dynamo_frontend_http_queued_requests{model="qwen/qwen3-0.6b"} 7
-dynamo_frontend_inflight_requests{model="qwen/qwen3-0.6b"} 10
-
-# Real setup using vLLM (instead of Mocker):
-$ python -m dynamo.vllm --model Qwen/Qwen3-0.6B  \
-   --enforce-eager --no-enable-prefix-caching --max-num-seqs 3
-
-Key Differences:
-- HTTP Queue: Measures queuing time before processing begins
-- Inflight: Measures total request lifetime including processing time
-- HTTP Queue <= Inflight (HTTP queue is a subset of inflight time)
-
-TODO¹: Implement the "actual" HTTP queue metric that tracks from request start
-until first token generation begins, rather than the current implementation
-that tracks until first token is received by the frontend
-*/
+// Inflight tracks requests from HTTP handler start until complete response is finished.
+// HTTP queue tracks requests from HTTP handler start until first token generation begins (including prefill time).
+// HTTP queue time is a subset of inflight time. For detailed explanation, see:
+// deploy/metrics/README.md - "Request Processing Flow" section
 
 /// RAII object for HTTP queue gauge
 /// Tracks requests from HTTP handler start until metrics processing begins
@@ -199,7 +148,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
+                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS_TOTAL),
                 "Number of inflight requests",
             ),
             &["model"],
@@ -214,7 +163,7 @@ impl Metrics {
 
         let http_queue_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::HTTP_QUEUED_REQUESTS),
+                frontend_metric_name(frontend_service::QUEUED_REQUESTS_TOTAL),
                 "Number of requests in HTTP processing queue",
             ),
             &["model"],
@@ -392,9 +341,9 @@ impl Metrics {
     ///
     /// # Metrics Distinction
     ///
-    /// This method creates an inflight guard that tracks requests actively being processed by the LLM engine.
+    /// This method creates an inflight guard  t tracks requests actively being processed by the LLM engine.
     /// This is distinct from [`HttpQueueGuard`] which tracks requests from HTTP handler start until
-    /// first token generation. The separation allows monitoring both HTTP processing queue time
+    /// first token generation (including prefill time). The separation allows monitoring both HTTP processing queue time
     /// and actual LLM processing time.
     pub fn create_inflight_guard(
         self: Arc<Self>,

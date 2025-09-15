@@ -486,7 +486,6 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
-
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
