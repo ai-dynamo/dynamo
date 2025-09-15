@@ -210,6 +210,7 @@ def gen_config_file(
         "moe_expert_parallel_size": ctx_tp_size,
         "enable_attention_dp": ctx_enable_attention_dp,
         "pipeline_parallel_size": 1,
+        "cuda_graph_config": None,
         "print_iter_log": True,
         "disable_overlap_scheduler": True,
         "kv_cache_config": {
