@@ -68,6 +68,8 @@ class HealthCheckPayload:
     Environment variable DYN_HEALTH_CHECK_PAYLOAD can override the default.
     """
 
+    default_payload: Dict[str, Any]  # Type hint for mypy - set by subclasses
+
     def __init__(self):
         """
         Initialize health check payload.
