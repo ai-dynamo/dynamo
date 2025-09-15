@@ -4,7 +4,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: gpt-oss-agg-shm
-  namespace: test-bis
 spec:
   backendFramework: trtllm
   services:
