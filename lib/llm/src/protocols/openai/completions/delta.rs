@@ -176,7 +176,7 @@ impl DeltaGenerator {
     /// * A [`NvCreateCompletionResponse`] with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
         let mut usage = self.usage.clone();
-        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
 
         let inner = dynamo_async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),

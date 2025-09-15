@@ -281,7 +281,7 @@ impl DeltaGenerator {
     /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let mut usage = self.usage.clone();
-        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
 
         dynamo_async_openai::types::CreateChatCompletionStreamResponse {
             id: self.id.clone(),
