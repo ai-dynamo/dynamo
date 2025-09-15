@@ -14,7 +14,9 @@ set -e
 
 # Configuration
 NAMESPACE=${NAMESPACE:-default}
-YAML_FILE="disagg_planner.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAML_FILE="$SCRIPT_DIR/disagg_planner.yaml"
+TEST_FILE="$SCRIPT_DIR/../test_scaling_e2e.py"
 FRONTEND_PORT=8000
 LOCAL_PORT=8000
 DEPLOYMENT_NAME="vllm-disagg-planner"
@@ -62,8 +64,8 @@ check_prerequisites() {
         exit 1
     fi
 
-    if [ ! -f "test_scaling_e2e.py" ]; then
-        log_error "test_scaling_e2e.py not found. Make sure you're in the tests/planner directory."
+    if [ ! -f "$TEST_FILE" ]; then
+        log_error "test_scaling_e2e.py not found at $TEST_FILE"
         exit 1
     fi
 
@@ -225,7 +227,7 @@ run_test() {
         log_info "Results will be saved to tests/planner/e2e_scaling_results"
     fi
 
-    if $python_cmd test_scaling_e2e.py $test_args; then
+    if $python_cmd "$TEST_FILE" $test_args; then
         log_success "Scaling test PASSED"
         return 0
     else
