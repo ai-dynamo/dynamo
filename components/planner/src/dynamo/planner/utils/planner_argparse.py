@@ -28,13 +28,18 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--environment",
         default=SLAPlannerDefaults.environment,
-        choices=["kubernetes"],
+        choices=["kubernetes", "virtual"],
         help="Environment type",
+    )
+    parser.add_argument(
+        "--namespace",
+        default=SLAPlannerDefaults.namespace,
+        help="Namespace",
     )
     parser.add_argument(
         "--backend",
         default=SLAPlannerDefaults.backend,
-        choices=["vllm", "sglang"],
+        choices=["vllm", "sglang", "trtllm"],
         help="Backend type",
     )
     parser.add_argument(

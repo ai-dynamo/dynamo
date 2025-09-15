@@ -18,6 +18,7 @@ use super::RouteDoc;
 pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
+    client_disconnect_gauge: prometheus::IntGauge,
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
@@ -133,6 +134,12 @@ impl Metrics {
         )
         .unwrap();
 
+        let client_disconnect_gauge = prometheus::IntGauge::new(
+            frontend_metric_name("client_disconnects"),
+            "Number of connections dropped by clients",
+        )
+        .unwrap();
+
         let buckets = vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
 
         let request_duration = HistogramVec::new(
@@ -198,6 +205,7 @@ impl Metrics {
         Metrics {
             request_counter,
             inflight_gauge,
+            client_disconnect_gauge,
             request_duration,
             input_sequence_length,
             output_sequence_length,
@@ -263,9 +271,20 @@ impl Metrics {
         self.inflight_gauge.with_label_values(&[model]).dec()
     }
 
+    /// Increment the gauge for client disconnections
+    pub fn inc_client_disconnect(&self) {
+        self.client_disconnect_gauge.inc();
+    }
+
+    /// Get the count of client disconnections
+    pub fn get_client_disconnect_count(&self) -> i64 {
+        self.client_disconnect_gauge.get()
+    }
+
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
