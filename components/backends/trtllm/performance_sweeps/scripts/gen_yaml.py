@@ -188,6 +188,7 @@ def gen_config_file(
         64,
         128,
         256,
+        384,
         512,
         768,
         1024,
@@ -242,12 +243,16 @@ def gen_config_file(
         },
         "moe_config": {
             "backend": gen_moe_backend,
+            "use_low_precision_moe_combine": True,
         },
         "cache_transceiver_config": {
             "max_tokens_in_buffer": cache_transceiver_max_num_tokens,
             "backend": "DEFAULT",
         },
         "stream_interval": 20,
+        # Should be unused in Dynamo integration when TRTLLM detokenization
+        # is disabled, but set it here for config parity.
+        "num_postprocess_workers": 8,
     }
 
     if gen_tp_size == 8 and not gen_enable_attention_dp:
