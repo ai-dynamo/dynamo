@@ -108,8 +108,8 @@ pub fn log_json_err(filename: &str, json: &str, err: &serde_json::Error) {
         return;
     }
     // These are 1 based for humans so subtract
-    let line = err.line() - 1;
-    let column = err.column() - 1;
+    let line = err.line().saturating_sub(1);
+    let column = err.column().saturating_sub(1);
 
     let json_lines: Vec<&str> = json.lines().collect();
     if json_lines.is_empty() {

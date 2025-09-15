@@ -639,9 +639,15 @@ impl HFConfig {
     fn from_json_file<P: AsRef<Path>>(file: P) -> Result<Arc<dyn ModelInfo>> {
         let file_path = file.as_ref();
         let contents = std::fs::read_to_string(file_path)?;
-        let mut config: Self = json_five::from_str(&contents)?;
+        let mut config: Self = json_five::from_str(&contents)
+            .inspect_err(|err| {
+                tracing::error!(path=%file_path.display(), %err, "Failed to parse config.json as JSON5");
+            })?;
         if config.text_config.is_none() {
-            let text_config: HFTextConfig = json_five::from_str(&contents)?;
+            let text_config: HFTextConfig = json_five::from_str(&contents)
+                .inspect_err(|err| {
+                    tracing::error!(path=%file_path.display(), %err, "Failed to parse text config from config.json as JSON5");
+                })?;
             config.text_config = Some(text_config);
         }
 
@@ -896,7 +902,7 @@ mod tests {
         Ok(())
     }
 
-    /// The Python JSON parser accepts `Infinity` as a numberic value. This is explicitly against the
+    /// The Python JSON parser accepts `Infinity` as a numeric value. This is explicitly against the
     /// JSON spec, but inevitably people rely on it, so we have to allow it.
     /// We treat that file as JSON5 (a lenient superset of JSON) to be able to parse it.
     #[test]
