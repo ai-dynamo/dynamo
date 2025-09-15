@@ -43,7 +43,7 @@
    components/backends/sglang/docs/multinode-examples.md
 
    examples/README.md
-   examples/runtime/hello_world/README.md
+   examples/custom_backend/hello_world/README.md
 
    architecture/distributed_runtime.md
    architecture/dynamo_flow.md

@@ -139,6 +139,7 @@ addopts = [
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     "--ignore-glob=components/backends/sglang/src/dynamo/sglang/request_handlers/*",
+    "--ignore-glob=components/backends/sglang/slurm_jobs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -177,7 +178,8 @@ markers = [
     "sglang: marks tests as requiring sglang",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
-    "kvbm: marks tests for KV behavior and model determinism"
+    "kvbm: marks tests for KV behavior and model determinism",
+    "model: model id used by a test or parameter"
 ]
 
 # Linting/formatting

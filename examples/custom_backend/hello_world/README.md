@@ -68,13 +68,13 @@ The example demonstrates:
 
 First, start the backend service:
 ```bash
-cd examples/runtime/hello_world
+cd examples/custom_backend/hello_world
 python hello_world.py
 ```
 
 Second, in a separate terminal, run the client:
 ```bash
-cd examples/runtime/hello_world
+cd examples/custom_backend/hello_world
 python client.py
 ```
 
@@ -112,7 +112,7 @@ Then deploy to kubernetes using
 ```bash
 export NAMESPACE=<your-namespace>
 cd dynamo
-kubectl apply -f examples/runtime/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
+kubectl apply -f examples/custom_backend/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
 ```
 
 to delete your deployment:
