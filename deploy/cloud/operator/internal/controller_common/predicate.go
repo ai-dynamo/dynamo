@@ -33,7 +33,7 @@ import (
 type GroveConfig struct {
 	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
 	Enabled bool
-	// TerminationDelay configures the termination delay for Grove PodGangSets
+	// TerminationDelay configures the termination delay for Grove PodCliqueSets
 	TerminationDelay time.Duration
 }
 

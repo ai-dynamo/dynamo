@@ -158,7 +158,7 @@ func main() {
 	flag.StringVar(&ingressHostSuffix, "ingress-host-suffix", "",
 		"The suffix to use for the ingress host")
 	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
-		"The termination delay for Grove PodGangSets")
+		"The termination delay for Grove PodCliqueSets")
 	flag.StringVar(&modelExpressURL, "model-express-url", "",
 		"URL of the Model Express server to inject into all pods")
 	opts := zap.Options{
