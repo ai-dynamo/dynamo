@@ -29,7 +29,7 @@ kubectl create namespace ${NAMESPACE}
 Update the `hf-token-secret.yaml` file with your HuggingFace token.
 
 ```bash
-kubectl apply -f hf-token-secret.yaml -n ${NAMESPACE}
+kubectl apply -f hf_hub_secret/hf_hub_secret.yaml -n ${NAMESPACE}
 ```
 
 6. (Optional) Create a shared model cache pvc to store the model weights.
