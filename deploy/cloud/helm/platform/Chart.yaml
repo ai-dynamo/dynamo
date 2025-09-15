@@ -40,6 +40,6 @@ dependencies:
     condition: kai-scheduler.enabled
   - name: grove-charts
     alias: grove
-    version: v0.0.0-6e30275
+    version: v0.0.0-f19bde6
     repository: oci://ghcr.io/nvidia/grove
     condition: grove.enabled
