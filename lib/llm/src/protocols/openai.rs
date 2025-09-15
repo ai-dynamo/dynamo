@@ -67,6 +67,12 @@ trait OpenAIStopConditionsProvider {
             self.nvext().and_then(|nv| nv.ignore_eos.as_ref()),
         )
     }
+
+    /// Get max_thinking_tokens from nvext
+    /// NOTE: This is currently a passthrough for future thinking budget implementation
+    fn get_max_thinking_tokens(&self) -> Option<u32> {
+        self.nvext().and_then(|nv| nv.max_thinking_tokens)
+    }
 }
 
 trait OpenAIOutputOptionsProvider {
@@ -152,6 +158,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
             && stop.len() > 4
@@ -168,6 +175,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             stop,
             stop_token_ids_hidden: None,
             ignore_eos,
+            max_thinking_tokens,
         })
     }
 }
