@@ -5,14 +5,28 @@ use crate::tokens::{SequenceHash, Token};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RouterRequest {
-    pub tokens: Vec<Token>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum RouterRequest {
+    // ini
+    #[serde(rename = "new")]
+    New {
+        tokens: Vec<Token>,
+    },
+    MarkPrefill {},
+    MarkFree {},
+}
+
+impl Default for RouterRequest {
+    fn default() -> Self {
+        RouterRequest::New { tokens: vec![] }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RouterResponse {
     pub worker_id: i64,
+    pub overlap_blocks: u32,
 }
 
 #[derive(Debug)]
