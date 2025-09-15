@@ -4,8 +4,9 @@
 import logging
 
 import numpy as np
-from utils.genai_perf import benchmark_prefill
-from utils.plot import plot_prefill_interpolation
+
+from benchmarks.profiler.utils.genai_perf import benchmark_prefill
+from benchmarks.profiler.utils.plot import plot_prefill_interpolation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

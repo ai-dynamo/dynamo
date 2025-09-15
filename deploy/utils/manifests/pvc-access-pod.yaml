@@ -8,7 +8,7 @@ metadata:
   labels:
     app: pvc-access
 spec:
-  activeDeadlineSeconds: 300  # Auto-delete after 5 minutes
+  activeDeadlineSeconds: 3000  # Auto-terminate after ~50 minutes; Pod will be Failed (not auto-deleted)
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -17,7 +17,7 @@ spec:
   - name: ubuntu
     image: ubuntu:22.04
     command: ["/bin/bash"]
-    args: ["-c", "sleep 290"]  # Sleep for slightly less than deadline - tools can be installed via kubectl exec if needed
+    args: ["-c", "sleep 3000"]
     securityContext:
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: false
