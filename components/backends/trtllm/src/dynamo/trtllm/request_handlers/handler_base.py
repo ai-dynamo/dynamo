@@ -216,7 +216,9 @@ class HandlerBase:
                 )
 
             if res.finished and not out.get("finish_reason"):
-                logging.warning("Request finished with no finish reason set - this indicates a possible bug")
+                logging.warning(
+                    "Request finished with no finish reason set - this indicates a possible bug"
+                )
 
             # Yield the chunk to the client and update the token count for the next iteration.
             yield out
