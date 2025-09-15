@@ -10,16 +10,40 @@ This directory contains comprehensive testing tools for validating the SLA plann
 The SLA planner monitors metrics every 60 seconds (default adjustment interval) and scales
 prefill/decode workers based on TTFT, ITL, and request patterns.
 
-## Pre-Requisite: Pre-Deployment Profiling Data
+## Prerequisites
+
+### Python Dependencies
+
+**Installation:**
+```bash
+# Install all required test dependencies
+pip install -r container/deps/requirements.test.txt
+
+# Install additional planner dependencies
+pip install -r container/deps/requirements.txt
+```
+
+**For Unit Tests:**
+- Python dependencies installed (see installation above)
+- PYTHONPATH set to include `components/planner/src`
+
+**For E2E Tests:**
+- Kubernetes cluster with GPU nodes
+- kubectl configured and accessible
+- genai-perf available in PATH
+- Python dependencies installed (see installation above)
+- PYTHONPATH properly configured for planner imports
+
+### Pre-Deployment Profiling Data
 
 You have two options to obtain the pre-deployment profiling data:
 
-### Option A: Use Test Configuration (Quickstart)
+#### Option A: Use Test Configuration (Quickstart)
 
 Use the pre-configured test deployment with sample profiling data, we provide the results and the deployment configuration for the following models x hardware configurations:
 - `nvidia/Llama-3.1-8B-Instruct-FP8` on H200 with max context length 16384, TP1 Prefill, and TP1 Decode. At ISL/OSL 3000/150, it achieves 40k tokens/s/gpu prefill with 80ms TTFT and 10k tokens/s/gpu decode with 10ms ITL. See `profiling_results/H200_TP1P_TP1D/`.
 
-### Option B: Use Your Own Profiling Results
+#### Option B: Use Your Own Profiling Results
 
 1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../docs/benchmarks/pre_deployment_profiling.md) for detailed instructions.
 
@@ -244,15 +268,18 @@ The table below shows the performance improvement of SLA planner across differen
 | Inefficient parallelization mapping | 311% | 249% |
 | Best static deployment | 52% | 29% |`
 
-### Prerequisites
 
-**For Unit Tests:**
-- Python dependencies installed
-- PYTHONPATH set to include `components/planner/src` (see unit test examples above)
+### Troubleshooting
 
-**For E2E Tests:**
-- Kubernetes cluster with GPU nodes
-- kubectl configured and accessible
-- genai-perf available in PATH
-- Python dependencies installed
-- PYTHONPATH properly configured for planner imports
+**Common Issues:**
+
+1. **`ModuleNotFoundError: No module named 'psutil'` or `unrecognized arguments: --mypy`**
+   ```bash
+   # Install all required test dependencies
+   pip install -r container/deps/requirements.test.txt
+   pip install -r container/deps/requirements.txt
+   ```
+
+2. **Import errors when running tests**
+   - Ensure PYTHONPATH is set correctly: `PYTHONPATH=components/planner/src`
+   - Verify all dependencies are installed: `pip install -r container/deps/requirements.test.txt` and `pip install -r container/deps/requirements.txt`
