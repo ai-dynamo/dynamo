@@ -16,14 +16,16 @@
 import copy
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Optional, Union
+from typing import Any, Optional, Protocol, Union
 
 import torch
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 
+from dynamo._core import PerformanceMetrics
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -37,6 +39,45 @@ from dynamo.trtllm.utils.disagg_utils import (
 )
 
 configure_dynamo_logging()
+
+
+class TimingMetrics(Protocol):
+    """Protocol for TensorRT-LLM timing metrics."""
+
+    arrival_time: Any  # datetime-like object with total_seconds() method
+    first_scheduled_time: Any
+    first_token_time: Any
+    last_token_time: Any
+    kv_cache_size: int
+    kv_cache_transfer_start: Any
+    kv_cache_transfer_end: Any
+
+
+class KvCacheMetrics(Protocol):
+    """Protocol for TensorRT-LLM KV cache metrics."""
+
+    num_total_allocated_blocks: int
+    num_new_allocated_blocks: int
+    num_reused_blocks: int
+    num_missed_blocks: int
+
+
+class SpeculativeDecoding(Protocol):
+    """Protocol for TensorRT-LLM speculative decoding metrics."""
+
+    acceptance_rate: float
+    total_accepted_draft_tokens: int
+    total_draft_tokens: int
+
+
+class TensorRTLLMPerformanceMetrics(Protocol):
+    """Protocol for TensorRT-LLM request performance metrics."""
+
+    timing_metrics: TimingMetrics
+    kv_cache_metrics: KvCacheMetrics
+    speculative_decoding: SpeculativeDecoding
+    first_iter: int
+    last_iter: int
 
 
 class DisaggregationMode(Enum):
@@ -100,7 +141,9 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
-    def request_perf_metrics_to_json(self, perf_metrics):
+    def request_perf_metrics_to_json(
+        self, perf_metrics: TensorRTLLMPerformanceMetrics
+    ) -> dict:
         timing_metrics = perf_metrics.timing_metrics
         kv_cache_metrics = perf_metrics.kv_cache_metrics
         speculative_decoding = perf_metrics.speculative_decoding
@@ -122,12 +165,14 @@ class HandlerBase:
             "num_missed_blocks": kv_cache_metrics.num_missed_blocks,
         }
         if timing_metrics.kv_cache_size > 0:
-            metrics_json["timing_metrics"].update({
-                # TODO: move to kv_cache_metrics
-                "kv_cache_size": timing_metrics.kv_cache_size,
-                "kv_cache_transfer_start": timing_metrics.kv_cache_transfer_start.total_seconds(),
-                "kv_cache_transfer_end": timing_metrics.kv_cache_transfer_end.total_seconds(),
-            })
+            metrics_json["timing_metrics"].update(
+                {
+                    # TODO: move to kv_cache_metrics
+                    "kv_cache_size": timing_metrics.kv_cache_size,
+                    "kv_cache_transfer_start": timing_metrics.kv_cache_transfer_start.total_seconds(),
+                    "kv_cache_transfer_end": timing_metrics.kv_cache_transfer_end.total_seconds(),
+                }
+            )
         if speculative_decoding.total_draft_tokens > 0:
             metrics_json["speculative_decoding"] = {
                 "acceptance_rate": speculative_decoding.acceptance_rate,
@@ -135,6 +180,86 @@ class HandlerBase:
                 "total_draft_tokens": speculative_decoding.total_draft_tokens,
             }
         return metrics_json
+
+    def create_performance_metrics(
+        self,
+        perf_metrics: Optional[TensorRTLLMPerformanceMetrics] = None,
+        arriving_time: Optional[float] = None,
+    ) -> PerformanceMetrics:
+        """
+        Create PerformanceMetrics from request performance data.
+
+        This method extracts only a small subset of the rich performance data available
+        from TensorRT-LLM. The full TensorRTLLMPerformanceMetrics contains much more
+        detailed timing, caching, and speculative decoding information.
+
+        Available TensorRT-LLM Performance Metrics:
+
+        Timing Metrics (perf_metrics.timing_metrics):
+        - arrival_time: When request arrived at engine
+        - first_scheduled_time: When first scheduled for processing
+        - first_token_time: Time to first token generation
+        - last_token_time: Time of last token generation
+        - kv_cache_size: Size of KV cache
+        - kv_cache_transfer_start: KV cache transfer start time
+        - kv_cache_transfer_end: KV cache transfer end time
+
+        KV Cache Metrics (perf_metrics.kv_cache_metrics):
+        - num_total_allocated_blocks: Total allocated KV cache blocks
+        - num_new_allocated_blocks: Newly allocated blocks
+        - num_reused_blocks: Reused blocks from cache
+        - num_missed_blocks: Missed blocks (cache misses)
+
+        Speculative Decoding (perf_metrics.speculative_decoding):
+        - acceptance_rate: Rate of accepted speculative tokens
+        - total_accepted_draft_tokens: Number of accepted draft tokens
+        - total_draft_tokens: Total number of draft tokens generated
+
+        Iteration Metrics:
+        - first_iter: First iteration number
+        - last_iter: Last iteration number
+        - iter: Current iteration (when request not finished)
+
+        Args:
+            perf_metrics: Request performance metrics from TensorRT-LLM engine output.
+                         Must implement TensorRTLLMPerformanceMetrics protocol with
+                         timing_metrics, kv_cache_metrics, speculative_decoding, first_iter, last_iter
+            arriving_time: Timestamp when request arrived (optional)
+
+        Returns:
+            PerformanceMetrics object with extracted subset of performance data
+        """
+        # Extract arriving_time
+        if (
+            arriving_time is None
+            and perf_metrics
+            and hasattr(perf_metrics, "timing_metrics")
+        ):
+            # Use the arrival time from the engine's timing metrics
+            arriving_time = perf_metrics.timing_metrics.arrival_time.total_seconds()
+        elif arriving_time is None:
+            # Fallback to current time if no arrival time is available
+            arriving_time = time.time()
+
+        # Extract KV cache metrics
+        kv_cache_num_total_allocated_blocks = None
+        if perf_metrics and hasattr(perf_metrics, "kv_cache_metrics"):
+            kv_cache_num_total_allocated_blocks = (
+                perf_metrics.kv_cache_metrics.num_total_allocated_blocks
+            )
+
+        # Extract speculative decoding acceptance rate
+        spec_decoding_acceptance_rate = None
+        if perf_metrics and hasattr(perf_metrics, "speculative_decoding"):
+            spec_decoding_acceptance_rate = (
+                perf_metrics.speculative_decoding.acceptance_rate
+            )
+
+        return PerformanceMetrics(
+            arriving_time=arriving_time,
+            kv_cache_num_total_allocated_blocks=kv_cache_num_total_allocated_blocks,
+            spec_decoding_acceptance_rate=spec_decoding_acceptance_rate,
+        )
 
     async def generate_locally(
         self, request: dict, embeddings: Optional[Union[torch.Tensor, dict]] = None
@@ -147,6 +272,9 @@ class HandlerBase:
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
         """
         logging.debug(f"Request: {request}")
+
+        # Record arriving time for performance metrics
+        arriving_time = time.time()
 
         # Default to text-based input. This will be overwritten if multimodal
         # content is found and processed.
@@ -237,6 +365,14 @@ class HandlerBase:
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
             if self.first_generation and self.publisher:
+                # Create performance metrics with arriving time
+                self.create_performance_metrics(arriving_time=arriving_time)
+                logging.debug(
+                    f"Created performance metrics: arriving_time={arriving_time}"
+                )
+                # Store arriving_time for later use
+                self._stored_arriving_time = arriving_time
+
                 self.publisher.start()
                 self.first_generation = False
 
@@ -246,19 +382,40 @@ class HandlerBase:
                 final_out = {}
                 output = res.outputs[0]
                 if output.request_perf_metrics:
-                    json_perf_metrics = self.request_perf_metrics_to_json(output.request_perf_metrics)
+                    json_perf_metrics = self.request_perf_metrics_to_json(
+                        output.request_perf_metrics
+                    )
                     final_out["request_perf_metrics"] = json_perf_metrics
                     logging.debug(f"Request perf metrics: {json_perf_metrics}")
+
+                    # Complete the performance metrics with engine data
+                    completed_performance_metrics = self.create_performance_metrics(
+                        perf_metrics=output.request_perf_metrics,
+                        arriving_time=self._stored_arriving_time,
+                    )
+                    logging.debug("Completed performance metrics with engine data")
+                    # Store for potential use by publisher
+                    self._completed_performance_metrics = completed_performance_metrics
+
+                    # Pass the completed performance metrics to the publisher
+                    if self.publisher:
+                        self.publisher.set_performance_metrics(
+                            completed_performance_metrics
+                        )
                 if output.disaggregated_params:
-                    final_out["ctx_request_id"] = output.disaggregated_params.ctx_request_id
+                    final_out[
+                        "ctx_request_id"
+                    ] = output.disaggregated_params.ctx_request_id
 
                 if self.multimodal_processor:
-                    final_out.update(self.multimodal_processor.get_stop_response(
-                        request_id, model_name
-                    ))
+                    final_out.update(
+                        self.multimodal_processor.get_stop_response(
+                            request_id, model_name
+                        )
+                    )
                     yield final_out
                 else:
-                    item = {"finish_reason": "stop", "token_ids": []} 
+                    item = {"finish_reason": "stop", "token_ids": []}
                     final_out.update(item)
                     yield final_out
                 break

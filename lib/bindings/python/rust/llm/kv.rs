@@ -24,6 +24,7 @@ use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
 use llm_rs::kv_router::protocols::KvStats as RsKvStats;
+use llm_rs::kv_router::protocols::PerformanceMetrics as RsPerformanceMetrics;
 use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
 use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
 use rs::traits::events::EventSubscriber;
@@ -750,6 +751,10 @@ impl KvRecorder {
 
 #[pyclass]
 #[repr(transparent)]
+pub struct PerformanceMetrics(pub RsPerformanceMetrics);
+
+#[pyclass]
+#[repr(transparent)]
 pub struct ForwardPassMetrics(pub RsForwardPassMetrics);
 
 #[pyclass]
@@ -765,18 +770,37 @@ pub struct KvStats(pub RsKvStats);
 pub struct SpecDecodeStats(pub RsSpecDecodeStats);
 
 #[pymethods]
+impl PerformanceMetrics {
+    #[new]
+    #[pyo3(signature = (arriving_time = None, kv_cache_num_total_allocated_blocks = None, spec_decoding_acceptance_rate = None))]
+    fn new(
+        arriving_time: Option<f64>,
+        kv_cache_num_total_allocated_blocks: Option<u64>,
+        spec_decoding_acceptance_rate: Option<f32>,
+    ) -> Self {
+        Self(RsPerformanceMetrics {
+            arriving_time,
+            kv_cache_num_total_allocated_blocks,
+            spec_decoding_acceptance_rate,
+        })
+    }
+}
+
+#[pymethods]
 impl ForwardPassMetrics {
     #[new]
-    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
+    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None, performance_metrics = None))]
     fn new(
         worker_stats: &WorkerStats,
         kv_stats: &KvStats,
         spec_decode_stats: Option<&SpecDecodeStats>,
+        performance_metrics: Option<&PerformanceMetrics>,
     ) -> Self {
         Self(RsForwardPassMetrics {
             worker_stats: worker_stats.0.clone(),
             kv_stats: kv_stats.0.clone(),
             spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
+            performance_metrics: performance_metrics.map(|p| p.0.clone()),
         })
     }
 }

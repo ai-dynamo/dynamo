@@ -15,6 +15,7 @@ from dynamo.llm import (
     ForwardPassMetrics,
     KvEventPublisher,
     KvStats,
+    PerformanceMetrics,
     WorkerMetricsPublisher,
     WorkerStats,
 )
@@ -162,6 +163,20 @@ class Publisher:
         )
         self._init_publish_kv_cache_events_thread()
 
+    def set_performance_metrics(
+        self, performance_metrics: Optional[PerformanceMetrics]
+    ):
+        """
+        Set performance metrics to be included in future ForwardPassMetrics publications.
+
+        Args:
+            performance_metrics: PerformanceMetrics object containing arriving_time,
+                               kv_cache_num_total_allocated_blocks, and spec_decoding_acceptance_rate
+        """
+        self._current_performance_metrics = performance_metrics
+        if performance_metrics is not None:
+            logging.debug("Set performance metrics successfully")
+
     def _init_publish_metrics_thread(self):
         # Need to publish stats once so that worker can be selected.
         # Publishing some dummy values...
@@ -199,6 +214,7 @@ class Publisher:
             worker_stats=worker_stats,
             kv_stats=kv_stats,
             spec_decode_stats=None,
+            performance_metrics=None,  # Will be populated later when we have actual performance data
         )
         self.metrics_publisher.publish(metrics)
 
@@ -281,6 +297,7 @@ class Publisher:
                 worker_stats=worker_stats,
                 kv_stats=kv_stats,
                 spec_decode_stats=spec_decode_stats,
+                performance_metrics=getattr(self, "_current_performance_metrics", None),
             )
             self.metrics_publisher.publish(metrics)
 

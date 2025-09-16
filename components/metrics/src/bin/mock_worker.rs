@@ -137,6 +137,7 @@ fn mock_stats_handler(_stats: EndpointStats) -> serde_json::Value {
         worker_stats,
         kv_stats,
         spec_decode_stats,
+        performance_metrics: None,
     };
     tracing::info!("Stats: {stats:?}");
     serde_json::to_value(stats).unwrap()

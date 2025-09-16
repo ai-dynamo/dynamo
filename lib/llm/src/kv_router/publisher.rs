@@ -1125,6 +1125,7 @@ mod test_integration_publisher {
                     request_total_slots: 100,
                 },
                 spec_decode_stats: None,
+                performance_metrics: None,
             });
 
             publisher.publish(metrics).unwrap();
@@ -1166,6 +1167,7 @@ mod test_integration_publisher {
                     request_total_slots: 100 + (i * 10) as u64, // Change other metrics
                 },
                 spec_decode_stats: None,
+                performance_metrics: None,
             });
 
             publisher.publish(metrics).unwrap();
@@ -1227,6 +1229,7 @@ mod test_integration_publisher {
                 gpu_prefix_cache_hit_rate: 0.75,
             },
             spec_decode_stats: None,
+            performance_metrics: None,
         });
 
         // Test 1: Initial gauge values should be 0

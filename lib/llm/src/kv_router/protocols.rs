@@ -29,10 +29,21 @@ pub struct WorkerSelectionResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PerformanceMetrics {
+    /// Timestamp when the request arrived at the handler
+    pub arriving_time: Option<f64>,
+    /// Total number of KV cache blocks allocated
+    pub kv_cache_num_total_allocated_blocks: Option<u64>,
+    /// Speculative decoding acceptance rate (0.0 to 1.0)
+    pub spec_decoding_acceptance_rate: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ForwardPassMetrics {
     pub worker_stats: WorkerStats,
     pub kv_stats: KvStats,
     pub spec_decode_stats: Option<SpecDecodeStats>,
+    pub performance_metrics: Option<PerformanceMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

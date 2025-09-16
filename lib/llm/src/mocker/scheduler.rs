@@ -616,6 +616,7 @@ fn get_fwd_pass_metrics(
         worker_stats,
         kv_stats,
         spec_decode_stats,
+        performance_metrics: None,
     }
 }
 
