@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llama3-70b-agg-perf
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: llama3-70b-agg-perf
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: perf
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+        workingDir: /workspace/components/backends/vllm
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # wait for the model to be ready
+          export ENDPOINT=llama3-70b-agg-0:8000
+          export TARGET_MODEL=RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+          export INTERVAL=5
+          echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (checking every ${INTERVAL}s)..."
+          while ! curl -s "http://$ENDPOINT/v1/models" | jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null 2>&1; do
+              echo "[$(date '+%H:%M:%S')] Model not ready yet, waiting ${INTERVAL}s..."
+              sleep $INTERVAL
+          done
+          echo "✅ Model '$TARGET_MODEL' is now available!"
+          curl -s "http://$ENDPOINT/v1/models" | jq .
+          # now run the benchmark
+          export ARTIFACT_DIR="/tmp/genai"
+          mkdir -p "$ARTIFACT_DIR"
+          echo "Running benchmark..."
+          export COLUMNS=200
+          genai-perf profile \
+            --model "$TARGET_MODEL" \
+            --tokenizer ~/.cache/huggingface/hub/models--RedHatAI--Llama-3.3-70B-Instruct-FP8-dynamic/snapshots/ddb4128556dfcff99e0c41aee159ea6c3e655dcd  \
+            --endpoint-type chat --url "$ENDPOINT" --streaming \
+            --concurrency 64 \
+            --warmup-request-count 2 \
+            --request-count 320 \
+            --extra-inputs max_tokens:1024 \
+            --synthetic-input-tokens-mean 8192 \
+            --synthetic-input-tokens-stddev 0 \
+            --output-tokens-mean 1024 \
+            --output-tokens-stddev 0 \
+            --extra-inputs min_tokens:1024 \
+            --extra-inputs ignore_eos:true \
+            --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+            --random-seed 1418186270 \
+            --artifact-dir $ARTIFACT_DIR \
+            --num-dataset-entries=3000 -- \
+            --max-threads 64
+          echo "----------------json----------------"
+          PERF_JSON=$(find $ARTIFACT_DIR -name profile_export_genai_perf.json)
+          cat $PERF_JSON | jq .
+          echo "----------------csv-----------------"
+          PERF_CSV=$(find $ARTIFACT_DIR -name profile_export_genai_perf.csv)
+          cat $PERF_CSV
+          echo "Benchmark completed successfully!"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

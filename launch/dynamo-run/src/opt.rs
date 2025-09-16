@@ -5,11 +5,8 @@ use dynamo_runtime::protocols::ENDPOINT_SCHEME;
 use std::fmt;
 
 pub enum Output {
-    /// Accept un-preprocessed requests, echo the prompt back as the response
-    EchoFull,
-
-    /// Accept preprocessed requests, echo the tokens back as the response
-    EchoCore,
+    /// Echos the prompt back as the response
+    Echo,
 
     /// Listen for models on nats/etcd, add/remove dynamically
     Auto,
@@ -44,8 +41,7 @@ impl TryFrom<&str> for Output {
             "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
 
             "mocker" => Ok(Output::Mocker),
-            "echo_full" => Ok(Output::EchoFull),
-            "echo_core" => Ok(Output::EchoCore),
+            "echo" | "echo_full" => Ok(Output::Echo),
 
             "dyn" | "auto" => Ok(Output::Auto),
 
@@ -69,8 +65,7 @@ impl fmt::Display for Output {
             Output::LlamaCpp => "llamacpp",
 
             Output::Mocker => "mocker",
-            Output::EchoFull => "echo_full",
-            Output::EchoCore => "echo_core",
+            Output::Echo => "echo",
 
             Output::Auto => "auto",
             Output::Static(endpoint) => &format!("{ENDPOINT_SCHEME}{endpoint}"),
@@ -82,11 +77,7 @@ impl fmt::Display for Output {
 impl Output {
     #[allow(unused_mut)]
     pub fn available_engines() -> Vec<String> {
-        let mut out = vec![
-            "echo_core".to_string(),
-            "echo_full".to_string(),
-            Output::Mocker.to_string(),
-        ];
+        let mut out = vec!["echo".to_string(), Output::Mocker.to_string()];
         #[cfg(feature = "mistralrs")]
         {
             out.push(Output::MistralRs.to_string());

@@ -9,6 +9,7 @@ testing load prediction, interpolation, or correction factors.
 """
 
 import argparse
+import asyncio
 import math
 import os
 
@@ -52,6 +53,7 @@ def planner():
     args.itl = 10  # ms
     args.backend = "vllm"
     args.no_operation = True  # Don't actually scale
+    args.no_correction = False  # Allow correction factors
     args.prometheus_port = 0  # 0 means disabled
     args.load_predictor = "constant"
     args.load_prediction_window_size = 10
@@ -153,8 +155,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run the calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Extract the calculated values from the log calls or by checking the mock calls
@@ -218,8 +218,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run the calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Check the results
@@ -291,8 +289,6 @@ class TestReplicaCalculation:
         planner.connector.reset_mock()
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify results
@@ -345,8 +341,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify that total GPU usage doesn't exceed budget
@@ -402,8 +396,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify minimum constraints are respected
@@ -466,8 +458,6 @@ class TestReplicaCalculation:
         )
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify that correction factor was effectively clamped
@@ -527,8 +517,6 @@ class TestReplicaCalculation:
                 planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
                 # Run calculation
-                import asyncio
-
                 asyncio.run(planner.make_adjustments())
 
                 # Should handle gracefully without crashing
@@ -591,8 +579,6 @@ class TestReplicaCalculation:
         )  # 4 GPUs per engine
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         if planner.connector.set_component_replicas.called:
@@ -650,8 +636,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         if planner.connector.set_component_replicas.called:

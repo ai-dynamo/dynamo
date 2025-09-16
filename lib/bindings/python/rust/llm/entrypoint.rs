@@ -219,7 +219,7 @@ async fn select_engine(
             // There is no validation for the echo engine
             RsEngineConfig::StaticFull {
                 model: Box::new(local_model),
-                engine: dynamo_llm::engines::make_engine_full(),
+                engine: dynamo_llm::engines::make_echo_engine(),
                 is_static: false,
             }
         }

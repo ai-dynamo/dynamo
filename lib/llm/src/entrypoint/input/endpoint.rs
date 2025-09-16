@@ -156,8 +156,8 @@ mod integration_tests {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create distributed runtime: {}", e))?;
 
-        let engine_config = EngineConfig::StaticCore {
-            engine: crate::engines::make_engine_core(),
+        let engine_config = EngineConfig::StaticFull {
+            engine: crate::engines::make_echo_engine(),
             model: Box::new(
                 crate::local_model::LocalModelBuilder::default()
                     .model_name(Some("test-model".to_string()))
