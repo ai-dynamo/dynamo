@@ -39,7 +39,7 @@ This sequential approach ensures:
 - **Reliable cleanup** between different TP configuration tests
 - **Accurate SLA compliance verification** for each configuration
 
-After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
+After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `components/backends/vllm/deploy/disagg.yaml`:
 
 ![Prefill Performance](../../docs/images/h100_prefill_performance.png)
 ![Decode Performance](../../docs/images/h100_decode_performance.png)

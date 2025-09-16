@@ -23,7 +23,6 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
-from benchmarks.profiler.utils.config import deep_update
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -37,6 +36,7 @@ from dynamo.trtllm.request_handlers.handlers import (
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
+    deep_update,
     is_first_worker,
     parse_endpoint,
 )
