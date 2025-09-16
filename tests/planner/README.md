@@ -168,7 +168,7 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 With custom namespace:
 ```bash
-./scaling/run_scaling_test.sh --namespace production
+./scaling/run_scaling_test.sh --namespace <namespace>
 ```
 
 To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
@@ -186,8 +186,7 @@ To save results to `tests/planner/e2e_scaling_results` instead of `/tmp`:
 The main test scenario validates prefill scaling for H200 with 1P1D → 2P1D configuration:
 
 - **Phase 1**: 8 req/s for 90s (baseline - maintains 1P1D)
-- **Phase 2**: 15 req/s for 120s (moderate load - maintains 1P1D)
-- **Phase 3**: 25 req/s for 180s (scaling trigger - scales to 2P1D)
+- **Phase 2**: 18 req/s for 120s (scaling trigger - scales to 2P1D)
 - **ISL/OSL**: 4000/150 tokens (optimized for prefill bottleneck)
 - **Transition delay**: 30s between phases
 - **Total test duration**: ~7 minutes + scaling observation
