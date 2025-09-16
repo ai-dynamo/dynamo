@@ -241,7 +241,8 @@ impl GrpcInferenceService for KserveService {
                 }
             }
 
-            let parsing_options = get_parsing_options(self.state.manager(), &model);
+            let parsing_options =
+                get_parsing_options(self.state.manager(), &completion_request.inner.model);
 
             let stream = completion_response_stream(self.state_clone(), completion_request).await?;
 
@@ -779,7 +780,7 @@ impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
 impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
     type Error = Status;
 
-    fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
+    fn try_from(mut request: ModelInferRequest) -> Result<Self, Self::Error> {
         // Protocol requires if `raw_input_contents` is used to hold input data,
         // it must be used for all inputs.
         if !request.raw_input_contents.is_empty()
@@ -802,7 +803,7 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
         };
 
         // iterate through inputs
-        for (idx, input) in request.inputs.iter().enumerate() {
+        for input in request.inputs {
             let mut tensor = Tensor {
                 metadata: TensorMetadata {
                     name: input.name.clone(),
@@ -831,10 +832,10 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                         tensor::FlattenTensor::Bytes(content.bytes_contents.clone())
                     }
                 },
+                // data is provided in raw_input_contents
                 None => {
-                    let raw_input = request.raw_input_contents.get(idx).ok_or_else(|| {
-                        Status::invalid_argument(format!("Missing raw input for '{}'", input.name))
-                    })?;
+                    // Take ownership of the raw input for later pointer operation
+                    let raw_input = request.raw_input_contents.remove(0);
                     let data_size = match tensor.metadata.data_type {
                         tensor::DataType::Bool => 1,
                         tensor::DataType::Uint32 => 4,
@@ -844,14 +845,26 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                     };
                     // Non-bytes type, simply reinterpret cast the raw input bytes
                     if data_size > 0 {
-                        let element_count = tensor
-                            .metadata
-                            .shape
-                            .iter()
-                            .map(|d| *d as usize)
-                            .product::<usize>();
+                        let element_count =
+                            tensor.metadata.shape.iter().try_fold(1usize, |acc, &d| {
+                                if d < 0 {
+                                    Err(Status::invalid_argument(format!(
+                                        "Shape contains negative dimension: {}",
+                                        d
+                                    )))
+                                } else {
+                                    acc.checked_mul(d as usize).ok_or_else(|| {
+                                        Status::invalid_argument(
+                                            "Overflow occurred while calculating element count",
+                                        )
+                                    })
+                                }
+                            })?;
                         if raw_input.len() % data_size != 0 {
-                            return Err(Status::invalid_argument("Length must be a multiple of 4"));
+                            return Err(Status::invalid_argument(format!(
+                                "Raw input length must be a multiple of {}",
+                                data_size
+                            )));
                         } else if raw_input.len() / data_size != element_count {
                             return Err(Status::invalid_argument(format!(
                                 "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
@@ -861,25 +874,47 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                             )));
                         }
 
+                        // Here we "reinterpret cast" vec<u8> to be vec<T> of the corresponding data type
+                        // To do so we extract the raw pointer to construct new vector<T>,
+                        // and forget the original vector to avoid double-free.
                         let ptr = raw_input.as_ptr();
-                        match tensor.metadata.data_type {
-                            tensor::DataType::Bool => tensor::FlattenTensor::Bool(unsafe {
-                                Vec::from_raw_parts(ptr as *mut bool, element_count, element_count)
-                            }),
-                            tensor::DataType::Uint32 => tensor::FlattenTensor::Uint32(unsafe {
-                                Vec::from_raw_parts(ptr as *mut u32, element_count, element_count)
-                            }),
-                            tensor::DataType::Int32 => tensor::FlattenTensor::Int32(unsafe {
-                                Vec::from_raw_parts(ptr as *mut i32, element_count, element_count)
-                            }),
-                            tensor::DataType::Float32 => tensor::FlattenTensor::Float32(unsafe {
-                                Vec::from_raw_parts(ptr as *mut f32, element_count, element_count)
-                            }),
-                            tensor::DataType::Bytes => {
-                                return Err(Status::internal(format!(
-                                    "Unexpected BYTES type in non-bytes branch for input '{}'",
-                                    input.name
-                                )));
+                        std::mem::forget(raw_input); // Prevent deallocation of the vector
+                        unsafe {
+                            match tensor.metadata.data_type {
+                                tensor::DataType::Bool => {
+                                    tensor::FlattenTensor::Bool(Vec::from_raw_parts(
+                                        ptr as *mut bool,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+                                tensor::DataType::Uint32 => {
+                                    tensor::FlattenTensor::Uint32(Vec::from_raw_parts(
+                                        ptr as *mut u32,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+                                tensor::DataType::Int32 => {
+                                    tensor::FlattenTensor::Int32(Vec::from_raw_parts(
+                                        ptr as *mut i32,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+                                tensor::DataType::Float32 => {
+                                    tensor::FlattenTensor::Float32(Vec::from_raw_parts(
+                                        ptr as *mut f32,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+                                tensor::DataType::Bytes => {
+                                    return Err(Status::internal(format!(
+                                        "Unexpected BYTES type in non-bytes branch for input '{}'",
+                                        input.name
+                                    )));
+                                }
                             }
                         }
                     } else {

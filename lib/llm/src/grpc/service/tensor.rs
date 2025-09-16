@@ -44,8 +44,10 @@ pub async fn tensor_response_stream(
     let request = Context::with_id(request, request_id.clone());
     let context = request.context();
 
+    // [gluo TODO] revisit metrics to properly expose it
     // create the connection handles
-    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+    let (mut connection_handle, stream_handle) =
+        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -68,10 +70,9 @@ pub async fn tensor_response_stream(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| Status::internal(format!("Failed to generate completions: {}", e)))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        Status::internal(format!("Failed to generate tensor response stream: {}", e))
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();

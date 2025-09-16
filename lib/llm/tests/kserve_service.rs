@@ -284,18 +284,20 @@ pub mod kserve_test {
         manager
             .add_completions_model("split", split.clone())
             .unwrap();
-        manager
-            .save_model_entry("split", ModelEntry {
-            name: "split".to_string(),
-            endpoint_id: EndpointId {
-                namespace: "namespace".to_string(),
-                component: "component".to_string(),
+        manager.save_model_entry(
+            "split",
+            ModelEntry {
                 name: "split".to_string(),
+                endpoint_id: EndpointId {
+                    namespace: "namespace".to_string(),
+                    component: "component".to_string(),
+                    name: "split".to_string(),
+                },
+                model_type: ModelType::Completions,
+                model_input: ModelInput::Text,
+                runtime_config: None,
             },
-            model_type: ModelType::Completions,
-            model_input: ModelInput::Text,
-            runtime_config: None,
-        });
+        );
 
         manager
             .add_chat_completions_model("failure", failure.clone())
@@ -303,34 +305,37 @@ pub mod kserve_test {
         manager
             .add_completions_model("failure", failure.clone())
             .unwrap();
-        manager
-            .save_model_entry("failure", ModelEntry {
-            name: "failure".to_string(),
-            endpoint_id: EndpointId {
-                namespace: "namespace".to_string(),
-                component: "component".to_string(),
+        manager.save_model_entry(
+            "failure",
+            ModelEntry {
                 name: "failure".to_string(),
+                endpoint_id: EndpointId {
+                    namespace: "namespace".to_string(),
+                    component: "component".to_string(),
+                    name: "failure".to_string(),
+                },
+                model_type: ModelType::Completions | ModelType::Chat,
+                model_input: ModelInput::Text,
+                runtime_config: None,
             },
-            model_type: ModelType::Completions | ModelType::Chat,
-            model_input: ModelInput::Text,
-            runtime_config: None,
-        });
+        );
         manager
             .add_completions_model("long_running", long_running.clone())
             .unwrap();
-        manager
-            .save_model_entry("failure", ModelEntry {
-            name: "failure".to_string(),
-            endpoint_id: EndpointId {
-                namespace: "namespace".to_string(),
-                component: "component".to_string(),
-                name: "failure".to_string(),
+        manager.save_model_entry(
+            "long_running",
+            ModelEntry {
+                name: "long_running".to_string(),
+                endpoint_id: EndpointId {
+                    namespace: "namespace".to_string(),
+                    component: "component".to_string(),
+                    name: "long_running".to_string(),
+                },
+                model_type: ModelType::Completions,
+                model_input: ModelInput::Text,
+                runtime_config: None,
             },
-            model_type: ModelType::Completions,
-            model_input: ModelInput::Text,
-            runtime_config: None,
-        });
-
+        );
 
         (service, split, failure, long_running)
     }
@@ -1351,17 +1356,29 @@ pub mod kserve_test {
             err.message()
         );
 
-        // model_stream_infer()
+        // model_stream_infer() and raw_input_contents
         {
             let inputs = vec![text_input.clone(), repeat.clone()];
             let outbound = async_stream::stream! {
                 let request_count = 1;
                 for _ in 0..request_count {
+                    let mut text_input = text_input.clone();
+                    text_input.contents = None; // Clear contents to use raw_input_contents
+                    let text_input_str = "dummy input";
+                    let input_len = text_input_str.len() as u32;
+                    let mut serialized_text_input = input_len.to_le_bytes().to_vec();
+                    serialized_text_input.extend_from_slice(text_input_str.as_bytes());
+
+                    let mut repeat = repeat.clone();
+                    repeat.contents = None; // Clear contents to use raw_input_contents
+                    let serialized_repeat = 2i32.to_le_bytes().to_vec();
+
                     let request = ModelInferRequest {
                         model_name: model_name.into(),
                         model_version: "1".into(),
                         id: "1234".into(),
                         inputs: vec![text_input.clone(), repeat.clone()],
+                        raw_input_contents: vec![serialized_text_input, serialized_repeat],
                         ..Default::default()
                     };
 

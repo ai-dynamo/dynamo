@@ -93,7 +93,7 @@ impl ModelManager {
     }
 
     pub fn list_tensor_models(&self) -> Vec<String> {
-        self.tensor_engines.read().unwrap().list()
+        self.tensor_engines.read().list()
     }
 
     pub fn add_completions_model(
@@ -128,7 +128,7 @@ impl ModelManager {
         model: &str,
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
-        let mut clients = self.tensor_engines.write().unwrap();
+        let mut clients = self.tensor_engines.write();
         clients.add(model, engine)
     }
 
@@ -148,7 +148,7 @@ impl ModelManager {
     }
 
     pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.tensor_engines.write().unwrap();
+        let mut clients = self.tensor_engines.write();
         clients.remove(model)
     }
 
@@ -191,7 +191,6 @@ impl ModelManager {
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.tensor_engines
             .read()
-            .unwrap()
             .get(model)
             .cloned()
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))

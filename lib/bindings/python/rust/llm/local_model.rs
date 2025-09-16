@@ -52,11 +52,14 @@ impl ModelRuntimeConfig {
         Ok(())
     }
 
-    fn set_tensor_model_config(&mut self, _py: Python<'_>, tensor_model_config: &Bound<'_, PyDict>) -> PyResult<()> {
-        let tensor_model_config = pythonize::depythonize(tensor_model_config)
-            .map_err(|err| {
-                PyErr::new::<PyException, _>(format!("Failed to convert tensor_model_config: {}", err))
-            })?;
+    fn set_tensor_model_config(
+        &mut self,
+        _py: Python<'_>,
+        tensor_model_config: &Bound<'_, PyDict>,
+    ) -> PyResult<()> {
+        let tensor_model_config = pythonize::depythonize(tensor_model_config).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to convert tensor_model_config: {}", err))
+        })?;
         self.inner.tensor_model_config = Some(tensor_model_config);
         Ok(())
     }
