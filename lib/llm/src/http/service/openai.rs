@@ -29,7 +29,7 @@ use super::{
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metrics::{
-        Endpoint, EventConverter, get_parsing_options, process_response_and_observe_metrics,
+        Endpoint, EventConverter, process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
     service_v2,
@@ -272,7 +272,7 @@ async fn completions(
         .get_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), &model);
+    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -533,7 +533,7 @@ async fn chat_completions(
         .get_chat_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), &model);
+    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -777,7 +777,7 @@ async fn responses(
         .get_chat_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), &model);
+    let parsing_options = state.manager().get_parsing_options(&model);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 

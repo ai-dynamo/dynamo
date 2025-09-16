@@ -661,20 +661,6 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     Ok(event)
 }
 
-/// Get parsing options for a model
-///
-/// Creates parsing options with tool call parser and reasoning parser for the specified model.
-/// Currently reasoning parser is not implemented (returns None).
-pub fn get_parsing_options(
-    manager: &crate::discovery::ModelManager,
-    model: &str,
-) -> crate::protocols::openai::ParsingOptions {
-    let tool_call_parser = manager.get_model_tool_call_parser(model);
-    let reasoning_parser = None; // TODO: Implement reasoning parser
-
-    crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
-}
-
 /// Create a new router with the given path
 pub fn router(registry: Registry, path: Option<String>) -> (Vec<RouteDoc>, Router) {
     let registry = Arc::new(registry);
