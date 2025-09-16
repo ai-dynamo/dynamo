@@ -60,8 +60,6 @@ def planner():
         "profiling_results/H200_TP1P_TP1D",
     )
     args.environment = "kubernetes"
-    args.namespace = "test-namespace"  # Required for Planner.__init__
-    args.no_correction = False  # Required for Planner.__init__
 
     # Mock the runtime
     mock_runtime = Mock()

@@ -64,7 +64,6 @@ spec:
               --ttft=0.1
               --itl=0.01
               --load-predictor=constant
-              --no-correction
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
       componentType: frontend
