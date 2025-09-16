@@ -797,7 +797,7 @@ impl From<String> for ChatCompletionRequestMessageContentPartText {
 impl From<&str> for ImageUrl {
     fn from(value: &str) -> Self {
         Self {
-            url: value.into(),
+            url: value.parse().expect("Invalid URL"),
             detail: Default::default(),
             uuid: None,
         }
@@ -807,7 +807,7 @@ impl From<&str> for ImageUrl {
 impl From<String> for ImageUrl {
     fn from(value: String) -> Self {
         Self {
-            url: value,
+            url: value.parse().expect("Invalid URL"),
             detail: Default::default(),
             uuid: None,
         }
@@ -817,7 +817,7 @@ impl From<String> for ImageUrl {
 impl From<&str> for VideoUrl {
     fn from(value: &str) -> Self {
         Self {
-            url: value.into(),
+            url: value.parse().expect("Invalid URL"),
             detail: Default::default(),
             uuid: None,
         }
@@ -827,7 +827,7 @@ impl From<&str> for VideoUrl {
 impl From<String> for VideoUrl {
     fn from(value: String) -> Self {
         Self {
-            url: value,
+            url: value.parse().expect("Invalid URL"),
             detail: Default::default(),
             uuid: None,
         }
@@ -837,7 +837,7 @@ impl From<String> for VideoUrl {
 impl From<&str> for AudioUrl {
     fn from(value: &str) -> Self {
         Self {
-            url: value.into(),
+            url: value.parse().expect("Invalid URL"),
             uuid: None,
         }
     }
@@ -846,7 +846,7 @@ impl From<&str> for AudioUrl {
 impl From<String> for AudioUrl {
     fn from(value: String) -> Self {
         Self {
-            url: value,
+            url: value.parse().expect("Invalid URL"),
             uuid: None,
         }
     }

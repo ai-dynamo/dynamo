@@ -14,6 +14,9 @@ use derive_builder::Builder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use url::Url;
+use uuid::{Uuid, uuid};
+
 use crate::error::OpenAIError;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -199,76 +202,76 @@ pub enum ImageDetail {
     High,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ImageUrlArgs")]
 #[builder(pattern = "mutable")]
-#[builder(setter(into, strip_option), default)]
+#[builder(setter(into, strip_option))]
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ImageUrl {
     /// Either a URL of the image or the base64 encoded image data.
-    pub url: String,
+    pub url: url::Url,
     /// Specifies the detail level of the image. Learn more in the [Vision guide](https://platform.openai.com/docs/guides/vision/low-or-high-fidelity-image-understanding).
     pub detail: Option<ImageDetail>,
     /// Optional unique identifier for the image.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "VideoUrlArgs")]
 #[builder(pattern = "mutable")]
-#[builder(setter(into, strip_option), default)]
+#[builder(setter(into, strip_option))]
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct VideoUrl {
     /// Either a URL of the video or the base64 encoded video data.
-    pub url: String,
+    pub url: url::Url,
     /// Specifies the detail level of the video processing.
     pub detail: Option<ImageDetail>,
     /// Optional unique identifier for the video.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ChatCompletionRequestMessageContentPartImageArgs")]
 #[builder(pattern = "mutable")]
-#[builder(setter(into, strip_option), default)]
+#[builder(setter(into, strip_option))]
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ChatCompletionRequestMessageContentPartImage {
     pub image_url: ImageUrl,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ChatCompletionRequestMessageContentPartVideoArgs")]
 #[builder(pattern = "mutable")]
-#[builder(setter(into, strip_option), default)]
+#[builder(setter(into, strip_option))]
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ChatCompletionRequestMessageContentPartVideo {
     pub video_url: VideoUrl,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "AudioUrlArgs")]
 #[builder(pattern = "mutable")]
-#[builder(setter(into, strip_option), default)]
+#[builder(setter(into, strip_option))]
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct AudioUrl {
     /// URL of the audio file
-    pub url: String,
+    pub url: url::Url,
     /// Optional unique identifier for the audio.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Builder, PartialEq)]
 #[builder(name = "ChatCompletionRequestMessageContentPartAudioUrlArgs")]
 #[builder(pattern = "mutable")]
-#[builder(setter(into, strip_option), default)]
+#[builder(setter(into, strip_option))]
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ChatCompletionRequestMessageContentPartAudioUrl {
@@ -1142,14 +1145,20 @@ mod tests {
 
     #[test]
     fn test_audio_url_content_part_json() {
-        let json = r#"{"type": "audio_url", "audio_url": {"url": "https://example.com/audio.mp3", "uuid": "test-123"}}"#;
+        let json = r#"{"type": "audio_url", "audio_url": {"url": "https://example.com/audio.mp3", "uuid": "67e55044-10b1-426f-9247-bb680e5fe0c8"}}"#;
         let content_part: ChatCompletionRequestUserMessageContentPart =
             serde_json::from_str(json).unwrap();
 
         match content_part {
             ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => {
-                assert_eq!(part.audio_url.url, "https://example.com/audio.mp3");
-                assert_eq!(part.audio_url.uuid, Some("test-123".to_string()));
+                assert_eq!(
+                    part.audio_url.url,
+                    "https://example.com/audio.mp3".parse().unwrap()
+                );
+                assert_eq!(
+                    part.audio_url.uuid,
+                    Some(uuid!("67e55044-10b1-426f-9247-bb680e5fe0c8"))
+                );
             }
             _ => panic!("Expected AudioUrl variant"),
         }
