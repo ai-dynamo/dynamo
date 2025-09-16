@@ -48,7 +48,7 @@ check_prerequisites() {
     log_info "Checking prerequisites..."
 
     if ! command -v kubectl &> /dev/null; then
-        log_error "kubectl not found. Please install kubectl."
+        log_error "kubectl not found. Please ensure it is installed and in your PATH."
         exit 1
     fi
 
@@ -62,29 +62,11 @@ check_prerequisites() {
         exit 1
     fi
 
-    if [ ! -f "test_scaling_e2e.py" ]; then
-        log_error "test_scaling_e2e.py not found. Make sure you're in the tests/planner directory."
-        exit 1
-    fi
-
     # Check for genai-perf
     if ! command -v genai-perf &> /dev/null; then
-        log_warning "genai-perf not found. This tool is required for load generation."
-        echo -n "Would you like us to install it for you? (y/n): "
-        read -r response
-        if [[ "$response" =~ ^[Yy]$ ]]; then
-            log_info "Installing genai-perf and perf_analyzer..."
-            # Install specific versions for reproducibility and security
-            if pip install 'nvidia-ml-py3>=12.0.0' 'genai-perf>=0.0.4' 'tritonclient[all]>=2.48.0'; then
-                log_success "genai-perf and perf_analyzer installed successfully"
-            else
-                log_error "Failed to install genai-perf. Please install it manually: pip install 'nvidia-ml-py3>=12.0.0' 'genai-perf>=0.0.4' 'tritonclient[all]>=2.48.0'"
-                exit 1
-            fi
-        else
-            log_error "genai-perf is required for the scaling test. Please install it: pip install 'nvidia-ml-py3>=12.0.0' 'genai-perf>=0.0.4' 'tritonclient[all]>=2.48.0'"
-            exit 1
-        fi
+        log_error "genai-perf not found. This tool is required for load generation."
+        log_error "Please install the required dependencies by following the instructions in tests/planner/README.md"
+        exit 1
     fi
 
     log_success "Prerequisites check passed"

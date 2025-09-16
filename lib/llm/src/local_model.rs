@@ -210,7 +210,7 @@ impl LocalModelBuilder {
             .map(RequestTemplate::load)
             .transpose()?;
 
-        // echo_full engine doesn't need a path. It's an edge case, move it out of the way.
+        // echo engine doesn't need a path. It's an edge case, move it out of the way.
         if self.model_path.is_none() {
             let mut card = ModelDeploymentCard::with_name_only(
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),

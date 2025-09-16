@@ -317,16 +317,16 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodGangSet
+// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodCliqueSet
 // based on the backend framework and multinode deployment patterns.
 //
 // Rules:
 // - For VLLM and SGLang: worker cliques start after leader clique
 // - For TRTLLM: leader clique starts after worker cliques
 // - Only applies to multinode deployments (numberOfNodes > 1)
-// - Sets the PodGangSet StartupType to Explicit if any dependencies are configured
+// - Sets the PodCliqueSet StartupType to Explicit if any dependencies are configured
 func applyCliqueStartupDependencies(
-	gangSet *grovev1alpha1.PodGangSet,
+	gangSet *grovev1alpha1.PodCliqueSet,
 	roles []ServiceRole,
 	backendFramework BackendFramework,
 	numberOfNodes int32,
@@ -880,14 +880,14 @@ func GeneratePodSpecForComponent(
 	return podSpec, nil
 }
 
-// GenerateGrovePodGangSet generates a Grove PodGangSet for the given deployment, supporting both single-node and multinode cases.
-func GenerateGrovePodGangSet(
+// GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
-) (*grovev1alpha1.PodGangSet, error) {
-	gangSet := &grovev1alpha1.PodGangSet{}
+) (*grovev1alpha1.PodCliqueSet, error) {
+	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Spec.Replicas = 1
@@ -986,7 +986,7 @@ func GenerateGrovePodGangSet(
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
 
-	return controller_common.CanonicalizePodGangSet(gangSet), nil
+	return controller_common.CanonicalizePodCliqueSet(gangSet), nil
 }
 
 func generateLabels(component *v1alpha1.DynamoComponentDeploymentOverridesSpec, dynamoDeployment *v1alpha1.DynamoGraphDeployment, componentName string) (map[string]string, error) {

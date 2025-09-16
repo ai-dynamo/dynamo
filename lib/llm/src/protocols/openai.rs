@@ -206,6 +206,12 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
 
     /// Gets the current prompt token count (Input Sequence Length).
     fn get_isl(&self) -> Option<u32>;
+
+    /// Creates a final usage-only chunk for OpenAI compliance.
+    fn create_usage_chunk(&self) -> ResponseType;
+
+    /// Check if usage tracking is enabled.
+    fn is_usage_enabled(&self) -> bool;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
