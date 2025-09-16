@@ -119,7 +119,7 @@ rules:
 - apiGroups:
   - grove.io
   resources:
-  - podgangsets
+  - podcliquesets
   verbs:
   - create
   - delete
