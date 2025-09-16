@@ -109,14 +109,9 @@ async fn engine_for(
             // A single static backend, no etcd
             Ok(EngineConfig::StaticRemote(Box::new(local_model)))
         }
-        Output::EchoFull => Ok(EngineConfig::StaticFull {
+        Output::Echo => Ok(EngineConfig::StaticFull {
             model: Box::new(local_model),
-            engine: dynamo_llm::engines::make_engine_full(),
-            is_static: flags.static_worker,
-        }),
-        Output::EchoCore => Ok(EngineConfig::StaticCore {
-            engine: dynamo_llm::engines::make_engine_core(),
-            model: Box::new(local_model),
+            engine: dynamo_llm::engines::make_echo_engine(),
             is_static: flags.static_worker,
         }),
         #[cfg(feature = "mistralrs")]

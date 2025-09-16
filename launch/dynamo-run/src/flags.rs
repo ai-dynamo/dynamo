@@ -204,14 +204,7 @@ impl Flags {
                     );
                 }
             }
-            Output::EchoFull => {}
-            Output::EchoCore => {
-                if !local_model.card().has_tokenizer() {
-                    anyhow::bail!(
-                        "out=echo_core need to find the tokenizer. Pass flag --model-path <path>"
-                    );
-                };
-            }
+            Output::Echo => {}
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => {}
             #[cfg(feature = "llamacpp")]
