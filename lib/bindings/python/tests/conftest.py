@@ -35,3 +35,12 @@ def nats_and_etcd():
     nats_server.wait()
     etcd.terminate()
     etcd.wait()
+
+
+@pytest.fixture(scope="session")
+async def runtime():
+    """Create a DistributedRuntime for testing"""
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, True)
+    yield runtime
+    runtime.shutdown
