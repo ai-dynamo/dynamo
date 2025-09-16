@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: my-registry/sglang-runtime:ABCDEFGH
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-agg
@@ -24,7 +24,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: my-registry/sglang-runtime:ABCDEFGH
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh

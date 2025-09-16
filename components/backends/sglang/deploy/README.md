@@ -61,7 +61,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: my-registry/sglang-runtime:my-tag
+    image: my-registry/sglang-runtime:ABCDEFGH
     workingDir: /workspace/components/backends/sglang
     args:
       - "python3"

@@ -69,7 +69,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: my-registry/vllm-runtime:my-tag
+    image: my-registry/vllm-runtime:ABCDEFGH
     workingDir: /workspace/components/backends/vllm
     args:
       - "python3"
