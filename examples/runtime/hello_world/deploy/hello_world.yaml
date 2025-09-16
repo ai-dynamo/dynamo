@@ -41,7 +41,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: my-registry/dynamo:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo:0.5.0
           workingDir: /workspace/examples/runtime/hello_world/
           command:
             - /bin/sh
@@ -80,7 +80,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: my-registry/dynamo:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo:0.5.0
           workingDir: /workspace/examples/runtime/hello_world/
           command:
             - /bin/sh

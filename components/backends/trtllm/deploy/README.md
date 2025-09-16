@@ -120,7 +120,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/trtllm-runtime:your-tag
+image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.5.0
 
 # Configure your model and deployment settings
 args:
