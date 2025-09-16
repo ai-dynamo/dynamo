@@ -26,6 +26,8 @@ import requests
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
+MSG_CONTAINS_ERROR = "This message contains an error."
+
 
 class MockHttpEngine:
     """A mock engine that returns a completion or raises an error."""
@@ -48,7 +50,7 @@ class MockHttpEngine:
             return
 
         if "error" in user_message.lower():
-            raise HttpError(status_code=400, detail="Message contains 'error'")
+            raise HttpError(status_code=400, detail=MSG_CONTAINS_ERROR)
 
         # Stream a mock response
         created = int(time.time())
@@ -132,24 +134,24 @@ def test_chat_completion_success(http_server):
         "messages": [{"role": "user", "content": "Hello, this is a test."}],
         "stream": True,
     }
-    response = requests.post(url, json=data, stream=True)
-    response.raise_for_status()
+    with requests.post(url, json=data, stream=True, timeout=5) as response:
+        response.raise_for_status()
 
-    content = ""
-    for line in response.iter_lines():
-        if line.startswith(b"data: "):
-            chunk_data = line[len(b"data: ") :]
-            if chunk_data.strip() == b"[DONE]":
-                break
-            chunk = json.loads(chunk_data)
-            if (
-                chunk["choices"]
-                and chunk["choices"][0]["delta"]
-                and chunk["choices"][0]["delta"].get("content")
-            ):
-                content += chunk["choices"][0]["delta"]["content"]
+        content = ""
+        for line in response.iter_lines():
+            if line.startswith(b"data: "):
+                chunk_data = line[len(b"data: ") :]
+                if chunk_data.strip() == b"[DONE]":
+                    break
+                chunk = json.loads(chunk_data)
+                if (
+                    chunk["choices"]
+                    and chunk["choices"][0]["delta"]
+                    and chunk["choices"][0]["delta"].get("content")
+                ):
+                    content += chunk["choices"][0]["delta"]["content"]
 
-    assert content == "This is a mock response."
+        assert content == "This is a mock response."
 
 
 def test_chat_completion_http_error(http_server):
@@ -158,8 +160,8 @@ def test_chat_completion_http_error(http_server):
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
-        "messages": [{"role": "user", "content": "This message contains an error."}],
+        "messages": [{"role": "user", "content": MSG_CONTAINS_ERROR}],
     }
-    response = requests.post(url, json=data)
+    response = requests.post(url, json=data, timeout=10)
     assert response.status_code == 400
-    assert response.json().get("error", {}).get("message") == "Message contains 'error'"
+    assert response.json().get("error", {}).get("message") == MSG_CONTAINS_ERROR
