@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
@@ -444,21 +432,27 @@ mod integration_tests {
 
                 // Prepare test cases
                 let mut test_cases = vec![];
-                if custom_health_path.is_none() {
-                    // When using default paths, test the default paths
-                    test_cases.push(("/health", expected_status, expected_body));
-                } else {
-                    // When using custom paths, default paths should not exist
-                    test_cases.push(("/health", 404, "Route not found"));
-                    test_cases.push((custom_health_path.unwrap(), expected_status, expected_body));
+                match custom_health_path {
+                    None => {
+                        // When using default paths, test the default paths
+                        test_cases.push(("/health", expected_status, expected_body));
+                    }
+                    Some(chp) => {
+                        // When using custom paths, default paths should not exist
+                        test_cases.push(("/health", 404, "Route not found"));
+                        test_cases.push((chp, expected_status, expected_body));
+                    }
                 }
-                if custom_live_path.is_none() {
-                    // When using default paths, test the default paths
-                    test_cases.push(("/live", expected_status, expected_body));
-                } else {
-                    // When using custom paths, default paths should not exist
-                    test_cases.push(("/live", 404, "Route not found"));
-                    test_cases.push((custom_live_path.unwrap(), expected_status, expected_body));
+                match custom_live_path {
+                    None => {
+                        // When using default paths, test the default paths
+                        test_cases.push(("/live", expected_status, expected_body));
+                    }
+                    Some(clp) => {
+                        // When using custom paths, default paths should not exist
+                        test_cases.push(("/live", 404, "Route not found"));
+                        test_cases.push((clp, expected_status, expected_body));
+                    }
                 }
                 test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
                 assert_eq!(test_cases.len(), expected_num_tests);

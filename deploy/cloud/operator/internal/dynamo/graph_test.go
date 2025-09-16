@@ -1048,7 +1048,7 @@ func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	return sorted
 }
 
-func TestGenerateGrovePodGangSet(t *testing.T) {
+func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
 		dynamoDeployment *v1alpha1.DynamoGraphDeployment
@@ -1057,11 +1057,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    args
-		want    *grovev1alpha1.PodGangSet
+		want    *grovev1alpha1.PodCliqueSet
 		wantErr bool
 	}{
 		{
-			name: "test_generate_grove_pod_gang_set_single_node",
+			name: "test_generate_grove_pod_clique_set_single_node",
 			args: args{
 				ctx: context.Background(),
 				controllerConfig: controller_common.Config{
@@ -1220,14 +1220,14 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					},
 				},
 			},
-			want: &grovev1alpha1.PodGangSet{
+			want: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
 				},
-				Spec: grovev1alpha1.PodGangSetSpec{
+				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
-					Template: grovev1alpha1.PodGangSetTemplateSpec{
+					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder),
 						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
 							PublishNotReadyAddresses: true,
@@ -1737,14 +1737,14 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					},
 				},
 			},
-			want: &grovev1alpha1.PodGangSet{
+			want: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
 				},
-				Spec: grovev1alpha1.PodGangSetSpec{
+				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
-					Template: grovev1alpha1.PodGangSetTemplateSpec{
+					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
 							PublishNotReadyAddresses: true,
 						},
@@ -2533,14 +2533,14 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					},
 				},
 			},
-			want: &grovev1alpha1.PodGangSet{
+			want: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
 				},
-				Spec: grovev1alpha1.PodGangSetSpec{
+				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
-					Template: grovev1alpha1.PodGangSetTemplateSpec{
+					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder),
 						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
 							PublishNotReadyAddresses: true,
@@ -3099,9 +3099,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodGangSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("GenerateGrovePodGangSet() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			sort.Slice(got.Spec.Template.Cliques, func(i, j int) bool {
@@ -3124,7 +3124,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(got, tt.want); diff != "" {
-				t.Errorf("GenerateGrovePodGangSet() mismatch (-want +got):\n%s", diff)
+				t.Errorf("GenerateGrovePodCliqueSet() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -4072,10 +4072,10 @@ func XTestApplyCliqueStartupDependencies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a PodGangSet with cliques matching the roles
-			gangSet := &grovev1alpha1.PodGangSet{
-				Spec: grovev1alpha1.PodGangSetSpec{
-					Template: grovev1alpha1.PodGangSetTemplateSpec{
+			// Create a PodCliqueSet with cliques matching the roles
+			gangSet := &grovev1alpha1.PodCliqueSet{
+				Spec: grovev1alpha1.PodCliqueSetSpec{
+					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{},
 					},
 				},
@@ -4234,7 +4234,7 @@ func XTestGetCliqueStartupDependencies(t *testing.T) {
 
 // deactivated for now.
 // TODO: reactivate this when we have a better way to handle the readiness probe for the leader.
-func XTestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
+func XTestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 
 	tests := []struct {
@@ -4301,9 +4301,9 @@ func XTestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodGangSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever)
 			if err != nil {
-				t.Errorf("GenerateGrovePodGangSet() error = %v", err)
+				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
 			}
 

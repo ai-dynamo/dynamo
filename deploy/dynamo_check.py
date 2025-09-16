@@ -12,6 +12,7 @@ in a hierarchical tree format. This script checks for:
 - Development tools (Cargo/Rust, Maturin, Python)
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
+- File system (permissions and disk space, detailed with --thorough-check)
 - Installation status and component availability
 
 The output uses status indicators:
@@ -20,18 +21,30 @@ The output uses status indicators:
 - ⚠️ Warning condition
 - ❓ Component not found (for optional items)
 
+By default, the tool runs quickly by checking only directory permissions and skipping
+size calculations. Use --thorough-check for detailed file-level permission analysis,
+directory size information, and disk space checking.
+
 Exit codes:
 - 0: All critical components are present
 - 1: One or more errors detected (❌ status)
 
-Example output:
+Example output (default mode):
 
 System info (hostname=jensen-linux, IP=10.111.122.133)
 ├─ OS Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64), Memory=26.7/125.5 GiB, Cores=32
+├─ User info: user=ubuntu, uid=1000, gid=1000
 ├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
-├─ ✅ Cargo /usr/local/cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
-│  ├─ cargo home directory $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
-│  └─ cargo target directory $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
+├─ File System
+│  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable
+│  ├─ ✅ Dynamo .git directory writable
+│  ├─ ✅ Rustup home ($HOME/.rustup) writable
+│  ├─ ✅ Cargo home ($HOME/.cargo) writable
+│  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
+│  └─ ✅ Python site-packages ($HOME/dynamo/venv/lib/python3.12/site-packages) writable
+├─ ✅ Cargo $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
+│  ├─ Cargo home directory CARGO_HOME=$HOME/.cargo
+│  └─ Cargo target directory CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 │     ├─ Debug $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
 │     ├─ Release $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
 │     └─ Binary $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
@@ -40,20 +53,20 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
 │  └─ PYTHONPATH $HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/llama_cpp/src:$HOME/dynamo/components/backends/mocker/src
 ├─ 🤖Framework
-│  ├─ ✅ vllm 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
-│  ├─ ❓ sglang -
-│  └─ ❓ tensorrt_llm -
+│  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
+│  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
 └─ Dynamo $HOME/dynamo, SHA: a03d29066, Date: 2025-08-30 16:22:29 PDT
    ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
-   │  ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info created=2025-08-30 19:14:29 PDT
-   │  ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth modified=2025-08-30 19:14:29 PDT
-   │  │  └─ → $HOME/dynamo/lib/bindings/python/src
+   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
+   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-08-30 19:14:29 PDT
+   │  │  └─ →: $HOME/dynamo/lib/bindings/python/src
    │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-08-30 19:14:29 PDT
    │  ├─ ✅ dynamo.logits_processing $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
    │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
    │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
    │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
    └─ ✅ Framework components ai-dynamo (via PYTHONPATH)
+      │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.0.dist-info: created=2025-09-05 16:20:35 PDT
       ├─ ✅ dynamo.frontend  $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
       ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
       ├─ ✅ dynamo.mocker    $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
@@ -63,10 +76,11 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
 
 Usage:
-    python dynamo_check.py [--fast]
+    python dynamo_check.py [--thorough-check] [--terse]
 
 Options:
-    --fast  Skip directory size calculations for faster output
+    --thorough-check  Enable thorough checking (file permissions, directory sizes, etc.)
+    --terse           Enable terse output mode
 """
 
 import datetime
@@ -81,6 +95,14 @@ import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+
+# ANSI color constants
+class Colors:
+    """ANSI color escape sequences for terminal output."""
+
+    RESET = "\033[0m"
+    BRIGHT_RED = "\033[38;5;196m"
 
 
 class NodeStatus(Enum):
@@ -104,7 +126,7 @@ class NodeInfo:
     status: NodeStatus = NodeStatus.NONE  # Status indicator
 
     # Additional metadata as key-value pairs
-    metadata: Dict[str, str] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Tree structure
     children: List["NodeInfo"] = field(default_factory=list)
@@ -130,7 +152,11 @@ class NodeInfo:
 
         # Determine the connector
         if not is_root:
-            connector = "└─" if is_last else "├─"
+            # Check if this is a sub-category item
+            if self.metadata and self.metadata.get("part_of_previous"):
+                connector = "│"
+            else:
+                connector = "└─" if is_last else "├─"
             current_prefix = prefix + connector + " "
         else:
             current_prefix = ""
@@ -151,7 +177,7 @@ class NodeInfo:
 
         # Add label and value
         if self.desc:
-            line_parts.append(f"{self.label} {self.desc}")
+            line_parts.append(f"{self.label}: {self.desc}")
         else:
             line_parts.append(self.label)
 
@@ -159,8 +185,10 @@ class NodeInfo:
         if self.metadata:
             metadata_items = []
             for k, v in self.metadata.items():
-                # Format all metadata consistently as "key=value"
-                metadata_items.append(f"{k}={v}")
+                # Skip internal metadata that shouldn't be displayed
+                if k != "part_of_previous":
+                    # Format all metadata consistently as "key=value"
+                    metadata_items.append(f"{k}={v}")
 
             if metadata_items:
                 # Use consistent separator (comma) for all metadata
@@ -208,6 +236,38 @@ class NodeInfo:
             return path.replace(home, "$HOME", 1)
         return path
 
+    def _is_inside_container(self) -> bool:
+        """Check if we're running inside a container."""
+        # Check for common container indicators
+        container_indicators = [
+            # Docker
+            os.path.exists("/.dockerenv"),
+            # Podman/containerd
+            os.path.exists("/run/.containerenv"),
+            # Check if cgroup contains docker/containerd
+            self._check_cgroup_for_container(),
+            # Check environment variables
+            os.environ.get("container") is not None,
+            os.environ.get("DOCKER_CONTAINER") is not None,
+        ]
+        return any(container_indicators)
+
+    def _check_cgroup_for_container(self) -> bool:
+        """Check cgroup for container indicators."""
+        try:
+            with open("/proc/1/cgroup", "r") as f:
+                content = f.read()
+                return any(
+                    indicator in content.lower()
+                    for indicator in ["docker", "containerd", "podman", "lxc"]
+                )
+        except Exception:
+            return False
+
+    def _get_gpu_container_remedies(self) -> str:
+        """Get remedies for GPU issues when running inside a container."""
+        return "maybe try a docker restart?"
+
     def _format_timestamp_pdt(self, timestamp: float) -> str:
         """Format timestamp as PDT time string."""
         dt_utc = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
@@ -219,8 +279,14 @@ class NodeInfo:
 class SystemInfo(NodeInfo):
     """Root node for system information"""
 
-    def __init__(self, hostname: Optional[str] = None, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(
+        self,
+        hostname: Optional[str] = None,
+        thorough_check: bool = False,
+        terse: bool = False,
+    ):
+        self.thorough_check = thorough_check
+        self.terse = terse
         if hostname is None:
             hostname = platform.node()
 
@@ -239,28 +305,36 @@ class SystemInfo(NodeInfo):
         self._suppress_planner_warnings()
 
         # Collect and add all system information
-        # Add OS info
+        # Always show: OS, User, GPU, Framework, Dynamo
         self.add_child(OSInfo())
+        self.add_child(UserInfo())
 
-        # Add GPU info
+        # Add GPU info (always show, even if not found)
         gpu_info = GPUInfo()
-        # Always add GPU info so we can see errors like "nvidia-smi not found"
         self.add_child(gpu_info)
-
-        # Add Cargo (always show, even if not found)
-        self.add_child(CargoInfo(fast_mode=self.fast_mode))
-
-        # Add Maturin (Python-Rust build tool)
-        self.add_child(MaturinInfo())
-
-        # Add Python info
-        self.add_child(PythonInfo())
 
         # Add Framework info (vllm, sglang, tensorrt_llm)
         self.add_child(FrameworkInfo())
 
         # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(fast_mode=self.fast_mode))
+        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
+
+        # In terse mode, only add other components if they have errors
+        if not self.terse:
+            # Add file permissions check
+            self.add_child(FilePermissionsInfo(thorough_check=self.thorough_check))
+
+            # Add Cargo (always show, even if not found)
+            self.add_child(CargoInfo(thorough_check=self.thorough_check))
+
+            # Add Maturin (Python-Rust build tool)
+            self.add_child(MaturinInfo())
+
+            # Add Python info
+            self.add_child(PythonInfo())
+        else:
+            # In terse mode, only add components that have errors
+            self._add_error_only_components()
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""
@@ -294,6 +368,56 @@ class SystemInfo(NodeInfo):
         # Also suppress the defaults._get_default_prometheus_endpoint logger
         defaults_logger = logging.getLogger("defaults._get_default_prometheus_endpoint")
         defaults_logger.setLevel(logging.ERROR)
+
+    def _add_error_only_components(self) -> None:
+        """In terse mode, only add components that have errors"""
+        # Create components and check their status
+        components_to_check = [
+            ("File System", FilePermissionsInfo(thorough_check=self.thorough_check)),
+            ("Cargo", CargoInfo(thorough_check=self.thorough_check)),
+            ("Maturin", MaturinInfo()),
+            ("Python", PythonInfo()),
+        ]
+
+        for name, component in components_to_check:
+            # Only add if the component has an error status
+            if component.status == NodeStatus.ERROR:
+                self.add_child(component)
+
+
+class UserInfo(NodeInfo):
+    """User information"""
+
+    def __init__(self):
+        # Get user info
+        username = os.getenv("USER") or os.getenv("LOGNAME") or "unknown"
+        if username == "unknown":
+            try:
+                import pwd
+
+                username = pwd.getpwuid(os.getuid()).pw_name
+            except Exception:
+                try:
+                    import subprocess
+
+                    result = subprocess.run(
+                        ["whoami"], capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        username = result.stdout.strip()
+                except Exception:
+                    pass
+        uid = os.getuid()
+        gid = os.getgid()
+
+        desc = f"user={username}, uid={uid}, gid={gid}"
+
+        # Add warning if running as root
+        status = NodeStatus.WARNING if uid == 0 else NodeStatus.INFO
+        if uid == 0:
+            desc += " ⚠️"
+
+        super().__init__(label="User info", desc=desc, status=status)
 
 
 class OSInfo(NodeInfo):
@@ -386,27 +510,24 @@ class GPUInfo(NodeInfo):
             )
 
             if result.returncode != 0:
-                # Capture error details from stderr or stdout
+                # Extract and process error message from stderr or stdout
                 error_msg = "nvidia-smi failed"
-                if result.stderr and result.stderr.strip():
-                    # Get first line of error for concise display
-                    error_lines = result.stderr.strip().splitlines()
-                    if error_lines:
-                        error_msg = error_lines[0].strip()
-                        # Make NVML error more user-friendly
-                        if "Failed to initialize NVML" in error_msg:
-                            error_msg = (
-                                "No NVIDIA GPU detected (NVML initialization failed)"
-                            )
-                elif result.stdout and result.stdout.strip():
-                    error_lines = result.stdout.strip().splitlines()
-                    if error_lines:
-                        error_msg = error_lines[0].strip()
-                        # Make NVML error more user-friendly
-                        if "Failed to initialize NVML" in error_msg:
-                            error_msg = (
-                                "No NVIDIA GPU detected (NVML initialization failed)"
-                            )
+
+                # Try stderr first, then stdout
+                for output in [result.stderr, result.stdout]:
+                    if output and output.strip():
+                        error_lines = output.strip().splitlines()
+                        if error_lines:
+                            error_msg = error_lines[0].strip()
+                            break
+
+                # Handle NVML-specific errors
+                if "Failed to initialize NVML" in error_msg:
+                    error_msg = "No NVIDIA GPU detected (NVML initialization failed)"
+                    # Add docker restart suggestion specifically for NVML failures in containers
+                    if self._is_inside_container():
+                        error_msg += " - maybe try a docker restart?"
+
                 super().__init__(
                     label="NVIDIA GPU", desc=error_msg, status=NodeStatus.ERROR
                 )
@@ -579,11 +700,535 @@ class GPUInfo(NodeInfo):
         return None
 
 
+class FilePermissionsInfo(NodeInfo):
+    """File system check for development environment directories
+
+    Checks writability of critical directories needed for:
+    - Dynamo development (top-level dynamo directory)
+    - Rust development (Cargo target directory + all files, RUSTUP_HOME, CARGO_HOME)
+    - Python development (site-packages)
+
+    In thorough mode, also checks disk space for the dynamo working directory
+    and shows a warning if less than 10% free space is available.
+
+    In fast mode, skips recursive file checking in Cargo target directory
+    for improved performance on large target directories.
+    """
+
+    def __init__(self, thorough_check: bool = False):
+        super().__init__(label="File System", status=NodeStatus.INFO)
+        self.thorough_check = thorough_check
+
+        # Check top-level dynamo directory
+        self._check_dynamo_directory_permissions()
+
+        # Check Rust toolchain directories (RUSTUP_HOME and CARGO_HOME)
+        self._check_rust_toolchain_permissions()
+
+        # Check Cargo target directory (with optional recursive file checking)
+        self._check_cargo_target_permissions()
+
+        # Check Python site-packages directory
+        self._check_site_packages_permissions()
+
+    def _check_permissions_unified(
+        self,
+        candidate_paths: List[str],
+        label_prefix: str,
+        recursive: bool = False,
+        exclude_files: Optional[List[str]] = None,
+    ) -> List[NodeInfo]:
+        """Unified permission checking function
+
+        Args:
+            candidate_paths: List of paths to check, uses first available one
+            label_prefix: Prefix for the node label
+            recursive: If True, check all files recursively; if False, check directory only
+            exclude_files: List of filenames to exclude from file checking (e.g., ['.git'])
+
+        Returns:
+            List of NodeInfo objects for the results
+        """
+        exclude_files = exclude_files or []
+        results = []
+
+        # Find first available path
+        selected_path = None
+        for path in candidate_paths:
+            expanded_path = os.path.expanduser(path)
+            if os.path.exists(expanded_path):
+                selected_path = expanded_path
+                break
+
+        if not selected_path:
+            # No paths exist
+            path_list = ", ".join(candidate_paths)
+            results.append(
+                NodeInfo(
+                    label=f"{label_prefix} (tried: {path_list})",
+                    desc="No candidate paths exist",
+                    status=NodeStatus.ERROR,
+                )
+            )
+            return results
+
+        try:
+            # Check if it's actually a directory
+            if not os.path.isdir(selected_path):
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
+                        desc="Path is not a directory",
+                        status=NodeStatus.ERROR,
+                    )
+                )
+                return results
+
+            # Check if directory is effectively writable
+            if not self._is_effectively_writable(selected_path):
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
+                        desc="Directory not writable",
+                        status=NodeStatus.ERROR,
+                    )
+                )
+                return results
+
+            if not recursive:
+                # Just check directory writability
+                # Check if running as root but directory is not owned by root
+                is_root = os.getuid() == 0
+                is_root_owned = False
+                warning_symbol = ""
+                desc_text = "writable"
+                owner_name = None
+
+                if is_root:
+                    try:
+                        stat_info = os.stat(selected_path)
+                        is_root_owned = stat_info.st_uid == 0
+                        if not is_root_owned:
+                            warning_symbol = " ⚠️"
+                            # Get the owner name
+                            try:
+                                import pwd
+
+                                owner_name = pwd.getpwuid(stat_info.st_uid).pw_name
+                            except Exception:
+                                owner_name = f"uid={stat_info.st_uid}"
+                        desc_text = f"writable (owned by {owner_name or 'root'})"
+                    except Exception:
+                        desc_text = "writable (owned by unknown)"
+
+                # Add disk space info in thorough mode
+                status = NodeStatus.OK  # Default status
+                if self.thorough_check:
+                    disk_space, disk_warning = self._format_disk_space(selected_path)
+                    desc_text += disk_space
+                    # Override status if disk space is low
+                    if disk_warning:
+                        status = disk_warning
+
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)}){warning_symbol}",
+                        desc=desc_text,
+                        status=status,
+                    )
+                )
+            else:
+                # Check files recursively
+                (
+                    total_files,
+                    non_writable_files,
+                    non_writable_list,
+                ) = self._count_writable_files(
+                    selected_path, recursive=True, exclude_files=exclude_files
+                )
+
+                # Create description based on results
+                desc, status = self._create_file_count_description(
+                    total_files, non_writable_files, "files"
+                )
+
+                # Check if running as root but directory is not owned by root
+                is_root = os.getuid() == 0
+                is_root_owned = False
+                warning_symbol = ""
+                owner_name = None
+
+                if is_root:
+                    try:
+                        stat_info = os.stat(selected_path)
+                        is_root_owned = stat_info.st_uid == 0
+                        if not is_root_owned:
+                            warning_symbol = " ⚠️"
+                            # Get the owner name
+                            try:
+                                import pwd
+
+                                owner_name = pwd.getpwuid(stat_info.st_uid).pw_name
+                            except Exception:
+                                owner_name = f"uid={stat_info.st_uid}"
+                        # Modify description to indicate ownership
+                        if "writable" in desc:
+                            desc = desc.replace(
+                                "writable",
+                                f"writable (owned by {owner_name or 'root'})",
+                            )
+                    except Exception:
+                        # Modify description to indicate ownership
+                        if "writable" in desc:
+                            desc = desc.replace(
+                                "writable", "writable (owned by unknown)"
+                            )
+
+                # Add disk space info in thorough mode
+                if self.thorough_check:
+                    disk_space, disk_warning = self._format_disk_space(selected_path)
+                    desc += disk_space
+                    # Override status if disk space is low
+                    if disk_warning:
+                        status = disk_warning
+
+                results.append(
+                    NodeInfo(
+                        label=f"{label_prefix} ({self._replace_home_with_var(selected_path)}){warning_symbol}",
+                        desc=desc,
+                        status=status,
+                    )
+                )
+
+                # Add details for non-writable files if there are any (limit to first 10)
+                if non_writable_files > 0:
+                    details_label = (
+                        f"Non-writable files (showing first 10 of {non_writable_files})"
+                    )
+                    if non_writable_files <= 10:
+                        details_label = f"Non-writable files ({non_writable_files})"
+
+                    details_node = NodeInfo(
+                        label=details_label,
+                        desc="; ".join(non_writable_list[:10]),
+                        status=NodeStatus.WARNING,
+                    )
+                    results.append(details_node)
+
+        except Exception as e:
+            results.append(
+                NodeInfo(
+                    label=f"{label_prefix} ({self._replace_home_with_var(selected_path)})",
+                    desc=f"Permission check failed: {str(e)}",
+                    status=NodeStatus.ERROR,
+                )
+            )
+
+        return results
+
+    def _is_effectively_writable(self, file_path: str) -> bool:
+        """Check if a file is effectively writable
+
+        A file is considered effectively writable if:
+        1. It's already writable (os.access check)
+        2. We own the file (can chmod it)
+        3. We are root (can do anything) - but only if os.access confirms write access
+           Note: Root may still be denied write access on NFS mounts due to root squashing
+        """
+        try:
+            # First check if it's already writable - this works for all cases including NFS
+            if os.access(file_path, os.W_OK):
+                return True
+
+            # Check if we own the file (and can therefore chmod it)
+            stat_info = os.stat(file_path)
+            if stat_info.st_uid == os.getuid():
+                return True
+
+            # For root, we still need to respect the os.access result
+            # Root privileges don't guarantee write access on NFS mounts
+            # If os.access(W_OK) returned False above, respect that even for root
+            return False
+        except Exception:
+            # If we can't stat the file, assume it's not writable
+            return False
+
+    def _count_writable_files(
+        self,
+        directory: str,
+        recursive: bool = False,
+        exclude_files: Optional[List[str]] = None,
+    ) -> Tuple[int, int, List[str]]:
+        """Count total files and non-writable files in directory
+
+        Returns:
+            Tuple of (total_files, non_writable_files, non_writable_list)
+        """
+        exclude_files = exclude_files or []
+        total_files = 0
+        non_writable_files = 0
+        non_writable_list = []
+
+        if recursive:
+            # Walk through all files in the directory tree recursively
+            for root, dirs, files in os.walk(directory):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    # Skip symbolic links
+                    if os.path.islink(file_path):
+                        continue
+                    total_files += 1
+                    if not self._is_effectively_writable(file_path):
+                        non_writable_files += 1
+                        rel_path = os.path.relpath(file_path, directory)
+                        non_writable_list.append(rel_path)
+        else:
+            # Only check files in the immediate directory (non-recursive)
+            for item in os.listdir(directory):
+                if item in exclude_files:
+                    continue
+                item_path = os.path.join(directory, item)
+                # Skip symbolic links and only check regular files
+                if os.path.isfile(item_path) and not os.path.islink(item_path):
+                    total_files += 1
+                    try:
+                        if not self._is_effectively_writable(item_path):
+                            non_writable_files += 1
+                            non_writable_list.append(item)
+                    except Exception:
+                        non_writable_files += 1
+                        non_writable_list.append(item)
+
+        return total_files, non_writable_files, non_writable_list
+
+    def _create_file_count_description(
+        self, total_files: int, non_writable_files: int, context: str = "files"
+    ) -> Tuple[str, NodeStatus]:
+        """Create description and status for file count results"""
+        if total_files == 0:
+            return f"writable, no {context} found", NodeStatus.INFO
+        elif non_writable_files == 0:
+            return f"writable, all {total_files} {context} writable", NodeStatus.OK
+        else:
+            return (
+                f"writable, {non_writable_files} of {total_files} {context} not writable",
+                NodeStatus.WARNING,
+            )
+
+    def _get_cargo_target_path_candidates(self) -> List[str]:
+        """Get candidate paths for cargo target directory"""
+        candidates = []
+
+        # Try to get target directory from cargo metadata (most accurate)
+        try:
+            result = subprocess.run(
+                ["cargo", "metadata", "--format-version=1", "--no-deps"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=".",
+            )
+            if result.returncode == 0:
+                import json
+
+                metadata = json.loads(result.stdout)
+                target_path = metadata.get("target_directory")
+                if target_path:
+                    candidates.append(target_path)
+        except Exception:
+            pass
+
+        # Add fallback candidates
+        cargo_target = os.environ.get("CARGO_TARGET_DIR")
+        if cargo_target:
+            candidates.append(cargo_target)
+
+        candidates.append("~/.cargo/target")
+        return candidates
+
+    def _check_dynamo_directory_permissions(self):
+        """Check top-level dynamo directory and key files writability"""
+        # Use the existing workspace detection logic
+        dynamo_root = DynamoInfo.find_workspace()
+
+        if not dynamo_root:
+            self.add_child(
+                NodeInfo(
+                    label="Dynamo workspace",
+                    desc="workspace not found",
+                    status=NodeStatus.ERROR,
+                )
+            )
+            return
+
+        if not DynamoInfo.is_dynamo_workspace(dynamo_root):
+            self.add_child(
+                NodeInfo(
+                    label="Dynamo workspace",
+                    desc="not a valid dynamo workspace",
+                    status=NodeStatus.ERROR,
+                )
+            )
+            return
+
+        # Check dynamo root directory and files (exclude .git)
+        recursive = self.thorough_check
+        results = self._check_permissions_unified(
+            [dynamo_root],
+            "Dynamo workspace",
+            recursive=recursive,
+            exclude_files=[".git"],
+        )
+        for result in results:
+            self.add_child(result)
+
+        # Check .git directory separately
+        git_dir = os.path.join(dynamo_root, ".git")
+        if os.path.exists(git_dir):
+            git_results = self._check_permissions_unified(
+                [git_dir], "Dynamo .git directory", recursive=recursive
+            )
+            for result in git_results:
+                self.add_child(result)
+        else:
+            self.add_child(
+                NodeInfo(
+                    label="Dynamo .git directory",
+                    desc="not available",
+                    status=NodeStatus.WARNING,
+                )
+            )
+
+    def _check_site_packages_permissions(self):
+        """Check site-packages directory writability"""
+        try:
+            import site
+
+            # Get all candidate site-packages directories
+            site_packages_dirs = site.getsitepackages()
+            user_site = site.getusersitepackages()
+            if user_site:
+                site_packages_dirs.append(user_site)
+
+            # Check each existing site-packages directory
+            recursive = self.thorough_check
+            for site_dir in site_packages_dirs:
+                if os.path.exists(site_dir):
+                    results = self._check_permissions_unified(
+                        [site_dir], "site-packages", recursive=recursive
+                    )
+                    for result in results:
+                        self.add_child(result)
+
+        except Exception as e:
+            self.add_child(
+                NodeInfo(
+                    label="Python site-packages",
+                    desc=f"Permission check failed: {str(e)}",
+                    status=NodeStatus.ERROR,
+                )
+            )
+
+    def _check_cargo_target_permissions(self):
+        """Check Cargo target directory writability and file permissions"""
+        candidates = self._get_cargo_target_path_candidates()
+        recursive = self.thorough_check
+        results = self._check_permissions_unified(
+            candidates, "Cargo target", recursive=recursive
+        )
+
+        if not results or (
+            len(results) == 1
+            and results[0].status == NodeStatus.ERROR
+            and results[0].desc is not None
+            and "No candidate paths exist" in results[0].desc
+        ):
+            # No paths exist - show warning instead of error
+            self.add_child(
+                NodeInfo(
+                    label="Cargo target",
+                    desc="Path does not exist",
+                    status=NodeStatus.WARNING,
+                )
+            )
+        else:
+            for result in results:
+                self.add_child(result)
+
+    def _check_rust_toolchain_permissions(self):
+        """Check RUSTUP_HOME and CARGO_HOME directory writability
+
+        These directories need recursive checking because:
+        - RUSTUP_HOME: rustup needs to write toolchain files, documentation, etc.
+        - CARGO_HOME: cargo needs to write registry cache, git repos, binaries, etc.
+        """
+        # Check RUSTUP_HOME
+        rustup_env = os.environ.get("RUSTUP_HOME")
+        rustup_candidates = [rustup_env] if rustup_env is not None else []
+        rustup_candidates.append("~/.rustup")
+
+        recursive = self.thorough_check
+        rustup_results = self._check_permissions_unified(
+            rustup_candidates, "Rustup home", recursive=recursive
+        )
+        for result in rustup_results:
+            self.add_child(result)
+
+        # Check CARGO_HOME
+        cargo_env = os.environ.get("CARGO_HOME")
+        cargo_candidates = [cargo_env] if cargo_env is not None else []
+        cargo_candidates.append("~/.cargo")
+
+        cargo_results = self._check_permissions_unified(
+            cargo_candidates, "Cargo home", recursive=recursive
+        )
+        for result in cargo_results:
+            self.add_child(result)
+
+    def _format_disk_space(self, path: str) -> Tuple[str, Optional[NodeStatus]]:
+        """Format disk space information for a given path
+
+        Returns:
+            Tuple of (formatted_string, warning_status_if_low_space)
+        """
+        try:
+            # Get disk usage statistics
+            statvfs = os.statvfs(path)
+
+            # Calculate sizes in bytes
+            total_bytes = statvfs.f_frsize * statvfs.f_blocks
+            free_bytes = statvfs.f_frsize * statvfs.f_bavail
+            used_bytes = total_bytes - free_bytes
+
+            # Convert to human readable format
+            def format_bytes(bytes_val):
+                """Convert bytes to human readable format"""
+                for unit in ["B", "KB", "MB", "GB", "TB"]:
+                    if bytes_val < 1024.0:
+                        return f"{bytes_val:.1f} {unit}"
+                    bytes_val /= 1024.0
+                return f"{bytes_val:.1f} PB"
+
+            # Calculate percentage used
+            percent_used = (used_bytes / total_bytes) * 100
+            percent_free = 100 - percent_used
+
+            formatted_string = f", {format_bytes(used_bytes)}/{format_bytes(total_bytes)} ({percent_used:.1f}% used)"
+
+            # Return warning status if less than 10% free space
+            warning_status = NodeStatus.WARNING if percent_free < 10 else None
+
+            return formatted_string, warning_status
+
+        except Exception:
+            return "", None
+
+
 class CargoInfo(NodeInfo):
     """Cargo tool information"""
 
-    def __init__(self, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         cargo_path = shutil.which("cargo")
         cargo_version = None
 
@@ -609,56 +1254,78 @@ class CargoInfo(NodeInfo):
         # Initialize with cargo path and version
         value = ""
         if cargo_path:
-            value = cargo_path
+            value = self._replace_home_with_var(cargo_path)
         if cargo_version:
             value += f", {cargo_version}" if value else cargo_version
 
         super().__init__(label="Cargo", desc=value, status=NodeStatus.OK)
 
-        # Get cargo home directory
-        cargo_home = os.environ.get("CARGO_HOME")
-        if not cargo_home:
+        # Get cargo home directory from the environment (may not exist, which is OK)
+        cargo_home_env = os.environ.get("CARGO_HOME")
+        if cargo_home_env:
+            cargo_home = cargo_home_env
+            home_value = f"CARGO_HOME={self._replace_home_with_var(cargo_home)}"
+        else:
             cargo_home = os.path.expanduser("~/.cargo")
+            home_value = (
+                f"CARGO_HOME=<not set>, using {self._replace_home_with_var(cargo_home)}"
+            )
 
         if cargo_home and os.path.exists(cargo_home):
-            cargo_home_env = os.environ.get("CARGO_HOME")
-            display_cargo_home = self._replace_home_with_var(cargo_home)
-            home_value = display_cargo_home
-            if cargo_home_env:
-                home_value += " (CARGO_HOME is set)"
+            status = NodeStatus.INFO
+        else:
+            home_value += " (directory does not exist)"
+            status = NodeStatus.WARNING
 
-            home_node = NodeInfo(
-                label="cargo home directory", desc=home_value, status=NodeStatus.INFO
-            )
-            self.add_child(home_node)
+        home_node = NodeInfo(
+            label="Cargo home directory", desc=home_value, status=status
+        )
+        self.add_child(home_node)
 
         # Get cargo target directory
+        cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
         cargo_target = self._get_cargo_target_directory()
+
+        # Calculate total directory size (only if thorough check and directory exists)
+        size_str = ""
+        if cargo_target and os.path.exists(cargo_target) and self.thorough_check:
+            total_size_gb = self._get_directory_size_gb(cargo_target)
+            size_str = f", {total_size_gb:.1f} GB" if total_size_gb is not None else ""
+
+        # Format the display value
+        if cargo_target_env:
+            display_cargo_target = (
+                self._replace_home_with_var(cargo_target) if cargo_target else "unknown"
+            )
+            target_value = f"CARGO_TARGET_DIR={display_cargo_target}{size_str}"
+        else:
+            display_cargo_target = (
+                self._replace_home_with_var(cargo_target) if cargo_target else "unknown"
+            )
+            target_value = (
+                f"CARGO_TARGET_DIR=<not set>, using {display_cargo_target}{size_str}"
+            )
+
+        # Check directory existence and set status
         if cargo_target and os.path.exists(cargo_target):
-            cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
-            display_cargo_target = self._replace_home_with_var(cargo_target)
-
-            # Calculate total directory size (skip if fast mode)
-            size_str = ""
-            if not self.fast_mode:
-                total_size_gb = self._get_directory_size_gb(cargo_target)
-                size_str = (
-                    f", {total_size_gb:.1f} GB" if total_size_gb is not None else ""
-                )
-
-            target_value = display_cargo_target + size_str
-            if cargo_target_env:
-                target_value += " (CARGO_TARGET_DIR is set)"
-
+            status = NodeStatus.INFO
             target_node = NodeInfo(
-                label="cargo target directory",
+                label="Cargo target directory",
                 desc=target_value,
-                status=NodeStatus.INFO,
+                status=status,
             )
             self.add_child(target_node)
-
             # Add debug/release/binary info as children of target directory
             self._add_build_info(target_node, cargo_target)
+        else:
+            target_value += " (directory does not exist)"
+            status = NodeStatus.WARNING if cargo_target_env else NodeStatus.INFO
+            target_node = NodeInfo(
+                label="Cargo target directory",
+                desc=target_value,
+                status=status,
+            )
+            self.add_child(target_node)
 
     def _get_directory_size_gb(self, directory: str) -> Optional[float]:
         """Get the size of a directory in GB."""
@@ -715,8 +1382,8 @@ class CargoInfo(NodeInfo):
             display_debug = self._replace_home_with_var(debug_dir)
             debug_value = display_debug
 
-            # Add size (skip if fast mode)
-            if not self.fast_mode:
+            # Add size (only if thorough check)
+            if self.thorough_check:
                 debug_size_gb = self._get_directory_size_gb(debug_dir)
                 if debug_size_gb is not None:
                     debug_value += f", {debug_size_gb:.1f} GB"
@@ -738,8 +1405,8 @@ class CargoInfo(NodeInfo):
             display_release = self._replace_home_with_var(release_dir)
             release_value = display_release
 
-            # Add size (skip if fast mode)
-            if not self.fast_mode:
+            # Add size (only if thorough check)
+            if self.thorough_check:
                 release_size_gb = self._get_directory_size_gb(release_dir)
                 if release_size_gb is not None:
                     release_value += f", {release_size_gb:.1f} GB"
@@ -762,8 +1429,8 @@ class CargoInfo(NodeInfo):
             display_so = self._replace_home_with_var(so_file)
             so_value = display_so
 
-            # Add file size (skip if fast mode)
-            if not self.fast_mode:
+            # Add file size (only if thorough check)
+            if self.thorough_check:
                 try:
                     file_size_bytes = os.path.getsize(so_file)
                     file_size_mb = file_size_bytes / (1024**2)
@@ -924,6 +1591,8 @@ class FrameworkInfo(NodeInfo):
             ("tensorrt_llm", "tensorRT LLM"),
         ]
 
+        frameworks_found = 0
+
         for module_name, display_name in frameworks_to_check:
             # Special handling for TensorRT-LLM to avoid NVML crashes
             if module_name == "tensorrt_llm":
@@ -934,14 +1603,13 @@ class FrameworkInfo(NodeInfo):
                     f"/usr/lib/python{python_version}/dist-packages",
                 ]
 
-                found_in_system = False
                 for pkg_path in system_packages:
                     if os.path.exists(pkg_path):
                         tensorrt_dirs = [
                             d for d in os.listdir(pkg_path) if "tensorrt_llm" in d
                         ]
                         if tensorrt_dirs:
-                            found_in_system = True
+                            frameworks_found += 1
                             # Try to get version safely
                             try:
                                 result = subprocess.run(
@@ -985,20 +1653,14 @@ class FrameworkInfo(NodeInfo):
                                 self.add_child(package_info)
                                 break
 
-                if not found_in_system:
-                    package_info = PythonPackageInfo(
-                        package_name=display_name,
-                        version="-",
-                        is_framework=True,
-                        is_installed=False,
-                    )
-                    self.add_child(package_info)
+                # Don't add anything if not found in system
                 continue
 
             # Regular import for other frameworks
             try:
                 module = __import__(module_name)
                 version = getattr(module, "__version__", "installed")
+                frameworks_found += 1
 
                 # Get module path
                 module_path = None
@@ -1021,14 +1683,18 @@ class FrameworkInfo(NodeInfo):
                 )
                 self.add_child(package_info)
             except (ImportError, Exception):
-                # Framework not installed - show with "-"
-                package_info = PythonPackageInfo(
-                    package_name=display_name,
-                    version="-",
-                    is_framework=True,
-                    is_installed=False,
-                )
-                self.add_child(package_info)
+                # Framework not installed - don't add it
+                pass
+
+        # If no frameworks found, set status to ERROR (X) and show what's missing
+        if frameworks_found == 0:
+            self.status = NodeStatus.ERROR
+            # List all the frameworks that were checked but not found
+            missing_frameworks = []
+            for module_name, display_name in frameworks_to_check:
+                missing_frameworks.append(f"no {module_name}")
+            missing_text = ", ".join(missing_frameworks)
+            self.desc = missing_text
 
 
 class PythonPackageInfo(NodeInfo):
@@ -1082,9 +1748,22 @@ class PythonPathInfo(NodeInfo):
         if pythonpath:
             # Split by colon and replace home in each path
             paths = pythonpath.split(":")
-            display_paths = [self._replace_home_with_var(p) for p in paths]
+            display_paths = []
+            has_invalid_paths = False
+
+            for p in paths:
+                display_path = self._replace_home_with_var(p)
+                # Check if path exists and is accessible
+                if not os.path.exists(p) or not os.access(p, os.R_OK):
+                    display_paths.append(
+                        f"{Colors.BRIGHT_RED}{display_path}{Colors.RESET}"
+                    )  # Bright red path
+                    has_invalid_paths = True
+                else:
+                    display_paths.append(display_path)
+
             display_pythonpath = ":".join(display_paths)
-            status = NodeStatus.INFO
+            status = NodeStatus.WARNING if has_invalid_paths else NodeStatus.INFO
         else:
             display_pythonpath = "not set"
             status = NodeStatus.WARNING  # Show warning when PYTHONPATH is not set
@@ -1095,8 +1774,8 @@ class PythonPathInfo(NodeInfo):
 class DynamoRuntimeInfo(NodeInfo):
     """Dynamo runtime components information"""
 
-    def __init__(self, workspace_dir: str, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         # Try to get package version
         import importlib.metadata
 
@@ -1230,12 +1909,17 @@ class DynamoRuntimeInfo(NodeInfo):
                     stat = os.stat(path)
                     timestamp = self._format_timestamp_pdt(stat.st_ctime)
                     return NodeInfo(
-                        label=display_path,
+                        label=f" {display_path}",
                         desc=f"created={timestamp}",
                         status=NodeStatus.INFO,
+                        metadata={"part_of_previous": True},
                     )
                 except Exception:
-                    return NodeInfo(label=display_path, status=NodeStatus.INFO)
+                    return NodeInfo(
+                        label=f" {display_path}",
+                        status=NodeStatus.INFO,
+                        metadata={"part_of_previous": True},
+                    )
         return None
 
     def _find_pth_file(self) -> Optional[NodeInfo]:
@@ -1250,9 +1934,10 @@ class DynamoRuntimeInfo(NodeInfo):
                     stat = os.stat(pth_path)
                     timestamp = self._format_timestamp_pdt(stat.st_mtime)
                     node = NodeInfo(
-                        label=display_path,
+                        label=f" {display_path}",
                         desc=f"modified={timestamp}",
                         status=NodeStatus.INFO,
+                        metadata={"part_of_previous": True},
                     )
 
                     # Read where it points to
@@ -1274,8 +1959,8 @@ class DynamoRuntimeInfo(NodeInfo):
 class DynamoFrameworkInfo(NodeInfo):
     """Dynamo framework components information"""
 
-    def __init__(self, workspace_dir: str, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, workspace_dir: str, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         # Try to get package version
         import importlib.metadata
 
@@ -1309,13 +1994,18 @@ class DynamoFrameworkInfo(NodeInfo):
                         stat = os.stat(path)
                         timestamp = self._format_timestamp_pdt(stat.st_ctime)
                         dist_node = NodeInfo(
-                            label=display_path,
+                            label=f" {display_path}",
                             desc=f"created={timestamp}",
                             status=NodeStatus.INFO,
+                            metadata={"part_of_previous": True},
                         )
                         self.add_child(dist_node)
                     except Exception:
-                        dist_node = NodeInfo(label=display_path, status=NodeStatus.INFO)
+                        dist_node = NodeInfo(
+                            label=f" {display_path}",
+                            status=NodeStatus.INFO,
+                            metadata={"part_of_previous": True},
+                        )
                         self.add_child(dist_node)
                     break
 
@@ -1415,8 +2105,8 @@ class DynamoFrameworkInfo(NodeInfo):
 class DynamoInfo(NodeInfo):
     """Dynamo workspace information"""
 
-    def __init__(self, fast_mode: bool = False):
-        self.fast_mode = fast_mode
+    def __init__(self, thorough_check: bool = False):
+        self.thorough_check = thorough_check
 
         # Find workspace directory
         workspace_dir = DynamoInfo.find_workspace()
@@ -1456,11 +2146,15 @@ class DynamoInfo(NodeInfo):
         super().__init__(label="Dynamo", desc=value, status=NodeStatus.INFO)
 
         # Always add runtime components
-        runtime_info = DynamoRuntimeInfo(workspace_dir, fast_mode=self.fast_mode)
+        runtime_info = DynamoRuntimeInfo(
+            workspace_dir, thorough_check=self.thorough_check
+        )
         self.add_child(runtime_info)
 
         # Always add framework components
-        framework_info = DynamoFrameworkInfo(workspace_dir, fast_mode=self.fast_mode)
+        framework_info = DynamoFrameworkInfo(
+            workspace_dir, thorough_check=self.thorough_check
+        )
         self.add_child(framework_info)
 
     def _get_git_info(self, workspace_dir: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1636,15 +2330,23 @@ def main():
         description="Display system information for Dynamo project"
     )
     parser.add_argument(
-        "-f",
-        "--fast",
+        "--thorough-check",
         action="store_true",
-        help="Skip size calculations for faster output",
+        help="Enable thorough checking (file permissions, directory sizes, disk space, etc.)",
+    )
+    parser.add_argument(
+        "--terse",
+        action="store_true",
+        help="Show only essential information (OS, User, GPU, Framework, Dynamo) and errors",
     )
     args = parser.parse_args()
 
+    # Validate mutual exclusion
+    if args.thorough_check and args.terse:
+        parser.error("--thorough-check and --terse cannot be used together")
+
     # Simply create a SystemInfo instance - it collects everything in its constructor
-    tree = SystemInfo(fast_mode=args.fast)
+    tree = SystemInfo(thorough_check=args.thorough_check, terse=args.terse)
     tree.print_tree()
 
     # Check if there are framework component errors and show PYTHONPATH recommendation

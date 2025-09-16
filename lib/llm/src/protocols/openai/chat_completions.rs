@@ -332,6 +332,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
         // none for functions
+        // Common Ext
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
 
         Ok(())
     }

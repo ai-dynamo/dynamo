@@ -246,15 +246,3 @@ The table below shows the performance improvement of SLA planner across differen
 | Inefficient parallelization mapping | 311% | 249% |
 | Best static deployment | 52% | 29% |`
 
-### Prerequisites
-
-**For Unit Tests:**
-- Python dependencies installed
-- PYTHONPATH set to include `components/planner/src` (see unit test examples above)
-
-**For E2E Tests:**
-- Kubernetes cluster with GPU nodes
-- kubectl configured and accessible
-- genai-perf available in PATH
-- Python dependencies installed
-- PYTHONPATH properly configured for planner imports
