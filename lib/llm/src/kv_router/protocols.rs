@@ -13,8 +13,8 @@ pub enum RouterRequest {
     New {
         tokens: Vec<Token>,
     },
-    MarkPrefill {},
-    MarkFree {},
+    MarkPrefill,
+    MarkFree,
 }
 
 impl Default for RouterRequest {

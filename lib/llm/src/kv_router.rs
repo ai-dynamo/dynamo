@@ -405,7 +405,6 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
             }
             RouterRequest::MarkPrefill {} => {
                 self.mark_prefill_completed(&context_id).await;
-
                 RouterResponse::PrefillMarked { success: true }
             }
             RouterRequest::MarkFree {} => {
