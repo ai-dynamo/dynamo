@@ -27,7 +27,29 @@ echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_
 wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
 
 set -e
-warmup_model $head_node $head_port $model_name $model_path "${chosen_isl}x${chosen_osl}x10000x10000x250"
+# Warmup the model
+warmup_isl=$chosen_isl
+warmup_osl=$chosen_osl
+warmup_prompts=10000
+warmup_concurrencies=10000
+warmup_req_rate=250
+set -x
+python3 benchmark_serving.py \
+    --model ${model_name} --tokenizer ${model_path} \
+    --host $head_node --port $head_port \
+    --use-chat-template \
+    --backend "openai" --endpoint /v1/completions \
+    --disable-tqdm \
+    --dataset-name random \
+    --num-prompts "$warmup_prompts" \
+    --random-input-len $warmup_isl \
+    --random-output-len $warmup_osl \
+    --random-range-ratio 0.8 \
+    --ignore-eos \
+    --request-rate ${warmup_req_rate} \
+    --percentile-metrics ttft,tpot,itl,e2el \
+    --max-concurrency "$warmup_concurrencies"
+set +x
 set +e
 
 result_dir="/logs/vllm_isl_${chosen_isl}_osl_${chosen_osl}"
