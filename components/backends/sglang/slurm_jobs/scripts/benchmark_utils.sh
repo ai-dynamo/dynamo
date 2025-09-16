@@ -6,22 +6,24 @@ wait_for_model() {
 
     local model_host=$1
     local model_port=$2
-    local poll=${3:-1}
-    local timeout=${4:-600}
-    local report_every=${5:-60}
+    local n_prefill=${3:-1}
+    local n_decode=${4:-1}
+    local poll=${5:-1}
+    local timeout=${6:-600}
+    local report_every=${7:-60}
 
     local health_addr="http://${model_host}:${model_port}/health"
-    echo "Polling ${health_addr} every ${poll} seconds"
+    echo "Polling ${health_addr} every ${poll} seconds to check whether ${n_prefill} prefills and ${n_decode} decodes are alive"
 
     local start_ts=$(date +%s)
     local report_ts=$(date +%s)
 
     while :; do
         curl_result=$(curl ${health_addr} 2>/dev/null)
-        health=$(grep '"status":"healthy"' <<< $curl_result)
-        if [[ -n $health ]]; then
-            echo "Model is alive. Health response: ${curl_result}; "
-            return 0;
+        check_result=$(python3 /scripts/check_server_health.py $n_prefill $n_decode <<< $curl_result)
+        if [[ $check_result == *"Model is ready."* ]]; then
+            echo $check_result
+            return 0
         fi
 
         time_now=$(date +%s)
@@ -31,7 +33,7 @@ wait_for_model() {
         fi
 
         if [[ $((time_now - report_ts)) -ge $report_every ]]; then
-            echo "Waiting for model to come alive. Current result: ${curl_result}"
+            echo $check_result
             report_ts=$time_now
         fi
 

@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+n_prefill=$1
+n_decode=$2
+
 chosen_isl=$3
 chosen_osl=$4
-
 concurrency_list=$5
+
 IFS='x' read -r -a chosen_concurrencies <<< "$concurrency_list"
 chosen_req_rate=$6
 
@@ -19,7 +22,7 @@ MODEL_PATH=/model/
 
 source /scripts/benchmark_utils.sh
 
-wait_for_model $head_node $head_port 5 2400 60
+wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
 
 sleep 300
 

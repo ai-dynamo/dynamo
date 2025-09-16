@@ -9,6 +9,9 @@ model_path="/model/"
 head_node="localhost"
 head_port=8000
 
+n_prefill=$1
+n_decode=$2
+
 source /scripts/benchmark_utils.sh
 work_dir="/scripts/vllm/"
 cd $work_dir
@@ -21,7 +24,7 @@ chosen_req_rate=$6
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
-wait_for_model $head_node $head_port 5 2400 60
+wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
 
 set -e
 warmup_model $head_node $head_port $model_name $model_path "${chosen_isl}x${chosen_osl}x10000x10000x${chosen_req_rate}"
