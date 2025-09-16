@@ -20,6 +20,8 @@ This directory contains benchmarking scripts and tools for performance evaluatio
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../components/backends/), then:
+
 ```bash
 # Port-forward your deployment to http://localhost:8000
 kubectl port-forward -n <namespace> <frontend-service-name> 8000:8000 &

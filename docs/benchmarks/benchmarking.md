@@ -55,7 +55,7 @@ Follow these steps to benchmark Dynamo deployments:
 Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. Follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) for detailed instructions.
 
 ### Step 2: Deploy DynamoGraphDeployments
-Deploy your DynamoGraphDeployments separately using the standard deployment documentation. Each deployment should have a frontend service exposed.
+Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../components/backends/). Each deployment should have a frontend service exposed.
 
 ### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
@@ -118,6 +118,17 @@ python3 -m benchmarks.utils.benchmark --namespace my-namespace \
 # Generate comparison plots
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 ```
+
+## Use Cases
+
+The benchmarking framework supports various comparative analysis scenarios:
+
+- **Compare multiple DynamoGraphDeployments of a single backend** (e.g., aggregated vs disaggregated configurations)
+- **Compare different backends** (e.g., vLLM vs TensorRT-LLM vs SGLang)
+- **Compare Dynamo vs other platforms** (e.g., Dynamo vs llm-d vs AIBrix)
+- **Compare different models** (e.g., Llama-3-8B vs Llama-3-70B vs Qwen-3-0.6B)
+- **Compare different hardware configurations** (e.g., H100 vs A100 vs H200)
+- **Compare different parallelization strategies** (e.g., different GPU counts or memory configurations)
 
 ## Configuration and Usage
 
@@ -218,6 +229,14 @@ python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input test=http:/
 ## Understanding Your Results
 
 After benchmarking completes, check `./benchmarks/results/` (or your custom output directory):
+
+### Plot Labels and Organization
+
+The plotting script uses the `--input` labels (the keys before the `=` sign) as the experiment names in all generated plots. For example:
+- `--input aggregated=http://localhost:8000` → plots will show "aggregated" as the label
+- `--input vllm-disagg=http://localhost:8001` → plots will show "vllm-disagg" as the label
+
+This allows you to easily identify and compare different configurations in the visualization plots.
 
 ### Summary and Plots
 
