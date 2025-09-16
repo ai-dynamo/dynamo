@@ -52,6 +52,26 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
+
+    def child_token(self) -> CancellationToken:
+        """
+        Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+class CancellationToken:
+    def cancel(self) -> None:
+        """
+        Cancel the token and all its children
+        """
+        ...
+
+    async def cancelled(self) -> None:
+        """
+        Await until the token is cancelled
+        """
+        ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
@@ -823,13 +843,6 @@ class HttpService:
     """
     A HTTP service for dynamo applications.
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
-    """
-
-    ...
-
-class HttpError:
-    """
-    An error that occurred in the HTTP service
     """
 
     ...

@@ -48,10 +48,10 @@ from dynamo._core import run_input
 
 class HttpError(Exception):
     def __init__(self, code: int, message: str):
-        assert isinstance(code, int), "HTTP status code must be an integer"
-        assert 0 <= code < 600, "HTTP status code must be between 0 and 599"
-        assert isinstance(message, str), "HTTP error message must be a string"
-        assert len(message) <= 8192, "HTTP error message too long"
+        if not (isinstance(code, int) and 0 <= code < 600):
+            raise ValueError("HTTP status code must be an integer between 0 and 599")
+        if not (isinstance(message, str) and 0 < len(message) <= 8192):
+            raise ValueError("HTTP error message must be a string of length <= 8192")
         self.code = code
         self.message = message
         super().__init__(f"HTTP {code}: {message}")

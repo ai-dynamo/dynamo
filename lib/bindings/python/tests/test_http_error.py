@@ -26,5 +26,5 @@ def test_raise_http_error():
 
 
 def test_invalid_http_error_code():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         HttpError(1700, "Invalid Code")
