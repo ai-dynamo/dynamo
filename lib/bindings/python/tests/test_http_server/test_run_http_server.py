@@ -86,29 +86,39 @@ async def http_server(runtime: DistributedRuntime):
     port = 8008
     host = "127.0.0.1"
     model_name = "test_model"
+    start_done = asyncio.Event()
 
     async def worker():
         """The server worker task."""
-        loop = asyncio.get_running_loop()
-        python_engine = MockHttpEngine(model_name)
-        engine = HttpAsyncEngine(python_engine.generate, loop)
+        try:
+            loop = asyncio.get_running_loop()
+            python_engine = MockHttpEngine(model_name)
+            engine = HttpAsyncEngine(python_engine.generate, loop)
 
-        service = HttpService(port=port, host=host)
-        service.add_chat_completions_model(model_name, engine)
-        service.enable_endpoint("chat", True)
+            service = HttpService(port=port, host=host)
+            service.add_chat_completions_model(model_name, engine)
+            service.enable_endpoint("chat", True)
 
-        shutdown_signal = service.run(runtime.child_token())
-        await shutdown_signal
+            shutdown_signal = service.run(runtime.child_token())
+            start_done.set()
+            await shutdown_signal
+        except Exception as e:
+            print("Server encountered an error:", e)
+            start_done.set()
+            raise e
 
     server_task = asyncio.create_task(worker())
-    await asyncio.sleep(0.5)  # Give server time to start
-
+    await asyncio.wait_for(start_done.wait(), timeout=20.0)
+    if server_task.done() and server_task.exception():
+        raise server_task.exception()
     yield f"http://{host}:{port}", model_name
 
+    # Teardown: Cancel the server task if it's still running
     if not server_task.done():
         server_task.cancel()
         try:
-            await server_task
+            # Await cancellation to ensure proper cleanup for up to 10s
+            await asyncio.wait_for(server_task, timeout=10.0)
         except asyncio.CancelledError:
             pass
 
