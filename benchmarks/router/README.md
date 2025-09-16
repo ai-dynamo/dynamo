@@ -179,7 +179,6 @@ The script can apply various modifications on top of the original trace file to 
 - `--prefix-root-multiplier`: Replicate the prefix tree structure N times with different roots
 - `--prompt-len-multiplier`: Scale the length of unique user prompts (e.g., 0.5 for shorter prompts)
 - `--max-isl`: Filter out requests exceeding this input sequence length
-- `--seed`: Random seed for reproducibility (default: 0)
 
 Examples:
 
@@ -195,15 +194,6 @@ python real_data_benchmark.py --input-file trace.jsonl --prefix-len-multiplier 2
 
 # Create more diverse workload by replicating prefix tree 3 times
 python real_data_benchmark.py --input-file trace.jsonl --prefix-root-multiplier 3
-
-# Combine multiple modifications
-python real_data_benchmark.py \
-  --input-file trace.jsonl \
-  --num-requests 5000 \
-  --speedup-ratio 1.5 \
-  --prefix-len-multiplier 1.5 \
-  --prompt-len-multiplier 0.8 \
-  --max-isl 10000
 ```
 
 ## Troubleshooting
