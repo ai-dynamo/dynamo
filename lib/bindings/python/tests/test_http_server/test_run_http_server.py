@@ -28,8 +28,6 @@ from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an error."
 
-from pydantic import BaseModel
-
 
 class MockHttpEngine:
     """A mock engine that returns a completion or raises an error."""
