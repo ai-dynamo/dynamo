@@ -173,6 +173,8 @@ where
                                     if let (Ok(code), Ok(message)) =
                                         (code.extract::<u16>(), message.extract::<String>())
                                     {
+                                        // SSE panics if there are carriage returns or newlines
+                                        let message = message.replace('\r', "").replace('\n', "");
                                         return Err(http_error::HttpError { code, message })?;
                                     }
                                 }
