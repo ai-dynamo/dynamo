@@ -32,7 +32,7 @@ def check_server_health(expected_n_prefill, expected_n_decode, response):
         - response: string, formatted `curl <url>/health` curl results,
                     should be JSON-parsable
 
-    Returns: 
+    Returns:
         string, a pretty-printable string that tell the current status.
     """
     if not (expected_n_prefill.isnumeric() and expected_n_decode.isnumeric()):
@@ -66,7 +66,7 @@ if __name__ == "__main__":
     """
     Usage -
     provide the expected number of prefill / decode as sys args
-    and then provide the `curl` response as an input. 
+    and then provide the `curl` response as an input.
     E.g.:
     ```bash
     curl_result=$(curl "${host_ip}:${host_port}/health" 2> /dev/null)
