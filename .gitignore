@@ -98,3 +98,6 @@ TensorRT-LLM
 /.cursor/instructions.md.bak
 /CLAUDE.md
 /CLAUDE.md.bak
+
+# Benchmarks
+benchmarks/results
