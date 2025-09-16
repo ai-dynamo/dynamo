@@ -52,6 +52,7 @@ def planner():
     args.itl = 10  # ms
     args.backend = "vllm"
     args.no_operation = True  # Don't actually scale
+    args.no_correction = False  # Allow correction factors
     args.prometheus_port = 0  # 0 means disabled
     args.load_predictor = "constant"
     args.load_prediction_window_size = 10
