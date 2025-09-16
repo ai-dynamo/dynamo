@@ -282,12 +282,6 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            // Download tokenizer.json etc to local disk
-            // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
-            // OpenAIPreprocessor::new loads the files, so we can delete them after this
-            // function. Needs checking carefully, possibly we need to store it in state.
-            //let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
-
             let kv_chooser = if self.router_mode == RouterMode::KV {
                 Some(
                     self.manager
@@ -388,9 +382,6 @@ impl ModelWatcher {
             && model_entry.model_type.supports_embedding()
         {
             // Case 4: Tokens + Embeddings
-
-            // Download tokenizer files to local disk
-            //let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
             // Create preprocessing pipeline similar to Backend
             let frontend = SegmentSource::<

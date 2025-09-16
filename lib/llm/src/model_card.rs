@@ -233,9 +233,9 @@ impl ModelDeploymentCard {
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
-                let p = checked_file.path().ok_or_else(||
-                    anyhow::anyhow!("Tokenizer is URL-backed ({:?}); call move_from_nats() before tokenizer_hf()", checked_file.url())
-                )?;
+                let p = checked_file.path().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
+                })?;
                 HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
