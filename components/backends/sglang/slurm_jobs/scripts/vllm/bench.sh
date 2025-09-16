@@ -44,7 +44,8 @@ do
     python3 benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
         --host $head_node --port $head_port \
-        --backend "dynamo" --endpoint /v1/chat/completions \
+        --use-chat-template \
+        --backend "openai" --endpoint /v1/completions \
         --disable-tqdm \
         --dataset-name random \
         --num-prompts "$num_prompts" \

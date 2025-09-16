@@ -306,7 +306,7 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                     if first_chunk_received:
                         output.success = True
