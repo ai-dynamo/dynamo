@@ -217,8 +217,9 @@ class VllmEncodeWorker:
 
     @classmethod
     def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
-        DEFAULT_ENDPOINT = "dyn://dynamo.encoder.generate"
-        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.llm.generate"
+        DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+        DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.encoder.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = f"dyn://{DYN_NAMESPACE}.llm.generate"
 
         parser = FlexibleArgumentParser(
             description="vLLM based encoder for Dynamo LLM."

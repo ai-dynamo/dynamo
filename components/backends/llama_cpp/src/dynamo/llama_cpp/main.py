@@ -5,6 +5,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -17,7 +18,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 
 configure_dynamo_logging()
 

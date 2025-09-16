@@ -15,9 +15,14 @@ from typing import Any, Dict, Optional
 from sglang.srt.server_args import ServerArgs
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang import __version__
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+configure_dynamo_logging()
+
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
+
 DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
     "endpoint": {
         "flags": ["--endpoint"],
