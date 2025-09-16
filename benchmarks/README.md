@@ -24,10 +24,12 @@ First, deploy your DynamoGraphDeployment using the [deployment documentation](..
 
 ```bash
 # Port-forward your deployment to http://localhost:8000
-kubectl port-forward -n <namespace> <frontend-service-name> 8000:8000 &
+kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 &
 
 # Run benchmark
-python3 -m benchmarks.utils.benchmark --namespace <namespace> --input my-benchmark=http://localhost:8000
+python3 -m benchmarks.utils.benchmark --namespace <namespace> \
+    --input my-benchmark=http://localhost:8000 \
+    --model "<your-model>"
 
 # Generate plots
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
@@ -43,10 +45,10 @@ Benchmark any HTTP endpoints! The benchmarking framework supports:
 - Customizable concurrency levels (configurable via CONCURRENCIES env var), sequence lengths, and models
 - Automated performance plot generation with custom labels
 
-**Sequential GPU Usage:**
-- Models are deployed and benchmarked **sequentially**, not in parallel
-- Each deployment gets exclusive access to all available GPUs during its benchmark run
-- Ensures accurate performance measurements and fair comparison across configurations
+**Sequential Execution:**
+- Benchmarks are run sequentially, not in parallel
+- To avoid interference, ensure only one deployment is utilizing the target GPUs during a run
+- This helps produce more comparable measurements across configurations
 
 **Supported Backends:**
 - DynamoGraphDeployments with port-forwarded endpoints
