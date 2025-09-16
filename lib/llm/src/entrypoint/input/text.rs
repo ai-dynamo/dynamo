@@ -122,7 +122,7 @@ async fn main_loop(
             inner,
             common: Default::default(),
             nvext: Some(nvext),
-            chat_template_kwargs: None,
+            chat_template_args: None,
         };
 
         // Call the model

@@ -70,8 +70,8 @@ pub trait OAIChatLikeRequest {
 
     fn should_add_generation_prompt(&self) -> bool;
 
-    /// Optional additional kwargs to merge into the chat template context
-    fn chat_template_kwargs(&self) -> Option<HashMap<String, serde_json::Value>> {
+    /// Optional additional args to merge into the chat template context
+    fn chat_template_args(&self) -> Option<&HashMap<String, serde_json::Value>> {
         None
     }
 

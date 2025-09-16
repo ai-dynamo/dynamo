@@ -127,8 +127,8 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         Some(TextInput::Single(String::new()))
     }
 
-    fn chat_template_kwargs(&self) -> Option<std::collections::HashMap<String, serde_json::Value>> {
-        self.chat_template_kwargs.clone()
+    fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        self.chat_template_args.as_ref()
     }
 }
 
@@ -223,9 +223,9 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             ..mixins
         };
 
-        // Merge any additional kwargs into the context last so they take precedence
-        let ctx = if let Some(kwargs) = req.chat_template_kwargs() {
-            let extra = Value::from_serialize(kwargs);
+        // Merge any additional args into the context last so they take precedence
+        let ctx = if let Some(args) = req.chat_template_args() {
+            let extra = Value::from_serialize(args);
             context! { ..ctx, ..extra }
         } else {
             ctx

@@ -160,7 +160,7 @@ class ChatProcessor:
             continue_final_message=request.continue_final_message,
             tool_dicts=None,
             documents=request.documents,
-            chat_template_kwargs=request.chat_template_kwargs,
+            chat_template_args=request.chat_template_args,
             tool_parser=self.openai_serving.tool_parser,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
             add_special_tokens=request.add_special_tokens,

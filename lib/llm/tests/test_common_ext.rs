@@ -67,7 +67,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
             .build()
             .unwrap(),
         nvext: None,
-        chat_template_kwargs: None,
+        chat_template_args: None,
     };
 
     let sampling = request.extract_sampling_options().unwrap();
@@ -328,7 +328,7 @@ fn test_serialization_preserves_structure() {
             ignore_eos: Some(false),
             ..Default::default()
         }),
-        chat_template_kwargs: None,
+        chat_template_args: None,
     };
 
     let json = serde_json::to_value(&request).unwrap();
@@ -378,7 +378,7 @@ fn test_sampling_parameters_extraction() {
             .build()
             .unwrap(),
         nvext: None,
-        chat_template_kwargs: None,
+        chat_template_args: None,
     };
 
     let sampling_options = request.extract_sampling_options().unwrap();
