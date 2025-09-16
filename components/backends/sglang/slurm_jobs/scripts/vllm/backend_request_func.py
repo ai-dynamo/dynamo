@@ -240,11 +240,13 @@ async def async_request_openai_completions(
         ("completions", "profile")
     ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
 
-    async with aiohttp.ClientSession(trust_env=True,
-                                     timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(
+        trust_env=True, timeout=AIOHTTP_TIMEOUT
+    ) as session:
         payload = {
-            "model": request_func_input.model_name \
-                if request_func_input.model_name else request_func_input.model,
+            "model": request_func_input.model_name
+            if request_func_input.model_name
+            else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
@@ -259,9 +261,7 @@ async def async_request_openai_completions(
             payload["ignore_eos"] = request_func_input.ignore_eos
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-        }
+        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -270,8 +270,9 @@ async def async_request_openai_completions(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(url=api_url, json=payload,
-                                    headers=headers) as response:
+            async with session.post(
+                url=api_url, json=payload, headers=headers
+            ) as response:
                 if response.status == 200:
                     first_chunk_received = False
                     async for chunk_bytes in response.content:
@@ -279,8 +280,7 @@ async def async_request_openai_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data: ")
+                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
 
@@ -300,21 +300,20 @@ async def async_request_openai_completions(
 
                                 # Decoding phase
                                 else:
-                                    output.itl.append(timestamp -
-                                                      most_recent_timestamp)
+                                    output.itl.append(timestamp - most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
                             elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                output.output_tokens = usage.get("completion_tokens")
                     if first_chunk_received:
                         output.success = True
                     else:
                         output.success = False
                         output.error = (
                             "Never received a valid chunk to calculate TTFT."
-                            "This response will be marked as failed!")
+                            "This response will be marked as failed!"
+                        )
                     output.generated_text = generated_text
                     output.latency = most_recent_timestamp - st
                 else:
@@ -329,6 +328,7 @@ async def async_request_openai_completions(
         pbar.update(1)
     return output
 
+
 async def async_request_dynamo_completions(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
@@ -338,8 +338,9 @@ async def async_request_dynamo_completions(
         ("completions", "profile")
     ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
 
-    async with aiohttp.ClientSession(trust_env=True,
-                                     timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(
+        trust_env=True, timeout=AIOHTTP_TIMEOUT
+    ) as session:
         payload = {
             "model": request_func_input.model_name
             if request_func_input.model_name
