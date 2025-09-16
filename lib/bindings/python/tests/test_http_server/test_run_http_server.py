@@ -107,12 +107,12 @@ async def http_server(runtime: DistributedRuntime):
         except Exception as e:
             print("Server encountered an error:", e)
             start_done.set()
-            raise e
+            raise ValueError(f"Server failed to start: {e}")
 
     server_task = asyncio.create_task(worker())
     await asyncio.wait_for(start_done.wait(), timeout=20.0)
     if server_task.done() and server_task.exception():
-        raise server_task.exception()
+        raise ValueError(f"Server task failed to start {server_task.exception()}")
     yield f"http://{host}:{port}", model_name
 
     # Teardown: Cancel the server task if it's still running
