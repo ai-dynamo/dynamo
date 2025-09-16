@@ -141,17 +141,12 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn messages(&self) -> Value {
         let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
 
-
         let needs_collapse = if let Some(arr) = messages_json.as_array() {
-            arr.iter().any(|msg| {
-                msg.get("content")
-                    .and_then(|c| c.as_array())
-                    .is_some()
-            })
+            arr.iter()
+                .any(|msg| msg.get("content").and_then(|c| c.as_array()).is_some())
         } else {
             false
         };
-
 
         if needs_collapse {
             may_be_fix_msg_content(messages_json)
@@ -485,7 +480,6 @@ mod tests {
             serde_json::Value::String("Another\nmulti-part\nmessage".to_string())
         );
     }
-
 
     #[test]
     fn test_may_be_fix_msg_content_empty_array() {
