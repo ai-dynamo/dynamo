@@ -36,7 +36,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
             "sampling_options": {
                 "temperature": 0.0,
                 "top_p": 1.0,
-                "top_k": -1,
+                "top_k": 1,
                 "beam_width": 1,
                 "repetition_penalty": 1.0,
                 "presence_penalty": 0.0,
