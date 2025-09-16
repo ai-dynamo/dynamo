@@ -37,22 +37,23 @@ The framework is a Python-based wrapper around `genai-perf` that:
 
 ## Prerequisites
 
-1. **Kubernetes cluster with NVIDIA GPUs and Dynamo Cloud platform** - You need a Kubernetes cluster with eligible NVIDIA GPUs and the Dynamo Cloud platform installed. First follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
+1. **Dynamo container environment** - You must be running inside a Dynamo container with the benchmarking tools pre-installed.
 
-2. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster.
+2. **Ubuntu 24.04** - GenAI-Perf requires Ubuntu 24.04 or higher to work properly. If you are on Ubuntu 22.04 or lower, you will need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).
 
-3. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
+3. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster.
+
+4. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
    ```bash
    pip install -r deploy/utils/requirements.txt
    ```
-   *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
 
 ## User Workflow
 
 Follow these steps to benchmark Dynamo deployments:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. Follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) for detailed instructions.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
 Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../components/backends/). Each deployment should have a frontend service exposed.
