@@ -208,8 +208,7 @@ python3 -u -m benchmarks.utils.benchmark \
 python3 -m benchmarks.utils.plot --data-dir $OUTPUT_DIR
 ```
 
-**Note**: The Python benchmarking module automatically handles deployment, benchmarking, and plot generation in a single command. The examples above show how to run each step separately if you need more granular control.
-
+**Note**: The Python benchmarking module connects to your existing endpoints, runs the benchmarks, and can generate plots. Deployment is user-managed and out of scope for this tool.
 ### Comparison Limitations
 
 The plotting system supports up to 12 different inputs in a single comparison. If you need to compare more than 12 different deployments/endpoints, consider running separate benchmark sessions or grouping related comparisons together.
