@@ -425,6 +425,9 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_user(self.inner.user.as_deref())?;
         // none for seed
 
+        // Common Ext
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
+
         Ok(())
     }
 }
