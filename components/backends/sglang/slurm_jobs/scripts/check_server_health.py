@@ -7,9 +7,9 @@ import sys
 
 """
 A file that parses the response of `curl <host_ip>:<host_port>/health` endpoint
-to check whether the server is ready to be benchmarked. 
+to check whether the server is ready to be benchmarked.
 
-Usage: 
+Usage:
 
 ```bash
 curl_result=$(curl "${host_ip}:${host_port}/health" 2> /dev/null)
@@ -19,26 +19,22 @@ check_result=$(python3 check_server_health.py $N_PREFILL $N_DECODE <<< $curl_res
 ```
 """
 
-def check_server_health(
-    expected_n_prefill, 
-    expected_n_decode, 
-    response):
-    
-    try: 
+def check_server_health(expected_n_prefill, expected_n_decode, response):
+    try:
         decoded_response = json.loads(response)
     except json.JSONDecodeError:
         return f"Got invalid response from server that leads to JSON Decode error: {response}"
 
     if "instances" not in decoded_response:
         return f"Key 'instances' not found in response: {response}"
-    
-    for instance in decoded_response['instances']:
-        if instance.get('endpoint') == 'generate':
-            if instance.get('component') == "prefill":
+
+    for instance in decoded_response["instances"]:
+        if instance.get("endpoint") == 'generate':
+            if instance.get("component") == "prefill":
                 expected_n_prefill -= 1
-            if instance.get('component') == 'backend':
+            if instance.get("component") == "backend":
                 expected_n_decode -= 1
-    
+
     if expected_n_prefill == 0 and expected_n_decode == 0:
         return f"Model is ready. Response: {response}"
     else:
@@ -51,8 +47,8 @@ if __name__ == "__main__":
     response = sys.stdin.read()
     print(
         check_server_health(
-            expected_n_prefill=expected_n_prefill, 
-            expected_n_decode=expected_n_decode, 
-            response=response
+            expected_n_prefill=expected_n_prefill,
+            expected_n_decode=expected_n_decode,
+            response=response,
         )
     )
