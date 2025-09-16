@@ -21,24 +21,24 @@ This directory contains benchmarking scripts and tools for performance evaluatio
 
 ### Benchmark an Existing Endpoint
 ```bash
-./benchmark.sh --namespace my-namespace --input my-endpoint=http://your-endpoint:8000
+python3 -m benchmarks.utils.benchmark --namespace my-namespace --input my-endpoint=http://your-endpoint:8000
 ```
 
 ### Benchmark Dynamo Deployments
 ```bash
 # Benchmark disaggregated vLLM with custom label
-./benchmark.sh --namespace my-namespace --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml
+python3 -m benchmarks.utils.benchmark --namespace my-namespace --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml
 
 # Benchmark TensorRT-LLM disaggregated deployment
-./benchmark.sh --namespace my-namespace --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
+python3 -m benchmarks.utils.benchmark --namespace my-namespace --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
 
 # Compare multiple Dynamo deployments
-./benchmark.sh --namespace my-namespace \
+python3 -m benchmarks.utils.benchmark --namespace my-namespace \
   --input agg=components/backends/vllm/deploy/agg.yaml \
   --input disagg=components/backends/vllm/deploy/disagg.yaml
 
 # Compare Dynamo vs external endpoint
-./benchmark.sh --namespace my-namespace \
+python3 -m benchmarks.utils.benchmark --namespace my-namespace \
   --input dynamo=components/backends/vllm/deploy/disagg.yaml \
   --input external=http://localhost:8000
 ```

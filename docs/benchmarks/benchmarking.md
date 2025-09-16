@@ -23,13 +23,14 @@ You can mix and match these in a single benchmark run using custom labels. Confi
 
 ## What This Tool Does
 
-The framework is a wrapper around `genai-perf` that:
+The framework is a Python-based wrapper around `genai-perf` that:
 - Deploys user-specified `DynamoGraphDeployments` automatically
 - Benchmarks any HTTP endpoints (no deployment needed)
 - Runs concurrency sweeps across configurable load levels
 - Generates comparison plots with your custom labels
 - Works with any HuggingFace-compatible model on NVIDIA GPUs (H200, H100, A100, etc.)
 - Runs locally and connects to your Kubernetes deployments/endpoints
+- Provides direct Python script execution for maximum flexibility
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
@@ -55,32 +56,32 @@ The tool can be used to deploy, benchmark and compare Dynamo deployments (Dynamo
 export NAMESPACE=benchmarking
 
 # Compare multiple DynamoGraphDeployments of a single backend
-./benchmarks/benchmark.sh --namespace $NAMESPACE \
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
    --input agg=components/backends/vllm/deploy/agg.yaml \
    --input disagg=components/backends/vllm/deploy/disagg.yaml
 
 # Compare different backend types (vLLM vs TensorRT-LLM)
-./benchmarks/benchmark.sh --namespace $NAMESPACE \
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
    --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml \
    --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
 
 # Compare Dynamo deployment vs existing deployment (external endpoint)
-./benchmarks/benchmark.sh --namespace $NAMESPACE \
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
    --input dynamo=components/backends/vllm/deploy/disagg.yaml \
    --input vllm-baseline=http://localhost:8000
 
 # Compare three different configurations
-./benchmarks/benchmark.sh --namespace $NAMESPACE \
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
    --input dynamo-agg=components/backends/vllm/deploy/agg.yaml \
    --input dynamo-disagg=components/backends/vllm/deploy/disagg.yaml \
    --input external-vllm=http://localhost:8000
 
 # Benchmark single external endpoint
-./benchmarks/benchmark.sh --namespace $NAMESPACE \
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
    --input production-api=http://your-api:8000
 
 # Custom model and sequence lengths
-./benchmarks/benchmark.sh --namespace $NAMESPACE \
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
    --input my-setup=my-custom-manifest.yaml \
    --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 256
 ```
@@ -98,7 +99,7 @@ Ensure container images in your DynamoGraphDeployment manifests are accessible:
 ### Command Line Options
 
 ```bash
-./benchmarks/benchmark.sh --namespace NAMESPACE --input <label>=<manifest_path_or_endpoint> [--input <label>=<manifest_path_or_endpoint>]... [OPTIONS]
+python3 -m benchmarks.utils.benchmark --namespace NAMESPACE --input <label>=<manifest_path_or_endpoint> [--input <label>=<manifest_path_or_endpoint>]... [OPTIONS]
 
 REQUIRED:
   -n, --namespace NAMESPACE           Kubernetes namespace
@@ -129,7 +130,7 @@ OPTIONS:
 
 ### What Happens During Benchmarking
 
-The script automatically:
+The Python benchmarking module automatically:
 1. **Deploys** each DynamoGraphDeployment configuration to Kubernetes if manifests are passed in
 2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
 3. **Measures** key metrics: latency, throughput, time-to-first-token
@@ -155,7 +156,7 @@ If you need to benchmark multiple configurations simultaneously, consider using 
 
 ### Results Clearing Behavior
 
-**Important**: The benchmark script automatically clears the output directory before each run to ensure clean, reproducible results. This means:
+**Important**: The Python benchmarking module automatically clears the output directory before each run to ensure clean, reproducible results. This means:
 - Previous benchmark results in the same output directory will be completely removed
 - Each benchmark run starts with a clean slate
 - Results from different runs are not mixed or accumulated
@@ -171,9 +172,9 @@ The benchmarking framework supports any HuggingFace-compatible LLM model. To ben
 
 **Note**: You can override the default sequence lengths (2000/256 tokens) with `--isl` and `--osl` flags if needed for your specific workload.
 
-### Direct Python Execution
+### Python Script Usage
 
-For direct control over the benchmark workflow:
+The benchmarking framework is built around Python modules that provide direct control over the benchmark workflow:
 
 ```bash
 # Endpoint benchmarking
@@ -199,6 +200,8 @@ python3 -u -m benchmarks.utils.benchmark \
 python3 -m benchmarks.utils.plot --data-dir $OUTPUT_DIR
 ```
 
+**Note**: The Python benchmarking module automatically handles deployment, benchmarking, and plot generation in a single command. The examples above show how to run each step separately if you need more granular control.
+
 ### Comparison Limitations
 
 The plotting system supports up to 12 different inputs in a single comparison. If you need to compare more than 12 different deployments/endpoints, consider running separate benchmark sessions or grouping related comparisons together.
@@ -209,11 +212,11 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 
 ```bash
 # Custom concurrency levels
-CONCURRENCIES="1,5,20,50" ./benchmarks/benchmark.sh --namespace $NAMESPACE --input my-test=components/backends/vllm/deploy/disagg.yaml
+CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input my-test=components/backends/vllm/deploy/disagg.yaml
 
 # Or set permanently
 export CONCURRENCIES="1,2,5,10,25,50,100"
-./benchmarks/benchmark.sh --namespace $NAMESPACE --input test=disagg.yaml
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input test=disagg.yaml
 ```
 
 ## Understanding Your Results
@@ -275,10 +278,12 @@ Each concurrency directory contains:
 
 ## Customize Benchmarking Behavior
 
-The built-in workflow handles DynamoGraphDeployment deployment, benchmarking with genai-perf, and plot generation automatically. If you want to modify the behavior:
+The built-in Python workflow handles DynamoGraphDeployment deployment, benchmarking with genai-perf, and plot generation automatically. If you want to modify the behavior:
 
 1. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
 
 2. **Generate different plots**: Modify `benchmarks/utils/plot.py` to generate a different set of plots for whatever you wish to visualize.
 
-The `benchmark.sh` script provides a complete end-to-end benchmarking experience. For more granular control, use the Python modules directly.
+3. **Direct module usage**: Use individual Python modules (`benchmarks.utils.benchmark`, `benchmarks.utils.plot`) for granular control over each step of the benchmarking process.
+
+The Python benchmarking module provides a complete end-to-end benchmarking experience with full control over the workflow.
