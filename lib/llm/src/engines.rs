@@ -138,7 +138,9 @@ impl
         let (request, context) = incoming_request.transfer(());
         let ctx = context.context();
         let mut deltas = request.response_generator(ctx.id().to_string());
-        let req = request.inner.messages.into_iter().next_back().unwrap();
+        let Some(req) = request.inner.messages.into_iter().next_back() else {
+            anyhow::bail!("Empty chat messages in request");
+        };
 
         let prompt = match req {
             dynamo_async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {

@@ -139,8 +139,8 @@ async fn main_loop(
                         let _ = stdout.flush();
                         assistant_message += c;
                     }
-                    if chat_comp.finish_reason.is_some() {
-                        tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
+                    if let Some(reason) = chat_comp.finish_reason {
+                        tracing::trace!("finish reason: {reason:?}");
                         break;
                     }
                 }

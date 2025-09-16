@@ -208,7 +208,7 @@ fn gguf_default() -> Output {
 
     #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
     {
-        Output::EchoFull
+        Output::Echo
     }
 }
 
@@ -220,6 +220,6 @@ fn safetensors_default() -> Output {
 
     #[cfg(not(feature = "mistralrs"))]
     {
-        Output::EchoFull
+        Output::Echo
     }
 }
