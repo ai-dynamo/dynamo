@@ -124,6 +124,26 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+
+    fn get_seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+
+    fn get_n(&self) -> Option<u8> {
+        self.inner.n
+    }
+
+    fn get_best_of(&self) -> Option<u8> {
+        self.inner.best_of
+    }
+
+    fn get_min_p(&self) -> Option<f32> {
+        None
+    }
+
+    fn get_length_penalty(&self) -> Option<f32> {
+        None
+    }
 }
 
 impl CommonExtProvider for NvCreateCompletionRequest {

@@ -127,6 +127,30 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+    /// Retrieves the seed value for random number generation, if set.
+    fn get_seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+
+    /// Retrieves the number of completions to generate for each prompt, if set.
+    fn get_n(&self) -> Option<u8> {
+        self.inner.n
+    }
+
+    /// Retrieves the best_of parameter, if set.
+    fn get_best_of(&self) -> Option<u8> {
+        None // Not supported in chat completions
+    }
+
+    /// Retrieves the minimum probability threshold for token selection, if set.
+    fn get_min_p(&self) -> Option<f32> {
+        None
+    }
+
+    /// Retrieves the length penalty parameter, if set.
+    fn get_length_penalty(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
