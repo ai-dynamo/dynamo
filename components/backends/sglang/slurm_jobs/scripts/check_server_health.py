@@ -19,6 +19,7 @@ check_result=$(python3 check_server_health.py $N_PREFILL $N_DECODE <<< $curl_res
 ```
 """
 
+
 def check_server_health(expected_n_prefill, expected_n_decode, response):
     try:
         decoded_response = json.loads(response)
@@ -29,7 +30,7 @@ def check_server_health(expected_n_prefill, expected_n_decode, response):
         return f"Key 'instances' not found in response: {response}"
 
     for instance in decoded_response["instances"]:
-        if instance.get("endpoint") == 'generate':
+        if instance.get("endpoint") == "generate":
             if instance.get("component") == "prefill":
                 expected_n_prefill -= 1
             if instance.get("component") == "backend":
@@ -39,6 +40,7 @@ def check_server_health(expected_n_prefill, expected_n_decode, response):
         return f"Model is ready. Response: {response}"
     else:
         return f"Model is not ready, waiting for {expected_n_prefill} prefills and {expected_n_decode} decodes to spin up. Response: {response}"
+
 
 if __name__ == "__main__":
     expected_n_prefill = sys.argv[1]
