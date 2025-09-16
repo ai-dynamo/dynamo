@@ -159,10 +159,11 @@ pub fn detect_tool_call_start_harmony(chunk: &str, config: &JsonParserConfig) ->
     if trimmed.is_empty() {
         return false;
     }
+
     config
         .tool_call_start_tokens
         .iter()
-        .any(|token| trimmed.contains(token))
+        .any(|token| trimmed.contains(token)) || trimmed.contains("<|channel|>")
 }
 
 #[cfg(test)]
@@ -296,6 +297,8 @@ mod detect_parser_tests {
 
     #[test]
     fn test_detect_tool_call_start_harmony_chunk_without_tool_call_start_token() {
+        // This is a warkaround for now. Right now everything is treated as tool call start token.
+        // We need to improve this in the future.
         let text = r#"<|channel|>commentary to=functions.get_current_weather"#;
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
@@ -303,6 +306,6 @@ mod detect_parser_tests {
             ..Default::default()
         };
         let result = detect_tool_call_start_harmony(text, &config);
-        assert!(!result);
+        assert!(result);
     }
 }

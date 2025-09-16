@@ -677,6 +677,7 @@ pub fn apply_tool_calling_jail_internal(
         last_response_metadata: None,
         finished: false,
     };
+
     // Transform the stream using unfold to maintain state
     // Input: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>
     // Returns None if the stream is finished
