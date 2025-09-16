@@ -19,8 +19,6 @@ This benchmarking framework lets you compare performance across any combination 
 - **DynamoGraphDeployments**
 - **External HTTP endpoints** (existing services deployed following standard documentation from vLLM, llm-d, AIBrix, etc.)
 
-You can mix and match these in a single benchmark run using custom labels. Configure your DynamoGraphDeployment manifests for your specific models, hardware, and parallelization needs.
-
 ## What This Tool Does
 
 The framework is a Python-based wrapper around `genai-perf` that:
@@ -33,7 +31,7 @@ The framework is a Python-based wrapper around `genai-perf` that:
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
-**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The actual model loaded is determined by your deployment manifests. Only one model can be benchmarked at a time across all inputs to ensure fair comparison. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model in the manifest(s) and the model deployed at the endpoint(s).
+**Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
 
 ## Prerequisites
 
@@ -187,7 +185,7 @@ The benchmarking framework is built around Python modules that provide direct co
 ```bash
 # Endpoint benchmarking
 python3 -u -m benchmarks.utils.benchmark \
-   --input trtllm=http://your-endpoint:8000 \
+   --input experiment-a=http://your-endpoint:8000 \
    --namespace $NAMESPACE \
    --isl 2000 \
    --std 10 \
@@ -196,13 +194,13 @@ python3 -u -m benchmarks.utils.benchmark \
 
 # Deployment benchmarking (any combination)
 python3 -u -m benchmarks.utils.benchmark \
-   --input agg=$AGG_CONFIG \
-   --input disagg=$DISAGG_CONFIG \
-   --namespace $NAMESPACE \
+   --input experiment-a=http://localhost:8000 \
+   --input experiment-b=http://localhost:8005 \
+   --namespace my-namespace \
    --isl 2000 \
    --std 10 \
    --osl 256 \
-   --output-dir $OUTPUT_DIR
+   --output-dir ./benchmarks/results
 
 # Generate plots separately
 python3 -m benchmarks.utils.plot --data-dir $OUTPUT_DIR
@@ -281,9 +279,9 @@ benchmarks/results/
 ```text
 benchmarks/results/
 ├── plots/
-├── dynamo-agg/                  # --input dynamo-agg=agg.yaml
-├── dynamo-disagg/               # --input dynamo-disagg=disagg.yaml
-└── external-vllm/               # --input external-vllm=http://localhost:8000
+├── experiment-a/                  # --input experiment-a=http://endpoint-a
+├── experiment-b/                  # --input experiment-b=http://endpoint-b
+└── experiment-c/                  # --input experiment-c=http://endpoint-c
 ```
 
 Each concurrency directory contains:
