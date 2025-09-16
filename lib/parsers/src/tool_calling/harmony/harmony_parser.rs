@@ -163,7 +163,8 @@ pub fn detect_tool_call_start_harmony(chunk: &str, config: &JsonParserConfig) ->
     config
         .tool_call_start_tokens
         .iter()
-        .any(|token| trimmed.contains(token)) || trimmed.contains("<|channel|>")
+        .any(|token| trimmed.contains(token))
+        || trimmed.contains("<|channel|>")
 }
 
 #[cfg(test)]
