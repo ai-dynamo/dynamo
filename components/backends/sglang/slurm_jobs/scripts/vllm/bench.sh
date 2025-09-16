@@ -27,7 +27,7 @@ echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_
 wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
 
 set -e
-warmup_model $head_node $head_port $model_name $model_path "${chosen_isl}x${chosen_osl}x10000x10000x${chosen_req_rate}"
+warmup_model $head_node $head_port $model_name $model_path "${chosen_isl}x${chosen_osl}x10000x10000x250"
 set +e
 
 result_dir="/logs/vllm_isl_${chosen_isl}_osl_${chosen_osl}"

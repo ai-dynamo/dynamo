@@ -27,7 +27,7 @@ wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
 sleep 300
 
 set -e
-warmup_model $head_node $head_port $SERVED_MODEL_NAME $MODEL_PATH "${chosen_isl}x${chosen_osl}x10000x10000x${chosen_req_rate}"
+warmup_model $head_node $head_port $SERVED_MODEL_NAME $MODEL_PATH "${chosen_isl}x${chosen_osl}x10000x10000x250"
 set +e
 
 profile_folder="/logs/sglang_isl_${chosen_isl}_osl_${chosen_osl}"
