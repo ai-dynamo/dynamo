@@ -84,7 +84,8 @@ Once vllm serve is ready, follow below steps to use LMBenchmark to benchmark KVB
 ```bash
 git clone https://github.com/LMCache/LMBenchmark.git
 
-# show case of running the synthetic multi-turn chat dataset
+# show case of running the synthetic multi-turn chat dataset.
+# we are passing model, endpoint, output file prefix and qps to the sh script.
 cd LMBenchmark/synthetic-multi-round-qa
 ./long_input_short_output_run.sh \
     "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
