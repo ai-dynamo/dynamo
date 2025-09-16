@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import os
 from typing import Optional
 
 from tensorrt_llm.llmapi import BuildConfig
@@ -13,11 +14,13 @@ from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationStrategy,
 )
 
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+
 # Default endpoint for the next worker.
-DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm.generate"
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
-DEFAULT_ENCODE_ENDPOINT = "dyn://dynamo.tensorrt_llm_encode.generate"
+DEFAULT_NEXT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm_next.generate"
+DEFAULT_ENCODE_ENDPOINT = f"dyn://{DYN_NAMESPACE}.tensorrt_llm_encode.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
