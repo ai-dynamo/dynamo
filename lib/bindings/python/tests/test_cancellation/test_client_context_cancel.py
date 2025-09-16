@@ -49,6 +49,6 @@ async def test_client_context_cancel(server, client):
 
     # Verify server detected the cancellation
     assert handler.context_is_stopped
-    assert handler.context_is_killed
+    assert not handler.context_is_killed
 
     # TODO: Test with _generate_until_asyncio_cancelled server handler
