@@ -109,14 +109,13 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
                     }
 
                     // If we found text parts, replace the array content with concatenated string
-                    if !text_parts.is_empty() {
-                        if let Some(msg_obj) = msg.as_object_mut() {
+                    if !text_parts.is_empty()
+                        && let Some(msg_obj) = msg.as_object_mut() {
                             msg_obj.insert(
                                 "content".to_string(),
                                 serde_json::Value::String(text_parts.join("\n")),
                             );
                         }
-                    }
                     updated_messages.push(msg);
                 } else {
                     // String content - no modification needed, just clone reference
