@@ -819,15 +819,39 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                     tensor::DataType::Bool => {
                         tensor::FlattenTensor::Bool(content.bool_contents.clone())
                     }
+                    tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
+                        content.uint_contents.iter().map(|&x| x as u8).collect(),
+                    ),
+                    tensor::DataType::Uint16 => tensor::FlattenTensor::Uint16(
+                        content.uint_contents.iter().map(|&x| x as u16).collect(),
+                    ),
                     tensor::DataType::Uint32 => {
                         tensor::FlattenTensor::Uint32(content.uint_contents.clone())
                     }
+                    tensor::DataType::Uint64 => {
+                        tensor::FlattenTensor::Uint64(content.uint64_contents.clone())
+                    }
+                    tensor::DataType::Int8 => tensor::FlattenTensor::Int8(
+                        content.int_contents.iter().map(|&x| x as i8).collect(),
+                    ),
+                    tensor::DataType::Int16 => tensor::FlattenTensor::Int16(
+                        content.int_contents.iter().map(|&x| x as i16).collect(),
+                    ),
                     tensor::DataType::Int32 => {
                         tensor::FlattenTensor::Int32(content.int_contents.clone())
                     }
+                    tensor::DataType::Int64 => {
+                        tensor::FlattenTensor::Int64(content.int64_contents.clone())
+                    }
+
                     tensor::DataType::Float32 => {
                         tensor::FlattenTensor::Float32(content.fp32_contents.clone())
                     }
+
+                    tensor::DataType::Float64 => {
+                        tensor::FlattenTensor::Float64(content.fp64_contents.clone())
+                    }
+
                     tensor::DataType::Bytes => {
                         tensor::FlattenTensor::Bytes(content.bytes_contents.clone())
                     }
@@ -838,9 +862,16 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                     let raw_input = request.raw_input_contents.remove(0);
                     let data_size = match tensor.metadata.data_type {
                         tensor::DataType::Bool => 1,
+                        tensor::DataType::Uint8 => 1,
+                        tensor::DataType::Uint16 => 2,
                         tensor::DataType::Uint32 => 4,
+                        tensor::DataType::Uint64 => 8,
+                        tensor::DataType::Int8 => 1,
+                        tensor::DataType::Int16 => 2,
                         tensor::DataType::Int32 => 4,
+                        tensor::DataType::Int64 => 8,
                         tensor::DataType::Float32 => 4,
+                        tensor::DataType::Float64 => 8,
                         tensor::DataType::Bytes => 0,
                     };
                     // Non-bytes type, simply reinterpret cast the raw input bytes
@@ -888,6 +919,22 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                                         element_count,
                                     ))
                                 }
+                                tensor::DataType::Uint8 => {
+                                    tensor::FlattenTensor::Uint8(Vec::from_raw_parts(
+                                        ptr as *mut u8,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
+                                tensor::DataType::Uint16 => {
+                                    tensor::FlattenTensor::Uint16(Vec::from_raw_parts(
+                                        ptr as *mut u16,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
                                 tensor::DataType::Uint32 => {
                                     tensor::FlattenTensor::Uint32(Vec::from_raw_parts(
                                         ptr as *mut u32,
@@ -895,6 +942,31 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                                         element_count,
                                     ))
                                 }
+
+                                tensor::DataType::Uint64 => {
+                                    tensor::FlattenTensor::Uint64(Vec::from_raw_parts(
+                                        ptr as *mut u64,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
+                                tensor::DataType::Int8 => {
+                                    tensor::FlattenTensor::Int8(Vec::from_raw_parts(
+                                        ptr as *mut i8,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
+                                tensor::DataType::Int16 => {
+                                    tensor::FlattenTensor::Int16(Vec::from_raw_parts(
+                                        ptr as *mut i16,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
                                 tensor::DataType::Int32 => {
                                     tensor::FlattenTensor::Int32(Vec::from_raw_parts(
                                         ptr as *mut i32,
@@ -902,6 +974,15 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                                         element_count,
                                     ))
                                 }
+
+                                tensor::DataType::Int64 => {
+                                    tensor::FlattenTensor::Int64(Vec::from_raw_parts(
+                                        ptr as *mut i64,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
                                 tensor::DataType::Float32 => {
                                     tensor::FlattenTensor::Float32(Vec::from_raw_parts(
                                         ptr as *mut f32,
@@ -909,6 +990,15 @@ impl TryFrom<ModelInferRequest> for NvCreateTensorRequest {
                                         element_count,
                                     ))
                                 }
+
+                                tensor::DataType::Float64 => {
+                                    tensor::FlattenTensor::Float64(Vec::from_raw_parts(
+                                        ptr as *mut f64,
+                                        element_count,
+                                        element_count,
+                                    ))
+                                }
+
                                 tensor::DataType::Bytes => {
                                     return Err(Status::internal(format!(
                                         "Unexpected BYTES type in non-bytes branch for input '{}'",
@@ -976,24 +1066,73 @@ impl TryFrom<NvCreateTensorResponse> for ModelInferResponse {
                             bool_contents: data.clone(),
                             ..Default::default()
                         }),
+                        tensor::FlattenTensor::Uint8(data) => {
+                            Some(inference::InferTensorContents {
+                                uint_contents: data.iter().map(|&x| x as u32).collect(),
+                                ..Default::default()
+                            })
+                        }
+
+                        tensor::FlattenTensor::Uint16(data) => {
+                            Some(inference::InferTensorContents {
+                                uint_contents: data.iter().map(|&x| x as u32).collect(),
+                                ..Default::default()
+                            })
+                        }
+
                         tensor::FlattenTensor::Uint32(data) => {
                             Some(inference::InferTensorContents {
                                 uint_contents: data.clone(),
                                 ..Default::default()
                             })
                         }
+
+                        tensor::FlattenTensor::Uint64(data) => {
+                            Some(inference::InferTensorContents {
+                                uint64_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+
+                        tensor::FlattenTensor::Int8(data) => Some(inference::InferTensorContents {
+                            int_contents: data.iter().map(|&x| x as i32).collect(),
+                            ..Default::default()
+                        }),
+                        tensor::FlattenTensor::Int16(data) => {
+                            Some(inference::InferTensorContents {
+                                int_contents: data.iter().map(|&x| x as i32).collect(),
+                                ..Default::default()
+                            })
+                        }
+
                         tensor::FlattenTensor::Int32(data) => {
                             Some(inference::InferTensorContents {
                                 int_contents: data.clone(),
                                 ..Default::default()
                             })
                         }
+
+                        tensor::FlattenTensor::Int64(data) => {
+                            Some(inference::InferTensorContents {
+                                int64_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+
                         tensor::FlattenTensor::Float32(data) => {
                             Some(inference::InferTensorContents {
                                 fp32_contents: data.clone(),
                                 ..Default::default()
                             })
                         }
+
+                        tensor::FlattenTensor::Float64(data) => {
+                            Some(inference::InferTensorContents {
+                                fp64_contents: data.clone(),
+                                ..Default::default()
+                            })
+                        }
+
                         tensor::FlattenTensor::Bytes(data) => {
                             Some(inference::InferTensorContents {
                                 bytes_contents: data.clone(),
@@ -1030,9 +1169,16 @@ impl tensor::DataType {
     pub fn to_kserve(&self) -> i32 {
         match *self {
             tensor::DataType::Bool => DataType::TypeBool as i32,
+            tensor::DataType::Uint8 => DataType::TypeUint8 as i32,
+            tensor::DataType::Uint16 => DataType::TypeUint16 as i32,
             tensor::DataType::Uint32 => DataType::TypeUint32 as i32,
+            tensor::DataType::Uint64 => DataType::TypeUint64 as i32,
+            tensor::DataType::Int8 => DataType::TypeInt8 as i32,
+            tensor::DataType::Int16 => DataType::TypeInt16 as i32,
             tensor::DataType::Int32 => DataType::TypeInt32 as i32,
+            tensor::DataType::Int64 => DataType::TypeInt64 as i32,
             tensor::DataType::Float32 => DataType::TypeFp32 as i32,
+            tensor::DataType::Float64 => DataType::TypeFp64 as i32,
             tensor::DataType::Bytes => DataType::TypeString as i32,
         }
     }
@@ -1042,9 +1188,16 @@ impl std::fmt::Display for tensor::DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             tensor::DataType::Bool => write!(f, "BOOL"),
+            tensor::DataType::Uint8 => write!(f, "UINT8"),
+            tensor::DataType::Uint16 => write!(f, "UINT16"),
             tensor::DataType::Uint32 => write!(f, "UINT32"),
+            tensor::DataType::Uint64 => write!(f, "UINT64"),
+            tensor::DataType::Int8 => write!(f, "INT8"),
+            tensor::DataType::Int16 => write!(f, "INT16"),
             tensor::DataType::Int32 => write!(f, "INT32"),
+            tensor::DataType::Int64 => write!(f, "INT64"),
             tensor::DataType::Float32 => write!(f, "FP32"),
+            tensor::DataType::Float64 => write!(f, "FP64"),
             tensor::DataType::Bytes => write!(f, "BYTES"),
         }
     }
@@ -1056,9 +1209,16 @@ impl FromStr for tensor::DataType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "BOOL" => Ok(tensor::DataType::Bool),
+            "UINT8" => Ok(tensor::DataType::Uint8),
+            "UINT16" => Ok(tensor::DataType::Uint16),
             "UINT32" => Ok(tensor::DataType::Uint32),
+            "UINT64" => Ok(tensor::DataType::Uint64),
+            "INT8" => Ok(tensor::DataType::Int8),
+            "INT16" => Ok(tensor::DataType::Int16),
             "INT32" => Ok(tensor::DataType::Int32),
+            "INT64" => Ok(tensor::DataType::Int64),
             "FP32" => Ok(tensor::DataType::Float32),
+            "FP64" => Ok(tensor::DataType::Float64),
             "BYTES" => Ok(tensor::DataType::Bytes),
             _ => Err(anyhow::anyhow!("Invalid data type")),
         }

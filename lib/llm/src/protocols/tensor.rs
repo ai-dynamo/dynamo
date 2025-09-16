@@ -22,9 +22,16 @@ pub use super::openai::nvext::{NvExt, NvExtProvider};
 #[derive(Debug, Serialize, Clone, Eq, PartialEq, Deserialize)]
 pub enum DataType {
     Bool,
+    Uint8,
+    Uint16,
     Uint32,
+    Uint64,
+    Int8,
+    Int16,
     Int32,
+    Int64,
     Float32,
+    Float64,
     Bytes,
 }
 
@@ -32,10 +39,17 @@ pub enum DataType {
 #[serde(untagged)]
 pub enum FlattenTensor {
     Bool(Vec<bool>),
-    // [gluo WIP] fill all numerical types in different precisions
+    // [gluo NOTE] f16, and bf16 is not stably supported
+    Uint8(Vec<u8>),
+    Uint16(Vec<u16>),
     Uint32(Vec<u32>),
+    Uint64(Vec<u64>),
+    Int8(Vec<i8>),
+    Int16(Vec<i16>),
     Int32(Vec<i32>),
+    Int64(Vec<i64>),
     Float32(Vec<f32>),
+    Float64(Vec<f64>),
     // Typically use to store string data, but really it can store
     // arbitrary data such as serialized handles for custom worker behavior.
     Bytes(Vec<Vec<u8>>),
@@ -58,9 +72,6 @@ pub struct TensorModelConfig {
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct Tensor {
     pub metadata: TensorMetadata,
-    // [gluo WIP] data type is determined by the enum variant.
-    // verify if the request can be properly pass to Python side as
-    // here is enum with data and there is no proper mapping in Python.
     pub data: FlattenTensor,
 }
 
