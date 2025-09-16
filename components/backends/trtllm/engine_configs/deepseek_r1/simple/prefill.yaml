@@ -36,4 +36,4 @@ disable_overlap_scheduler: true
 print_iter_log: true
 
 cache_transceiver_config:
-  backend: default
+  backend: DEFAULT

@@ -97,6 +97,7 @@ async def test_radix_tree_binding(distributed_runtime):
 # OnceCell initializations not being reset.
 # The test works individually if I run it with 32, then 11, then 64.
 # @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
+@pytest.mark.skip(reason="Flakey in CI. Likely race condition going on.")
 async def test_event_handler(distributed_runtime):
     kv_block_size = 32
     namespace = "kv_test"

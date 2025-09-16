@@ -35,9 +35,7 @@ pytestmark = [
     pytest.mark.kvbm,
     pytest.mark.e2e,
     pytest.mark.slow,
-    pytest.mark.nightly,
     pytest.mark.gpu_1,
-    pytest.mark.skip,  # TODO failing for me so turning off for now
 ]
 
 
@@ -119,6 +117,8 @@ class LLMServerManager:
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}',
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            "--max-seq-len",
+            "8000",  # required to fit on L4 GPU when using 8b model
         ]
 
         # GPU blocks override

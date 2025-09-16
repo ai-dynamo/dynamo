@@ -119,7 +119,7 @@ pub async fn start_kv_router_background(
         ))?;
 
         match nats_client
-            .object_store_download_data::<Vec<RouterEvent>>(url)
+            .object_store_download_data::<Vec<RouterEvent>>(&url)
             .await
         {
             Ok(events) => {
@@ -353,7 +353,7 @@ async fn perform_snapshot_and_purge(
 
     resources
         .nats_client
-        .object_store_upload_data(&events, url)
+        .object_store_upload_data(&events, &url)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to upload snapshot: {e:?}"))?;
 

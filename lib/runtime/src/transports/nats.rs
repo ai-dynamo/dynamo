@@ -173,10 +173,10 @@ impl Client {
     }
 
     /// Upload file to NATS at this URL
-    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
+    pub async fn object_store_upload(&self, filepath: &Path, nats_url: &Url) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::open(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -193,12 +193,12 @@ impl Client {
     /// Download file from NATS at this URL
     pub async fn object_store_download(
         &self,
-        nats_url: Url,
+        nats_url: &Url,
         filepath: &Path,
     ) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::create(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
@@ -225,7 +225,7 @@ impl Client {
     }
 
     /// Upload a serializable struct to NATS object store using bincode
-    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: Url) -> anyhow::Result<()>
+    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: &Url) -> anyhow::Result<()>
     where
         T: Serialize,
     {
@@ -233,7 +233,7 @@ impl Client {
         let binary_data = bincode::serialize(data)
             .map_err(|e| anyhow::anyhow!("Failed to serialize data with bincode: {e}"))?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -251,11 +251,11 @@ impl Client {
     }
 
     /// Download and deserialize a struct from NATS object store using bincode
-    pub async fn object_store_download_data<T>(&self, nats_url: Url) -> anyhow::Result<T>
+    pub async fn object_store_download_data<T>(&self, nats_url: &Url) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
     {
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
@@ -1078,13 +1078,13 @@ mod tests {
 
         // Upload the data
         client
-            .object_store_upload_data(&test_data, url.clone())
+            .object_store_upload_data(&test_data, &url)
             .await
             .expect("Failed to upload data");
 
         // Download the data
         let downloaded_data: TestData = client
-            .object_store_download_data(url.clone())
+            .object_store_download_data(&url)
             .await
             .expect("Failed to download data");
 

@@ -26,7 +26,7 @@ kv_cache_config:
   enable_block_reuse: false
 
 cache_transceiver_config:
-  backend: default
+  backend: DEFAULT
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed
 # config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
