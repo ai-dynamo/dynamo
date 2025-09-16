@@ -171,6 +171,7 @@ for concurrency in ${concurrency_list}; do
     mkdir -p ${log_path}/concurrency_${concurrency}
 
     python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
+        --backend "dynamo" \
         --served-model-name ${model} \
         --model ${model_path} \
         --dataset-name random \
