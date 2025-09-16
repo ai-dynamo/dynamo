@@ -12,6 +12,7 @@ use rs::pipeline::network::Ingress;
 use std::path::PathBuf;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
+use tracing::{Instrument, info_span};
 
 use dynamo_runtime::{
     self as rs, logging,
@@ -58,6 +59,37 @@ type JsonServerStreamingIngress =
 static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
+
+// Helper to create child span with trace context if available
+fn create_client_span(operation: &str, request_id: &str, trace_context: Option<&dynamo_runtime::logging::DistributedTraceContext>) -> tracing::Span {
+    if let Some(ctx) = trace_context {
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = request_id,
+            trace_id = ctx.trace_id.as_str(),           // Pass existing trace_id
+            parent_id = ctx.span_id.as_str(),           // Use current span as parent
+            x_request_id = ctx.x_request_id.as_deref().unwrap_or(""),
+            x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
+            tracestate = ctx.tracestate.as_deref().unwrap_or("")
+        )
+    } else {
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = request_id,
+        )
+    }
+}
+
+// Helper to get appropriate span for instrumentation
+fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
+    if let Some(trace_ctx) = context.trace_context() {
+        create_client_span(operation, context.inner().id(), Some(trace_ctx))
+    } else {
+        tracing::Span::none()
+    }
+}
 
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
@@ -782,8 +814,13 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.round_robin(request).await.map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    // NEW: Always instrument with appropriate span (none if no trace context)
+                    let span = get_span_for_context(&context, "round_robin");
+                    let stream_future = client.round_robin(request_ctx).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -815,8 +852,12 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.random(request).await.map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    let span = get_span_for_context(&context, "random");
+                    let stream_future = client.random(request_ctx).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -849,11 +890,12 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client
-                        .direct(request, instance_id)
-                        .await
-                        .map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    let span = get_span_for_context(&context, "direct");
+                    let stream_future = client.direct(request_ctx, instance_id).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }
@@ -890,8 +932,12 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.r#static(request).await.map_err(to_pyerr)?;
+                    let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
+
+                    let span = get_span_for_context(&context, "static");
+                    let stream_future = client.r#static(request_ctx).instrument(span);
+
+                    let stream = stream_future.await.map_err(to_pyerr)?;
                     context.inner().link_child(stream.context());
                     stream
                 }

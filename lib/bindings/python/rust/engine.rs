@@ -22,6 +22,7 @@ use pythonize::{depythonize, pythonize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use dynamo_runtime::logging::get_distributed_tracing_context;
 
 pub use dynamo_runtime::{
     pipeline::{
@@ -167,6 +168,9 @@ where
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
 
+        // NEW: Capture current trace context
+        let current_trace_context = get_distributed_tracing_context();
+
         // Clone the PyObject to move into the thread
 
         // Create a channel to communicate between the Python thread and the Rust async context
@@ -190,7 +194,12 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, Context::new(ctx_python.clone()))?;
+
+                // NEW: Create context with trace information
+                let py_ctx = Py::new(py, Context::with_trace_context(
+                    ctx_python.clone(),
+                    current_trace_context  // Pass the trace context
+                ))?;
 
                 let gen = if has_context {
                     // Pass context as a kwarg
