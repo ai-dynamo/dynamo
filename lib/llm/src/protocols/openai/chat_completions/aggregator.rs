@@ -12,7 +12,6 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
 use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -38,6 +37,7 @@ pub struct DeltaAggregator {
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
+#[derive(Debug)]
 struct DeltaChoice {
     /// The index of the choice in the completion.
     index: u32,
@@ -60,6 +60,28 @@ impl Default for DeltaAggregator {
     /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn convert_tool_chunk_to_message_tool_call(
+    chunk: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+) -> Option<dynamo_async_openai::types::ChatCompletionMessageToolCall> {
+    // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+    if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
+        if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
+            Some(dynamo_async_openai::types::ChatCompletionMessageToolCall {
+                id: id.clone(),
+                r#type: r#type.clone(),
+                function: dynamo_async_openai::types::FunctionCall {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            })
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -89,7 +111,7 @@ impl DeltaAggregator {
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
-        parsing_options: ParsingOptions,
+        _parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -133,10 +155,9 @@ impl DeltaAggregator {
                                     tool_calls: None,
                                     reasoning_content: None,
                                 });
-
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
-                            state_choice.text.push_str(content);
+                            state_choice.text.push_str(content.trim_end());
                         }
 
                         if let Some(reasoning_content) = &choice.delta.reasoning_content {
@@ -144,6 +165,27 @@ impl DeltaAggregator {
                                 .reasoning_content
                                 .get_or_insert_with(String::new)
                                 .push_str(reasoning_content);
+                        }
+
+                        // Since one tool call is one chunk, we don't need to aggregate them
+                        // We just need to convert the ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall and append to the state_choice.tool_calls
+                        if let Some(tool_calls) = &choice.delta.tool_calls
+                            && !tool_calls.is_empty()
+                        {
+                            // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
+                            let converted_tool_calls: Vec<
+                                dynamo_async_openai::types::ChatCompletionMessageToolCall,
+                            > = tool_calls
+                                .iter()
+                                .filter_map(convert_tool_chunk_to_message_tool_call)
+                                .collect();
+
+                            // Initialize and push the converted tool calls to state_choice.tool_calls
+                            if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
+                                existing_tool_calls.extend(converted_tool_calls);
+                            } else {
+                                state_choice.tool_calls = Some(converted_tool_calls);
+                            }
                         }
 
                         // Update finish reason if provided.
@@ -179,39 +221,8 @@ impl DeltaAggregator {
             .await;
 
         // Return early if an error was encountered.
-        let mut aggregator = if let Some(error) = aggregator.error {
+        if let Some(error) = aggregator.error {
             return Err(error);
-        } else {
-            aggregator
-        };
-
-        // After aggregation, inspect each choice's text for tool call syntax
-        for choice in aggregator.choices.values_mut() {
-            if choice.tool_calls.is_none()
-                && let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
-                    &choice.text,
-                    parsing_options.tool_call_parser.as_deref(),
-                )
-            {
-                if tool_calls.is_empty() {
-                    continue;
-                }
-                for tool_call in &tool_calls {
-                    tracing::debug!(
-                        tool_call_id = %tool_call.id,
-                        function_name = %tool_call.function.name,
-                        arguments = %tool_call.function.arguments,
-                        "Parsed structured tool call from aggregated content"
-                    );
-                }
-                choice.tool_calls = Some(tool_calls);
-                choice.text.clear();
-                // If normal text is not empty, update the choice text
-                if let Some(normal_text) = normal_text.filter(|text| !text.is_empty()) {
-                    choice.text = normal_text;
-                }
-                choice.finish_reason = Some(dynamo_async_openai::types::FinishReason::ToolCalls);
-            }
         }
 
         // Extract aggregated choices and sort them by index.
@@ -328,12 +339,40 @@ mod tests {
         role: Option<dynamo_async_openai::types::Role>,
         finish_reason: Option<dynamo_async_openai::types::FinishReason>,
         logprob: Option<f32>,
+        tool_calls: Option<&str>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         // ALLOW: function_call is deprecated
+
+        let tool_calls: Option<serde_json::Value> =
+            tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
+
+        let tool_call_chunks = if let Some(tool_calls) = tool_calls {
+            vec![
+                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    index: 0,
+                    id: Some("test_id".to_string()),
+                    r#type: Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                    function: Some(dynamo_async_openai::types::FunctionCallStream {
+                        name: tool_calls["name"].as_str().map(|s| s.to_string()),
+                        arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
+                    }),
+                },
+            ]
+        } else {
+            vec![
+                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    index: 0,
+                    id: None,
+                    r#type: None,
+                    function: None,
+                },
+            ]
+        };
+
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: Some(text.to_string()),
             function_call: None,
-            tool_calls: None,
+            tool_calls: Some(tool_call_chunks),
             role,
             refusal: None,
             reasoning_content: None,
@@ -407,6 +446,7 @@ mod tests {
             Some(dynamo_async_openai::types::Role::User),
             None,
             None,
+            None,
         );
 
         // Create a stream
@@ -445,6 +485,7 @@ mod tests {
             Some(dynamo_async_openai::types::Role::User),
             None,
             Some(-0.1),
+            None,
         );
         let annotated_delta2 = create_test_delta(
             0,
@@ -452,6 +493,7 @@ mod tests {
             None,
             Some(dynamo_async_openai::types::FinishReason::Stop),
             Some(-0.2),
+            None,
         );
 
         // Create a stream
@@ -591,10 +633,11 @@ mod tests {
         // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
         let annotated_delta = create_test_delta(
             0,
-            tool_call_json,
+            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?",
             Some(dynamo_async_openai::types::Role::Assistant),
             Some(dynamo_async_openai::types::FinishReason::ToolCalls),
             None,
+            Some(tool_call_json),
         );
         let data = annotated_delta.data.unwrap();
 
@@ -630,72 +673,9 @@ mod tests {
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "fahrenheit");
 
-        // The content should be cleared (None) after tool call parsing
-        assert!(choice.message.content.is_none());
-
-        // The finish_reason should be ToolCalls
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
-        );
-        assert_eq!(
-            choice.message.role,
-            dynamo_async_openai::types::Role::Assistant
-        );
-    }
-
-    #[tokio::test]
-    async fn test_tool_calling_output_with_normal_text() {
-        // Simulate a delta with a tool call in the content
-        let tool_call_json = r#"Hey, I'm a normal text! {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-
-        // Use create_test_delta to generate the annotated delta, then extract the inner delta for the test
-        let annotated_delta = create_test_delta(
-            0,
-            tool_call_json,
-            Some(dynamo_async_openai::types::Role::Assistant),
-            Some(dynamo_async_openai::types::FinishReason::ToolCalls),
-            None,
-        );
-        let data = annotated_delta.data.unwrap();
-
-        // Wrap it in Annotated and create a stream
-        let annotated_delta = Annotated {
-            data: Some(data),
-            id: Some("test_id".to_string()),
-            event: None,
-            comment: None,
-        };
-        let stream = Box::pin(stream::iter(vec![annotated_delta]));
-
-        // Call DeltaAggregator::apply
-        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
-
-        // Check the result
-        assert!(result.is_ok());
-        let response = result.unwrap();
-
-        // There should be one choice
-        assert_eq!(response.choices.len(), 1);
-        let choice = &response.choices[0];
-
-        // The tool_calls field should be present and parsed
-        assert!(choice.message.tool_calls.is_some());
-        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
-        assert_eq!(tool_calls.len(), 1);
-
-        let tool_call = &tool_calls[0];
-        assert_eq!(tool_call.function.name, "get_weather");
-        // The arguments should be a JSON string containing the expected keys
-        let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments).unwrap();
-        assert_eq!(args["location"], "San Francisco, CA");
-        assert_eq!(args["unit"], "fahrenheit");
-
-        // The content should be the normal text
-        assert!(choice.message.content.is_some());
         assert_eq!(
             choice.message.content.as_ref().unwrap(),
-            "Hey, I'm a normal text!"
+            "Hey Dude ! What's the weather in San Francisco in Fahrenheit?"
         );
 
         // The finish_reason should be ToolCalls
