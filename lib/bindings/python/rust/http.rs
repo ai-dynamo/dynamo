@@ -167,10 +167,9 @@ where
                         // and fields.
                         if let Ok(type_name) = bound_err.get_type().name() {
                             if type_name.to_string().contains("HttpError") {
-                                if let (Ok(code), Ok(message)) = (
-                                    bound_err.getattr("code"),
-                                    bound_err.getattr("message"),
-                                ) {
+                                if let (Ok(code), Ok(message)) =
+                                    (bound_err.getattr("code"), bound_err.getattr("message"))
+                                {
                                     if let (Ok(code), Ok(message)) =
                                         (code.extract::<u16>(), message.extract::<String>())
                                     {

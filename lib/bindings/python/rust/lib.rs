@@ -116,6 +116,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
@@ -378,6 +379,11 @@ impl DistributedRuntime {
 
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
+    }
+
+    fn child_token(&self) -> CancellationToken {
+        let inner = self.inner.runtime().child_token();
+        CancellationToken { inner }
     }
 }
 
