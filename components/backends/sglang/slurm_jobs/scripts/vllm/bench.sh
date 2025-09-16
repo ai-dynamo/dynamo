@@ -37,8 +37,7 @@ set -x
 python3 benchmark_serving.py \
     --model ${model_name} --tokenizer ${model_path} \
     --host $head_node --port $head_port \
-    --use-chat-template \
-    --backend "openai" --endpoint /v1/completions \
+    --backend "dynamo" --endpoint /v1/completions \
     --disable-tqdm \
     --dataset-name random \
     --num-prompts "$warmup_prompts" \
@@ -66,8 +65,7 @@ do
     python3 benchmark_serving.py \
         --model ${model_name} --tokenizer ${model_path} \
         --host $head_node --port $head_port \
-        --use-chat-template \
-        --backend "openai" --endpoint /v1/completions \
+        --backend "dynamo" --endpoint /v1/completions \
         --disable-tqdm \
         --dataset-name random \
         --num-prompts "$num_prompts" \
