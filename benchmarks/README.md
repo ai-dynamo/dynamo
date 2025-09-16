@@ -23,7 +23,12 @@ This directory contains benchmarking scripts and tools for performance evaluatio
 ```bash
 # Port-forward your deployment to http://localhost:8000
 kubectl port-forward -n <namespace> <frontend-service-name> 8000:8000 &
-python3 -m benchmarks.utils.benchmark --namespace <namespace> --input my-endpoint=http://localhost:8000
+
+# Run benchmark
+python3 -m benchmarks.utils.benchmark --namespace <namespace> --input my-benchmark=http://localhost:8000
+
+# Generate plots
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 ```
 
 ## Features

@@ -47,39 +47,76 @@ The framework is a Python-based wrapper around `genai-perf` that:
    ```
    *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
 
-## Quickstart/Steps
+## User Workflow
 
-```
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input production-api=http://your-api:8000
-```
+Follow these steps to benchmark Dynamo deployments:
 
-## Use Cases
+### Step 1: Establish Kubernetes Cluster and Install Dynamo
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. Follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) for detailed instructions.
 
-The tool can be used to deploy, benchmark and compare Dynamo deployments (DynamoGraphDeployments) on a Kubernetes cluster as well as benchmark and compare servers deployed separately given a URL. In the examples below, Dynamo deployments are specified with a yaml and servers deployed separately by URL.
+### Step 2: Deploy DynamoGraphDeployments
+Deploy your DynamoGraphDeployments separately using the standard deployment documentation. Each deployment should have a frontend service exposed.
 
+### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
-export NAMESPACE=benchmarking
+# Port-forward the frontend service for deployment A
+kubectl port-forward -n <namespace> <frontend-service-name> 8000:8000 &
 
-# Compare multiple DynamoGraphDeployments of a single backend
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input agg=http://localhost:8000 \
-   --input disagg=http://localhost:8004
+# Benchmark deployment A using Python scripts
+python3 -m benchmarks.utils.benchmark --namespace <namespace> \
+   --input deployment-a=http://localhost:8000 \
+   --model "your-model-name" \
+   --output-dir ./benchmarks/results
+```
 
-# Compare different backend types (vLLM vs TensorRT-LLM)
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input vllm=http://localhost:8000 \
-   --input trtllm=http://localhost:8004
+### Step 4: [If Comparative] Teardown Deployment A and Establish Deployment B
+If comparing multiple deployments, teardown deployment A and deploy deployment B with a different configuration.
 
-# Compare Dynamo deployment vs another platform (e.g. llm-d)
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input dynamo=http://localhost:8000 \
-   --input llm-d=http://localhost:8004
+### Step 5: [If Comparative] Port-Forward and Benchmark Deployment B
+```bash
+# Port-forward the frontend service for deployment B
+kubectl port-forward -n <namespace> <frontend-service-name> 8001:8000 &
 
-# Custom model and sequence lengths
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input name=url \
-   --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 256
+# Benchmark deployment B using Python scripts
+python3 -m benchmarks.utils.benchmark --namespace <namespace> \
+   --input deployment-b=http://localhost:8001 \
+   --model "your-model-name" \
+   --output-dir ./benchmarks/results
+```
+
+### Step 6: Generate Summary and Visualization
+```bash
+# Generate plots and summary using Python plotting script
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
+```
+
+## Example Commands
+
+### Single Deployment Benchmark
+```bash
+# Port-forward and benchmark a single deployment
+kubectl port-forward -n my-namespace svc/my-frontend-service 8000:8000 &
+python3 -m benchmarks.utils.benchmark --namespace my-namespace \
+   --input my-deployment=http://localhost:8000 \
+   --model "meta-llama/Meta-Llama-3-8B"
+```
+
+### Comparative Benchmark
+```bash
+# Benchmark deployment A
+kubectl port-forward -n my-namespace svc/agg-frontend 8000:8000 &
+python3 -m benchmarks.utils.benchmark --namespace my-namespace \
+   --input aggregated=http://localhost:8000 \
+   --model "meta-llama/Meta-Llama-3-8B"
+
+# Benchmark deployment B (different port)
+kubectl port-forward -n my-namespace svc/disagg-frontend 8001:8000 &
+python3 -m benchmarks.utils.benchmark --namespace my-namespace \
+   --input disaggregated=http://localhost:8001 \
+   --model "meta-llama/Meta-Llama-3-8B"
+
+# Generate comparison plots
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 ```
 
 ## Configuration and Usage
@@ -87,19 +124,19 @@ python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
 ### Command Line Options
 
 ```bash
-python3 -m benchmarks.utils.benchmark --namespace NAMESPACE --input <label>=<manifest_path_or_endpoint> [--input <label>=<manifest_path_or_endpoint>]... [OPTIONS]
+python3 -m benchmarks.utils.benchmark --namespace NAMESPACE --input <label>=<endpoint_url> [--input <label>=<endpoint_url>]... [OPTIONS]
 
 REQUIRED:
   -n, --namespace NAMESPACE           Kubernetes namespace
-  --input <label>=<manifest_path_or_endpoint>  Benchmark input with custom label
+  --input <label>=<endpoint_url>     Benchmark input with custom label
                                         - <label>: becomes the name/label in plots
-                                        - <manifest_path_or_endpoint>: either a DynamoGraphDeployment manifest or HTTP endpoint URL
+                                        - <endpoint_url>: HTTP endpoint URL (e.g., http://localhost:8000)
                                         Can be specified multiple times for comparisons
 
 OPTIONS:
   -h, --help                    Show help message and examples
   -m, --model MODEL             Model name for GenAI-Perf configuration and logging (default: Qwen/Qwen3-0.6B)
-                                NOTE: This must match the model configured in your deployment manifests and endpoints
+                                NOTE: This must match the model deployed at the endpoint
   -i, --isl LENGTH              Input sequence length (default: 2000)
   -s, --std STDDEV              Input sequence standard deviation (default: 10)
   -o, --osl LENGTH              Output sequence length (default: 256)
@@ -111,19 +148,21 @@ OPTIONS:
 
 - **Custom Labels**: Each input must have a unique label that becomes the name in plots and results
 - **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
-- **Input Types**: Supports DynamoGraphDeployment manifests for automatic deployment, or HTTP endpoints for existing services
-- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, not deployment (deployment model is determined by the manifest files)
-- **Single Model Requirement**: Only one model can be benchmarked at a time across all inputs to ensure fair comparison.
+- **Port-Forwarding**: You must have an exposed endpoint before benchmarking
+- **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, and must match the model deployed at the endpoint
+- **Sequential Benchmarking**: For comparative benchmarks, deploy and benchmark each configuration separately
 
 ### What Happens During Benchmarking
 
 The Python benchmarking module:
-1. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
-2. **Measures** key metrics: latency, throughput, time-to-first-token
-3. **Saves** results to an output directory under the input keys
+1. **Connects** to your port-forwarded endpoint
+2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
+3. **Measures** key metrics: latency, throughput, time-to-first-token
+4. **Saves** results to an output directory organized by input labels
 
-The Python benchmark plotting module:
-1. **Generates** comparison plots using your custom labels in `<OUTPUT_DIR>/results/plots/`
+The Python plotting module:
+1. **Generates** comparison plots using your custom labels in `<OUTPUT_DIR>/plots/`
+2. **Creates** summary statistics and visualizations
 
 ### Using Your Own Models and Configuration
 
@@ -169,11 +208,11 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 
 ```bash
 # Custom concurrency levels
-CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input my-test=components/backends/vllm/deploy/disagg.yaml
+CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input my-test=http://localhost:8000
 
 # Or set permanently
 export CONCURRENCIES="1,2,5,10,25,50,100"
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input test=disagg.yaml
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input test=http://localhost:8000
 ```
 
 ## Understanding Your Results
