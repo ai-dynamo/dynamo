@@ -59,7 +59,8 @@ Deploy your DynamoGraphDeployments separately using the [deployment documentatio
 ### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
 # Port-forward the frontend service for deployment A
-kubectl port-forward -n <namespace> <frontend-service-name> 8000:8000 &
+kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 &
+# Note: remember to stop the port-forward process after benchmarking.
 
 # Benchmark deployment A using Python scripts
 python3 -m benchmarks.utils.benchmark --namespace <namespace> \
@@ -279,9 +280,9 @@ benchmarks/results/
 ```text
 benchmarks/results/
 ├── plots/
-├── experiment-a/                  # --input experiment-a=http://endpoint-a
-├── experiment-b/                  # --input experiment-b=http://endpoint-b
-└── experiment-c/                  # --input experiment-c=http://endpoint-c
+├── experiment-a/                  # --input experiment-a=http://localhost:8000
+├── experiment-b/                  # --input experiment-b=http://localhost:8001
+└── experiment-c/                  # --input experiment-c=http://localhost:8002
 ```
 
 Each concurrency directory contains:
@@ -291,7 +292,7 @@ Each concurrency directory contains:
 
 ## Customize Benchmarking Behavior
 
-The built-in Python workflow handles DynamoGraphDeployment deployment, benchmarking with genai-perf, and plot generation automatically. If you want to modify the behavior:
+The built-in Python workflow connects to endpoints, benchmarks with genai-perf, and generates plots. If you want to modify the behavior:
 
 1. **Extend the workflow**: Modify `benchmarks/utils/workflow.py` to add custom deployment types or metrics collection
 
