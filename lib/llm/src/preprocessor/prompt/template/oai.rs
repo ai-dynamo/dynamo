@@ -85,8 +85,8 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
 }
 
 fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
-    // Fix multi-part content messages by concatenating text parts with newlines
-    // This function assumes it's only called when fixing is needed
+    // If messages[content] is provided as a list, concatenate all the text fields
+    // into a string to match chat template expectations/usage.
     if let Some(arr) = messages.as_array() {
         let mut updated_messages = Vec::new();
         for msg in arr {
