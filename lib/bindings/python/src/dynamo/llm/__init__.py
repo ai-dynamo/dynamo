@@ -20,7 +20,6 @@ from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import ForwardPassMetrics as ForwardPassMetrics
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
-from dynamo._core import HttpError as HttpError
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
@@ -45,3 +44,14 @@ from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for
 from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input
+
+
+class HttpError(Exception):
+    def __init__(self, code: int, message: str):
+        assert isinstance(code, int), "HTTP status code must be an integer"
+        assert 0 <= code < 600, "HTTP status code must be between 0 and 599"
+        assert isinstance(message, str), "HTTP error message must be a string"
+        assert len(message) <= 8192, "HTTP error message too long"
+        self.code = code
+        self.message = message
+        super().__init__(f"HTTP {code}: {message}")

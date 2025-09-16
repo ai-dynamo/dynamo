@@ -92,7 +92,7 @@ def parse_args():
     parser.add_argument(
         "model",
         nargs="?",  # Make it optional for argparse, we'll validate manually
-        help="Path to the model (e.g., Qwen/Qwen3-0.6B).\n" "Required unless out=dyn.",
+        help="Path to the model (e.g., Qwen/Qwen3-0.6B).\nRequired unless out=dyn.",
     )
 
     # Parse the arguments that were not 'in=' or 'out='
