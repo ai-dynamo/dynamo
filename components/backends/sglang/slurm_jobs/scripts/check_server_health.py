@@ -43,8 +43,8 @@ def check_server_health(expected_n_prefill, expected_n_decode, response):
 
 
 if __name__ == "__main__":
-    expected_n_prefill = sys.argv[1]
-    expected_n_decode = sys.argv[2]
+    expected_n_prefill = int(sys.argv[1])
+    expected_n_decode = int(sys.argv[2])
 
     response = sys.stdin.read()
     print(
