@@ -141,7 +141,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/trtllm-runtime:your-tag
+image: my-registry/trtllm-runtime:my-tag
 
 # Configure your model and deployment settings
 args:

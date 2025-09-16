@@ -92,7 +92,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/sglang-runtime:your-tag
+image: my-registry/sglang-runtime:my-tag
 
 # Configure your model
 args:
