@@ -297,41 +297,48 @@ main() {
             # 1k/1k
             export ISL=1024
             export OSL=1024
+            export CACHE_TRANSCEIVER_MAX_NUM_TOKENS=4608
 
-            # 1k/1k mtp=on
-            run_single 1 4 8 32 128 false "0.9" 3 0 "1 2 4 8 16 36"
-            run_single 1 1 16 64 256 true "0.7" 3 0 "512 1075"
-            run_single 2 1 16 128 256 true "0.7" 1 0 "2150"
-            run_single 1 1 32 16 64 true "0.6" 3 0 "512"
-            run_single 1 1 8 256 512 true "0.8" 1 0 "2252"
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
+                # 1k/1k mtp=off
+                run_single 1 4 8 128 128 false "0.9" 0 0 "1 2 4 8 16 32 64 141"
+                run_single 1 1 32 32 32 true "0.7" 0 0 "1075"
+                run_single 1 1 16 64 64 true "0.75" 0 0 "1075"
+                run_single 2 1 16 256 256 true "0.75" 0 0 "2048 4300"
+                run_single 1 1 8 512 512 true "0.8" 0 0 "4300"
 
-            # 1k/1k mtp=off
-            run_single 1 4 8 128 128 false "0.9" 0 0 "1 2 4 8 16 32 64 141"
-            run_single 1 1 32 32 32 true "0.7" 0 0 "1075"
-            run_single 1 1 16 64 64 true "0.75" 0 0 "1075"
-            run_single 2 1 16 256 256 true "0.75" 0 0 "2048 4300"
-            run_single 1 1 8 512 512 true "0.8" 0 0 "4300"
+            else
+                # 1k/1k mtp=on
+                run_single 1 4 8 32 128 false "0.9" 3 0 "1 2 4 8 16 36"
+                run_single 1 1 16 64 256 true "0.7" 3 0 "512 1075"
+                run_single 2 1 16 128 256 true "0.7" 1 0 "2150"
+                run_single 1 1 32 16 64 true "0.6" 3 0 "512"
+                run_single 1 1 8 256 512 true "0.8" 1 0 "2252"
+            fi
 
             # 8k/1k
             export ISL=8192
             export OSL=1024
+            export CACHE_TRANSCEIVER_MAX_NUM_TOKENS=8448
 
-            # 8k/1k mtp=off
-            run_single 1 3 8 32 32 false "0.9" 0 0 "1 2 4 8 16 34"
-            run_single 4 1 32 16 16 true "0.7" 0 0 "256 538"
-            run_single 7 1 32 32 32 true "0.7" 0 0 "1075" # remove if need 5 cofigs
-            run_single 6 1 16 64 64 true "0.75" 0 0 "1075"
-            run_single 8 1 16 128 128 true "0.75" 0 0 "2150"
-            run_single 5 1 8 256 256 true "0.8" 0 0 "2150"
-
-            # 8k/1k mtp=on
-            run_single 1 3 8 16 64 false "0.9" 3 0 "1 2 4 8 18"
-            run_single 5 1 32 8 32 true "0.7" 3 0 "128 269"
-            run_single 8 1 32 16 64 true "0.7" 3 0 "538"
-            run_single 6 1 16 32 128 true "0.75" 3 0 "538" # remove if need 5 configs
-            run_single 8 1 16 64 256 true "0.75" 2 0 "1075"
-            run_single 5 1 8 128 256 true "0.8" 1 0 "1075" # remove if need 5 configs
-            run_single 6 1 8 256 512 true "0.8" 1 0 "2150"
+            if [[ "$mtp_mode" == "mtp=off" ]]; then
+                # 8k/1k mtp=off
+                run_single 1 3 8 32 32 false "0.9" 0 0 "1 2 4 8 16 34"
+                run_single 4 1 32 16 16 true "0.7" 0 0 "256 538"
+                run_single 7 1 32 32 32 true "0.7" 0 0 "1075" # remove if need 5 cofigs
+                run_single 6 1 16 64 64 true "0.75" 0 0 "1075"
+                run_single 8 1 16 128 128 true "0.75" 0 0 "2150"
+                run_single 5 1 8 256 256 true "0.8" 0 0 "2150"
+            else
+                # 8k/1k mtp=on
+                run_single 1 3 8 16 64 false "0.9" 3 0 "1 2 4 8 18"
+                run_single 5 1 32 8 32 true "0.7" 3 0 "128 269"
+                run_single 8 1 32 16 64 true "0.7" 3 0 "538"
+                run_single 6 1 16 32 128 true "0.75" 3 0 "538" # remove if need 5 configs
+                run_single 8 1 16 64 256 true "0.75" 2 0 "1075"
+                run_single 5 1 8 128 256 true "0.8" 1 0 "1075" # remove if need 5 configs
+                run_single 6 1 8 256 512 true "0.8" 1 0 "2150"
+            fi
             ;;
         "4GPU")
             echo "Running 4 GPUs combinations for $mtp_mode mode..."
