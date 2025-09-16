@@ -403,11 +403,11 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                     overlap_blocks,
                 }
             }
-            RouterRequest::MarkPrefill {} => {
+            RouterRequest::MarkPrefill => {
                 self.mark_prefill_completed(&context_id).await;
                 RouterResponse::PrefillMarked { success: true }
             }
-            RouterRequest::MarkFree {} => {
+            RouterRequest::MarkFree => {
                 self.free(&context_id).await;
                 RouterResponse::FreeMarked { success: true }
             }
