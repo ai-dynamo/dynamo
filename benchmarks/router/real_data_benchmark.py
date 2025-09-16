@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 
 import numpy as np
 from prefix_data_generator.synthesizer import Synthesizer
@@ -195,99 +194,87 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Determine whether to use original or synthesized data
-    temp_file = None
-    try:
-        # Check if any synthesis parameters are non-default
-        needs_synthesis = (
-            args.num_requests is not None
-            or args.speedup_ratio != 1.0
-            or args.prefix_len_multiplier != 1.0
-            or args.prefix_root_multiplier != 1
-            or args.prompt_len_multiplier != 1.0
-            or args.max_isl is not None
+    # Check if any synthesis parameters are non-default
+    needs_synthesis = (
+        args.num_requests is not None
+        or args.speedup_ratio != 1.0
+        or args.prefix_len_multiplier != 1.0
+        or args.prefix_root_multiplier != 1
+        or args.prompt_len_multiplier != 1.0
+        or args.max_isl is not None
+    )
+
+    if not needs_synthesis:
+        # No synthesis needed, use original file
+        trace_file_path = args.input_file
+        logger.info(
+            f"Using original trace file (no synthesis parameters modified): {trace_file_path}"
+        )
+    else:
+        # Generate synthetic data based on input file
+        logger.info("Generating synthetic trace data...")
+        logger.info(f"  Base file: {args.input_file}")
+        logger.info(
+            f"  Num requests: {args.num_requests if args.num_requests else 'all'}"
+        )
+        logger.info(f"  Speedup ratio: {args.speedup_ratio}")
+        logger.info(f"  Prefix len multiplier: {args.prefix_len_multiplier}")
+        logger.info(f"  Prefix root multiplier: {args.prefix_root_multiplier}")
+        logger.info(f"  Prompt len multiplier: {args.prompt_len_multiplier}")
+        logger.info(f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'}")
+        logger.info(f"  Random seed: {args.seed}")
+
+        # Set random seed for reproducibility
+        np.random.seed(args.seed)
+
+        # Create synthesizer
+        synthesizer = Synthesizer(
+            args.input_file,
+            block_size=args.block_size,
+            speedup_ratio=args.speedup_ratio,
+            prefix_len_multiplier=args.prefix_len_multiplier,
+            prefix_root_multiplier=args.prefix_root_multiplier,
+            prompt_len_multiplier=args.prompt_len_multiplier,
         )
 
-        if not needs_synthesis:
-            # No synthesis needed, use original file
-            trace_file_path = args.input_file
-            logger.info(
-                f"Using original trace file (no synthesis parameters modified): {trace_file_path}"
-            )
+        # Determine number of requests
+        if args.num_requests is None:
+            # Count requests in original file
+            with open(args.input_file, "r") as f:
+                num_requests = sum(1 for _ in f)
+            logger.info(f"Using all {num_requests} requests from input file")
         else:
-            # Generate synthetic data based on input file
-            logger.info("Generating synthetic trace data...")
-            logger.info(f"  Base file: {args.input_file}")
-            logger.info(
-                f"  Num requests: {args.num_requests if args.num_requests else 'all'}"
-            )
-            logger.info(f"  Speedup ratio: {args.speedup_ratio}")
-            logger.info(f"  Prefix len multiplier: {args.prefix_len_multiplier}")
-            logger.info(f"  Prefix root multiplier: {args.prefix_root_multiplier}")
-            logger.info(f"  Prompt len multiplier: {args.prompt_len_multiplier}")
-            logger.info(f"  Max ISL: {args.max_isl if args.max_isl else 'no limit'}")
-            logger.info(f"  Random seed: {args.seed}")
+            num_requests = args.num_requests
 
-            # Set random seed for reproducibility
-            np.random.seed(args.seed)
+        # Generate synthetic requests
+        requests = synthesizer.synthesize_requests(num_requests, args.max_isl)
+        logger.info(f"Generated {len(requests)} synthetic requests")
 
-            # Create synthesizer
-            synthesizer = Synthesizer(
-                args.input_file,
-                block_size=args.block_size,
-                speedup_ratio=args.speedup_ratio,
-                prefix_len_multiplier=args.prefix_len_multiplier,
-                prefix_root_multiplier=args.prefix_root_multiplier,
-                prompt_len_multiplier=args.prompt_len_multiplier,
-            )
+        # Save synthetic data to a permanent file in output directory
+        synthetic_trace_filename = "synthetic_trace.jsonl"
+        trace_file_path = os.path.join(args.output_dir, synthetic_trace_filename)
 
-            # Determine number of requests
-            if args.num_requests is None:
-                # Count requests in original file
-                with open(args.input_file, "r") as f:
-                    num_requests = sum(1 for _ in f)
-                logger.info(f"Using all {num_requests} requests from input file")
-            else:
-                num_requests = args.num_requests
-
-            # Generate synthetic requests
-            requests = synthesizer.synthesize_requests(num_requests, args.max_isl)
-            logger.info(f"Generated {len(requests)} synthetic requests")
-
-            # Create temporary file for synthetic data
-            temp_file = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".jsonl", delete=False, dir=args.output_dir
-            )
-
-            # Write synthetic data to temp file
+        # Write synthetic data to file
+        with open(trace_file_path, "w") as f:
             for request in requests:
-                temp_file.write(json.dumps(request) + "\n")
-            temp_file.close()
+                f.write(json.dumps(request) + "\n")
 
-            trace_file_path = temp_file.name
-            logger.info(
-                f"Synthetic trace data saved to temporary file: {trace_file_path}"
-            )
+        logger.info(f"Synthetic trace data saved to: {trace_file_path}")
 
-        # Run benchmark with the trace file
-        artifact_dir = os.path.join(args.output_dir, "genai_perf_artifacts")
-        os.makedirs(artifact_dir, exist_ok=True)
+    # Run benchmark with the trace file
+    artifact_dir = os.path.join(args.output_dir, "genai_perf_artifacts")
+    os.makedirs(artifact_dir, exist_ok=True)
 
-        run_benchmark_with_trace(
-            args.model,
-            args.tokenizer,
-            trace_file_path,
-            artifact_dir,
-            args.url,
-            args.seed,
-        )
+    run_benchmark_with_trace(
+        args.model,
+        args.tokenizer,
+        trace_file_path,
+        artifact_dir,
+        args.url,
+        args.seed,
+    )
 
-        logger.info(f"Results saved to: {artifact_dir}")
-
-    finally:
-        # Clean up temporary file if it was created
-        if temp_file and os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
-            logger.info(f"Cleaned up temporary file: {temp_file.name}")
+    logger.info(f"Results saved to: {artifact_dir}")
 
 
 if __name__ == "__main__":
