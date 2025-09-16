@@ -214,7 +214,7 @@ cleanup_deployment() {
 }
 
 run_test() {
-    log_info "Running scaling test (graduated 8->15->25 req/s)..."
+    log_info "Running scaling test (graduated 8->18 req/s)..."
 
     local python_cmd="python3"
     if ! command -v python3 &> /dev/null; then
@@ -268,7 +268,7 @@ main() {
 
     log_info "SLA Planner Scaling Test"
     log_info "Namespace: $NAMESPACE"
-    log_info "Scenario: Graduated 8->15->25 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
+    log_info "Scenario: Graduated 8->18 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
 
     check_prerequisites
 
