@@ -76,10 +76,11 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
 
 Usage:
-    python dynamo_check.py [--thorough-check]
+    python dynamo_check.py [--thorough-check] [--terse]
 
 Options:
     --thorough-check  Enable thorough checking (file permissions, directory sizes, etc.)
+    --terse           Enable terse output mode
 """
 
 import datetime
