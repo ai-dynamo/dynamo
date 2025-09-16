@@ -25,6 +25,35 @@ import tempfile
 from jinja2 import Template
 
 
+def print_welcome_message(job_ids: list[str]):
+    """Print a clean welcome message with job information."""
+
+    job_id = f"<{', '.join(job_ids)}>"
+    print(
+        f"""
+🚀 Welcome! We hope you enjoy your time on our GB200 NVL72.
+
+Your logs for this submitted job will be available in logs/{job_id}
+You can access them by running:
+
+    cd logs/{job_id}
+
+You can view all of the prefill/decode worker logs by running:
+
+    tail -f *_decode_*.err *_prefill_*.err
+
+To kick off the benchmark we suggest opening up a new terminal, SSH-ing
+into the login node, and running the srun command that is found at the
+bottom of the log.out. You can find it by running:
+
+    cat log.out
+
+Enjoy :)
+- NVIDIA
+"""
+    )
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(
         level=level,
@@ -45,7 +74,7 @@ def generate_job_script(template_path, output_path, **kwargs):
     return output_path
 
 
-def submit_job(job_script_path):
+def submit_job(job_script_path, extra_slurm_args=[]):
     """
     Submit the job script to SLURM and extract the job ID from the output.
 
@@ -53,9 +82,14 @@ def submit_job(job_script_path):
         The job ID of the submitted job.
     """
     try:
-        result = subprocess.run(
-            ["sbatch", job_script_path], capture_output=True, text=True, check=True
+        command = (
+            ["sbatch"]
+            + ["--" + x for x in extra_slurm_args]
+            + [
+                job_script_path,
+            ]
         )
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
         output_lines = result.stdout.strip().split("\n")
 
         # sbatch typically outputs: "Submitted batch job JOBID"
@@ -118,6 +152,45 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         default="batch",
         help="SLURM partition to use",
     )
+    parser.add_argument(
+        "--enable-multiple-frontends",
+        action="store_true",
+        help="Enable multiple frontend architecture with nginx load balancer",
+    )
+    parser.add_argument(
+        "--num-additional-frontends",
+        type=int,
+        default=0,
+        help="Number of additional frontend nodes (beyond the first frontend on node 1)",
+    )
+
+    parser.add_argument(
+        "--use-init-location",
+        action="store_true",
+        help="Whether we use '--init-expert-locations' json files",
+    )
+
+    parser.add_argument(
+        "--profiler",
+        type=str,
+        help="Profiler configurations. Example: "
+        + '"type=vllm; isl=8192; osl=1024; concurrencies=16x2048x4096x8192; req-rate=inf"',
+    )
+
+    parser.add_argument(
+        "--extra-slurm-args",
+        action="append",
+        default=[],
+        help="Extra slurm arguments, remove the '--' prefix. Example: --extra-slurm-args dependency=afterok:<x>",
+    )
+
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        help="Tries to launch the job multiple times to catch transient errors",
+    )
+
     return parser.parse_args(args)
 
 
@@ -136,7 +209,45 @@ def main(input_args: list[str] | None = None):
             f"Decode nodes ({args.decode_nodes}) must be divisible by decode workers ({args.decode_workers})"
         )
 
+    # Validation for multiple frontends
+    if args.enable_multiple_frontends:
+        if args.num_additional_frontends < 0:
+            raise ValueError("Number of additional frontends cannot be negative")
+
     total_nodes = args.prefill_nodes + args.decode_nodes
+
+    # parse profiler configs
+    profiler_config = {}
+    if args.profiler:
+        for key_val_pair in args.profiler.split("; "):
+            key, val = key_val_pair.split("=")
+            profiler_config[key] = val
+
+    # validate profiler configs
+    if profiler_config == {} or profiler_config["type"] == "manual":
+        parsable_config = ""
+        profiler_config["type"] = "manual"
+    elif profiler_config["type"] in ["sglang", "vllm", "gap"]:
+        parsable_config = ""
+        need_keys = ["isl", "osl", "concurrencies"]
+        assert all([key in profiler_config for key in need_keys])
+        assert profiler_config["isl"].isnumeric()
+        parsable_config = f"{parsable_config} {profiler_config['isl']}"
+        assert profiler_config["osl"].isnumeric()
+        parsable_config = f"{parsable_config} {profiler_config['osl']}"
+        assert all([x.isnumeric() for x in profiler_config["concurrencies"].split("x")])
+        parsable_config = f"{parsable_config} {profiler_config['concurrencies']}"
+
+        if profiler_config["type"] in ["sglang", "vllm"]:
+            assert "req-rate" in profiler_config
+            assert (
+                profiler_config["req-rate"] == "inf"
+                or profiler_config["req-rate"].isnumeric()
+            )
+            parsable_config = f"{parsable_config} {profiler_config['req-rate']}"
+    else:
+        assert False, profiler_config["type"]
+
     template_vars = {
         "job_name": args.job_name,
         "total_nodes": total_nodes,
@@ -153,12 +264,33 @@ def main(input_args: list[str] | None = None):
         "network_interface": args.network_interface,
         "gpu_type": args.gpu_type,
         "partition": args.partition,
+        "enable_multiple_frontends": args.enable_multiple_frontends,
+        "num_additional_frontends": args.num_additional_frontends,
+        "use_init_location": args.use_init_location,
+        "do_profile": profiler_config["type"] != "manual",
+        "profiler_type": profiler_config["type"],
+        "profiler_arg": parsable_config,
     }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:
         generate_job_script(args.template, temp_file.name, **template_vars)
-        job_id = submit_job(temp_file.name)
-        logging.info(f"Job logs will be available in: logs/{job_id}/")
+
+        submitted_job_ids = []
+        job_id = submit_job(temp_file.name, args.extra_slurm_args)
+        submitted_job_ids.append(job_id)
+        # retries logic
+        extra_slurm_args_without_dependencies = [
+            x for x in args.extra_slurm_args if "dependency" not in x
+        ]
+        for _ in range(args.retries):
+            dependencies = ",".join([f"afternotok:{job}" for job in submitted_job_ids])
+            slurm_args = extra_slurm_args_without_dependencies + [
+                f"dependency={dependencies}"
+            ]
+            job_id = submit_job(temp_file.name, slurm_args)
+            submitted_job_ids.append(job_id)
+
+        print_welcome_message(submitted_job_ids)
 
 
 if __name__ == "__main__":
