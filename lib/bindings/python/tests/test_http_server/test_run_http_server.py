@@ -26,7 +26,8 @@ import pytest
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
-MSG_CONTAINS_ERROR = "This message contains an error."
+MSG_CONTAINS_ERROR = "This message contains an 400error."
+MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
 
 class MockHttpEngine:
@@ -49,8 +50,10 @@ class MockHttpEngine:
             print(f"Request {context.id()} was cancelled before starting.")
             return
 
-        if "error" in user_message.lower():
+        if MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
+        elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
+            raise ValueError("Simulated internal error")
 
         # Stream a mock response
         created = int(time.time())
@@ -71,15 +74,6 @@ class MockHttpEngine:
                 ],
             }
             await asyncio.sleep(0.01)
-
-
-@pytest.fixture(scope="session")
-async def runtime():
-    """Create a DistributedRuntime for testing"""
-    loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
-    yield runtime
-    runtime.shutdown
 
 
 @pytest.fixture
@@ -163,18 +157,31 @@ async def test_chat_completion_success(http_server):
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_http_error(http_server):
+@pytest.mark.parametrize(
+    "msg_to_code",
+    [
+        (MSG_CONTAINS_ERROR, 500),  # # TODO: should be 400, but currently 500
+        (
+            MSG_CONTAINS_INTERNAL_ERROR,
+            500,
+        ),  # Placeholder for future internal error test
+    ],
+)
+async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, int]):
     """Tests that an HttpError is raised when the message contains 'error'."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
-        "messages": [{"role": "user", "content": MSG_CONTAINS_ERROR}],
+        "messages": [{"role": "user", "content": msg_to_code[0]}],
     }
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10)
     ) as session:
         async with session.post(url, json=data) as response:
-            assert response.status in [500]  # TODO: should be 400, but currently 500
+            assert response.status == msg_to_code[1]
             error_json = await response.json()
-            assert MSG_CONTAINS_ERROR in str(error_json)
+            if msg_to_code[0] == MSG_CONTAINS_ERROR:
+                assert MSG_CONTAINS_ERROR in str(error_json)
+            elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
+                assert "a python exception was caught" in str(error_json).lower()
