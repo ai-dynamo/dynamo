@@ -131,10 +131,14 @@ class LoadGenerator:
         ]
 
         logger.info(f"Running command: {' '.join(cmd)}")
+        logger.info(
+            f"Expected duration: {duration_sec}s, timeout: {max(duration_sec * 2 + 120, int(duration_sec * 2.5))}s"
+        )
 
         # Run genai-perf (async)
         start_time = time.time()
-        timeout = max(duration_sec + 60, int(duration_sec * 1.5))
+        # More generous timeout for high-load tests - allow 2x duration + 2 minutes buffer
+        timeout = max(duration_sec * 2 + 120, int(duration_sec * 2.5))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
