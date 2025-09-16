@@ -16,16 +16,15 @@
 # Dynamo Benchmarking Guide
 
 This benchmarking framework lets you compare performance across any combination of:
-- **DynamoGraphDeployments** (automatically deployed from your manifests)
-- **External HTTP endpoints** (existing services, vLLM, TensorRT-LLM, etc.)
+- **DynamoGraphDeployments**
+- **External HTTP endpoints** (existing services deployed following standard documentation from vLLM, llm-d, AIBrix, etc.)
 
 You can mix and match these in a single benchmark run using custom labels. Configure your DynamoGraphDeployment manifests for your specific models, hardware, and parallelization needs.
 
 ## What This Tool Does
 
 The framework is a Python-based wrapper around `genai-perf` that:
-- Deploys user-specified `DynamoGraphDeployments` automatically
-- Benchmarks any HTTP endpoints (no deployment needed)
+- Benchmarks any HTTP endpoints
 - Runs concurrency sweeps across configurable load levels
 - Generates comparison plots with your custom labels
 - Works with any HuggingFace-compatible model on NVIDIA GPUs (H200, H100, A100, etc.)
@@ -48,7 +47,14 @@ The framework is a Python-based wrapper around `genai-perf` that:
    ```
    *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
 
-## Quick Start Examples
+## Quickstart/Steps
+
+```
+python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
+   --input production-api=http://your-api:8000
+```
+
+## Use Cases
 
 The tool can be used to deploy, benchmark and compare Dynamo deployments (DynamoGraphDeployments) on a Kubernetes cluster as well as benchmark and compare servers deployed separately given a URL. In the examples below, Dynamo deployments are specified with a yaml and servers deployed separately by URL.
 
@@ -57,42 +63,24 @@ export NAMESPACE=benchmarking
 
 # Compare multiple DynamoGraphDeployments of a single backend
 python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input agg=components/backends/vllm/deploy/agg.yaml \
-   --input disagg=components/backends/vllm/deploy/disagg.yaml
+   --input agg=http://localhost:8000 \
+   --input disagg=http://localhost:8004
 
 # Compare different backend types (vLLM vs TensorRT-LLM)
 python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml \
-   --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
+   --input vllm=http://localhost:8000 \
+   --input trtllm=http://localhost:8004
 
-# Compare Dynamo deployment vs existing deployment (external endpoint)
+# Compare Dynamo deployment vs another platform (e.g. llm-d)
 python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input dynamo=components/backends/vllm/deploy/disagg.yaml \
-   --input vllm-baseline=http://localhost:8000
-
-# Compare three different configurations
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input dynamo-agg=components/backends/vllm/deploy/agg.yaml \
-   --input dynamo-disagg=components/backends/vllm/deploy/disagg.yaml \
-   --input external-vllm=http://localhost:8000
-
-# Benchmark single external endpoint
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input production-api=http://your-api:8000
+   --input dynamo=http://localhost:8000 \
+   --input llm-d=http://localhost:8004
 
 # Custom model and sequence lengths
 python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE \
-   --input my-setup=my-custom-manifest.yaml \
+   --input name=url \
    --model "meta-llama/Meta-Llama-3-8B" --isl 512 --osl 256
 ```
-
-**Key**: Configure your manifests for your specific models, hardware, and parallelization strategy before benchmarking.
-
-### Important: Image Accessibility
-
-Ensure container images in your DynamoGraphDeployment manifests are accessible:
-- **Public images**: Use [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) public releases
-- **Custom registries**: Configure proper credentials in your Kubernetes namespace
 
 ## Configuration and Usage
 
@@ -125,52 +113,21 @@ OPTIONS:
 - **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
 - **Input Types**: Supports DynamoGraphDeployment manifests for automatic deployment, or HTTP endpoints for existing services
 - **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, not deployment (deployment model is determined by the manifest files)
-- **Standalone Deployments**: For non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), you must deploy them manually following their respective Kubernetes deployment guides. The benchmarking framework only supports automatic deployment of DynamoGraphDeployments.
 - **Single Model Requirement**: Only one model can be benchmarked at a time across all inputs to ensure fair comparison.
 
 ### What Happens During Benchmarking
 
-The Python benchmarking module automatically:
-1. **Deploys** each DynamoGraphDeployment configuration to Kubernetes if manifests are passed in
-2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
-3. **Measures** key metrics: latency, throughput, time-to-first-token
-4. **Generates** comparison plots using your custom labels in `./benchmarks/results/plots/`
-5. **Cleans up** deployments when complete
+The Python benchmarking module:
+1. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
+2. **Measures** key metrics: latency, throughput, time-to-first-token
+3. **Saves** results to an output directory under the input keys
 
-### GPU Resource Usage
-
-**Important**: Models are deployed and benchmarked **sequentially**, not in parallel. This means:
-
-- **One deployment at a time**: Each DynamoGraphDeployment is deployed, benchmarked, and cleaned up before the next one starts
-- **Full GPU access**: Each deployment gets exclusive access to all available GPUs during its benchmark run
-- **Resource isolation**: No resource conflicts between different deployment configurations
-- **Fair comparison**: Each configuration is tested under identical resource conditions
-
-This sequential approach ensures:
-- **Accurate performance measurements** without interference between deployments
-- **Consistent resource allocation** for fair comparison across different configurations
-- **Simplified resource management** without complex GPU scheduling
-- **Reliable cleanup** between benchmark runs
-
-If you need to benchmark multiple configurations simultaneously, consider using separate Kubernetes namespaces or running benchmarks on different clusters.
-
-### Results Clearing Behavior
-
-**Important**: The Python benchmarking module automatically clears the output directory before each run to ensure clean, reproducible results. This means:
-- Previous benchmark results in the same output directory will be completely removed
-- Each benchmark run starts with a clean slate
-- Results from different runs are not mixed or accumulated
-
-If you want to preserve results from previous runs, use different output directories with the `--output-dir` flag.
+The Python benchmark plotting module:
+1. **Generates** comparison plots using your custom labels in `<OUTPUT_DIR>/results/plots/`
 
 ### Using Your Own Models and Configuration
 
-The benchmarking framework supports any HuggingFace-compatible LLM model. To benchmark your own custom deployment:
-
-1. **Edit your deployment YAML files** to specify your model in the `--model` argument of the container command
-2. **Use the corresponding model name** in the benchmark script's `--model` parameter
-
-**Note**: You can override the default sequence lengths (2000/256 tokens) with `--isl` and `--osl` flags if needed for your specific workload.
+The benchmarking framework supports any HuggingFace-compatible LLM model. Specify your model in the benchmark script's `--model` parameter. It must match the model name of the deployment. You can override the default sequence lengths (2000/256 tokens) with `--isl` and `--osl` flags if needed for your specific workload.
 
 ### Python Script Usage
 

@@ -15,45 +15,20 @@
 
 # Benchmarks
 
-This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments. The benchmarking framework is a wrapper around genai-perf that makes it easy to benchmark DynamoGraphDeployments and compare them with external endpoints.
+This directory contains benchmarking scripts and tools for performance evaluation of Dynamo deployments. The benchmarking framework is a wrapper around genai-perf that makes it easy to benchmark DynamoGraphDeployments or other deployments with exposed endpoints.
 
 ## Quick Start
 
-### Benchmark an Existing Endpoint
+### Benchmark a Dynamo Deployment
 ```bash
-python3 -m benchmarks.utils.benchmark --namespace my-namespace --input my-endpoint=http://your-endpoint:8000
+# Port-forward your deployment to http://localhost:8000
+kubectl port-forward -n <namespace> <frontend-service-name> 8000:8000 &
+python3 -m benchmarks.utils.benchmark --namespace <namespace> --input my-endpoint=http://localhost:8000
 ```
-
-### Benchmark Dynamo Deployments
-```bash
-# Benchmark disaggregated vLLM with custom label
-python3 -m benchmarks.utils.benchmark --namespace my-namespace --input vllm-disagg=components/backends/vllm/deploy/disagg.yaml
-
-# Benchmark TensorRT-LLM disaggregated deployment
-python3 -m benchmarks.utils.benchmark --namespace my-namespace --input trtllm-disagg=components/backends/trtllm/deploy/disagg.yaml
-
-# Compare multiple Dynamo deployments
-python3 -m benchmarks.utils.benchmark --namespace my-namespace \
-  --input agg=components/backends/vllm/deploy/agg.yaml \
-  --input disagg=components/backends/vllm/deploy/disagg.yaml
-
-# Compare Dynamo vs external endpoint
-python3 -m benchmarks.utils.benchmark --namespace my-namespace \
-  --input dynamo=components/backends/vllm/deploy/disagg.yaml \
-  --input external=http://localhost:8000
-```
-
-**Note**:
-- The sample manifests may reference private registry images. Update the `image:` fields to use accessible images from [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts) or your own registry before running.
-- Only DynamoGraphDeployment manifests are supported for automatic deployment. To benchmark non-Dynamo backends (vLLM, TensorRT-LLM, SGLang, etc.), deploy them manually using their Kubernetes guides and use the endpoint option.
 
 ## Features
 
-The benchmarking framework supports:
-
-**Two Benchmarking Modes:**
-- **Endpoint Benchmarking**: Test existing HTTP endpoints without deployment overhead
-- **Deployment Benchmarking**: Deploy, test, and cleanup DynamoGraphDeployments automatically
+Benchmark any HTTP endpoints! The benchmarking framework supports:
 
 **Flexible Configuration:**
 - User-defined labels for each input using `--input label=value` format
@@ -67,8 +42,8 @@ The benchmarking framework supports:
 - Ensures accurate performance measurements and fair comparison across configurations
 
 **Supported Backends:**
-- DynamoGraphDeployments
-- External HTTP endpoints (for comparison with non-Dynamo backends)
+- DynamoGraphDeployments with port-forwarded endpoints
+- External HTTP endpoints (for comparison with non-Dynamo backends or platforms)
 
 ## Installation
 
