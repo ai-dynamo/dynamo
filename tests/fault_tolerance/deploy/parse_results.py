@@ -160,12 +160,12 @@ def calculate_metrics(df, fault_time, sla=None):
 
 def parse_process_log(log_dir, process_name):
     process_ready_pattern = {
-        "Frontend": re.compile(r"added model (?P<model_name>.*?)"),
+        "Frontend": re.compile(r"added model"),
         "VllmDecodeWorker": re.compile(
-            r"main.init: VllmWorker for (?P<model_name>.*?) has been initialized"
+            r"VllmWorker for (?P<model_name>.*?) has been initialized"
         ),
         "VllmPrefillWorker": re.compile(
-            r"main.setup_vllm_engine: VllmWorker for (?P<model_name>.*?) has been initialized"
+            r"VllmWorker for (?P<model_name>.*?) has been initialized"
         ),
     }
     if not os.path.isdir(log_dir):
@@ -183,26 +183,44 @@ def parse_process_log(log_dir, process_name):
 
             with open(os.path.join(log_dir, entry), "r") as f:
                 for line in f:
-                    clean_line = re.sub(
-                        r"\x1b\[.*?m", "", line.strip()
-                    )  # Remove ANSI codes
-                    if not clean_line:
+                    line = line.strip()
+                    if not line:
                         continue
 
-                    parts = clean_line.split()
-                    if len(parts) < 2:
-                        continue
-
+                    # Try to parse as JSONL first
                     try:
-                        # Parse timestamp (remove 'Z' for naive datetime)
-                        timestamp = datetime.fromisoformat(parts[0].replace("Z", ""))
-                    except ValueError:
-                        continue
+                        json_data = json.loads(line)
+                        # Extract timestamp and message from JSON format
+                        if "time" in json_data:
+                            timestamp = datetime.fromisoformat(
+                                json_data["time"].replace("Z", "")
+                            )
+                            log_message = json_data.get("message", "")
+                        else:
+                            continue
+                    except (json.JSONDecodeError, ValueError, KeyError):
+                        # Fall back to readable format parsing
+                        clean_line = re.sub(
+                            r"\x1b\[.*?m", "", line
+                        )  # Remove ANSI codes
+                        if not clean_line:
+                            continue
 
+                        parts = clean_line.split()
+                        if len(parts) < 2:
+                            continue
+
+                        try:
+                            # Parse timestamp (remove 'Z' for naive datetime)
+                            timestamp = datetime.fromisoformat(
+                                parts[0].replace("Z", "")
+                            )
+                        except ValueError:
+                            continue
+
+                        log_message = " ".join(parts[1:])
                     if not process_start_time:
                         process_start_time = timestamp
-
-                    log_message = " ".join(parts[1:])
 
                     relative_time = (timestamp - process_start_time).total_seconds()
 
