@@ -156,7 +156,7 @@ python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
         --random-range-ratio 0.8 \
         --ignore-eos \
         --use-chat-template \
-        --backend "openai" \
+        --backend "dynamo" \
         --endpoint "/v1/completions" \
         --percentile-metrics ttft,tpot,itl,e2el \
         --max-concurrency "1" \
@@ -181,7 +181,7 @@ for concurrency in ${concurrency_list}; do
         --use-chat-template \
         --ignore-eos \
         --use-chat-template \
-        --backend "openai" \
+        --backend "dynamo" \
         --endpoint "/v1/completions" \
         --percentile-metrics ttft,tpot,itl,e2el \
         --max-concurrency "$concurrency" \
