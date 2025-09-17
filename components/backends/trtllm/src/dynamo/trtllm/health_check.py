@@ -2,9 +2,9 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 """
-TensorRT-LLM-specific health check configuration.
+TRT-LLM-specific health check configuration.
 
-This module defines the default health check payload for TensorRT-LLM backends.
+This module defines the default health check payload for TRT-LLM backends.
 """
 
 from dynamo.health_check import HealthCheckPayload
@@ -12,14 +12,14 @@ from dynamo.health_check import HealthCheckPayload
 
 class TrtllmHealthCheckPayload(HealthCheckPayload):
     """
-    TensorRT-LLM-specific health check payload.
+    TRT-LLM-specific health check payload.
 
-    Provides TensorRT-LLM defaults and inherits environment override support from base class.
+    Provides TRT-LLM defaults and inherits environment override support from base class.
     """
 
     def __init__(self):
         """
-        Initialize TensorRT-LLM health check payload with TensorRT-LLM-specific defaults.
+        Initialize TRT-LLM health check payload with TRT-LLM-specific defaults.
         """
         # Set TensorRT-LLM default payload - minimal request that completes quickly
         # The handler expects token_ids, stop_conditions, and sampling_options
