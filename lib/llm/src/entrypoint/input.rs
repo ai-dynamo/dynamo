@@ -21,6 +21,7 @@ pub mod endpoint;
 pub mod grpc;
 pub mod http;
 pub mod text;
+pub mod worker_selection_pipeline;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
 use either::Either;
