@@ -19,6 +19,9 @@
         ]
     },
     "launch": {
+        // REQUIRES:
+        // export RUSTFLAGS="-g"
+        // cargo b --features cuda --profile dev
         "configurations": [
             {
                 "name": "Dynamo Frontend",
