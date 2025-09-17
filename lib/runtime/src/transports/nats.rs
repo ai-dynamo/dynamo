@@ -520,13 +520,11 @@ impl NatsQueue {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(time::Duration::from_secs)
                 .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
-
             // Always try to create the stream (removes the race condition)
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
-
-                max_age: max_age,
+                max_age,
                 ..Default::default()
             };
 
