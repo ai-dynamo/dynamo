@@ -22,8 +22,12 @@ async def test_register(runtime: DistributedRuntime):
 
     model_config = {
         "name": "tensor",
-        "inputs": [{"name": "input", "data_type": "Int32", "shape": [-1]}],
-        "outputs": [{"name": "output", "data_type": "Int32", "shape": [-1]}],
+        "inputs": [
+            {"name": "input_text", "data_type": "Bytes", "shape": [-1]},
+            {"name": "custom", "data_type": "Bytes", "shape": [-1]},
+            {"name": "streaming", "data_type": "Bool", "shape": [1]},
+        ],
+        "outputs": [{"name": "output_text", "data_type": "Bytes", "shape": [-1]}],
     }
     runtime_config = ModelRuntimeConfig()
     runtime_config.set_tensor_model_config(model_config)
@@ -48,7 +52,18 @@ async def test_register(runtime: DistributedRuntime):
 
 async def generate(request, context):
     print(f"Received request: {request}")
-    yield {"model": request["model"], "tensors": request["tensors"]}
+    # Echo input_text in output_text
+    output_text = None
+    for tensor in request["tensors"]:
+        if tensor["metadata"]["name"] == "input_text":
+            input_text_str = "".join(map(chr, tensor["data"][0]))
+            print(f"Input text: {input_text_str}")
+            output_text = tensor
+            output_text["metadata"]["name"] = "output_text"
+            break
+    if output_text is None:
+        raise ValueError("input_text tensor not found in request")
+    yield {"model": request["model"], "tensors": [output_text]}
 
 
 if __name__ == "__main__":

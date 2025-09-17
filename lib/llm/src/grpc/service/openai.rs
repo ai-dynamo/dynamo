@@ -17,6 +17,7 @@ use crate::protocols::openai::{
 use crate::types::Annotated;
 
 use super::kserve;
+use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::{
@@ -24,6 +25,7 @@ use crate::http::service::{
     metrics::{Endpoint, ResponseMetricCollector},
 };
 use crate::{http::service::metrics::InflightGuard, preprocessor::LLMMetricAnnotation};
+use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::Status;
 
@@ -196,4 +198,204 @@ pub fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOption
     let reasoning_parser = None; // TODO: Implement reasoning parser
 
     ParsingOptions::new(tool_call_parser, reasoning_parser)
+}
+
+impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
+    type Error = Status;
+
+    fn try_from(request: inference::ModelInferRequest) -> Result<Self, Self::Error> {
+        // Protocol requires if `raw_input_contents` is used to hold input data,
+        // it must be used for all inputs.
+        if !request.raw_input_contents.is_empty()
+            && request.inputs.len() != request.raw_input_contents.len()
+        {
+            return Err(Status::invalid_argument(
+                "`raw_input_contents` must be used for all inputs",
+            ));
+        }
+
+        // iterate through inputs
+        let mut text_input = None;
+        let mut stream = false;
+        for (idx, input) in request.inputs.iter().enumerate() {
+            match input.name.as_str() {
+                "text_input" => {
+                    if input.datatype != "BYTES" {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'text_input' to be of type BYTES for string input, got {:?}",
+                            input.datatype
+                        )));
+                    }
+                    if input.shape != vec![1] && input.shape != vec![1, 1] {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'text_input' to have shape [1], got {:?}",
+                            input.shape
+                        )));
+                    }
+                    match &input.contents {
+                        Some(content) => {
+                            let bytes = &content.bytes_contents[0];
+                            text_input = Some(String::from_utf8_lossy(bytes).to_string());
+                        }
+                        None => {
+                            let raw_input =
+                                request.raw_input_contents.get(idx).ok_or_else(|| {
+                                    Status::invalid_argument("Missing raw input for 'text_input'")
+                                })?;
+                            if raw_input.len() < 4 {
+                                return Err(Status::invalid_argument(
+                                    "'text_input' raw input must be length-prefixed (>= 4 bytes)",
+                                ));
+                            }
+                            // We restrict the 'text_input' only contain one element, only need to
+                            // parse the first element. Skip first four bytes that is used to store
+                            // the length of the input.
+                            text_input = Some(String::from_utf8_lossy(&raw_input[4..]).to_string());
+                        }
+                    }
+                }
+                "streaming" | "stream" => {
+                    if input.datatype != "BOOL" {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected '{}' to be of type BOOL, got {:?}",
+                            input.name, input.datatype
+                        )));
+                    }
+                    if input.shape != vec![1] {
+                        return Err(Status::invalid_argument(format!(
+                            "Expected 'stream' to have shape [1], got {:?}",
+                            input.shape
+                        )));
+                    }
+                    match &input.contents {
+                        Some(content) => {
+                            stream = content.bool_contents[0];
+                        }
+                        None => {
+                            let raw_input =
+                                request.raw_input_contents.get(idx).ok_or_else(|| {
+                                    Status::invalid_argument("Missing raw input for 'stream'")
+                                })?;
+                            if raw_input.is_empty() {
+                                return Err(Status::invalid_argument(
+                                    "'stream' raw input must contain at least one byte",
+                                ));
+                            }
+                            stream = raw_input[0] != 0;
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Status::invalid_argument(format!(
+                        "Invalid input name: {}, supported inputs are 'text_input', 'stream'",
+                        input.name
+                    )));
+                }
+            }
+        }
+
+        // return error if text_input is None
+        let text_input = match text_input {
+            Some(input) => input,
+            None => {
+                return Err(Status::invalid_argument(
+                    "Missing required input: 'text_input'",
+                ));
+            }
+        };
+
+        Ok(NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: request.model_name,
+                prompt: Prompt::String(text_input),
+                stream: Some(stream),
+                user: if request.id.is_empty() {
+                    None
+                } else {
+                    Some(request.id.clone())
+                },
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+        })
+    }
+}
+
+impl TryFrom<NvCreateCompletionResponse> for inference::ModelInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
+        let mut outputs = vec![];
+        let mut text_output = vec![];
+        let mut finish_reason = vec![];
+        for choice in &response.inner.choices {
+            text_output.push(choice.text.clone());
+            if let Some(reason) = choice.finish_reason.as_ref() {
+                match reason {
+                    CompletionFinishReason::Stop => {
+                        finish_reason.push("stop".to_string());
+                    }
+                    CompletionFinishReason::Length => {
+                        finish_reason.push("length".to_string());
+                    }
+                    CompletionFinishReason::ContentFilter => {
+                        finish_reason.push("content_filter".to_string());
+                    }
+                }
+            }
+        }
+        outputs.push(inference::model_infer_response::InferOutputTensor {
+            name: "text_output".to_string(),
+            datatype: "BYTES".to_string(),
+            shape: vec![text_output.len() as i64],
+            contents: Some(inference::InferTensorContents {
+                bytes_contents: text_output
+                    .into_iter()
+                    .map(|text| text.as_bytes().to_vec())
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        outputs.push(inference::model_infer_response::InferOutputTensor {
+            name: "finish_reason".to_string(),
+            datatype: "BYTES".to_string(),
+            shape: vec![finish_reason.len() as i64],
+            contents: Some(inference::InferTensorContents {
+                bytes_contents: finish_reason
+                    .into_iter()
+                    .map(|text| text.as_bytes().to_vec())
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        Ok(inference::ModelInferResponse {
+            model_name: response.inner.model,
+            model_version: "1".to_string(),
+            id: response.inner.id,
+            outputs,
+            parameters: ::std::collections::HashMap::<String, inference::InferParameter>::new(),
+            raw_output_contents: vec![],
+        })
+    }
+}
+
+impl TryFrom<NvCreateCompletionResponse> for inference::ModelStreamInferResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
+        match inference::ModelInferResponse::try_from(response) {
+            Ok(response) => Ok(inference::ModelStreamInferResponse {
+                infer_response: Some(response),
+                ..Default::default()
+            }),
+            Err(e) => Ok(inference::ModelStreamInferResponse {
+                infer_response: None,
+                error_message: format!("Failed to convert response: {}", e),
+            }),
+        }
+    }
 }
