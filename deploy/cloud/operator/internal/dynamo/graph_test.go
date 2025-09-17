@@ -4498,7 +4498,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	}
 }
 
-func TestGenerateBasePodSpec_DisableDockerSecrets(t *testing.T) {
+func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 	tests := []struct {
 		name                     string
 		component                *v1alpha1.DynamoComponentDeploymentOverridesSpec
