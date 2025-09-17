@@ -88,11 +88,7 @@ impl ReasoningParser for GraniteReasoningParser {
         }
     }
 
-    fn parse_reasoning_streaming_incremental(
-        &mut self,
-        text: &str,
-        _: &[u32],
-    ) -> ParserResult {
+    fn parse_reasoning_streaming_incremental(&mut self, text: &str, _: &[u32]) -> ParserResult {
         // Implement streaming parsing logic specific to Granite format
 
         // Incrementally parse the streaming text
