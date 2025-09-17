@@ -93,7 +93,6 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
         for msg in arr {
             if let Some(content) = msg.get("content") {
                 if let Some(content_array) = content.as_array() {
-                    // Check if ALL parts are text type
                     let all_text = content_array.iter().all(|part| {
                         part.get("type")
                             .and_then(|t| t.as_str())
@@ -102,7 +101,6 @@ fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
                     });
 
                     if all_text && !content_array.is_empty() {
-                        // All parts are text type - extract and concatenate
                         let mut msg = msg.clone();
                         let mut text_parts = Vec::new();
 
