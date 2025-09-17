@@ -80,7 +80,7 @@ If comparing multiple deployments, teardown deployment A and deploy deployment B
 ### Step 5: [If Comparative] Port-Forward and Benchmark Deployment B
 ```bash
 # Port-forward the frontend service for deployment B
-kubectl port-forward -n <namespace> <frontend-service-name> 8001:8000 > /dev/null 2>&1 &
+kubectl port-forward -n <namespace> svc/<frontend-service-name> 8001:8000 > /dev/null 2>&1 &
 
 # Benchmark deployment B using Python scripts
 python3 -m benchmarks.utils.benchmark \
@@ -115,7 +115,7 @@ python3 -m benchmarks.utils.benchmark --input <label>=<endpoint_url> [--input <l
 
 REQUIRED:
   --input <label>=<endpoint_url>     Benchmark input with custom label
-                                        - <label>: becomes the name/label in plots
+                                        - <label>: becomes the name/label in plots (see Important Notes for restrictions)
                                         - <endpoint_url>: HTTP endpoint URL (e.g., http://localhost:8000)
                                         Can be specified multiple times for comparisons
 
@@ -166,11 +166,13 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 
 ```bash
 # Custom concurrency levels
-CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark --input my-test=http://localhost:8000
+CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark \
+    --input my-test=http://localhost:8000
 
 # Or set permanently
 export CONCURRENCIES="1,2,5,10,25,50,100"
-python3 -m benchmarks.utils.benchmark --input test=http://localhost:8000
+python3 -m benchmarks.utils.benchmark \
+    --input test=http://localhost:8000
 ```
 
 ## Understanding Your Results

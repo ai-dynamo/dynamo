@@ -4,15 +4,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import re
 import sys
 from typing import Dict, Tuple
+
 from benchmarks.utils.workflow import run_benchmark_workflow
 
 
 def validate_inputs(inputs: Dict[str, str]) -> None:
     """Validate that all inputs are HTTP endpoints"""
     for label, value in inputs.items():
-        if not value.startswith(("http://", "https://")):
+        if not value.lower().startswith(("http://", "https://")):
             raise ValueError(
                 f"Input '{label}' must be an HTTP endpoint (starting with http:// or https://). Got: {value}"
             )
@@ -48,8 +50,6 @@ def parse_input(input_str: str) -> Tuple[str, str]:
     value = value.strip()
 
     # Validate label characters
-    import re
-
     if not re.match(r"^[a-zA-Z0-9_-]+$", label):
         raise ValueError(
             f"Label must contain only letters, numbers, hyphens, and underscores. Invalid label: {label}"
@@ -117,7 +117,7 @@ def main() -> int:
         # Validate that all inputs are HTTP endpoints
         validate_inputs(parsed_inputs)
 
-    except (ValueError, FileNotFoundError) as e:
+    except ValueError as e:
         print(f"ERROR: {e}")
         return 1
 
