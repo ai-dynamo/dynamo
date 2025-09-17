@@ -266,6 +266,7 @@ impl KvRouter {
                 component.clone(),
                 consumer_uuid,
                 kv_indexer.event_sender(),
+                kv_indexer.remove_worker_sender(),
                 kv_router_config
                     .router_snapshot_threshold
                     .map(|_| kv_indexer.snapshot_event_sender()),

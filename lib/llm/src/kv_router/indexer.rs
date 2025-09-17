@@ -874,6 +874,15 @@ impl KvIndexer {
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
     }
+
+    /// Get a sender for worker removal requests.
+    ///
+    /// ### Returns
+    ///
+    /// A `mpsc::Sender` for `WorkerId`s.
+    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
+        self.remove_worker_tx.clone()
+    }
 }
 
 #[async_trait]
