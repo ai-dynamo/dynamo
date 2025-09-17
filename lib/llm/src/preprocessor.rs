@@ -974,11 +974,10 @@ impl
 
         // Apply tool calling jail to the stream if tool call parser is present
         let stream = if enable_tool_calling {
-            self.apply_tool_calling_jail_with_parser(stream)
+            self.apply_tool_calling_jail_with_parser(stream).await
         } else {
             stream
         };
-        //let stream = self.apply_tool_calling_jail_with_parser(stream);
 
         let context = stream.context();
         // prepend the annotations to the response stream
