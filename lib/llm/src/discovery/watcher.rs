@@ -21,6 +21,7 @@ use crate::{
     backend::Backend,
     entrypoint,
     kv_router::KvRouterConfig,
+    model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
@@ -260,19 +261,16 @@ impl ModelWatcher {
             .namespace(&endpoint_id.namespace)?
             .component(&endpoint_id.component)?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
-
-        let Some(etcd_client) = self.drt.etcd_client() else {
-            // Should be impossible because we only get here on an etcd event
-            anyhow::bail!("Missing etcd_client");
-        };
-        let card = match model_entry.load_mdc(&etcd_client).await {
-            Ok(card) => {
-                tracing::debug!(card.display_name, "adding model");
-                Some(card)
+        let model_slug = model_entry.slug();
+        let card = match ModelDeploymentCard::load_from_store(&model_slug, &self.drt).await {
+            Ok(Some(card)) => card,
+            Ok(None) => {
+                anyhow::bail!("Missing ModelDeploymentCard in storage under key {model_slug}");
             }
             Err(err) => {
-                tracing::info!(error = %err, "load_mdc did not complete");
-                None
+                anyhow::bail!(
+                    "Error fetching ModelDeploymentCard from storage under key {model_slug}. {err}"
+                );
             }
         };
 
@@ -283,15 +281,6 @@ impl ModelWatcher {
             // Case 1: Tokens + (Chat OR Completions OR Both)
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
-
-            let Some(mut card) = card else {
-                anyhow::bail!("Missing model deployment card");
-            };
-            // Download tokenizer.json etc to local disk
-            // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
-            // OpenAIPreprocessor::new loads the files, so we can delete them after this
-            // function. Needs checking carefully, possibly we need to store it in state.
-            let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
             let kv_chooser = if self.router_mode == RouterMode::KV {
                 Some(
@@ -309,7 +298,7 @@ impl ModelWatcher {
             };
 
             // This is expensive, we are loading ~10MiB JSON, so only do it once
-            let tokenizer_hf = card.tokenizer_hf()?;
+            let tokenizer_hf = card.tokenizer_hf().context("tokenizer_hf")?;
 
             // Add chat engine only if the model supports chat
             if model_entry.model_type.supports_chat() {
@@ -324,9 +313,11 @@ impl ModelWatcher {
                     kv_chooser.clone(),
                     tokenizer_hf.clone(),
                 )
-                .await?;
+                .await
+                .context("build_routed_pipeline")?;
                 self.manager
-                    .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                    .add_chat_completions_model(&model_entry.name, chat_engine)
+                    .context("add_chat_completions_model")?;
                 tracing::info!("Chat completions is ready");
             }
 
@@ -338,7 +329,8 @@ impl ModelWatcher {
                     card.clone(),
                     formatter,
                     tokenizer_hf.clone(),
-                )?;
+                )
+                .context("OpenAIPreprocessor::new_with_parts")?;
                 let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
                     NvCreateCompletionRequest,
                     NvCreateCompletionResponse,
@@ -351,9 +343,11 @@ impl ModelWatcher {
                     preprocessor,
                     tokenizer_hf,
                 )
-                .await?;
+                .await
+                .context("build_routed_pipeline_with_preprocessor")?;
                 self.manager
-                    .add_completions_model(&model_entry.name, completions_engine)?;
+                    .add_completions_model(&model_entry.name, completions_engine)
+                    .context("add_completions_model")?;
                 tracing::info!("Completions is ready");
             }
         } else if model_entry.model_input == ModelInput::Text
@@ -388,12 +382,6 @@ impl ModelWatcher {
             && model_entry.model_type.supports_embedding()
         {
             // Case 4: Tokens + Embeddings
-            let Some(mut card) = card else {
-                anyhow::bail!("Missing model deployment card for embedding model");
-            };
-
-            // Download tokenizer files to local disk
-            let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
             // Create preprocessing pipeline similar to Backend
             let frontend = SegmentSource::<

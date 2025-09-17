@@ -24,6 +24,12 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
 
+    /// Relative probability floor
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub min_p: Option<f32>,
+
     /// How much to penalize tokens based on how frequently they occur in the text.
     /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
     #[builder(default, setter(strip_option))]
