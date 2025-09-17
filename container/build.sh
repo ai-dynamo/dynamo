@@ -631,7 +631,12 @@ if [[ $FRAMEWORK != "NONE" ]]; then
     echo "======================================"
     BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
     $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+else
+    # Tag the dynamo base image with the user-specified tag
+    # Remove --tag prefix from LATEST_TAG for docker tag command
+    $RUN_PREFIX docker tag $DYNAMO_BASE_IMAGE ${LATEST_TAG#--tag }
 fi
+
 
 
 { set +x; } 2>/dev/null
