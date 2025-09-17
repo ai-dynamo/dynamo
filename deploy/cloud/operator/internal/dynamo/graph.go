@@ -765,8 +765,7 @@ func GenerateBasePodSpec(
 		maps.Copy(container.Resources.Limits, overrideResources.Limits)
 	}
 
-	disableImagePullSecretAnnotationValue := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery]
-	shouldDisableImagePullSecret := disableImagePullSecretAnnotationValue == commonconsts.KubeLabelValueTrue
+	shouldDisableImagePullSecret := component.Annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 
 	imagePullSecrets := []corev1.LocalObjectReference{}
 	if !shouldDisableImagePullSecret && secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
