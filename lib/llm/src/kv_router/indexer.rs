@@ -1103,34 +1103,6 @@ impl KvIndexerSharded {
         self.kv_block_size
     }
 
-    /// Get a combined sender for worker removal requests that fans out to all shards.
-    ///
-    /// ### Returns
-    ///
-    /// A `mpsc::Sender` that will forward removal requests to all shards.
-    pub fn remove_worker_sender(&self) -> mpsc::Sender<WorkerId> {
-        // Create a channel that will fan out to all shards
-        let (tx, mut rx) = mpsc::channel::<WorkerId>(16);
-        let shard_senders = self.remove_worker_tx.clone();
-
-        tokio::spawn(async move {
-            while let Some(worker_id) = rx.recv().await {
-                // Send to all shards - each will handle if it owns the worker
-                for (shard_idx, sender) in shard_senders.iter().enumerate() {
-                    if let Err(e) = sender.send(worker_id).await {
-                        tracing::warn!(
-                            "Failed to send remove_worker to shard {}: {:?}",
-                            shard_idx,
-                            e
-                        );
-                    }
-                }
-            }
-        });
-
-        tx
-    }
-
     pub fn new(
         token: CancellationToken,
         num_shards: usize,
