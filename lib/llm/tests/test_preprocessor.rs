@@ -726,7 +726,7 @@ fn test_enable_tool_call() {
         nvext: None,
         chat_template_args: None,
     };
-    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(maybe_enable_tool_call(Some("nemotron_deci"), &request));
 
     let request = NvCreateChatCompletionRequest {
         inner: CreateChatCompletionRequest {
@@ -748,16 +748,16 @@ fn test_enable_tool_call() {
         nvext: None,
         chat_template_args: None,
     };
-    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(maybe_enable_tool_call(Some("nemotron_deci"), &request));
 
     let request = NvCreateChatCompletionRequest {
         inner: CreateChatCompletionRequest {
-            tool_choice: None,
+            tool_choice: Some(ChatCompletionToolChoiceOption::Auto),
             ..Default::default()
         },
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
     };
-    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(!maybe_enable_tool_call(None, &request));
 }
