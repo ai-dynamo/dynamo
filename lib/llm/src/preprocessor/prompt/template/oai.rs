@@ -85,44 +85,49 @@ fn may_be_fix_tool_schema(tools: serde_json::Value) -> Option<Value> {
 }
 
 fn may_be_fix_msg_content(messages: serde_json::Value) -> Value {
-    // If messages[content] is provided as a list, concatenate all the text fields
-    // into a string to match chat template expectations/usage.
+    // If messages[content] is provided as a list containing ONLY text parts,
+    // concatenate them into a string to match chat template expectations.
+    // Mixed content types are left for chat templates to handle.
     if let Some(arr) = messages.as_array() {
         let mut updated_messages = Vec::new();
         for msg in arr {
             if let Some(content) = msg.get("content") {
                 if let Some(content_array) = content.as_array() {
-                    // This message needs fixing - clone and modify it
-                    let mut msg = msg.clone();
+                    // Check if ALL parts are text type
+                    let all_text = content_array.iter().all(|part| {
+                        part.get("type")
+                            .and_then(|t| t.as_str())
+                            .map(|t| t == "text")
+                            .unwrap_or(false)
+                    });
 
-                    // Extract text parts and concatenate with newlines
-                    let mut text_parts = Vec::new();
-                    for part in content_array {
-                        if let Some(part_type) = part.get("type")
-                            && let Some(type_str) = part_type.as_str()
-                            && type_str == "text"
-                            && let Some(text) = part.get("text")
-                            && let Some(text_str) = text.as_str()
-                        {
-                            text_parts.push(text_str.to_string());
+                    if all_text && !content_array.is_empty() {
+                        // All parts are text type - extract and concatenate
+                        let mut msg = msg.clone();
+                        let mut text_parts = Vec::new();
+
+                        for part in content_array {
+                            if let Some(text) = part.get("text")
+                                && let Some(text_str) = text.as_str()
+                            {
+                                text_parts.push(text_str.to_string());
+                            }
                         }
-                    }
 
-                    // If we found text parts, replace the array content with concatenated string
-                    if !text_parts.is_empty()
-                        && let Some(msg_obj) = msg.as_object_mut() {
+                        if let Some(msg_obj) = msg.as_object_mut() {
                             msg_obj.insert(
                                 "content".to_string(),
                                 serde_json::Value::String(text_parts.join("\n")),
                             );
                         }
-                    updated_messages.push(msg);
+                        updated_messages.push(msg);
+                    } else {
+                        updated_messages.push(msg.clone());
+                    }
                 } else {
-                    // String content - no modification needed, just clone reference
                     updated_messages.push(msg.clone());
                 }
             } else {
-                // No content field - just clone reference
                 updated_messages.push(msg.clone());
             }
         }
@@ -518,5 +523,57 @@ mod tests {
             messages[0]["content"],
             serde_json::Value::String("Simple text message".to_string())
         );
+    }
+
+    #[test]
+    fn test_may_be_fix_msg_content_mixed_types() {
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Check this image:"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+                        {"type": "text", "text": "What do you see?"}
+                    ]
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages = serde_json::to_value(request.messages()).unwrap();
+
+        assert!(messages[0]["content"].is_array());
+        let content_array = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content_array.len(), 3);
+        assert_eq!(content_array[0]["type"], "text");
+        assert_eq!(content_array[1]["type"], "image_url");
+        assert_eq!(content_array[2]["type"], "text");
+    }
+
+    #[test]
+    fn test_may_be_fix_msg_content_non_text_only() {
+        let json_str = r#"{
+            "model": "gpt-4o",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image1.jpg"}},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image2.jpg"}}
+                    ]
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages = serde_json::to_value(request.messages()).unwrap();
+
+        assert!(messages[0]["content"].is_array());
+        let content_array = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content_array.len(), 2);
+        assert_eq!(content_array[0]["type"], "image_url");
+        assert_eq!(content_array[1]["type"], "image_url");
     }
 }
