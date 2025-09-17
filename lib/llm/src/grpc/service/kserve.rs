@@ -35,8 +35,8 @@ pub mod inference {
 }
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
 use inference::{
-    ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest,
-    ModelInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
+    ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest, ModelInferResponse,
+    ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
 };
 
 /// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
