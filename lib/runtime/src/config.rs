@@ -112,6 +112,15 @@ pub struct RuntimeConfig {
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub starting_health_status: HealthStatus,
 
+    /// Use Endpoint Health Status
+    /// When using endpoint health status, health status
+    /// is the AND of individual endpoint health
+    /// Set this at runtime with environment variable DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+    /// with the list of endpoints to consider for system health
+    #[builder(default = "vec![]")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub use_endpoint_health_status: Vec<String>,
+
     /// Health endpoint paths
     /// Set this at runtime with environment variable DYN_SYSTEM_HEALTH_PATH
     #[builder(default = "DEFAULT_SYSTEM_HEALTH_PATH.to_string()")]
@@ -153,6 +162,11 @@ impl fmt::Display for RuntimeConfig {
         write!(f, "system_host={}, ", self.system_host)?;
         write!(f, "system_port={}, ", self.system_port)?;
         write!(f, "system_enabled={}", self.system_enabled)?;
+        write!(
+            f,
+            "use_endpoint_health_status={:?}",
+            self.use_endpoint_health_status
+        )?;
         write!(
             f,
             "starting_health_status={:?}",
@@ -200,6 +214,7 @@ impl RuntimeConfig {
                             "HOST" => "system_host",
                             "PORT" => "system_port",
                             "ENABLED" => "system_enabled",
+                            "USE_ENDPOINT_HEALTH_STATUS" => "use_endpoint_health_status",
                             "STARTING_HEALTH_STATUS" => "starting_health_status",
                             "HEALTH_PATH" => "system_health_path",
                             "LIVE_PATH" => "system_live_path",
@@ -280,6 +295,7 @@ impl RuntimeConfig {
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
+            use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
             health_check_enabled: false,
@@ -311,6 +327,7 @@ impl Default for RuntimeConfig {
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
+            use_endpoint_health_status: vec![],
             system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
             system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
             health_check_enabled: false,
@@ -505,6 +522,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_system_use_endpoint_health_status() {
+        temp_env::with_vars(
+            vec![("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some("[\"ready\"]"))],
+            || {
+                let config = RuntimeConfig::from_settings().unwrap();
+                assert!(config.use_endpoint_health_status == vec!["ready"]);
+            },
+        );
+    }
+    
     #[test]
     fn test_system_health_endpoint_path_default() {
         temp_env::with_vars(vec![("DYN_SYSTEM_HEALTH_PATH", None::<&str>)], || {

@@ -544,13 +544,15 @@ mod integration_tests {
     #[tokio::test]
     async fn test_health_endpoint_with_changing_health_status() {
         // Test health endpoint starts in not ready status, then becomes ready
-        // when endpoints register with health check payloads
+        // when endpoints are created (DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=generate)
         const ENDPOINT_NAME: &str = "generate";
+        const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
         temp_env::async_with_vars(
             [
                 ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                ("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -717,6 +719,10 @@ mod integration_tests {
                 ("DYN_SYSTEM_ENABLED", Some("true")),
                 ("DYN_SYSTEM_PORT", Some("0")),
                 ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                (
+                    "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    Some("[\"test.endpoint\"]"),
+                ),
                 // Enable health check with short intervals for testing
                 ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
                 ("DYN_CANARY_WAIT_TIME", Some("1")), // Send canary after 1 second of inactivity
