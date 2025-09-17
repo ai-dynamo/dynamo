@@ -12,7 +12,25 @@ inputs:
   target:
     description: 'Target to build'
     required: false
-    default: 'runtime'    
+    default: 'runtime'
+  ngc_ci_access_token:
+    description: 'NGC CI Access Token'
+    required: true
+  ci_token:
+    description: 'CI Token'
+    required: true
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: true
+  sccache_s3_bucket:
+    description: 'SCCache S3 Bucket'
+    required: true
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: true
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: true    
 
 runs:
   using: "composite"
@@ -23,7 +41,7 @@ runs:
       if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
       shell: bash
       run: |
-        echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+        echo "${{ inputs.ngc_ci_access_token }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
     - name: Cleanup
       if: always()
       shell: bash
@@ -32,11 +50,11 @@ runs:
     - name: Build image
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
-        AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-        SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        GITHUB_TOKEN: ${{ inputs.ci_token }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
+        SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
       run: |
         ./container/build.sh --tag ${{ inputs.framework }}:latest \
           --target ${{ inputs.target }} \
