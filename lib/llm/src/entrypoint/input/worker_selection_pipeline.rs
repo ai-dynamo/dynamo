@@ -42,7 +42,10 @@ use crate::{
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+    protocols::{
+        common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        openai::{chat_completions::NvCreateChatCompletionRequest, nvext::NvExt},
+    },
     types::Annotated,
 };
 
@@ -59,13 +62,12 @@ use dynamo_runtime::{
 ///
 /// This pipeline: frontend -> preprocessor -> backend -> migration -> router
 /// The router handles query_instance_id annotations and returns worker_instance_id and token_data annotations.
-pub async fn build_worker_selection_pipeline_with_preprocessor<Req>(
+pub async fn build_worker_selection_pipeline<Req>(
     card: &ModelDeploymentCard,
     client: &Client,
     router_mode: RouterMode,
     busy_threshold: Option<f64>,
     chooser: Option<Arc<KvRouter>>,
-    preprocessor: Arc<OpenAIPreprocessor>,
     hf_tokenizer: tokenizers::Tokenizer,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
@@ -77,6 +79,12 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
         >,
 {
+    use crate::preprocessor::prompt::PromptFormatter;
+
+    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let preprocessor =
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
+
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
@@ -111,42 +119,6 @@ where
         .link(service_backend)?;
 
     Ok(frontend)
-}
-
-/// Convenience function that creates a preprocessor and calls build_worker_selection_pipeline_with_preprocessor
-pub async fn build_worker_selection_pipeline<Req>(
-    card: &ModelDeploymentCard,
-    client: &Client,
-    router_mode: RouterMode,
-    busy_threshold: Option<f64>,
-    chooser: Option<Arc<KvRouter>>,
-    hf_tokenizer: tokenizers::Tokenizer,
-) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>>
-where
-    Req: dynamo_runtime::engine::Data,
-    OpenAIPreprocessor: Operator<
-            Context<Req>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
-            Context<PreprocessedRequest>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
-        >,
-{
-    use crate::preprocessor::prompt::PromptFormatter;
-
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
-    let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
-
-    build_worker_selection_pipeline_with_preprocessor(
-        card,
-        client,
-        router_mode,
-        busy_threshold,
-        chooser,
-        preprocessor,
-        hf_tokenizer,
-    )
-    .await
 }
 
 /// Helper function to extract worker selection information from the annotation stream
@@ -186,44 +158,172 @@ pub async fn extract_worker_selection_from_stream(
     Ok((worker_id, tokens))
 }
 
-#[cfg(test)]
-mod tests {
-    #[allow(unused_imports)]
-    use super::*;
-
-    #[tokio::test]
-    #[ignore] // Requires full distributed setup
-    async fn test_worker_selection_pipeline() {
-        // This test would require:
-        // - A real ModelDeploymentCard
-        // - A Component client connected to workers
-        // - A KvRouter with actual worker state
-
-        // Example test structure:
-        // let engine = build_worker_selection_pipeline(...).await.unwrap();
-        //
-        // // Create a request with query_instance_id annotation
-        // let request = create_test_request_with_annotation("query_instance_id");
-        // let response_stream = engine.generate(request).await.unwrap();
-        //
-        // // Use the helper function to extract worker selection information
-        // let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await.unwrap();
-        //
-        // assert!(worker_id > 0);
-        // assert!(!tokens.is_empty());
-    }
-}
-
-/*
-/// Helper function to create worker selection pipeline from C string parameters
+/// Utility function to add the "query_instance_id" annotation to an OpenAI request
 ///
-/// This function demonstrates how to create all the necessary parameters for
-/// `build_worker_selection_pipeline` when you only have namespace, component,
-/// and model information from C FFI.
+/// This function modifies the request to include the annotation that signals the KV router
+/// to return worker selection information (worker_instance_id and token_data) instead of
+/// performing actual inference.
 ///
 /// # Parameters
-/// - `namespace_c_str`: C string pointer to namespace name
-/// - `component_c_str`: C string pointer to component name
+/// - `request`: Mutable reference to the OpenAI chat completion request
+///
+/// # Returns
+/// The same request with the "query_instance_id" annotation added
+pub fn add_query_instance_id(
+    request: &mut NvCreateChatCompletionRequest,
+) -> &mut NvCreateChatCompletionRequest {
+    // Create or modify the nvext field to include the query_instance_id annotation
+    match request.nvext.as_mut() {
+        Some(nvext) => {
+            // NvExt already exists, add annotation to it
+            match nvext.annotations.as_mut() {
+                Some(annotations) => {
+                    // Annotations vector exists, add if not already present
+                    if !annotations.contains(&"query_instance_id".to_string()) {
+                        annotations.push("query_instance_id".to_string());
+                    }
+                }
+                None => {
+                    // No annotations vector, create one with our annotation
+                    nvext.annotations = Some(vec!["query_instance_id".to_string()]);
+                }
+            }
+        }
+        None => {
+            // No nvext field, create one with our annotation
+            request.nvext = Some(
+                NvExt::builder()
+                    .add_annotation("query_instance_id")
+                    .build()
+                    .expect("NvExt builder should not fail"),
+            );
+        }
+    }
+
+    request
+}
+
+/// Utility function to add worker_instance_id annotation to an OpenAI request
+pub fn add_worker_instance_id_annotation(
+    request: &mut NvCreateChatCompletionRequest,
+    worker_id: i64,
+) -> &mut NvCreateChatCompletionRequest {
+    let worker_id_str = worker_id.to_string();
+
+    match request.nvext.as_mut() {
+        Some(nvext) => {
+            match nvext.annotations.as_mut() {
+                Some(annotations) => {
+                    // Remove existing worker_instance_id if present
+                    annotations.retain(|ann| !ann.starts_with("worker_instance_id:"));
+                    annotations.push(format!("worker_instance_id:{}", worker_id_str));
+                }
+                None => {
+                    nvext.annotations = Some(vec![format!("worker_instance_id:{}", worker_id_str)]);
+                }
+            }
+        }
+        None => {
+            request.nvext = Some(
+                NvExt::builder()
+                    .add_annotation(format!("worker_instance_id:{}", worker_id_str))
+                    .build()
+                    .expect("NvExt builder should not fail"),
+            );
+        }
+    }
+
+    request
+}
+
+/// Utility function to add token_data annotation to an OpenAI request
+pub fn add_token_data_annotation<'a>(
+    request: &'a mut NvCreateChatCompletionRequest,
+    tokens: &[u32],
+) -> &'a mut NvCreateChatCompletionRequest {
+    let tokens_json = serde_json::to_string(tokens).unwrap_or_default();
+
+    match request.nvext.as_mut() {
+        Some(nvext) => {
+            match nvext.annotations.as_mut() {
+                Some(annotations) => {
+                    // Remove existing token_data if present
+                    annotations.retain(|ann| !ann.starts_with("token_data:"));
+                    annotations.push(format!("token_data:{}", tokens_json));
+                }
+                None => {
+                    nvext.annotations = Some(vec![format!("token_data:{}", tokens_json)]);
+                }
+            }
+        }
+        None => {
+            request.nvext = Some(
+                NvExt::builder()
+                    .add_annotation(format!("token_data:{}", tokens_json))
+                    .build()
+                    .expect("NvExt builder should not fail"),
+            );
+        }
+    }
+
+    request
+}
+
+/// Wrapper function that queries worker selection and annotates the original request
+///
+/// This function performs the complete flow:
+/// 1. Clones the original request and adds "query_instance_id" annotation
+/// 2. Calls engine.generate() with the modified request
+/// 3. Extracts worker_instance_id and tokens from the response stream
+/// 4. Adds worker_instance_id and token_data annotations to the original request
+/// 5. Returns (worker_id, tokens, annotated_original_request)
+///
+/// # Parameters
+/// - `engine`: The worker selection pipeline engine
+/// - `original_request`: The original OpenAI request to process
+///
+/// # Returns
+/// A tuple containing (worker_instance_id, tokens, modified_original_request)
+/// where the modified_original_request has worker_instance_id and token_data annotations added
+///
+/// # Example
+/// ```rust,ignore
+/// let (worker_id, tokens, annotated_request) =
+///     query_worker_selection_and_annotate(&engine, original_request).await?;
+/// ```
+pub async fn query_worker_selection_and_annotate(
+    engine: &ServiceEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<LLMEngineOutput>>,
+    >,
+    mut original_request: NvCreateChatCompletionRequest,
+) -> anyhow::Result<(i64, Vec<u32>, NvCreateChatCompletionRequest)> {
+    // Clone the request and add query_instance_id annotation
+    let mut query_request = original_request.clone();
+    add_query_instance_id(&mut query_request);
+
+    // Create SingleIn and generate
+    let single_in = SingleIn::new(query_request);
+    let response_stream = engine.generate(single_in).await?;
+
+    // Extract worker selection from stream
+    let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
+
+    // Add worker_instance_id and tokens to original request's nvext
+    add_worker_instance_id_annotation(&mut original_request, worker_id);
+    add_token_data_annotation(&mut original_request, &tokens);
+
+    Ok((worker_id, tokens, original_request))
+}
+
+/// Helper function to create worker selection pipeline from string parameters
+///
+/// This function creates all the necessary parameters for `build_worker_selection_pipeline`
+/// when you have namespace, component, and model information as strings.
+///
+/// # Parameters
+/// - `namespace`: namespace name
+/// - `component_name`: component name
 /// - `endpoint_name`: Name of the endpoint to connect to (e.g., "inference")
 /// - `model_name`: Name/slug of the model to load
 /// - `router_mode`: How to route requests (KV, RoundRobin, etc.)
@@ -232,11 +332,11 @@ mod tests {
 /// # Returns
 /// A configured worker selection pipeline ready to use
 ///
-/// # Example Usage in C FFI context:
+/// # Example Usage:
 /// ```rust,ignore
-/// let pipeline = create_worker_selection_pipeline_from_c_params(
-///     namespace_c_str,
-///     component_c_str,
+/// let pipeline = create_worker_selection_pipeline(
+///     "my-namespace",
+///     "backend",
 ///     "inference",
 ///     "llama3-8b-instruct",
 ///     RouterMode::KV,
@@ -248,9 +348,9 @@ mod tests {
 /// let response_stream = pipeline.generate(request).await?;
 /// let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
 /// ```
-pub async fn create_worker_selection_pipeline_from_c_params<Req>(
-    namespace_c_str: *const std::os::raw::c_char,
-    component_c_str: *const std::os::raw::c_char,
+pub async fn create_worker_selection_pipeline<Req>(
+    namespace: &str,
+    component_name: &str,
     endpoint_name: &str,
     model_name: &str,
     router_mode: RouterMode,
@@ -265,63 +365,57 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
         >,
 {
-    use std::ffi::CStr;
+    use crate::{discovery::ModelManager, model_card::ModelDeploymentCard};
+    use anyhow::Context;
     use dynamo_runtime::{
-        Runtime, DistributedRuntime,
-        storage::{EtcdStorage, KeyValueStoreManager},
-        slug::Slug,
-    };
-    use crate::{
-        model_card::{ModelDeploymentCard, ROOT_PATH as MODEL_ROOT_PATH},
-        discovery::ModelManager,
+        DistributedRuntime, Runtime, distributed::DistributedConfig, slug::Slug,
+        traits::DistributedRuntimeProvider,
     };
 
-    // 1. Convert C strings to Rust strings
-    let namespace_str = unsafe {
-        CStr::from_ptr(namespace_c_str)
-            .to_str()
-            .map_err(|e| anyhow::anyhow!("Invalid namespace string: {}", e))?
-    };
-    let component_str = unsafe {
-        CStr::from_ptr(component_c_str)
-            .to_str()
-            .map_err(|e| anyhow::anyhow!("Invalid component string: {}", e))?
-    };
+    // Create DistributedRuntime
+    let runtime = Runtime::from_settings()?;
+    let dst_config = DistributedConfig::from_settings(true);
+    let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
 
-    // 2. Create Runtime and DistributedRuntime
-    let runtime = Runtime::new().await?;
-    let distributed_runtime = DistributedRuntime::from_settings(runtime).await?;
-
-    // 3. Create Component and Client
-    let namespace = distributed_runtime.namespace(namespace_str)?;
-    let component = namespace.component(component_str)?;
+    // Create Component and Client
+    let ns = distributed_runtime.namespace(namespace)?;
+    let component = ns.component(component_name)?;
     let endpoint = component.endpoint(endpoint_name);
     let client = endpoint.client().await?;
 
-    // 4. Load ModelDeploymentCard
+    // Load ModelDeploymentCard
     let model_slug = Slug::from_string(model_name);
-    let card = match ModelDeploymentCard::load_from_store(&model_slug, &runtime)
+    let card = match ModelDeploymentCard::load_from_store(&model_slug, component.drt()).await {
+        Ok(Some(card)) => card,
+        Ok(None) => anyhow::bail!("ModelDeploymentCard not found for model: {}", model_name),
+        Err(err) => anyhow::bail!(
+            "Error fetching ModelDeploymentCard from storage under key {model_slug}. {err}"
+        ),
+    };
 
-    // 5. Get HuggingFace tokenizer from the model card
-    let hf_tokenizer = card.tokenizer_hf()
+    // Get tokenizer from the model card
+    let hf_tokenizer = card
+        .tokenizer_hf()
         .with_context(|| format!("Failed to load tokenizer for model: {}", model_name))?;
 
-    // 6. Create KV chooser if using KV routing mode
+    // Create KV chooser if using KV routing mode
     let chooser = if router_mode == RouterMode::KV {
         let model_manager = std::sync::Arc::new(ModelManager::new());
         Some(
-            model_manager.kv_chooser_for(
-                &card.display_name,
-                &component,
-                card.kv_cache_block_size,
-                None, // Use default KV router config
-            ).await?
+            model_manager
+                .kv_chooser_for(
+                    &card.display_name,
+                    &component,
+                    card.kv_cache_block_size,
+                    None, // Use default KV router config
+                )
+                .await?,
         )
     } else {
         None
     };
 
-    // 7. Build and return the worker selection pipeline
+    // Build and return the worker selection pipeline
     build_worker_selection_pipeline(
         &card,
         &client,
@@ -329,7 +423,6 @@ where
         busy_threshold,
         chooser,
         hf_tokenizer,
-    ).await
+    )
+    .await
 }
-
-*/
