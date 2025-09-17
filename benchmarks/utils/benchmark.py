@@ -5,9 +5,25 @@
 
 import argparse
 import sys
+from ast import Dict
 from typing import Tuple
 
-from benchmarks.utils.workflow import categorize_inputs, run_benchmark_workflow
+from benchmarks.utils.workflow import run_benchmark_workflow
+
+
+def validate_inputs(inputs: Dict[str, str]) -> None:
+    """Validate that all inputs are HTTP endpoints"""
+    for label, value in inputs.items():
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Input '{label}' must be an HTTP endpoint (starting with http:// or https://). Got: {value}"
+            )
+
+        # Validate reserved labels
+        if label.lower() == "plots":
+            raise ValueError(
+                "Label 'plots' is reserved and cannot be used. Please choose a different label."
+            )
 
 
 def parse_input(input_str: str) -> Tuple[str, str]:
@@ -100,7 +116,8 @@ def main() -> int:
             )
             print()
 
-        endpoints, manifests = categorize_inputs(parsed_inputs)
+        # Validate that all inputs are HTTP endpoints
+        validate_inputs(parsed_inputs)
 
     except (ValueError, FileNotFoundError) as e:
         print(f"ERROR: {e}")
