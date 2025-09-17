@@ -4,6 +4,7 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.06-py3"
 ARG RELEASE_BUILD
+ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 
