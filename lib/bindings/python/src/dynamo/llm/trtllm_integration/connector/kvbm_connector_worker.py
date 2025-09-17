@@ -4,7 +4,7 @@
 import torch
 from tensorrt_llm import logger
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import KvCacheConnectorWorker
-from tensorrt_llm.bindings.executor import ExecutorConfig
+from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
 from dynamo.llm.trtllm_integration.rust import (
     KvConnectorWorker as RustKvConnectorWorker,
@@ -13,16 +13,15 @@ from dynamo.runtime import DistributedRuntime
 
 
 class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
-    def __init__(self, executor_config: ExecutorConfig):
-        super().__init__(executor_config)
+    def __init__(self, llm_args: TorchLlmArgs):
+        super().__init__(llm_args)
 
         self.drt = DistributedRuntime.detached()
 
-        self.rank = executor_config.mapping.rank
+        mappings = self._llm_args.parallel_config.to_mapping()
+        self.rank = mappings.rank
 
-        self._connector = RustKvConnectorWorker(
-            self.drt, str(executor_config.mapping.rank)
-        )
+        self._connector = RustKvConnectorWorker(self.drt, str(self.rank))
 
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor):
         """
@@ -33,11 +32,11 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         """
         print(f"Register KV Caches on rank {self.rank}")
         logger.info(
-            f"KvConnectorWorker started registering the kv caches on rank {self._config.mapping.rank}"
+            f"KvConnectorWorker started registering the kv caches on rank {self.rank}"
         )
 
         num_device_blocks = kv_cache_tensor.shape[0]
-        page_size = self._config.tokens_per_block
+        page_size = self._llm_args.kv_cache_config.tokens_per_block
         device_id = kv_cache_tensor.device.index
         kv_cache_dtype = kv_cache_tensor.dtype
 
