@@ -77,3 +77,26 @@ sudo ufw allow 6881/tcp
 ```
 
 View grafana metrics via http://localhost:3001 (default login: dynamo/dynamo) and look for KVBM Dashboard
+
+## Benchmark KVBM
+
+Once vllm serve is ready, follow below steps to use LMBenchmark to benchmark KVBM performance:
+```bash
+git clone https://github.com/LMCache/LMBenchmark.git
+
+# show case of running the synthetic multi-turn chat dataset.
+# we are passing model, endpoint, output file prefix and qps to the sh script.
+cd LMBenchmark/synthetic-multi-round-qa
+./long_input_short_output_run.sh \
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" \
+    "http://localhost:8000" \
+    "benchmark_kvbm" \
+    1
+
+# Average TTFT and other perf numbers would be in the output from above cmd
+```
+More details about how to use LMBenchmark could be found [here](https://github.com/LMCache/LMBenchmark).
+
+`NOTE`: if metrics are enabled as mentioned in the above section, you can observe KV offloading, and KV onboarding in the grafana dashboard.
+
+To compare, you can run `vllm serve deepseek-ai/DeepSeek-R1-Distill-Llama-8B` to turn KVBM off as the baseline.
