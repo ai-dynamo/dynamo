@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -19,6 +19,7 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
+
 
 def _profile_prefill_helper(
     work_dir,
@@ -69,6 +70,7 @@ def _profile_prefill_helper(
 
     return
 
+
 def profile_prefill(
     work_dir,
     model_name,
@@ -90,7 +92,7 @@ def profile_prefill(
         if gap_result is not None:
             return gap_result["time_to_first_token"]["avg"]
         return None
-    
+
     return _profile_prefill_helper(
         work_dir,
         num_gpus,
@@ -98,6 +100,7 @@ def profile_prefill(
         interpolation_granularity,
         get_ttft,
     )
+
 
 def profile_prefill_aiconfigurator(
     work_dir,
@@ -115,6 +118,7 @@ def profile_prefill_aiconfigurator(
 
         ttft = perf_dict["context_latency"]
         logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
+        return ttft
 
     return _profile_prefill_helper(
         work_dir,

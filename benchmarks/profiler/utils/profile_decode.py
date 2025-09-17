@@ -27,7 +27,9 @@ def _profile_decode_helper(
     max_kv_tokens,
     max_context_length,
     interpolation_granularity,
-    get_itl_and_thpt_per_gpu: Callable[[int, int, int], Tuple[Optional[float], Optional[float]]],
+    get_itl_and_thpt_per_gpu: Callable[
+        [int, int, int], Tuple[Optional[float], Optional[float]]
+    ],
 ):
     """interpolate ITL - Active_KV_Cache - Decode_Context_Length"""
     x_kv_usage = []
@@ -90,6 +92,7 @@ def _profile_decode_helper(
 
     return
 
+
 def profile_decode(
     work_dir,
     model_name,
@@ -99,7 +102,6 @@ def profile_decode(
     max_kv_tokens,
     max_context_length,
     interpolation_granularity,
-    ai_configurator_perf_estimator: Optional[AIConfiguratorPerfEstimator] = None,
 ):
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
@@ -126,6 +128,7 @@ def profile_decode(
         interpolation_granularity,
         get_itl_and_thpt_per_gpu,
     )
+
 
 def profile_decode_aiconfigurator(
     work_dir,

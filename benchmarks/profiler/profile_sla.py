@@ -336,6 +336,7 @@ async def run_profile(args):
                 engine_decode_itl = []
                 engine_decode_thpt_per_gpu = []
                 for num_request in sweep_num_request:
+                    itl, thpt_per_gpu = None, None
                     if args.use_ai_configurator:
                         logger.info("Using ai-configurator to estimate decode latency.")
                         perf_dict = ai_configurator_perf_estimator.estimate_perf(
