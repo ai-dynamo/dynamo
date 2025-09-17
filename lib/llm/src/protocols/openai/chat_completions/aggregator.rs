@@ -249,6 +249,13 @@ impl DeltaAggregator {
             service_tier: aggregator.service_tier,
         };
 
+        if crate::audit::audit_enabled() {
+            // Only logs if we previously stashed a request for this id
+            if let Some(req_json) = crate::audit::take_request(&response.id) {
+                crate::audit::log_stored_completion(&response.id, &req_json, &response);
+            }
+        }
+
         Ok(response)
     }
 }
