@@ -617,22 +617,19 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-# TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
-if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
-    # Define base image tag before using it
-    DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
-    # Start base image build
+# Build the base image first
+DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+echo "======================================"
+echo "Starting Build: Base Image"
+echo "======================================"
+$RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+
+# For framework-specific builds, build the framework image on top of the base
+if [[ $FRAMEWORK != "NONE" ]]; then
     echo "======================================"
-    echo "Starting Build 1: Base Image"
-    echo "======================================"
-    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-    # Start framework build
-    echo "======================================"
-    echo "Starting Build 2: Framework Image"
+    echo "Starting Build: Framework Image"
     echo "======================================"
     BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
-    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-else
     $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 fi
 
