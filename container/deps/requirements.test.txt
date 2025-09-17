@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# For testing use_ai_configurator in profile_sla tests
+aiconfigurator>=0.1.1
 # For IFEval dataset loading in kvbm tests
 datasets
 psutil>=5.0.0
