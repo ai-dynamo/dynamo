@@ -257,6 +257,13 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
+        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        let finish_reason = if delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        } else {
+            delta.finish_reason
+        };
+
         dynamo_async_openai::types::ChatChoice {
             message: dynamo_async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
@@ -272,7 +279,7 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
                 reasoning_content: delta.reasoning_content,
             },
             index: delta.index,
-            finish_reason: delta.finish_reason,
+            finish_reason,
             logprobs: delta.logprobs,
         }
     }
@@ -622,6 +629,48 @@ mod tests {
         assert_eq!(
             choice1.message.role,
             dynamo_async_openai::types::Role::Assistant
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_output_finish_reason_override() {
+        // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
+        let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "I'll check the weather for you.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Stop), // Original finish reason is Stop
+            None,
+            Some(tool_call_json),
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         );
     }
 
