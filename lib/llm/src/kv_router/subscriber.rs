@@ -68,10 +68,12 @@ impl SnapshotResources {
 }
 
 /// Start a unified background task for event consumption and optional snapshot management
+#[allow(clippy::too_many_arguments)]
 pub async fn start_kv_router_background(
     component: Component,
     consumer_uuid: String,
     kv_events_tx: mpsc::Sender<RouterEvent>,
+    remove_worker_tx: mpsc::Sender<crate::kv_router::indexer::WorkerId>,
     snapshot_tx: Option<mpsc::Sender<DumpRequest>>,
     cancellation_token: CancellationToken,
     router_snapshot_threshold: Option<u32>,
@@ -156,6 +158,13 @@ pub async fn start_kv_router_background(
         .dissolve();
     let cleanup_lock_name = format!("{}/{}", ROUTER_CLEANUP_LOCK, component.subject());
 
+    // Get the generate endpoint and watch for instance deletions
+    let generate_endpoint = component.endpoint("generate");
+    let (_instance_prefix, _instance_watcher, mut instance_event_rx) = etcd_client
+        .kv_get_and_watch_prefix(generate_endpoint.etcd_root())
+        .await?
+        .dissolve();
+
     // Only set up snapshot-related resources if snapshot_tx is provided and threshold is set
     let snapshot_resources = if snapshot_tx.is_some() && router_snapshot_threshold.is_some() {
         let lock_name = format!("{}/{}", ROUTER_SNAPSHOT_LOCK, component.subject());
@@ -186,6 +195,30 @@ pub async fn start_kv_router_background(
                         tracing::warn!("Failed to shutdown NatsQueue: {e}");
                     }
                     break;
+                }
+
+                // Handle generate endpoint instance deletion events
+                Some(event) = instance_event_rx.recv() => {
+                    let WatchEvent::Delete(kv) = event else {
+                        continue;
+                    };
+
+                    let key = String::from_utf8_lossy(kv.key());
+
+                    let Some(worker_id_str) = key.split('/').next_back() else {
+                        tracing::warn!("Could not extract worker ID from instance key: {}", key);
+                        continue;
+                    };
+
+                    let Ok(worker_id) = worker_id_str.parse::<i64>() else {
+                        tracing::warn!("Could not parse worker ID from instance key: {}", key);
+                        continue;
+                    };
+
+                    tracing::info!("Generate endpoint instance deleted, removing worker {}", worker_id);
+                    if let Err(e) = remove_worker_tx.send(worker_id).await {
+                        tracing::warn!("Failed to send worker removal for worker {}: {}", worker_id, e);
+                    }
                 }
 
                 // Handle event consumption
