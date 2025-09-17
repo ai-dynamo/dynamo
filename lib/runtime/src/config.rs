@@ -532,7 +532,7 @@ mod tests {
             },
         );
     }
-    
+
     #[test]
     fn test_system_health_endpoint_path_default() {
         temp_env::with_vars(vec![("DYN_SYSTEM_HEALTH_PATH", None::<&str>)], || {
