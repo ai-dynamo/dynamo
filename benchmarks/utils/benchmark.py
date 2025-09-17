@@ -5,9 +5,7 @@
 
 import argparse
 import sys
-from ast import Dict
-from typing import Tuple
-
+from typing import Dict, Tuple
 from benchmarks.utils.workflow import run_benchmark_workflow
 
 
