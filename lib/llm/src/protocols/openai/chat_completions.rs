@@ -41,6 +41,10 @@ pub struct NvCreateChatCompletionRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Extra args to pass to the chat template rendering context
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -127,6 +131,20 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+    /// Retrieves the seed value for random number generation, if set.
+    fn get_seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+
+    /// Retrieves the number of completions to generate for each prompt, if set.
+    fn get_n(&self) -> Option<u8> {
+        self.inner.n
+    }
+
+    /// Retrieves the best_of parameter, if set.
+    fn get_best_of(&self) -> Option<u8> {
+        None // Not supported in chat completions
+    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
@@ -192,6 +210,14 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
             "top_k",
             self.common.top_k.as_ref(),
             self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
+        )
+    }
+
+    fn get_min_p(&self) -> Option<f32> {
+        choose_with_deprecation(
+            "min_p",
+            self.common.min_p.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.min_p.as_ref()),
         )
     }
 

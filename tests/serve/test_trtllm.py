@@ -59,6 +59,7 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: \d+, logit: ",
                 ]
             )
@@ -102,7 +103,6 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="skipping until @alec-flowers fixes the test")
 @pytest.mark.trtllm_marker
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
@@ -122,7 +122,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
         script_name=base.script_name,  # agg.sh
         marks=[],  # not used by this direct test
         request_payloads=[
-            chat_payload_default(),
+            chat_payload_default(expected_response=["Hello world!"]),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=base.delayed_start,

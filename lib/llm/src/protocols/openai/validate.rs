@@ -21,6 +21,13 @@ pub const MAX_TOP_P: f32 = 1.0;
 /// Allowed range of values for OpenAI's `top_p` sampling option
 pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
+/// Minimum allowed value for `min_p`
+pub const MIN_MIN_P: f32 = 0.0;
+/// Maximum allowed value for `min_p`
+pub const MAX_MIN_P: f32 = 1.0;
+/// Allowed range of values for `min_p`
+pub const MIN_P_RANGE: (f32, f32) = (MIN_MIN_P, MAX_MIN_P);
+
 /// Minimum allowed value for OpenAI's `frequency_penalty` sampling option
 pub const MIN_FREQUENCY_PENALTY: f32 = -2.0;
 /// Maximum allowed value for OpenAI's `frequency_penalty` sampling option
@@ -34,6 +41,13 @@ pub const MIN_PRESENCE_PENALTY: f32 = -2.0;
 pub const MAX_PRESENCE_PENALTY: f32 = 2.0;
 /// Allowed range of values for OpenAI's `presence_penalty` sampling option
 pub const PRESENCE_PENALTY_RANGE: (f32, f32) = (MIN_PRESENCE_PENALTY, MAX_PRESENCE_PENALTY);
+
+/// Minimum allowed value for `length_penalty`
+pub const MIN_LENGTH_PENALTY: f32 = -2.0;
+/// Maximum allowed value for `length_penalty`
+pub const MAX_LENGTH_PENALTY: f32 = 2.0;
+/// Allowed range of values for `length_penalty`
+pub const LENGTH_PENALTY_RANGE: (f32, f32) = (MIN_LENGTH_PENALTY, MAX_LENGTH_PENALTY);
 
 /// Maximum allowed value for `top_logprobs`
 pub const MIN_TOP_LOGPROBS: u8 = 0;
@@ -49,6 +63,8 @@ pub const MAX_LOGPROBS: u8 = 5;
 pub const MIN_N: u8 = 1;
 /// Maximum allowed value for `n` (number of choices)
 pub const MAX_N: u8 = 128;
+/// Allowed range of values for `n` (number of choices)
+pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
 
 /// Minimum allowed value for OpenAI's `logit_bias` values
 pub const MIN_LOGIT_BIAS: f32 = -100.0;
@@ -59,6 +75,8 @@ pub const MAX_LOGIT_BIAS: f32 = 100.0;
 pub const MIN_BEST_OF: u8 = 0;
 /// Maximum allowed value for `best_of`
 pub const MAX_BEST_OF: u8 = 20;
+/// Allowed range of values for `best_of`
+pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 
 /// Maximum allowed number of stop sequences
 pub const MAX_STOP_SEQUENCES: usize = 4;

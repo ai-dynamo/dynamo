@@ -252,8 +252,10 @@ impl LocalModelBuilder {
         // --model-config takes precedence over --model-path
         let model_config_path = self.model_config.as_ref().unwrap_or(&full_path);
 
-        let mut card =
-            ModelDeploymentCard::load(model_config_path, self.custom_template_path.as_deref())?;
+        let mut card = ModelDeploymentCard::load_from_disk(
+            model_config_path,
+            self.custom_template_path.as_deref(),
+        )?;
 
         // Usually we infer from the path, self.model_name is user override
         let model_name = self.model_name.take().unwrap_or_else(|| {
