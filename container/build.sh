@@ -617,24 +617,23 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-# Build the base image first
-DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
-echo "======================================"
-echo "Starting Build: Base Image"
-echo "======================================"
-$RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
-
-# For framework-specific builds, build the framework image on top of the base
+# TODO: Follow 2-step build process for all frameworks
 if [[ $FRAMEWORK != "NONE" ]]; then
+    # Define base image tag before using it
+    DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
+    # Start base image build
     echo "======================================"
-    echo "Starting Build: Framework Image"
+    echo "Starting Build 1: Base Image"
+    echo "======================================"
+    $RUN_PREFIX docker build -f "${SOURCE_DIR}/Dockerfile" --target dev $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO --tag $DYNAMO_BASE_IMAGE $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+    # Start framework build
+    echo "======================================"
+    echo "Starting Build 2: Framework Image"
     echo "======================================"
     BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${DYNAMO_BASE_IMAGE}"
     $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 else
-    # Tag the dynamo base image with the user-specified tag
-    # Remove --tag prefix from LATEST_TAG for docker tag command
-    $RUN_PREFIX docker tag $DYNAMO_BASE_IMAGE ${LATEST_TAG#--tag }
+    $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 fi
 
 
