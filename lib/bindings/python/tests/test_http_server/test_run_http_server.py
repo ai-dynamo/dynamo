@@ -29,6 +29,8 @@ from dynamo.runtime import DistributedRuntime
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
+pytestmark = pytest.mark.pre_merge
+
 
 class MockHttpEngine:
     """A mock engine that returns a completion or raises an error."""
