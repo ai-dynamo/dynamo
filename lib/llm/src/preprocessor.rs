@@ -78,7 +78,7 @@ pub struct JailState {
     finished: bool,                            // Add this flag to track if stream is finished
 }
 
-pub fn _maybe_enable_tool_call(
+pub fn maybe_enable_tool_call(
     parser_str: Option<&str>,
     request: &NvCreateChatCompletionRequest,
 ) -> bool {
@@ -949,7 +949,7 @@ impl
         let mut response_generator = Box::new(response_generator);
 
         let enable_tool_calling =
-            _maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
+            maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 

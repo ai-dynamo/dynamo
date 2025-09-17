@@ -8,8 +8,8 @@ use dynamo_async_openai::types::{
     ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason as OAIFinishReason, Role,
 };
 use dynamo_llm::preprocessor::{
-    _maybe_enable_tool_call, ANNOTATION_POSSIBLE_TOOL_CALL, PossibleToolCallAnnotation,
-    apply_tool_calling_jail_internal,
+    ANNOTATION_POSSIBLE_TOOL_CALL, PossibleToolCallAnnotation, apply_tool_calling_jail_internal,
+    maybe_enable_tool_call,
 };
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -726,7 +726,7 @@ fn test_enable_tool_call() {
         nvext: None,
         chat_template_args: None,
     };
-    assert!(_maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
 
     let request = NvCreateChatCompletionRequest {
         inner: CreateChatCompletionRequest {
@@ -737,7 +737,7 @@ fn test_enable_tool_call() {
         nvext: None,
         chat_template_args: None,
     };
-    assert!(!_maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
 
     let request = NvCreateChatCompletionRequest {
         inner: CreateChatCompletionRequest {
@@ -748,7 +748,7 @@ fn test_enable_tool_call() {
         nvext: None,
         chat_template_args: None,
     };
-    assert!(_maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
 
     let request = NvCreateChatCompletionRequest {
         inner: CreateChatCompletionRequest {
@@ -759,5 +759,5 @@ fn test_enable_tool_call() {
         nvext: None,
         chat_template_args: None,
     };
-    assert!(!_maybe_enable_tool_call(Some("nemotron_deci"), &request));
+    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
 }
