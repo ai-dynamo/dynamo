@@ -419,6 +419,7 @@ impl KvIndexer {
                 component.inner.clone(),
                 consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                 inner.event_sender(),
+                inner.remove_worker_sender(),
                 None,
                 cancellation_token,
                 None,
