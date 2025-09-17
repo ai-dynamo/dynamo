@@ -12,7 +12,7 @@ on:
 jobs:
   vllm-build-test:
     runs-on: gpu-l40-amd64
-    name: Build and Test - vllm
+    name: Build and Test - VLLM
     
     # Do not cancel main branch runs
     concurrency:
@@ -29,16 +29,10 @@ jobs:
           framework: vllm
           target: runtime
           pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          ngc_token: ${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push') && secrets.NGC_CI_ACCESS_TOKEN || '' }}
-          github_token: ${{ secrets.CI_TOKEN }}
-          aws_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   sglang-build-test:
     runs-on: gpu-l40-amd64
-    name: Build and Test - sglang
+    name: Build and Test - SGLang
     
     # Do not cancel main branch runs
     concurrency:
@@ -55,16 +49,10 @@ jobs:
           framework: sglang
           target: runtime
           pytest_marks: "e2e and sglang and gpu_1"
-          ngc_token: ${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push') && secrets.NGC_CI_ACCESS_TOKEN || '' }}
-          github_token: ${{ secrets.CI_TOKEN }}
-          aws_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   trtllm-build-test:
     runs-on: gpu-l40-amd64
-    name: Build and Test - trtllm
+    name: Build and Test - TensorRT-LLM
     
     # Do not cancel main branch runs
     concurrency:
@@ -81,9 +69,3 @@ jobs:
           framework: trtllm
           target: runtime
           pytest_marks: "e2e and trtllm_marker and gpu_1"
-          ngc_token: ${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push') && secrets.NGC_CI_ACCESS_TOKEN || '' }}
-          github_token: ${{ secrets.CI_TOKEN }}
-          aws_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
