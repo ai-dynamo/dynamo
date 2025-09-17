@@ -4,7 +4,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import asyncio
 import sys
 from typing import Tuple
 
@@ -15,13 +14,13 @@ def parse_input(input_str: str) -> Tuple[str, str]:
     """Parse input string in format key=value with additional validation"""
     if "=" not in input_str:
         raise ValueError(
-            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
+            f"Invalid input format. Expected: <label>=<endpoint>, got: {input_str}"
         )
 
     parts = input_str.split("=", 1)  # Split on first '=' only
     if len(parts) != 2:
         raise ValueError(
-            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
+            f"Invalid input format. Expected: <label>=<endpoint>, got: {input_str}"
         )
 
     label, value = parts
@@ -51,9 +50,8 @@ def main() -> int:
         "--input",
         action="append",
         dest="inputs",
-        help="Input in format <label>=<manifest_path_or_endpoint>. Can be specified multiple times for comparisons.",
+        help="Input in format <label>=<endpoint>. Can be specified multiple times for comparisons.",
     )
-    parser.add_argument("--namespace", required=True, help="Kubernetes namespace")
     parser.add_argument("--isl", type=int, default=2000, help="Input sequence length")
     parser.add_argument(
         "--std",
@@ -109,16 +107,13 @@ def main() -> int:
         return 1
 
     # Run the benchmark workflow with the parsed inputs
-    asyncio.run(
-        run_benchmark_workflow(
-            namespace=args.namespace,
-            inputs=parsed_inputs,
-            isl=args.isl,
-            std=args.std,
-            osl=args.osl,
-            model=args.model,
-            output_dir=args.output_dir,
-        )
+    run_benchmark_workflow(
+        inputs=parsed_inputs,
+        isl=args.isl,
+        std=args.std,
+        osl=args.osl,
+        model=args.model,
+        output_dir=args.output_dir,
     )
     return 0
 
