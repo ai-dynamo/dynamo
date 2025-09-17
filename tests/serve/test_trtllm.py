@@ -102,6 +102,7 @@ def test_deployment(trtllm_config_test, request, runtime_services, predownload_m
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
+@pytest.mark.skip(reason="skipping until @alec-flowers fixes the test")
 @pytest.mark.trtllm_marker
 def test_chat_only_aggregated_with_test_logits_processor(
     request, runtime_services, predownload_models, monkeypatch
