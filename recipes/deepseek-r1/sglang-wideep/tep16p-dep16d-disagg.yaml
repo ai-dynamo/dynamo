@@ -59,7 +59,7 @@ spec:
               --dp 16
               --enable-dp-attention
               --ep-size 16
-              --trust-remote-code 
+              --trust-remote-code
               --skip-tokenizer-init
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl

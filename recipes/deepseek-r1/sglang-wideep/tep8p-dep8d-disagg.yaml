@@ -57,7 +57,7 @@ spec:
               --dp 8
               --enable-dp-attention
               --ep-size 8
-              --trust-remote-code 
+              --trust-remote-code
               --skip-tokenizer-init
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
