@@ -128,6 +128,8 @@ async def run_profile(args):
         logger.info("Profiling prefill...")
         prefill_config = config_modifier.convert_config(config, "prefill")
         frontend_port = config_modifier.get_port(config)
+        itl: float | None = None
+        thpt_per_gpu: float | None = None
         for tp_size in profile_tp_size:
             logger.info(f"Profiling prefill with TP size {tp_size}...")
 
@@ -336,7 +338,7 @@ async def run_profile(args):
                 engine_decode_itl = []
                 engine_decode_thpt_per_gpu = []
                 for num_request in sweep_num_request:
-                    itl, thpt_per_gpu = None, None
+                    itl = thpt_per_gpu = None
                     if args.use_ai_configurator:
                         logger.info("Using ai-configurator to estimate decode latency.")
                         perf_dict = ai_configurator_perf_estimator.estimate_perf(

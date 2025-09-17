@@ -107,7 +107,7 @@ def profile_prefill_aiconfigurator(
     num_gpus,
     max_context_length,
     interpolation_granularity,
-    ai_configurator_perf_estimator: Optional[AIConfiguratorPerfEstimator],
+    ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
     **model_config_kwargs,
 ):
     def get_ttft(isl):
