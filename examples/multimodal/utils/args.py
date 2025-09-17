@@ -29,7 +29,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 
 
 class Config:

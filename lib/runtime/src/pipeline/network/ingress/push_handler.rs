@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::*;
 use crate::metrics::prometheus_names::work_handler;
@@ -136,6 +124,14 @@ where
         // Call the Ingress-specific add_metrics implementation
         use crate::pipeline::network::Ingress;
         Ingress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
@@ -317,6 +313,11 @@ where
                         .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
                         .inc();
                 }
+            }
+            // Notify the health check manager that the stream has finished.
+            // This resets the timer, delaying the next canary health check.
+            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
             }
         }
 

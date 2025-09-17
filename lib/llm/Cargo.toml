@@ -147,6 +147,7 @@ erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
 minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+json-five = { version = "0.3" }
 
 # GGUF
 ggus = "0.4.0"

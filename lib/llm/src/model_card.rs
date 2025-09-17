@@ -174,12 +174,16 @@ impl ModelDeploymentCard {
 
     /// Load a model deployment card from a JSON file
     pub fn load_from_json_file<P: AsRef<Path>>(file: P) -> std::io::Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(file)?)?)
+        let contents = std::fs::read_to_string(&file)?;
+        Ok(serde_json::from_str(&contents).inspect_err(|err| {
+            crate::log_json_err(&file.as_ref().display().to_string(), &contents, err)
+        })?)
     }
 
     /// Load a model deployment card from a JSON string
-    pub fn load_from_json_str(json: &str) -> Result<Self, anyhow::Error> {
-        Ok(serde_json::from_str(json)?)
+    pub fn load_from_json_str(contents: &str) -> Result<Self, anyhow::Error> {
+        Ok(serde_json::from_str(contents)
+            .inspect_err(|err| crate::log_json_err("unknown", contents, err))?)
     }
 
     //
@@ -227,7 +231,15 @@ impl ModelDeploymentCard {
                 let p = checked_file.path().ok_or_else(||
                     anyhow::anyhow!("Tokenizer is URL-backed ({:?}); call move_from_nats() before tokenizer_hf()", checked_file.url())
                 )?;
-                HfTokenizer::from_file(p).map_err(anyhow::Error::msg)
+                HfTokenizer::from_file(p)
+                    .inspect_err(|err| {
+                        if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
+                            && let Ok(contents) = std::fs::read_to_string(p)
+                        {
+                            crate::log_json_err(&p.display().to_string(), &contents, serde_err);
+                        }
+                    })
+                    .map_err(anyhow::Error::msg)
             }
             Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
             None => {
@@ -627,11 +639,18 @@ impl HFConfig {
     fn from_json_file<P: AsRef<Path>>(file: P) -> Result<Arc<dyn ModelInfo>> {
         let file_path = file.as_ref();
         let contents = std::fs::read_to_string(file_path)?;
-        let mut config: Self = serde_json::from_str(&contents)?;
+        let mut config: Self = json_five::from_str(&contents)
+            .inspect_err(|err| {
+                tracing::error!(path=%file_path.display(), %err, "Failed to parse config.json as JSON5");
+            })?;
         if config.text_config.is_none() {
-            let text_config: HFTextConfig = serde_json::from_str(&contents)?;
+            let text_config: HFTextConfig = json_five::from_str(&contents)
+                .inspect_err(|err| {
+                    tracing::error!(path=%file_path.display(), %err, "Failed to parse text config from config.json as JSON5");
+                })?;
             config.text_config = Some(text_config);
         }
+
         // Sometimes bos_token_id is in generation_config.json not config.json
         let Some(text_config) = config.text_config.as_mut() else {
             anyhow::bail!(
@@ -881,5 +900,15 @@ mod tests {
         let config = HFConfig::from_json_file(&config_file)?;
         assert_eq!(config.bos_token_id(), 200000);
         Ok(())
+    }
+
+    /// The Python JSON parser accepts `Infinity` as a numeric value. This is explicitly against the
+    /// JSON spec, but inevitably people rely on it, so we have to allow it.
+    /// We treat that file as JSON5 (a lenient superset of JSON) to be able to parse it.
+    #[test]
+    fn test_invalid_json_but_py_accepts_it() {
+        dynamo_runtime::logging::init();
+        let path = "tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
+        let _ = HFConfig::from_json_file(path).unwrap();
     }
 }

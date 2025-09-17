@@ -271,20 +271,8 @@ print_config() {
     echo
 }
 
-clear_output_directory() {
-    if [[ -d "$OUTPUT_DIR" ]]; then
-        echo "🧹 Clearing existing output directory: $OUTPUT_DIR"
-        rm -rf "$OUTPUT_DIR"
-    fi
-    mkdir -p "$OUTPUT_DIR"
-    echo "✅ Output directory prepared: $OUTPUT_DIR"
-}
-
 run_benchmark() {
     echo "🚀 Starting benchmark workflow..."
-
-    # Clear and recreate output directory
-    clear_output_directory
 
     # Change to dynamo root directory
     cd "$DYNAMO_ROOT"

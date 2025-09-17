@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llama3-70b-disagg-sn
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: llama3-70b-disagg-sn
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          workingDir: /workspace/components/backends/vllm
+      replicas: 1
+    VllmPrefillWorker:
+      componentType: worker
+      dynamoNamespace: llama3-70b-disagg-sn
+      envFromSecret: hf-token-secret
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-component-type
+                      operator: In
+                      values:
+                        - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - "python3 -m dynamo.vllm --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --tensor-parallel-size 2 --data-parallel-size 1 --disable-log-requests --is-prefill-worker --gpu-memory-utilization 0.95 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          workingDir: /workspace/components/backends/vllm
+      replicas: 2
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+    VllmDecodeWorker:
+      componentType: worker
+      dynamoNamespace: llama3-70b-disagg-sn
+      envFromSecret: hf-token-secret
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-component-type
+                      operator: In
+                      values:
+                        - worker
+                topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - "python3 -m dynamo.vllm --model RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic --tensor-parallel-size 4 --data-parallel-size 1 --disable-log-requests --gpu-memory-utilization 0.90 --no-enable-prefix-caching --block-size 128"
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          workingDir: /workspace/components/backends/vllm
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

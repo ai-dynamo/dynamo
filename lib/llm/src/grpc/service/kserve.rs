@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::grpc::service::openai::{completion_response_stream, get_parsing_options};
+use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::tensor_response_stream;
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
@@ -235,8 +235,8 @@ impl GrpcInferenceService for KserveService {
                 }
             }
 
-            let parsing_options =
-                get_parsing_options(self.state.manager(), &completion_request.inner.model);
+            let model = completion_request.inner.model.clone();
+            let parsing_options = self.state.manager.get_parsing_options(&model);
 
             let stream = completion_response_stream(self.state_clone(), completion_request).await?;
 
@@ -340,7 +340,7 @@ impl GrpcInferenceService for KserveService {
                     }
 
                     let model = completion_request.inner.model.clone();
-                    let parsing_options = get_parsing_options(state.manager(), &model);
+                    let parsing_options = state.manager.get_parsing_options(&model);
 
                     let streaming = completion_request.inner.stream.unwrap_or(false);
 
