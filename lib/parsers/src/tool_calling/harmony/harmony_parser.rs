@@ -7,19 +7,27 @@ use openai_harmony::StreamableParser;
 use openai_harmony::chat::{Content::Text, Role};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding};
 use serde_json::Value;
-use std::sync::OnceLock;
 
-static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
-    OnceLock::new();
+static GLOBAL_HARMONY_GPTOSS_ENCODING: tokio::sync::OnceCell<
+    Result<HarmonyEncoding, anyhow::Error>,
+> = tokio::sync::OnceCell::const_new();
 
-pub fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
+pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+        .get_or_init(|| async {
+            tokio::task::spawn_blocking(|| {
+                load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
+            })
+            .await
+            .map_err(anyhow::Error::msg)
+            .flatten()
+        })
+        .await
 }
 
 /// Parse tool calls from Harmony Format text
 /// <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>
-pub fn parse_tool_calls_harmony(
+pub async fn parse_tool_calls_harmony(
     text: &str,
     config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
@@ -43,7 +51,7 @@ pub fn parse_tool_calls_harmony(
         trimmed.push_str(end_token);
     }
 
-    let enc = match get_harmony_encoding().as_ref() {
+    let enc = match get_harmony_encoding().await.as_ref() {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
@@ -176,8 +184,8 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[test]
-    fn test_parse_tool_calls_harmony_basic() {
+    #[tokio::test]
+    async fn test_parse_tool_calls_harmony_basic() {
         let text = r#"
 <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
 <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
@@ -188,7 +196,7 @@ mod tests {
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).await.unwrap();
         assert_eq!(
             normal_content,
             Some("Need to use function get_current_weather.".to_string())
@@ -199,8 +207,8 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[test]
-    fn test_parse_tools_harmony_without_start_token() {
+    #[tokio::test]
+    async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"
 <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
 <|message|>{"location":"San Francisco"}<|call|>
@@ -210,13 +218,13 @@ mod tests {
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).await.unwrap();
         assert_eq!(normal_content, Some(text.trim().to_string()));
         assert_eq!(tool_calls.len(), 0);
     }
 
-    #[test]
-    fn test_parse_tool_calls_harmony_with_multi_args() {
+    #[tokio::test]
+    async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"
         <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
         <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
@@ -227,7 +235,7 @@ mod tests {
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).await.unwrap();
         assert_eq!(
             normal_content,
             Some("Need to use function get_current_weather.".to_string())
@@ -239,8 +247,8 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test]
-    fn test_parse_tool_calls_harmony_with_normal_text() {
+    #[tokio::test]
+    async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"
         <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
         <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
@@ -251,7 +259,7 @@ mod tests {
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).await.unwrap();
         assert_eq!(
             normal_content,
             Some("Need to use function get_current_weather.".to_string())
@@ -262,15 +270,15 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
-    #[test]
-    fn test_parse_tool_calls_harmony_without_call_token() {
+    #[tokio::test]
+    async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).unwrap();
+        let (tool_calls, normal_content) = parse_tool_calls_harmony(text, &config).await.unwrap();
         assert_eq!(normal_content, Some("We need to call get_weather function. The user asks \"What's the weather like in San Francisco in Celsius?\" So location: \"San Francisco, CA\" unit: \"celsius\". Let's call function.".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());

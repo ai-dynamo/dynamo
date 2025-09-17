@@ -169,7 +169,7 @@ async fn test_apply_tool_calling_jail_internal_with_tool_call_detection() {
 
     // Apply the jail with nemotron_deci parser - should trigger jailing on first chunk
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string())).await;
 
     // Collect all results
     let results: Vec<_> = jailed_stream.collect().await;
@@ -225,7 +225,7 @@ async fn test_apply_tool_calling_jail_internal_no_tool_calls() {
 
     // Apply the jail with nemotron_deci parser - regular text should NOT be jailed
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string())).await;
 
     // Collect all results
     let results: Vec<_> = jailed_stream.collect().await;
@@ -276,7 +276,7 @@ async fn test_apply_tool_calling_jail_internal_with_empty_stream() {
     let input_stream = stream::iter(chunks);
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
-    let jailed_stream = apply_tool_calling_jail_internal(response_stream, None);
+    let jailed_stream = apply_tool_calling_jail_internal(response_stream, None).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(results.is_empty(), "Empty stream should produce no results");
@@ -300,7 +300,7 @@ async fn test_apply_tool_calling_jail_internal_with_different_parsers() {
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(!results.is_empty(), "Should have results for hermes parser");
@@ -360,7 +360,7 @@ async fn test_apply_tool_calling_jail_internal_hermes_parser() {
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(!results.is_empty(), "Should have results for hermes parser");
@@ -458,7 +458,7 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_no_tool_call_
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string())).await;
 
     let results: Vec<_> = jailed_stream.collect().await;
 
@@ -532,7 +532,7 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_false_positiv
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(
@@ -583,7 +583,7 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_false_positiv
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(
@@ -670,7 +670,7 @@ async fn test_tool_calling_jail_internal_with_harmony_parser() {
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("harmony".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("harmony".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(

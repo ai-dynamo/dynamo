@@ -32,7 +32,7 @@ pub fn get_available_tool_parsers() -> Vec<&'static str> {
     get_tool_parser_map().keys().copied().collect()
 }
 
-pub fn try_tool_call_parse(
+pub async fn try_tool_call_parse(
     message: &str,
     config: &ToolCallConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
@@ -43,7 +43,7 @@ pub fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ToolCallParserType::Harmony => {
-            let (results, normal_content) = parse_tool_calls_harmony(message, &config.json)?;
+            let (results, normal_content) = parse_tool_calls_harmony(message, &config.json).await?;
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
@@ -60,7 +60,7 @@ pub fn try_tool_call_parse(
 }
 
 // Base Detector to call for all tool parsing
-pub fn detect_and_parse_tool_call(
+pub async fn detect_and_parse_tool_call(
     message: &str,
     parser_str: Option<&str>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
@@ -75,7 +75,7 @@ pub fn detect_and_parse_tool_call(
 
     match parser_map.get(parser_key) {
         Some(config) => {
-            let (results, normal_content) = try_tool_call_parse(message, config)?;
+            let (results, normal_content) = try_tool_call_parse(message, config).await?;
             Ok((results, normal_content))
         }
         None => anyhow::bail!(
