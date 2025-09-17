@@ -1,7 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-# Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B-Q8_0.gguf --extra-engine-args args.json`
+# Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
 
 import os
 
