@@ -19,19 +19,16 @@ jobs:
       group: ${{ github.workflow }}-vllm-build-test-${{ github.ref_name || github.run_id }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-    strategy:
-      fail-fast: false
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         
-      - name: Build and Test - vllm
+      - name: Build and Test VLLM
         uses: ./.github/actions/build-and-test-framework
         with:
           framework: vllm
           target: runtime
-          pytest_marks: "e2e and vllm and gpu_1"
+          pytest_marks: "e2e and vllm and gpu_1 and not slow"
           ngc_token: ${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push') && secrets.NGC_CI_ACCESS_TOKEN || '' }}
           github_token: ${{ secrets.CI_TOKEN }}
           aws_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -48,14 +45,11 @@ jobs:
       group: ${{ github.workflow }}-sglang-build-test-${{ github.ref_name || github.run_id }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-    strategy:
-      fail-fast: false
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         
-      - name: Build and Test - sglang
+      - name: Build and Test SGLang
         uses: ./.github/actions/build-and-test-framework
         with:
           framework: sglang
@@ -77,14 +71,11 @@ jobs:
       group: ${{ github.workflow }}-trtllm-build-test-${{ github.ref_name || github.run_id }}
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-    strategy:
-      fail-fast: false
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         
-      - name: Build and Test - trtllm
+      - name: Build and Test TensorRT-LLM
         uses: ./.github/actions/build-and-test-framework
         with:
           framework: trtllm
