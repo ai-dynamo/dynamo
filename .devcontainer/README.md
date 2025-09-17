@@ -351,13 +351,15 @@ If you see errors like "container is not running" or "An error occurred setting 
 
 **Common Causes and Solutions:**
 
-1. **Missing base image:**
+1. **Missing a local-dev image:**
    ```bash
-   # Check if the required image exists
+   # Check if the required local-dev image exists
    docker images | grep dynamo
 
-   # If missing, build the dev image first
-   ./container/build.sh --target dev
+   # If missing, build the dev image first, then build local-dev
+   ./container/build.sh --framework vllm --target dev
+   ./container/build_local_dev.sh --dev-image dynamo:latest-vllm
+   # Output: dynamo:latest-vllm-local-dev
    ```
 
 2. **Container startup failure:**
