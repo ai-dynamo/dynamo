@@ -84,17 +84,23 @@ class VllmBaseWorker:
 
         # use endpoint_overwrite to set the default endpoint based on worker type
         def endpoint_overwrite(args):
+            DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
             # default endpoint for this worker
             if args.worker_type == "prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.llm.generate"
+                args.endpoint = args.endpoint or f"dyn://{DYN_NAMESPACE}.llm.generate"
             elif args.worker_type == "decode":
-                args.endpoint = args.endpoint or "dyn://dynamo.decoder.generate"
+                args.endpoint = (
+                    args.endpoint or f"dyn://{DYN_NAMESPACE}.decoder.generate"
+                )
             elif args.worker_type == "encode_prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.encoder.generate"
+                args.endpoint = (
+                    args.endpoint or f"dyn://{DYN_NAMESPACE}.encoder.generate"
+                )
             # set downstream endpoint for disaggregated workers
             if args.enable_disagg:
                 args.downstream_endpoint = (
-                    args.downstream_endpoint or "dyn://dynamo.decoder.generate"
+                    args.downstream_endpoint
+                    or f"dyn://{DYN_NAMESPACE}.decoder.generate"
                 )
 
             return args

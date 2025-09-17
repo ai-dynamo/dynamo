@@ -37,9 +37,15 @@ The framework is a wrapper around `genai-perf` that:
 
 ## Prerequisites
 
-1. **Kubernetes cluster with NVIDIA GPUs and Dynamo namespace setup** - You need a Kubernetes cluster with eligible NVIDIA GPUs and a properly configured namespace for Dynamo benchmarking. See the [deploy/utils/README](../../deploy/utils/README.md) for complete setup instructions.
+1. **Kubernetes cluster with NVIDIA GPUs and Dynamo Cloud platform** - You need a Kubernetes cluster with eligible NVIDIA GPUs and the Dynamo Cloud platform installed. First follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
 
-2. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster. All other required tools (GenAI-Perf, Python, etc.) are included in the Dynamo containers. If you are not working within a Dynamo container, you can install the necessary requirements using `deploy/utils/requirements.txt`. *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
+2. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster.
+
+3. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
+   ```bash
+   pip install -r deploy/utils/requirements.txt
+   ```
+   *Note: if you are on Ubuntu 22.04 or lower, you will also need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).*
 
 ## Quick Start Examples
 
