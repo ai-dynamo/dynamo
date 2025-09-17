@@ -78,13 +78,18 @@ pub struct JailState {
     finished: bool,                            // Add this flag to track if stream is finished
 }
 
-pub fn enable_tool_call(parser_str: Option<&str>, request: &NvCreateChatCompletionRequest) -> bool {
+pub fn _maybe_enable_tool_call(
+    parser_str: Option<&str>,
+    request: &NvCreateChatCompletionRequest,
+) -> bool {
     // Enable tool call if the below two conditions are satisfied
     // 1. parser_str is not None
     // 2. tool_choice is not None
     parser_str.is_some()
-        && request.inner.tool_choice.is_some()
-        && (request.inner.tool_choice.clone() != Some(ChatCompletionToolChoiceOption::None))
+        && !matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::None)
+        )
 }
 
 impl LLMMetricAnnotation {
@@ -943,7 +948,8 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
-        let enable_tool_calling = enable_tool_call(self.tool_call_parser.as_deref(), &request);
+        let enable_tool_calling =
+            _maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
@@ -968,10 +974,8 @@ impl
 
         // Apply tool calling jail to the stream if tool call parser is present
         let stream = if enable_tool_calling {
-            tracing::info!("Tool calling is enabled");
             self.apply_tool_calling_jail_with_parser(stream)
         } else {
-            tracing::info!("Tool calling is disabled");
             stream
         };
         //let stream = self.apply_tool_calling_jail_with_parser(stream);
