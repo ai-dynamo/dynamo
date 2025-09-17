@@ -244,7 +244,7 @@ pub async fn start_kv_router_background(
                     };
 
                     // Perform snapshot upload and purge
-                    match perform_snapshot_and_purge(
+                    match purge_then_snapshot(
                         &mut nats_queue,
                         snapshot_tx,
                         resources
@@ -322,7 +322,7 @@ pub async fn start_kv_router_background(
 }
 
 /// Perform snapshot upload and purge operations
-async fn perform_snapshot_and_purge(
+async fn purge_then_snapshot(
     nats_queue: &mut NatsQueue,
     snapshot_tx: &mpsc::Sender<DumpRequest>,
     resources: &SnapshotResources,
