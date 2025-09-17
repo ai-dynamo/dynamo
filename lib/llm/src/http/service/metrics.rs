@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, sse::Event},
+    routing::get,
+};
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
 };
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
+use serde::Serialize;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -19,11 +26,24 @@ pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
+    http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
+}
+
+// Inflight tracks requests from HTTP handler start until complete response is finished.
+// HTTP queue tracks requests from HTTP handler start until first token generation begins (including prefill time).
+// HTTP queue time is a subset of inflight time. For detailed explanation, see:
+// deploy/metrics/README.md - "Request Processing Flow" section
+
+/// RAII object for HTTP queue gauge
+/// Tracks requests from HTTP handler start until metrics processing begins
+pub struct HttpQueueGuard {
+    metrics: Arc<Metrics>,
+    model: String,
 }
 
 /// RAII object for inflight gauge and request counters
@@ -65,6 +85,7 @@ pub enum RequestType {
 }
 
 /// Status
+#[derive(PartialEq)]
 pub enum Status {
     Success,
     Error,
@@ -127,7 +148,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
+                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS_TOTAL),
                 "Number of inflight requests",
             ),
             &["model"],
@@ -137,6 +158,15 @@ impl Metrics {
         let client_disconnect_gauge = prometheus::IntGauge::new(
             frontend_metric_name("client_disconnects"),
             "Number of connections dropped by clients",
+        )
+        .unwrap();
+
+        let http_queue_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::QUEUED_REQUESTS_TOTAL),
+                "Number of requests in HTTP processing queue",
+            ),
+            &["model"],
         )
         .unwrap();
 
@@ -206,6 +236,7 @@ impl Metrics {
             request_counter,
             inflight_gauge,
             client_disconnect_gauge,
+            http_queue_gauge,
             request_duration,
             input_sequence_length,
             output_sequence_length,
@@ -281,10 +312,19 @@ impl Metrics {
         self.client_disconnect_gauge.get()
     }
 
+    fn inc_http_queue_gauge(&self, model: &str) {
+        self.http_queue_gauge.with_label_values(&[model]).inc()
+    }
+
+    fn dec_http_queue_gauge(&self, model: &str) {
+        self.http_queue_gauge.with_label_values(&[model]).dec()
+    }
+
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
         registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
+        registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
@@ -298,6 +338,13 @@ impl Metrics {
     ///
     /// The [`InflightGuard`] is an RAII object will handle incrementing the inflight gauge and
     /// request counters.
+    ///
+    /// # Metrics Distinction
+    ///
+    /// This method creates an inflight guard  t tracks requests actively being processed by the LLM engine.
+    /// This is distinct from [`HttpQueueGuard`] which tracks requests from HTTP handler start until
+    /// first token generation (including prefill time). The separation allows monitoring both HTTP processing queue time
+    /// and actual LLM processing time.
     pub fn create_inflight_guard(
         self: Arc<Self>,
         model: &str,
@@ -321,6 +368,30 @@ impl Metrics {
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
     pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
         ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+    }
+
+    /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
+    ///
+    /// This guard tracks requests from HTTP handler start until first token generation,
+    /// providing visibility into HTTP processing queue time before actual LLM processing begins.
+    pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
+        HttpQueueGuard::new(self, model.to_string().to_lowercase())
+    }
+}
+
+impl HttpQueueGuard {
+    fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        // Increment the HTTP queue gauge when the guard is created
+        metrics.inc_http_queue_gauge(&model);
+
+        HttpQueueGuard { metrics, model }
+    }
+}
+
+impl Drop for HttpQueueGuard {
+    fn drop(&mut self) {
+        // Decrement the HTTP queue gauge when the guard is dropped
+        self.metrics.dec_http_queue_gauge(&self.model);
     }
 }
 
@@ -355,6 +426,8 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
+        let duration = self.timer.elapsed().as_secs_f64();
+
         // Decrement the gauge when the guard is dropped
         self.metrics.dec_inflight_gauge(&self.model);
 
@@ -372,7 +445,7 @@ impl Drop for InflightGuard {
         self.metrics
             .request_duration
             .with_label_values(&[&self.model])
-            .observe(self.timer.elapsed().as_secs_f64());
+            .observe(duration);
     }
 }
 
@@ -433,6 +506,11 @@ impl ResponseMetricCollector {
         self.osl = osl;
     }
 
+    /// Check if this will be the first token (before calling observe_response)
+    pub fn is_first_token(&self) -> bool {
+        self.is_first_token
+    }
+
     /// Observe a response with input sequence length and number of new tokens
     pub fn observe_response(&mut self, isl: usize, num_tokens: usize) {
         if num_tokens == 0 {
@@ -484,6 +562,103 @@ impl Drop for ResponseMetricCollector {
             .with_label_values(&[&self.model])
             .observe(self.osl as f64);
     }
+}
+
+/// Process streaming metrics for annotated responses
+///
+/// This function handles metrics collection and http_queue_guard management for streaming responses.
+/// It observes the current output sequence length, drops the http_queue_guard on the first token,
+/// and records response metrics.
+pub fn process_response_and_observe_metrics<T>(
+    annotated: &crate::types::Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) {
+    use crate::preprocessor::LLMMetricAnnotation;
+
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+
+        // Drop http_queue_guard on first token for non-streaming (same as streaming)
+        if response_collector.is_first_token()
+            && metrics.chunk_tokens > 0
+            && let Some(guard) = http_queue_guard.take()
+        {
+            drop(guard);
+        }
+
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+    }
+}
+
+/// Event converter wrapper for streaming responses
+pub struct EventConverter<T>(pub crate::types::Annotated<T>);
+
+impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
+    fn from(annotated: crate::types::Annotated<T>) -> Self {
+        EventConverter(annotated)
+    }
+}
+
+/// Process streaming response with event conversion for SSE
+///
+/// This function handles metrics collection, http_queue_guard management, and converts
+/// annotated responses to SSE events for streaming responses.
+pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
+    annotated: EventConverter<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> Result<Event, axum::Error> {
+    use crate::preprocessor::LLMMetricAnnotation;
+
+    let mut annotated = annotated.0;
+
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+
+        // Drop http_queue_guard on first token for streaming
+        if response_collector.is_first_token()
+            && metrics.chunk_tokens > 0
+            && let Some(guard) = http_queue_guard.take()
+        {
+            drop(guard);
+        }
+
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+
+        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
+        // TODO: add a flag to control what is returned in the SSE stream
+        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
+            annotated.event = None;
+            annotated.comment = None;
+        }
+    }
+
+    let mut event = Event::default();
+
+    if let Some(data) = annotated.data {
+        event = event.json_data(data)?;
+    }
+
+    if let Some(msg) = annotated.event {
+        if msg == "error" {
+            let msgs = annotated
+                .comment
+                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
+            return Err(axum::Error::new(msgs.join(" -- ")));
+        }
+        event = event.event(msg);
+    }
+
+    if let Some(comments) = annotated.comment {
+        for comment in comments {
+            event = event.comment(comment);
+        }
+    }
+
+    Ok(event)
 }
 
 /// Create a new router with the given path

@@ -333,7 +333,7 @@
           "useBackend": false
         }
       ],
-      "title": "Offload Blocks",
+      "title": "Offload Blocks - Device to Host",
       "type": "timeseries"
     },
     {
@@ -730,7 +730,7 @@
           "useBackend": false
         }
       ],
-      "title": "Onboard Blocks - Disk to Host",
+      "title": "Onboard Blocks - Disk to Device",
       "type": "timeseries"
     }
   ],
@@ -749,5 +749,5 @@
   "timezone": "browser",
   "title": "KVBM Dashboard",
   "uid": "3f679257-70a5-402c-92b4-05382337b548",
-  "version": 5
+  "version": 7
 }

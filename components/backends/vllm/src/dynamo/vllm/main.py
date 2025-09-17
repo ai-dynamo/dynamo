@@ -30,6 +30,7 @@ from .args import (
     parse_args,
 )
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .health_check import VllmHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -151,6 +152,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
+    # Get health check payload (checks env var and falls back to vLLM default)
+    health_check_payload = VllmHealthCheckPayload().to_dict()
+
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
         await asyncio.gather(
@@ -162,6 +166,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=[("model", config.model)],
+                health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
@@ -263,6 +268,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             custom_template_path=config.custom_jinja_template,
         )
 
+    # Get health check payload (checks env var and falls back to vLLM default)
+    health_check_payload = VllmHealthCheckPayload().to_dict()
+
     try:
         logger.debug("Starting serve_endpoint for decode worker")
         await asyncio.gather(
@@ -272,6 +280,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
                 metrics_labels=[("model", config.model)],
+                health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]

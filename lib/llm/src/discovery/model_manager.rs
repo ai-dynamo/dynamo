@@ -254,6 +254,15 @@ impl ModelManager {
             .and_then(|config| config.tool_call_parser.clone())
             .map(|parser| parser.to_string())
     }
+
+    /// Creates parsing options with tool call parser and reasoning parser for the specified model.
+    /// Currently reasoning parser is not implemented (returns None).
+    pub fn get_parsing_options(&self, model: &str) -> crate::protocols::openai::ParsingOptions {
+        let tool_call_parser = self.get_model_tool_call_parser(model);
+        let reasoning_parser = None; // TODO: Implement reasoning parser
+
+        crate::protocols::openai::ParsingOptions::new(tool_call_parser, reasoning_parser)
+    }
 }
 
 pub struct ModelEngines<E> {

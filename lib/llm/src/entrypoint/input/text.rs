@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::protocols::openai::nvext::NvExt;
 use crate::request_template::RequestTemplate;
 use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
@@ -107,21 +106,11 @@ async fn main_loop(
             .temperature(template.as_ref().map_or(0.7, |t| t.temperature))
             .n(1) // only generate one response
             .build()?;
-        let nvext = NvExt {
-            ignore_eos: Some(true),
-            ..Default::default()
-        };
-
-        // TODO We cannot set min_tokens with async-openai
-        // if inspect_template {
-        //     // This makes the pre-processor ignore stop tokens
-        //     req_builder.min_tokens(8192);
-        // }
 
         let req = NvCreateChatCompletionRequest {
             inner,
             common: Default::default(),
-            nvext: Some(nvext),
+            nvext: None,
         };
 
         // Call the model
@@ -150,8 +139,8 @@ async fn main_loop(
                         let _ = stdout.flush();
                         assistant_message += c;
                     }
-                    if chat_comp.finish_reason.is_some() {
-                        tracing::trace!("finish reason: {:?}", chat_comp.finish_reason.unwrap());
+                    if let Some(reason) = chat_comp.finish_reason {
+                        tracing::trace!("finish reason: {reason:?}");
                         break;
                     }
                 }
