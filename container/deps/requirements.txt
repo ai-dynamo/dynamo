@@ -37,3 +37,4 @@ transformers
 types-aiofiles
 types-PyYAML
 uvicorn
+prometheus_client
