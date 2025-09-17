@@ -303,3 +303,44 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 ## Performance Sweep
 
 For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](./performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+
+## Known Issues
+
+If you encounter the following NIXL import error:
+
+```bash
+ModuleNotFoundError: No module named 'nixl'
+```
+
+or
+
+```bash
+ImportError: NIXL Python bindings must be installed to use this module.
+```
+
+Follow these steps to install NIXL from source, which will resolve the import error:
+
+```bash
+export NIXL_REF="0.4.1"
+export NIXL_SRC_DIR="/opt/nixl"
+export NIXL_PREFIX="/opt/nvidia/nvda_nixl"
+export ARCH_ALT="x86_64"
+export NIXL_LIB_DIR="$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu"
+export NIXL_PLUGIN_DIR="$NIXL_LIB_DIR/plugins"
+export LD_LIBRARY_PATH="$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH"
+git clone "https://github.com/ai-dynamo/nixl.git"; ${NIXL_SRC_DIR}
+cd ${NIXL_SRC_DIR}
+git checkout ${NIXL_REF}
+# Build NIXL (no special args needed for x86_64)
+mkdir build
+meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX
+cd build/
+ninja
+ninja install
+mkdir -p /workspace/wheels/nixl
+# Build Python wheel (back to NIXL source root)
+cd ${NIXL_SRC_DIR}
+uv build . --out-dir /workspace/wheels/nixl
+# Install the wheel
+pip install --break-system-packages /workspace/wheels/nixl/*.whl
+```
