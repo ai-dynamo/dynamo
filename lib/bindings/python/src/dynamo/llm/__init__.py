@@ -45,13 +45,4 @@ from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input
 
-
-class HttpError(Exception):
-    def __init__(self, code: int, message: str):
-        if not (isinstance(code, int) and 0 <= code < 600):
-            raise ValueError("HTTP status code must be an integer between 0 and 599")
-        if not (isinstance(message, str) and 0 < len(message) <= 8192):
-            raise ValueError("HTTP error message must be a string of length <= 8192")
-        self.code = code
-        self.message = message
-        super().__init__(f"HTTP {code}: {message}")
+from .exceptions import HttpError
