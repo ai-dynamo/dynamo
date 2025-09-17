@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calling_output_finish_reason_override() {
+    async fn test_tool_calling_finish_reason_override_from_stop() {
         // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
         let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
 
@@ -671,6 +671,172 @@ mod tests {
         assert_eq!(
             choice.finish_reason,
             Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_override_from_length() {
+        // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
+        let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "Let me search for that.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Length), // Original finish reason is Length
+            None,
+            Some(tool_call_json),
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        // Verify that finish reason was overridden to ToolCalls despite original being Length
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_override_from_none() {
+        // Test that when tool calls are present but finish reason is None, it gets set to ToolCalls
+        let tool_call_json = r#"{"name": "calculate", "arguments": {"expression": "2+2"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "I'll calculate that for you.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            None, // Original finish reason is None
+            None,
+            Some(tool_call_json),
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+
+        // Verify that finish reason was set to ToolCalls despite original being None
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_tool_calling_preserves_original_finish_reason() {
+        // Test that when no tool calls are present, the original finish reason is preserved
+        let annotated_delta = create_test_delta(
+            0,
+            "This is a regular response without tool calls.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Stop),
+            None,
+            None, // No tool calls
+        );
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify no tool calls are present
+        assert!(choice.message.tool_calls.is_none());
+
+        // Verify that original finish reason (Stop) is preserved
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_tool_calls_preserves_original_finish_reason() {
+        // Test that when tool calls array is empty, the original finish reason is preserved
+        // Create a delta with empty tool calls by modifying the create_test_delta output
+        let mut annotated_delta = create_test_delta(
+            0,
+            "Response with empty tool calls array.",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Length),
+            None,
+            None,
+        );
+
+        // Manually set empty tool calls array
+        if let Some(ref mut data) = annotated_delta.data {
+            data.choices[0].delta.tool_calls = Some(vec![]); // Empty tool calls array
+        }
+
+        let data = annotated_delta.data.unwrap();
+        let annotated_delta = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+        };
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // Verify tool calls array is empty
+        assert!(choice.message.tool_calls.is_none());
+
+        // Verify that original finish reason (Length) is preserved since tool calls are empty
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::Length)
         );
     }
 
