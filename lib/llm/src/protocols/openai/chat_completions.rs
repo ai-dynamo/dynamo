@@ -141,16 +141,6 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn get_best_of(&self) -> Option<u8> {
         None // Not supported in chat completions
     }
-
-    /// Retrieves the minimum probability threshold for token selection, if set.
-    fn get_min_p(&self) -> Option<f32> {
-        None
-    }
-
-    /// Retrieves the length penalty parameter, if set.
-    fn get_length_penalty(&self) -> Option<f32> {
-        None
-    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
@@ -216,6 +206,14 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
             "top_k",
             self.common.top_k.as_ref(),
             self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
+        )
+    }
+
+    fn get_min_p(&self) -> Option<f32> {
+        choose_with_deprecation(
+            "min_p",
+            self.common.min_p.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.min_p.as_ref()),
         )
     }
 

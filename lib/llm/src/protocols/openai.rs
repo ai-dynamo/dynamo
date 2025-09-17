@@ -20,8 +20,8 @@ pub mod responses;
 pub mod validate;
 
 use validate::{
-    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, LENGTH_PENALTY_RANGE, MIN_P_RANGE, N_RANGE,
-    PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
+    BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
+    TEMPERATURE_RANGE, TOP_P_RANGE, validate_range,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -46,10 +46,6 @@ trait OpenAISamplingOptionsProvider {
     fn get_n(&self) -> Option<u8>;
 
     fn get_best_of(&self) -> Option<u8>;
-
-    fn get_min_p(&self) -> Option<f32>;
-
-    fn get_length_penalty(&self) -> Option<f32>;
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
 }
@@ -121,10 +117,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let best_of = validate_range(self.get_best_of(), &BEST_OF_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating best_of: {}", e))?;
 
-        let length_penalty = validate_range(self.get_length_penalty(), &LENGTH_PENALTY_RANGE)
-            .map_err(|e| anyhow::anyhow!("Error validating length_penalty: {}", e))?;
-
-        let min_p = validate_range(self.get_min_p(), &MIN_P_RANGE)
+        let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
 
         if let Some(nvext) = self.nvext() {
@@ -168,7 +161,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             min_p,
             seed,
             use_beam_search: None,
-            length_penalty,
+            length_penalty: None,
             guided_decoding,
             include_stop_str_in_output,
         })

@@ -112,14 +112,6 @@ impl OpenAISamplingOptionsProvider for NvCreateResponse {
     fn get_best_of(&self) -> Option<u8> {
         None // TODO setting as None for now
     }
-
-    fn get_min_p(&self) -> Option<f32> {
-        None // TODO setting as None for now
-    }
-
-    fn get_length_penalty(&self) -> Option<f32> {
-        None // TODO setting as None for now
-    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateResponse`,
