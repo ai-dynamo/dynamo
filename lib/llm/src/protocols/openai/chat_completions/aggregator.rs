@@ -258,7 +258,11 @@ impl From<DeltaChoice> for dynamo_async_openai::types::ChatChoice {
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
         // If tool calls are present and non-empty, finish reason should be ToolCalls
-        let finish_reason = if delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+        let finish_reason = if delta
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        {
             Some(dynamo_async_openai::types::FinishReason::ToolCalls)
         } else {
             delta.finish_reason
@@ -902,5 +906,46 @@ mod tests {
             choice.message.role,
             dynamo_async_openai::types::Role::Assistant
         );
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_override_from_stop() {
+        // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
+        let tool_call_json =
+            r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "Getting weather for New York",
+            Some(dynamo_async_openai::types::Role::Assistant),
+            Some(dynamo_async_openai::types::FinishReason::Stop), // This should be overridden
+            None,
+            Some(tool_call_json),
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        // Call DeltaAggregator::apply
+        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
+
+        // Check the result
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // There should be one choice
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+
+        // The finish_reason should be ToolCalls, not Stop, because tool calls are present
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_async_openai::types::FinishReason::ToolCalls)
+        );
+
+        // Verify tool calls are present
+        assert!(choice.message.tool_calls.is_some());
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
     }
 }
