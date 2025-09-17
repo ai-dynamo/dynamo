@@ -469,7 +469,19 @@ fi
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
 if [[ $TARGET == "local-dev" ]]; then
-    BUILD_ARGS+=" --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) "
+    cat << EOF
+NOTE: The 'local-dev' target has been moved to a separate build process.
+Please use the build_local_dev.sh script instead:
+
+  # First build a dev image (this creates dynamo:latest-${FRAMEWORK,,}):
+  ./build.sh --framework $FRAMEWORK --target dev
+
+  # Then convert it to local-dev (this creates dynamo:latest-${FRAMEWORK,,}-local-dev)
+  ./build_local_dev.sh --dev-image dynamo:latest-${FRAMEWORK,,}
+
+For more information, see: ./build_local_dev.sh --help
+EOF
+    exit 1
 fi
 
 # BUILD DEV IMAGE

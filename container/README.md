@@ -39,7 +39,7 @@ These targets are specified with `build.sh --target <target>` and correspond to 
 
 - `runtime` - For running pre-built containers without development tools (minimal size)
 - `dev` - For development with full toolchain (git, vim, build tools, etc.)
-- `local-dev` - For development with user-based permissions matching host UID/GID
+- `local-dev` - For development with user-based permissions matching host UID/GID (built using build_local_dev.sh)
 
 Additional targets are available in the Dockerfiles for specific build stages and use cases.
 
@@ -107,21 +107,21 @@ The `build.sh` script is responsible for building Docker images for different AI
 **Key Features:**
 - **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, or NONE
 - **Multi-stage Builds**: Build process with base images
-- **Development Targets**: Supports `dev` and `local-dev` targets
+- **Development Targets**: Supports `dev` target (local-dev images built separately with build_local_dev.sh)
 - **Build Caching**: Docker layer caching and sccache support
 - **GPU Optimization**: CUDA, EFA, and NIXL support
 
 **Common Usage Examples:**
 
 ```bash
-# Build vLLM image (default)
+# Build vLLM image called dynamo:latest-vllm (default)
 ./build.sh
 
-# Build with specific framework
+# Build with specific framework called dynamo:latest-trtllm
 ./build.sh --framework trtllm
 
-# Build local development image
-./build.sh --framework vllm --target local-dev
+# Build local development image called dynamo:latest-vllm-local-dev
+./build_local_dev.sh --dev-image dynamo:latest-vllm
 
 # Build with custom tag
 ./build.sh --framework sglang --tag my-custom-tag
@@ -134,6 +134,33 @@ The `build.sh` script is responsible for building Docker images for different AI
 
 # Build with build arguments
 ./build.sh --build-arg CUSTOM_ARG=value
+```
+
+### build_local_dev.sh - Local Development Image Builder
+
+The `build_local_dev.sh` script creates local development images from existing dev images with proper user permissions for Dev Container workflows.
+
+**Purpose:**
+- Converts dev images to local-dev images with user-based permissions
+- Sets up proper UID/GID mapping for seamless host-container file sharing
+- Configures development environment for VS Code/Cursor Dev Container extension
+- Adds comprehensive developer utilities (debugging tools, text editors, system monitors, etc.)
+- Creates images with "-local-dev" suffix (e.g., dynamo:latest-vllm → dynamo:latest-vllm-local-dev)
+
+**Common Usage Examples:**
+
+```bash
+# List available dev images to convert
+./build_local_dev.sh --list
+
+# Convert dev image to local-dev image
+./build_local_dev.sh --dev-image dynamo:latest-vllm
+
+# Convert with custom tag
+./build_local_dev.sh --dev-image dynamo:latest-vllm --tag my-local:dev
+
+# Dry run to see what would be built
+./build_local_dev.sh --dev-image dynamo:latest-vllm --dry-run
 ```
 
 ### run.sh - Container Runtime Manager
@@ -188,10 +215,13 @@ The `run.sh` script launches Docker containers with the appropriate configuratio
 
 ### Development Workflow
 ```bash
-# 1. Build development image
-./build.sh --framework vllm --target local-dev
+# 1. Build dev image first
+./build.sh --framework vllm --target dev
 
-# 2. Run development container
+# 2. Build local-dev image from dev image
+./build_local_dev.sh --dev-image dynamo:latest-vllm
+
+# 3. Run development container
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -it
 
 # 3. Inside container, run inference (requires both frontend and backend)

@@ -94,7 +94,10 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 Build `dynamo:latest-vllm` from scratch from the source:
 
 ```bash
-./container/build.sh --target dev --framework VLLM
+./container/build.sh --framework VLLM
+# Now you have a dev image dynamo:latest-vllm
+./container/build_local_dev --image dynamo:latest-vllm
+# Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
 The container will be built and give certain file permissions to your local uid and gid.
@@ -235,30 +238,6 @@ cp .devcontainer/devcontainer.json .devcontainer/jensen_dev/devcontainer.json
 
 Common customizations include additional mounts, environment variables, IDE extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/<path>/devcontainer.json` files available.
 
-### SGLANG Custom devcontainer.json Configuration (EXPERIMENTAL)
-
-This is experimental. Please update/fix if you encounter problems. For sglang Dev Container, you first need to build `dynamo:latest-sglang-local-dev` image like this (wait about half an hour):
-
-```bash
-./container/build.sh --framework SGLANG --target local-dev
-```
-
-Then, make a copy of the `devcontainer.json file` to a directory of your choice. For this example, we'll just call it `sglang`:
-
-```bash
-mkdir .devcontainer/sglang/
-cp -a .devcontainer/devcontainer.json .devcontainer/sglang/
-```
-
-Afterwards, edit your `.devcontainer/sglang/devcontainer.json` so that the name and image correspond to SGLANG. Example:
-```json
-    "name": "[sglang] This is my amazing custom Dev Container Development",
-    ...
-    "image": "dynamo:latest-sglang-local-dev",
-```
-
-Now, go to **Dev Containers: Open Folder in Container** and select `[sglang] This is my amazing custom Dev Container Development`. The post-create.sh script should be running.
-
 
 ### SSH Keys for Git Operations
 
@@ -378,7 +357,7 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first
-   ./container/build.sh --target local-dev
+   ./container/build.sh --target dev
    ```
 
 2. **Container startup failure:**
