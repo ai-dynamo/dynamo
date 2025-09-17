@@ -797,13 +797,19 @@ impl KvIndexer {
                         tokio::select! {
                             biased;
 
+                            _ = cancel.cancelled() => {
+                                tracing::debug!("KvCacheIndexer progress loop shutting down");
+                                return;
+                            }
+
                             Some(worker) = remove_worker_rx.recv() => {
                                 trie.remove_worker(worker);
                             }
 
-                            Some(req) = match_rx.recv() => {
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                let _ = req.resp.send(matches);
+                            Some(event) = event_rx.recv() => {
+                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                let result = trie.apply_event(event);
+                                metrics.increment_event_applied(event_type, result);
                             }
 
                             Some(dump_req) = dump_rx.recv() => {
@@ -811,15 +817,9 @@ impl KvIndexer {
                                 let _ = dump_req.resp.send(events);
                             }
 
-                            _ = cancel.cancelled() => {
-                                tracing::debug!("KvCacheIndexer progress loop shutting down");
-                                return;
-                            }
-
-                            Some(event) = event_rx.recv() => {
-                                let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                let result = trie.apply_event(event);
-                                metrics.increment_event_applied(event_type, result);
+                            Some(req) = match_rx.recv() => {
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                let _ = req.resp.send(matches);
                             }
                         }
                     }
@@ -1040,15 +1040,19 @@ impl KvIndexerSharded {
                             tokio::select! {
                                 biased;
 
+                                _ = cancel.cancelled() => {
+                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
+                                    return;
+                                }
+
                                 Some(worker) = shard_remove_worker_rx.recv() => {
                                     trie.remove_worker(worker);
                                 }
 
-                                Ok(req) = shard_broadcast_rx.recv() => {
-                                    let matches = trie.find_matches(req.sequence, req.early_exit);
-                                    if let Err(e) = req.resp.send(matches).await {
-                                        tracing::trace!("Failed to send match response: {:?}", e);
-                                    }
+                                Some(event) = shard_event_rx.recv() => {
+                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                                    let result = trie.apply_event(event);
+                                    metrics.increment_event_applied(event_type, result);
                                 }
 
                                 Some(dump_req) = shard_dump_rx.recv() => {
@@ -1056,15 +1060,11 @@ impl KvIndexerSharded {
                                     let _ = dump_req.resp.send(events);
                                 }
 
-                                _ = cancel.cancelled() => {
-                                    tracing::trace!("KvCacheIndexer progress loop shutting down");
-                                    return;
-                                }
-
-                                Some(event) = shard_event_rx.recv() => {
-                                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                    let result = trie.apply_event(event);
-                                    metrics.increment_event_applied(event_type, result);
+                                Ok(req) = shard_broadcast_rx.recv() => {
+                                    let matches = trie.find_matches(req.sequence, req.early_exit);
+                                    if let Err(e) = req.resp.send(matches).await {
+                                        tracing::trace!("Failed to send match response: {:?}", e);
+                                    }
                                 }
                             }
                         }

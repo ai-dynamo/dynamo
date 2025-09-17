@@ -381,7 +381,8 @@ impl KvRouter {
     }
 }
 
-// NOTE: this would not be usable for now, should deprecate
+// NOTE: KVRouter works like a PushRouter,
+// but without the reverse proxy functionality, but based on contract of 3 request types
 #[async_trait]
 impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
     async fn generate(
@@ -389,11 +390,29 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let (worker_id, _) = self
-            .find_best_match(ctx.id(), &request.tokens, None, true)
-            .await?;
+        let context_id = ctx.context().id().to_string();
+        // Handle different request types
+        let response = match request {
+            RouterRequest::New { tokens } => {
+                let (worker_id, overlap_blocks) = self
+                    .find_best_match(&context_id, &tokens, None, true)
+                    .await?;
 
-        let response = RouterResponse { worker_id };
+                RouterResponse::New {
+                    worker_id,
+                    overlap_blocks,
+                }
+            }
+            RouterRequest::MarkPrefill => {
+                self.mark_prefill_completed(&context_id).await;
+                RouterResponse::PrefillMarked { success: true }
+            }
+            RouterRequest::MarkFree => {
+                self.free(&context_id).await;
+                RouterResponse::FreeMarked { success: true }
+            }
+        };
+
         let response = Annotated::from_data(response);
         let stream = stream::iter(vec![response]);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
