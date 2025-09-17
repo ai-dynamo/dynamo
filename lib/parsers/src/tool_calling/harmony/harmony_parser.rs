@@ -37,7 +37,7 @@ pub async fn parse_tool_calls_harmony(
     // Check if tool call start tokens are present, if not return everything as normal text
     // Start Token: "<|start|>assistant<|channel|>commentary" should be present in the text if tool calls are present
     // End Token: "<|call|>"
-    if !detect_tool_call_start_harmony(text, config) {
+    if !detect_tool_call_start_harmony(text, config, true) {
         return Ok((vec![], Some(trimmed)));
     }
 
@@ -162,17 +162,28 @@ pub async fn parse_tool_calls_harmony(
     Ok((res, Some(normal_text.to_string())))
 }
 
-pub fn detect_tool_call_start_harmony(chunk: &str, config: &JsonParserConfig) -> bool {
+pub fn detect_tool_call_start_harmony(
+    chunk: &str,
+    config: &JsonParserConfig,
+    strict: bool,
+) -> bool {
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
         return false;
     }
 
-    config
-        .tool_call_start_tokens
-        .iter()
-        .any(|token| trimmed.contains(token))
-        || trimmed.contains("<|channel|>")
+    if strict {
+        config
+            .tool_call_start_tokens
+            .iter()
+            .any(|token| trimmed.contains(token))
+    } else {
+        config
+            .tool_call_start_tokens
+            .iter()
+            .any(|token| trimmed.contains(token))
+            || trimmed.contains("<|channel|>")
+    }
 }
 
 #[cfg(test)]
@@ -300,7 +311,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_harmony(text, &config);
+        let result = detect_tool_call_start_harmony(text, &config, false);
         assert!(result);
     }
 
@@ -314,7 +325,7 @@ mod detect_parser_tests {
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
-        let result = detect_tool_call_start_harmony(text, &config);
+        let result = detect_tool_call_start_harmony(text, &config, false);
         assert!(result);
     }
 }

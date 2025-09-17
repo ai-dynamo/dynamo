@@ -96,7 +96,9 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     match parser_map.get(parser_key) {
         Some(config) => match config.format {
             ToolCallParserType::Json => Ok(detect_tool_call_start_json(chunk, &config.json)),
-            ToolCallParserType::Harmony => Ok(detect_tool_call_start_harmony(chunk, &config.json)),
+            ToolCallParserType::Harmony => {
+                Ok(detect_tool_call_start_harmony(chunk, &config.json, false))
+            }
             ToolCallParserType::Pythonic => Ok(detect_tool_call_start_pythonic(chunk)),
             ToolCallParserType::Typescript => {
                 anyhow::bail!("Typescript parser not implemented");
