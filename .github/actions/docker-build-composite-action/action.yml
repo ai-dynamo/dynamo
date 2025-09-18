@@ -1,14 +1,10 @@
-name: 'Dynamo Backend Validation'
-description: 'Build and test container for a Dynamo backend'
+name: 'Dynamo Container Build'
+description: 'Build Dynamo container images'
 inputs:
   framework:
-    description: 'Framework to validate'
+    description: 'Framework to build'
     required: true
     default: 'vllm'
-  pytest_marks:
-    description: 'Pytest marks'
-    required: true
-    default: 'e2e and vllm and gpu_1 and not slow'
   target:
     description: 'Target to build'
     required: false
@@ -31,6 +27,11 @@ inputs:
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
     required: true    
+
+outputs:
+  image_tag:
+    description: 'Image Tag'
+    value: ${{ inputs.framework }}:latest
 
 runs:
   using: "composite"
