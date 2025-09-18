@@ -298,7 +298,7 @@ impl ModelType {
     };
     #[classattr]
     const Tensor: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Tensor,
+        inner: llm_rs::model_type::ModelType::TensorBased,
     };
 
     fn __or__(&self, other: &Self) -> Self {

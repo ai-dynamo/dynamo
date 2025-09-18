@@ -59,7 +59,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Chat,
     ModelType::Completions,
     ModelType::Embedding,
-    ModelType::Tensor,
+    ModelType::TensorBased,
 ];
 
 impl ModelWatcher {
@@ -253,7 +253,7 @@ impl ModelWatcher {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
-                    || (tensor_model_removed && *model_type == ModelType::Tensor))
+                    || (tensor_model_removed && *model_type == ModelType::TensorBased))
                     && let Some(tx) = &self.model_update_tx
                 {
                     tx.send(ModelUpdate::Removed(*model_type)).await.ok();

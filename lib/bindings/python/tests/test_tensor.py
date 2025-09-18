@@ -39,7 +39,7 @@ async def test_register(runtime: DistributedRuntime):
     # a valid model name to pass the registration.
     await register_llm(
         ModelInput.Tensor,
-        ModelType.Tensor,
+        ModelType.TensorBased,
         endpoint,
         "Qwen/Qwen3-0.6B",
         "tensor",

@@ -15,6 +15,7 @@ bitflags! {
     /// - `ModelType::Chat`
     /// - `ModelType::Completions`
     /// - `ModelType::Embedding`
+    /// - `ModelType::TensorBased`
     ///
     /// For example, a model that supports both chat and completions can be
     /// expressed as:
@@ -34,7 +35,7 @@ bitflags! {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
-        const Tensor = 1 << 3;
+        const TensorBased = 1 << 3;
     }
 }
 
@@ -53,7 +54,7 @@ impl ModelType {
         self.contains(ModelType::Embedding)
     }
     pub fn supports_tensor(&self) -> bool {
-        self.contains(ModelType::Tensor)
+        self.contains(ModelType::TensorBased)
     }
 
     pub fn as_vec(&self) -> Vec<&'static str> {

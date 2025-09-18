@@ -1186,7 +1186,7 @@ pub mod kserve_test {
                 component: "component".to_string(),
                 name: "endpoint".to_string(),
             },
-            model_type: ModelType::Tensor,
+            model_type: ModelType::TensorBased,
             model_input: ModelInput::Tensor,
             runtime_config: None,
         };
@@ -1244,7 +1244,7 @@ pub mod kserve_test {
                 component: "component".to_string(),
                 name: "endpoint".to_string(),
             },
-            model_type: ModelType::Tensor,
+            model_type: ModelType::TensorBased,
             model_input: ModelInput::Tensor,
             runtime_config: Some(ModelRuntimeConfig {
                 tensor_model_config: Some(tensor::TensorModelConfig {
