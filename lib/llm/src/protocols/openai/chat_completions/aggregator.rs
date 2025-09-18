@@ -181,10 +181,13 @@ impl DeltaAggregator {
                                 .collect();
 
                             // Initialize and push the converted tool calls to state_choice.tool_calls
-                            if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
-                                existing_tool_calls.extend(converted_tool_calls);
-                            } else {
-                                state_choice.tool_calls = Some(converted_tool_calls);
+                            // Only set tool_calls to Some if there are actual tool calls
+                            if !converted_tool_calls.is_empty() {
+                                if let Some(existing_tool_calls) = &mut state_choice.tool_calls {
+                                    existing_tool_calls.extend(converted_tool_calls);
+                                } else {
+                                    state_choice.tool_calls = Some(converted_tool_calls);
+                                }
                             }
                         }
 
@@ -358,7 +361,7 @@ mod tests {
             tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
 
         let tool_call_chunks = if let Some(tool_calls) = tool_calls {
-            vec![
+            Some(vec![
                 dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
@@ -368,22 +371,15 @@ mod tests {
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
                 },
-            ]
+            ])
         } else {
-            vec![
-                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
-                    index: 0,
-                    id: None,
-                    r#type: None,
-                    function: None,
-                },
-            ]
+            None
         };
 
         let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
             content: Some(text.to_string()),
             function_call: None,
-            tool_calls: Some(tool_call_chunks),
+            tool_calls: tool_call_chunks,
             role,
             refusal: None,
             reasoning_content: None,
