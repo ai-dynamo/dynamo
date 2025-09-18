@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
+use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 use dynamo_async_openai::types::EncodingFormat;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -75,6 +76,20 @@ pub struct JailState {
     accumulated_content: HashMap<u32, String>, // choice index -> accumulated content
     last_response_metadata: Option<NvCreateChatCompletionStreamResponse>, // for response structure
     finished: bool,                            // Add this flag to track if stream is finished
+}
+
+pub fn maybe_enable_tool_call(
+    parser_str: Option<&str>,
+    request: &NvCreateChatCompletionRequest,
+) -> bool {
+    // Enable tool call if the below two conditions are satisfied
+    // 1. parser_str is not None
+    // 2. tool_choice is not None
+    parser_str.is_some()
+        && !matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::None)
+        )
 }
 
 impl LLMMetricAnnotation {
@@ -941,7 +956,8 @@ impl
 
         // set the runtime configuration
         response_generator.set_reasoning_parser(self.runtime_config.clone());
-
+        let enable_tool_calling =
+            maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
@@ -964,7 +980,13 @@ impl
         // transform the postprocessor stream
         let stream = Self::transform_postprocessor_stream(response_stream, response_generator);
 
-        let stream = self.apply_tool_calling_jail_with_parser(stream).await;
+        // Apply tool calling jail to the stream if tool call parser is present
+        let stream = if enable_tool_calling {
+            self.apply_tool_calling_jail_with_parser(stream).await
+        } else {
+            stream
+        };
+
         let context = stream.context();
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
