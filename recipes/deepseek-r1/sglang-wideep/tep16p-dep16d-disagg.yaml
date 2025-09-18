@@ -52,7 +52,7 @@ spec:
             - -c
           args:
             - >-
-              python3 -m dynamo.sglang
+              exec python3 -m dynamo.sglang
               --model-path deepseek-ai/DeepSeek-R1
               --served-model-name deepseek-ai/DeepSeek-R1
               --tp 16
@@ -96,7 +96,7 @@ spec:
             - -c
           args:
             - >-
-              python3 -m dynamo.sglang
+              exec python3 -m dynamo.sglang
               --model-path deepseek-ai/DeepSeek-R1
               --served-model-name deepseek-ai/DeepSeek-R1
               --tp 16
