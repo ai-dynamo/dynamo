@@ -15,7 +15,10 @@ from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
-from dynamo.sglang.health_check import SglangHealthCheckPayload
+from dynamo.sglang.health_check import (
+    SglangHealthCheckPayload,
+    SglangPrefillHealthCheckPayload,
+)
 from dynamo.sglang.publisher import setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_runtime_config
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -113,7 +116,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         ready_event.set()
         logging.info("Model registration succeeded; processing queued requests")
 
-    # Get health check payload (checks env var and falls back to sglang default)
     health_check_payload = SglangHealthCheckPayload().to_dict()
 
     try:
@@ -155,8 +157,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     handler = PrefillWorkerHandler(component, engine, config)
 
-    # Get health check payload (checks env var and falls back to sglang default)
-    health_check_payload = SglangHealthCheckPayload().to_dict()
+    health_check_payload = SglangPrefillHealthCheckPayload().to_dict()
 
     tasks = [
         generate_endpoint.serve_endpoint(
