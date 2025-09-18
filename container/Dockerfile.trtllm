@@ -238,6 +238,7 @@ COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash
 
 # Copy tests, benchmarks, deploy and components for CI
 COPY tests /workspace/tests
+COPY examples /workspace/examples
 COPY benchmarks /workspace/benchmarks
 COPY deploy /workspace/deploy
 COPY components/ /workspace/components/
