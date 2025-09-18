@@ -95,9 +95,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	if err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to get DynamoGraphDeployment")
+			return ctrl.Result{}, err
+		}
 		// not found, nothing to do
 		return ctrl.Result{}, nil
 	}
