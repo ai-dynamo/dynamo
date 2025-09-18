@@ -19,8 +19,6 @@ import string
 
 import pytest
 
-from dynamo._core import DistributedRuntime
-
 
 class MockServer:
     """
@@ -131,15 +129,6 @@ def random_string(length=10):
     remaining_chars = string.ascii_lowercase + string.digits
     rest = "".join(random.choices(remaining_chars, k=length - 1))
     return first_char + rest
-
-
-@pytest.fixture
-async def runtime():
-    """Create a DistributedRuntime for testing"""
-    loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
-    yield runtime
-    runtime.shutdown()
 
 
 @pytest.fixture

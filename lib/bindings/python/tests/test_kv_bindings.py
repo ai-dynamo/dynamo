@@ -30,18 +30,12 @@ from dynamo.llm import (
     WorkerMetricsPublisher,
     WorkerStats,
 )
-from dynamo.runtime import Component, DistributedRuntime
+from dynamo.runtime import Component
 
 pytestmark = pytest.mark.pre_merge
 
 
-@pytest.fixture(scope="module")
-async def distributed_runtime():
-    loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop, False)
-
-
-async def test_radix_tree_binding(distributed_runtime):
+async def test_radix_tree_binding(runtime):
     """Test RadixTree binding directly with store event and find matches"""
     import json
 
@@ -98,11 +92,11 @@ async def test_radix_tree_binding(distributed_runtime):
 # The test works individually if I run it with 32, then 11, then 64.
 # @pytest.mark.parametrize("kv_block_size", [11, 32, 64])
 @pytest.mark.skip(reason="Flakey in CI. Likely race condition going on.")
-async def test_event_handler(distributed_runtime):
+async def test_event_handler(runtime):
     kv_block_size = 32
     namespace = "kv_test"
     component = "event"
-    kv_listener = distributed_runtime.namespace(namespace).component(component)
+    kv_listener = runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
 
     # publisher
@@ -153,11 +147,11 @@ async def test_event_handler(distributed_runtime):
             ), f"Scores still present after {(retry+1)*0.5}s: {scores.scores}"
 
 
-async def test_approx_kv_indexer(distributed_runtime):
+async def test_approx_kv_indexer(runtime):
     kv_block_size = 32
     namespace = "kv_test"
     component = "approx_kv"
-    kv_listener = distributed_runtime.namespace(namespace).component(component)
+    kv_listener = runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
 
     indexer = ApproxKvIndexer(kv_listener, kv_block_size, 30.0)
@@ -210,10 +204,10 @@ class EventPublisher:
         self.event_id_counter += 1
 
 
-async def test_metrics_aggregator(distributed_runtime):
+async def test_metrics_aggregator(runtime):
     namespace = "kv_test"
     component = "metrics"
-    kv_listener = distributed_runtime.namespace(namespace).component(component)
+    kv_listener = runtime.namespace(namespace).component(component)
     await kv_listener.create_service()
 
     # aggregator
