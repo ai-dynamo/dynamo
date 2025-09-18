@@ -117,7 +117,7 @@ The `build.sh` script is responsible for building Docker images for different AI
 # Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is fine to use for inferencing/benchmarking, etc.
 ./build.sh
 
-# Build both development and local-dev images (calls build_local_dev.sh internally). While the dev image runs as root, the local-dev image will run as the local user, which is useful when mounting partitions. It will also contain development tools.
+# Build both development and local-dev images (integrated into build.sh). While the dev image runs as root, the local-dev image will run as the local user, which is useful when mounting partitions. It will also contain development tools.
 ./build.sh --framework vllm --target local-dev
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
@@ -136,31 +136,21 @@ The `build.sh` script is responsible for building Docker images for different AI
 ./build.sh --build-arg CUSTOM_ARG=value
 ```
 
-### build_local_dev.sh - Local Development Image Builder
+### build.sh --dev-image - Local Development Image Builder
 
-The `build_local_dev.sh` script takes a dev image (runs as root) and then builds a local-dev image that contains proper local user permissions. Local-dev images will give you local user permissions matching your host user, which is useful for mounting partitions. It also includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
-
-**Purpose:**
-- Takes dev images (runs as root user) and builds a new local-dev image with user-based permissions
-- Sets up proper UID/GID mapping for seamless host-container file sharing
-- Configures development environment for VS Code/Cursor Dev Container extension
-- Adds comprehensive developer utilities (debugging tools, text editors, system monitors, etc.)
-- Builds images with "-local-dev" suffix (e.g., dynamo:latest-vllm → dynamo:latest-vllm-local-dev)
+The `build.sh --dev-image` option takes a dev image and then builds a local-dev image, which contains proper local user permissions. It also includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
 
 **Common Usage Examples:**
 
 ```bash
-# List available dev images to build from
-./build_local_dev.sh --list
-
 # Build local-dev image from dev image dynamo:latest-vllm
-./build_local_dev.sh --dev-image dynamo:latest-vllm
+./build.sh --dev-image dynamo:latest-vllm --framework vllm
 
 # Build with custom tag from dev image dynamo:latest-vllm
-./build_local_dev.sh --dev-image dynamo:latest-vllm --tag my-local:dev
+./build.sh --dev-image dynamo:latest-vllm --framework vllm --tag my-local:dev
 
 # Dry run to see what would be built
-./build_local_dev.sh --dev-image dynamo:latest-vllm --dry-run
+./build.sh --dev-image dynamo:latest-vllm --framework vllm --dry-run
 ```
 
 ### run.sh - Container Runtime Manager

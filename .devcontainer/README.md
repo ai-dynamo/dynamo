@@ -101,7 +101,7 @@ Build `dynamo:latest-vllm-local-dev` from scratch from the source:
 # Alternatively, you can build a development container then local-dev
 ./container/build.sh --framework VLLM
 # Now you have a development image dynamo:latest-vllm
-./container/build_local_dev.sh --dev-image dynamo:latest-vllm
+./container/build.sh --dev-image dynamo:latest-vllm --framework VLLM
 # Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
@@ -362,8 +362,8 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first, then build local-dev
-   ./container/build.sh --framework vllm --target dev
-   ./container/build_local_dev.sh --dev-image dynamo:latest-vllm
+   ./container/build.sh --framework vllm
+   ./container/build.sh --dev-image dynamo:latest-vllm --framework vllm
    # Output: dynamo:latest-vllm-local-dev
    ```
 
