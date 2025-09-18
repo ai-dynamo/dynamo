@@ -4,11 +4,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-disagg
+  name: sgl-dsr1-8gpu
 spec:
   services:
     Frontend:
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sgl-dsr1-8gpu
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -22,7 +22,7 @@ spec:
             failureThreshold: 60
           image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
     decode:
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
       replicas: 1
       resources:
@@ -63,7 +63,7 @@ spec:
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
     prefill:
-      dynamoNamespace: sglang-disagg
+      dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
       replicas: 1
       resources:
