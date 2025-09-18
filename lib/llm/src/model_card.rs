@@ -23,6 +23,8 @@ use crate::common::checked_file::CheckedFile;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -141,6 +143,9 @@ pub struct ModelDeploymentCard {
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    #[serde(skip)]
+    cache_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl ModelDeploymentCard {
@@ -228,9 +233,9 @@ impl ModelDeploymentCard {
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
-                let p = checked_file.path().ok_or_else(||
-                    anyhow::anyhow!("Tokenizer is URL-backed ({:?}); call move_from_nats() before tokenizer_hf()", checked_file.url())
-                )?;
+                let p = checked_file.path().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
+                })?;
                 HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -240,6 +245,7 @@ impl ModelDeploymentCard {
                         }
                     })
                     .map_err(anyhow::Error::msg)
+                    .with_context(|| p.display().to_string())
             }
             Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
             None => {
@@ -308,7 +314,7 @@ impl ModelDeploymentCard {
     /// Updates the URI's to point to the created files.
     ///
     /// The returned TempDir must be kept alive, it cleans up on drop.
-    pub async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
+    async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
         let nats_addr = nats_client.addr();
         let bucket_name = self.slug();
         let target_dir = tempfile::TempDir::with_prefix(bucket_name.to_string())?;
@@ -388,7 +394,7 @@ impl ModelDeploymentCard {
     /// - a folder containing config.json, tokenizer.json and token_config.json
     /// - a GGUF file
     ///   With an optional custom template
-    pub fn load(
+    pub fn load_from_disk(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<ModelDeploymentCard> {
@@ -402,6 +408,29 @@ impl ModelDeploymentCard {
             }
             Self::from_gguf(config_path)
         }
+    }
+
+    /// Load a ModelDeploymentCard from storage the DistributedRuntime is configured to use.
+    /// Card should be fully local and ready to use when the call returns.
+    pub async fn load_from_store(
+        model_slug: &Slug,
+        drt: &DistributedRuntime,
+    ) -> anyhow::Result<Option<Self>> {
+        let Some(etcd_client) = drt.etcd_client() else {
+            // Should be impossible because we only get here on an etcd event
+            anyhow::bail!("Missing etcd_client");
+        };
+        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client));
+        let card_store = Arc::new(KeyValueStoreManager::new(store));
+        let Some(mut card) = card_store
+            .load::<ModelDeploymentCard>(ROOT_PATH, model_slug)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // This cache_dir is a tempfile::TempDir will be deleted on drop, so keep it alive.
+        card.cache_dir = Some(Arc::new(card.move_from_nats(drt.nats_client()).await?));
+        Ok(Some(card))
     }
 
     /// Creates a ModelDeploymentCard from a local directory path.
@@ -474,6 +503,7 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            cache_dir: None,
         })
     }
 
@@ -537,6 +567,7 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            cache_dir: None,
         })
     }
 }

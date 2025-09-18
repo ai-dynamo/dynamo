@@ -324,7 +324,7 @@ def main():
     parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
     parser.add_argument("--requests", type=int, default=200, help="Number of requests")
     parser.add_argument("--concurrency", type=int, default=20, help="Concurrency level")
-    parser.add_argument("--seed", type=int, default=420, help="Initial random seed")
+    parser.add_argument("--seed", type=int, default=0, help="Initial random seed")
     parser.add_argument(
         "--prefix-ratios",
         type=float,
