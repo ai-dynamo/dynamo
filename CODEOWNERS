@@ -33,7 +33,7 @@ CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # recipes
 
-/recipes/ @biswapanda @tedzhouhk
+/recipes/ @ai-dynamo/python-codeowners @ai-dynamo/Devops @biswapanda @tedzhouhk 
 
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops
