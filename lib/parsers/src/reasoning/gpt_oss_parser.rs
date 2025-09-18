@@ -192,10 +192,17 @@ impl ReasoningParser for GptOssReasoningParser {
                     let current_content = self.parser.current_content().unwrap_or_default();
                     let mut final_text = text.to_string();
 
-                    // Need to recover commentary content consumed by the parser.
+                    // Restore commentary metadata consumed by the parser so the tool-call parser can
+                    // process it correctly.
+                    //
                     // Example:
-                    //   <|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>
-                    // The part that needs recovery is everything between <|channel|> and the end of the message.
+                    //   Before parsing:
+                    //   "<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{\"format\":\"celsius\",\"location\":\"San Francisco\"}<|call|>"
+                    //   After parsing, the header is stripped, so we must reconstruct it:
+                    //   "<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>"
+                    //
+                    // This ensures downstream tool-call parsing receives the channel, target, and
+                    // constraint metadata together with the message payload.
 
                     // Recovery should only happen once, and only when `current_content` is empty.
                     if current_content.is_empty() {
@@ -215,9 +222,9 @@ impl ReasoningParser for GptOssReasoningParser {
                             })
                             .unwrap_or(0);
 
-                        // then get the generate text between the last  <|channel|> to the end of self.parser.tokens()
+                        // Then get the generated text from the last <|channel|> to the end of self.parser.tokens()
                         let end_token_idx = self.parser.tokens().len();
-                        // using the harmony decode_utf8 to translate the tokens to text
+                        // Use Harmony's decode_utf8 to decode tokens into text
                         let generated_text = enc
                             .tokenizer()
                             .decode_utf8(

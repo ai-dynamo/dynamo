@@ -174,7 +174,7 @@ pub async fn parse_tool_calls_harmony(
 /// or token-by-token streaming, making it more efficient for complete chunks.
 ///
 /// # Arguments
-/// * `text` - The complete Harmony Format text to parse
+/// * `text` - The full Harmony-format string to be parsed, excluding any trailing stop tokens.
 ///   Example:
 ///   `<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}`
 /// * `_config` - Parser configuration (currently unused but kept for API consistency)
