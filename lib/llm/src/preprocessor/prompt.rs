@@ -20,6 +20,7 @@
 
 use anyhow::Result;
 use minijinja::value::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 mod template;
@@ -56,6 +57,11 @@ pub trait OAIChatLikeRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool;
+
+    /// Optional additional args to merge into the chat template context
+    fn chat_template_args(&self) -> Option<&HashMap<String, serde_json::Value>> {
+        None
+    }
 
     /// Returns the type of input for the prompt. Default is Text.
     fn prompt_input_type(&self) -> PromptInput {

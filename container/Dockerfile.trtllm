@@ -237,6 +237,7 @@ ARG RELEASE_BUILD
 # Use arg ENABLE_KVBM = true to turn on the block-manager feature
 ARG ENABLE_KVBM
 ARG CARGO_BUILD_JOBS
+ARG ENABLE_KVBM
 # Set CARGO_BUILD_JOBS to 16 if not provided
 # This is to prevent cargo from building $(nproc) jobs in parallel,
 # which might exceed the number of opened files limit.
@@ -282,7 +283,7 @@ COPY launch /workspace/launch
 RUN cargo build \
 	--release \
 	--locked \
-	--features dynamo-llm/block-manager \
+	--features block-manager \
 	--workspace
 
 # Build dynamo wheels
@@ -295,8 +296,8 @@ RUN uv build --wheel --out-dir /workspace/dist && \
         maturin build --release --out /workspace/dist; \
     fi && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv build --wheel --out-dir /workspace/dist --python 3.11 && \
-        uv build --wheel --out-dir /workspace/dist --python 3.10; \
+        uv run --python 3.11 maturin build --release --out /workspace/dist && \
+        uv run --python 3.10 maturin build --release --out /workspace/dist; \
     fi
 
 ########################################

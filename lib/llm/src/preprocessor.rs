@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
+use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 use dynamo_async_openai::types::EncodingFormat;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -75,6 +76,20 @@ pub struct JailState {
     accumulated_content: HashMap<u32, String>, // choice index -> accumulated content
     last_response_metadata: Option<NvCreateChatCompletionStreamResponse>, // for response structure
     finished: bool,                            // Add this flag to track if stream is finished
+}
+
+pub fn maybe_enable_tool_call(
+    parser_str: Option<&str>,
+    request: &NvCreateChatCompletionRequest,
+) -> bool {
+    // Enable tool call if the below two conditions are satisfied
+    // 1. parser_str is not None
+    // 2. tool_choice is not None
+    parser_str.is_some()
+        && !matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::None)
+        )
 }
 
 impl LLMMetricAnnotation {
@@ -653,17 +668,17 @@ impl OpenAIPreprocessor {
     }
 
     /// Apply tool calling jail to the stream using the preprocessor's tool call parser
-    pub fn apply_tool_calling_jail_with_parser(
+    pub async fn apply_tool_calling_jail_with_parser(
         &self,
         stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
-        apply_tool_calling_jail_internal(stream, self.tool_call_parser.clone())
+        apply_tool_calling_jail_internal(stream, self.tool_call_parser.clone()).await
     }
 }
 
 /// Apply tool calling jail to the stream - stops/jails the stream under certain conditions
 /// When jailed, the stream will be unjailed when the input stream ends
-pub fn apply_tool_calling_jail_internal(
+pub async fn apply_tool_calling_jail_internal(
     stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     tool_call_parser: Option<String>,
 ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
@@ -677,6 +692,7 @@ pub fn apply_tool_calling_jail_internal(
         last_response_metadata: None,
         finished: false,
     };
+
     // Transform the stream using unfold to maintain state
     // Input: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>
     // Returns None if the stream is finished
@@ -814,7 +830,9 @@ pub fn apply_tool_calling_jail_internal(
                         if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
                             accumulated_text,
                             state.tool_call_parser.as_deref(),
-                        ) {
+                        )
+                        .await
+                        {
                             // Found tool calls, create a final response with them
                             tracing::debug!(
                                 "Parsed {} tool calls from accumulated content",
@@ -930,6 +948,8 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
+        let enable_tool_calling =
+            maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
@@ -952,7 +972,13 @@ impl
         // transform the postprocessor stream
         let stream = Self::transform_postprocessor_stream(response_stream, response_generator);
 
-        let stream = self.apply_tool_calling_jail_with_parser(stream);
+        // Apply tool calling jail to the stream if tool call parser is present
+        let stream = if enable_tool_calling {
+            self.apply_tool_calling_jail_with_parser(stream).await
+        } else {
+            stream
+        };
+
         let context = stream.context();
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
