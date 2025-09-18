@@ -8,7 +8,7 @@ use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use dynamo_llm::entrypoint::input::worker_selection_pipeline::{
-    create_worker_selection_pipeline, query_worker_selection_and_annotate,
+    create_worker_selection_pipeline_chat, query_worker_selection_and_annotate,
 };
 use dynamo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
@@ -444,7 +444,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         };
 
         // Create the worker selection pipeline
-        let pipeline = match create_worker_selection_pipeline::<NvCreateChatCompletionRequest>(
+        let pipeline = match create_worker_selection_pipeline_chat(
             namespace,
             component_name,
             model_name,
@@ -580,13 +580,13 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         } else {
             let tokens_len = tokens.len();
             let layout = std::alloc::Layout::array::<u32>(tokens_len).unwrap();
-            let ptr = std::alloc::alloc(layout) as *mut u32;
+            let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
             if ptr.is_null() {
                 eprintln!("Failed to allocate memory for tokens");
                 return DynamoLlmResult::ERR;
             }
             // Copy tokens to allocated memory
-            std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, tokens_len);
+            unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, tokens_len) };
             ptr
         };
 
