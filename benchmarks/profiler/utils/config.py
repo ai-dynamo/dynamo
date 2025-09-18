@@ -159,21 +159,6 @@ def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
     return override_dict, args
 
 
-def deep_update(target: dict, source: dict) -> None:
-    """
-    Recursively update nested dictionaries.
-
-    Args:
-        target: Dictionary to update
-        source: Dictionary with new values
-    """
-    for key, value in source.items():
-        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
-            deep_update(target[key], value)
-        else:
-            target[key] = value
-
-
 class ConfigModifierProtocol(Protocol):
     @classmethod
     def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:

@@ -26,6 +26,7 @@ This directory contains scripts for benchmarking the Dynamo router with prefix c
   - `dynamo` package (with vllm and frontend modules)
   - `genai-perf` for benchmarking
   - `matplotlib` for plotting results
+  - `data-generator` package (install with `pip install -e ./benchmarks` from repo root)
 
 ### Setting up etcd and NATS
 
@@ -43,6 +44,7 @@ This will start both etcd and NATS with the required configurations in the backg
 - **`run_engines.sh`** - Launches multiple vLLM worker instances
 - **`ping.sh`** - Simple test script to verify the setup is working
 - **`prefix_ratio_benchmark.py`** - Main benchmarking script that sweeps prefix ratios
+- **`real_data_benchmark.py`** - Benchmarking script that uses real mooncake-style trace data
 - **`plot_prefix_ratio_comparison.py`** - Generates comparison plots from benchmark results
 
 ## Usage Instructions
@@ -160,20 +162,39 @@ python prefix_ratio_benchmark.py --url http://localhost:8000 http://localhost:80
 python prefix_ratio_benchmark.py --output-dir results/experiment1
 ```
 
-### Benchmark Output
+### Step 4 (Alternative): Run Benchmarks with Real Trace Data
 
-The benchmark script generates:
+Instead of synthetic benchmarks with controlled prefix ratios, you can benchmark using real trace data in [mooncake-style format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). This approach uses actual request patterns from production traces, potentially modified with synthesis parameters.
 
-1. **Performance plots** (`prefix_ratio_performance.png`):
-   - TTFT (Time to First Token) vs Prefix Ratio
-   - Throughput (tokens/s) vs Prefix Ratio
+```bash
+python real_data_benchmark.py --input-file mooncake_trace.jsonl
+```
 
-2. **Results summary** (`results_summary.json`):
-   - Raw data for all prefix ratios tested
-   - Configuration parameters used
+The script can apply various modifications on top of the original trace file to simulate different scenarios and workload conditions. This script accepts the same synthesis parameters as the [prefix data generator](../prefix_data_generator/README.md):
 
-3. **Detailed artifacts** (in subdirectories):
-   - Full genai-perf profiling data for each run
+**Key parameters:**
+- `--num-requests`: Number of requests to synthesize from the trace (default: use all)
+- `--speedup-ratio`: Speed up request arrival times (e.g., 2.0 makes requests arrive 2x faster)
+- `--prefix-len-multiplier`: Scale the length of shared prefixes (e.g., 2.0 doubles prefix lengths)
+- `--prefix-root-multiplier`: Replicate the prefix tree structure N times with different roots
+- `--prompt-len-multiplier`: Scale the length of unique user prompts (e.g., 0.5 for shorter prompts)
+- `--max-isl`: Filter out requests exceeding this input sequence length
+
+Examples:
+
+```bash
+# Use original trace file as-is (no synthesis parameters specified)
+python real_data_benchmark.py --input-file trace.jsonl
+
+# Speed up request rate by 2x and use only first 1000 requests
+python real_data_benchmark.py --input-file trace.jsonl --num-requests 1000 --speedup-ratio 2.0
+
+# Double prefix lengths to test cache efficiency with longer shared contexts
+python real_data_benchmark.py --input-file trace.jsonl --prefix-len-multiplier 2.0
+
+# Create more diverse workload by replicating prefix tree 3 times
+python real_data_benchmark.py --input-file trace.jsonl --prefix-root-multiplier 3
+```
 
 ## Troubleshooting
 

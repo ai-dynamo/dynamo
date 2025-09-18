@@ -1373,6 +1373,8 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1413,6 +1415,7 @@ dependencies = [
  "hf-hub",
  "humantime",
  "itertools 0.14.0",
+ "json-five",
  "memmap2",
  "minijinja",
  "minijinja-contrib",
@@ -2925,6 +2928,16 @@ checksum = "1cfaf33c695fc6e08064efbc1f72ec937429614f25eef83af942d0e227c3a28f"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json-five"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56bf719068ddd382e66ee32cf044805aa8203bf9999b5af007bd0367fb681c4d"
+dependencies = [
+ "serde",
+ "unicode-general-category",
 ]
 
 [[package]]
@@ -6183,6 +6196,12 @@ name = "unicase"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b844d17643ee918803943289730bec8aac480150456169e647ed0b576ba539"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-ident"
