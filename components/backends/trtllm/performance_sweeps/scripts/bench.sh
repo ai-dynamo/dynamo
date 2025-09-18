@@ -191,7 +191,7 @@ for concurrency in ${concurrency_list}; do
         --port ${port} \
         --save-result \
         --result-dir "${log_path}/results" \
-        --result-filename "results_concurrency_${original_concurrency}.json"
+        --result-filename "results_concurrency_${original_concurrency}_gpus_${total_gpus}.json"
 
     echo "Benchmark with concurrency ${concurrency} done"
     do_get_logs ${log_path}/output_workers.log ${log_path}/concurrency_${concurrency}
