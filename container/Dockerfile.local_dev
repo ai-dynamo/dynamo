@@ -11,8 +11,8 @@
 # - Command line: run.sh --image <local-dev-image> --mount-workspace ...
 #   where the ubuntu user inside the container is mapped to your local user login
 
-ARG LOCAL_DEV_BASE=""
-FROM ${LOCAL_DEV_BASE} AS local-dev
+ARG DEV_BASE=""
+FROM ${DEV_BASE} AS local-dev
 
 # Don't want ubuntu to be editable, just change uid and gid.
 ENV USERNAME=ubuntu

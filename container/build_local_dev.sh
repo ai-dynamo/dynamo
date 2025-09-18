@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: MIT
 
 # Script to convert dev images to local_dev images
 # Usage: ./convert-to-local-dev.sh [OPTIONS]
@@ -10,11 +12,9 @@ DOCKERFILE_LOCAL_DEV="${SCRIPT_DIR}/Dockerfile.local_dev"
 
 
 # Default values
-ARCH="amd64"
 USER_UID=$(id -u)
 USER_GID=$(id -g)
 RUN_PREFIX=
-SQUASH=false
 CUSTOM_TAGS=()
 
 usage() {
@@ -24,28 +24,19 @@ Usage: $0 [OPTIONS]
 Convert dev images to local_dev images for Dev Container use.
 
 OPTIONS:
-    -l, --list              List available dev images
     -i, --dev-image IMAGE   Dev image to convert (required for conversion)
     -t, --tag TAG           Custom tag for the local-dev image (overrides default naming)
-    -a, --arch ARCH         Architecture (default: amd64)
     -u, --uid UID           User UID (default: current user UID)
     -g, --gid GID           User GID (default: current user GID)
     -d, --dry-run           Show what would be done without building
-    --squash                Squash the layers in the resulting image
     -h, --help              Show this help message
 
 EXAMPLES:
-    # List available dev images
-    $0 --list
-
     # Convert a specific dev image
     $0 --dev-image dynamo:latest-vllm
 
     # Convert with custom UID/GID
     $0 --dev-image dynamo:vllm-dev --uid 1001 --gid 1001
-
-    # Convert for arm64 architecture
-    $0 --dev-image dynamo:vllm-dev --arch arm64
 
     # Dry run to see what would be done
     $0 --dev-image dynamo:latest-vllm --dry-run
@@ -57,43 +48,6 @@ EOF
 }
 
 
-list_dev_images() {
-    echo "Searching for dynamo dev/latest images..."
-
-    # Look for dynamo images with dev patterns or latest patterns
-    local dev_images
-    dev_images=$(docker images --format "{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedSince}}|{{.Size}}" | \
-        grep "dynamo:" | \
-        grep -E "(dev|development|latest)" | \
-        grep -v "local-dev" | \
-        head -20)
-
-    if [[ -z "$dev_images" ]]; then
-        echo "No dynamo dev/latest images found. Looking for any dynamo images..."
-        dev_images=$(docker images --format "{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedSince}}|{{.Size}}" | \
-            grep "dynamo:" | \
-            grep -v "local-dev" | \
-            head -20)
-    fi
-
-    if [[ -n "$dev_images" ]]; then
-        echo
-        echo "Available dynamo images that could be converted:"
-        echo "IMAGE:TAG                                                    IMAGE ID     CREATED        SIZE"
-        echo "====================================================================================================="
-
-        # Format each line with proper column alignment
-        while IFS='|' read -r image_tag image_id created_since size; do
-            printf "%-60s %-12s %-14s %s\n" "$image_tag" "$image_id" "$created_since" "$size"
-        done <<< "$dev_images"
-
-        echo
-        echo "Use --dev-image <IMAGE:TAG> to convert one of these images"
-    else
-        echo "No dynamo images found"
-        echo "Make sure you have built dynamo images first"
-    fi
-}
 
 validate_image() {
     local image="$1"
@@ -132,25 +86,16 @@ validate_uid_gid() {
 
 # Parse command line arguments
 PARSE_ARGS=true
-LIST_IMAGES=false
 BASE_IMAGE=""
 
 while [[ $# -gt 0 ]] && [[ "$PARSE_ARGS" == "true" ]]; do
     case $1 in
-        -l|--list)
-            LIST_IMAGES=true
-            shift
-            ;;
         -i|--dev-image)
             BASE_IMAGE="$2"
             shift 2
             ;;
         -t|--tag)
             CUSTOM_TAGS+=("$2")
-            shift 2
-            ;;
-        -a|--arch)
-            ARCH="$2"
             shift 2
             ;;
         -u|--uid)
@@ -163,10 +108,6 @@ while [[ $# -gt 0 ]] && [[ "$PARSE_ARGS" == "true" ]]; do
             ;;
         -d|--dry-run|--dryrun)
             RUN_PREFIX="echo"
-            shift
-            ;;
-        --squash)
-            SQUASH=true
             shift
             ;;
         -h|--help)
@@ -218,13 +159,7 @@ for tag in "${CUSTOM_TAGS[@]}"; do
     TAG_ARGS+=" --tag $tag"
 done
 
-# Add squash flag if requested
-SQUASH_ARG=""
-if [[ "$SQUASH" == "true" ]]; then
-    SQUASH_ARG=" --squash"
-fi
-
-echo "Using UID: $USER_UID, GID: $USER_GID, ARCH: $ARCH"
+echo "Using UID: $USER_UID, GID: $USER_GID"
 
 if [[ ! -f "$DOCKERFILE_LOCAL_DEV" ]]; then
     echo "ERROR: Dockerfile.local_dev not found at: $DOCKERFILE_LOCAL_DEV"
@@ -236,18 +171,12 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-$RUN_PREFIX docker build \
-    --build-arg LOCAL_DEV_BASE="$BASE_IMAGE" \
-    --build-arg USER_UID="$USER_UID" \
-    --build-arg USER_GID="$USER_GID" \
-    --build-arg ARCH="$ARCH" \
-    --file "$DOCKERFILE_LOCAL_DEV" \
-    $TAG_ARGS$SQUASH_ARG \
-    "$SCRIPT_DIR" || {
-    { set +x; } 2>/dev/null
-    echo "ERROR: Failed to build local_dev image"
-    exit 1
-}
+# Docker build logic moved to build.sh
+echo "Docker build arguments prepared:"
+echo "  LOCAL_DEV_BASE: $BASE_IMAGE"
+echo "  USER_UID: $USER_UID"
+echo "  USER_GID: $USER_GID"
+echo "  TAG_ARGS: $TAG_ARGS"
 { set +x; } 2>/dev/null
 
 # Show usage example with run.sh
