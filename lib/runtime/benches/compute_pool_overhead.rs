@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dynamo_runtime::compute::ComputePool;
 use std::sync::Arc;

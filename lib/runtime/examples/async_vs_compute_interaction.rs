@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Benchmark demonstrating async I/O vs compute workload interaction
 //!
 //! This example measures how different types of compute workloads interfere with

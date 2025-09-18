@@ -47,7 +47,8 @@ impl ComputeMetrics {
         self.tasks_active.fetch_sub(1, Ordering::Relaxed);
         self.tasks_total.fetch_add(1, Ordering::Relaxed);
 
-        let duration_us = duration.as_micros() as u64;
+        // Use saturating conversion to prevent overflow
+        let duration_us = duration.as_micros().min(u64::MAX as u128) as u64;
         self.total_compute_time_us
             .fetch_add(duration_us, Ordering::Relaxed);
 

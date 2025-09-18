@@ -58,16 +58,43 @@ impl Default for ComputeConfig {
 }
 
 impl ComputeConfig {
+    /// Validate the configuration
+    pub fn validate(&self) -> Result<()> {
+        if let Some(num_threads) = self.num_threads
+            && num_threads == 0 {
+                return Err(anyhow::anyhow!(
+                    "Number of compute threads cannot be 0. Use None to disable compute pool entirely."
+                ));
+            }
+
+        if let Some(stack_size) = self.stack_size
+            && stack_size < 128 * 1024 {
+                return Err(anyhow::anyhow!(
+                    "Stack size too small: {}KB. Minimum recommended: 128KB",
+                    stack_size / 1024
+                ));
+            }
+
+        Ok(())
+    }
+
     /// Create a ThreadPoolBuilder from this configuration
     pub(crate) fn build_pool(&self) -> Result<rayon::ThreadPool> {
+        // Validate configuration first
+        self.validate()?;
+
         let mut builder = ThreadPoolBuilder::new();
 
-        // Set number of threads
+        // Set number of threads with better logic for minimum parallelism
         let num_threads = self.num_threads.unwrap_or_else(|| {
             std::thread::available_parallelism()
-                .map(|n| n.get() / 2)
-                .unwrap_or(2)
-                .max(1)
+                .map(|n| {
+                    let total_cores = n.get();
+                    // Use half the cores, but ensure we have at least 2 threads
+                    // for meaningful parallelism, and cap at 16 for efficiency
+                    (total_cores / 2).clamp(2, 16)
+                })
+                .unwrap_or(2) // Fallback to 2 threads if detection fails
         });
         builder = builder.num_threads(num_threads);
 
