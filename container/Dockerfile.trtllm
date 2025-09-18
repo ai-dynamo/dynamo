@@ -187,6 +187,8 @@ COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy
 COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
 COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
@@ -210,10 +212,6 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
     fi
-
-# Copy triton and pytorch_triton from framework image
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
-COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 
 # Install dynamo, NIXL, and dynamo-specific dependencies
 COPY benchmarks/ /opt/dynamo/benchmarks/
