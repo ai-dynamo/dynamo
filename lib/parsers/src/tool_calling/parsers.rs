@@ -44,7 +44,7 @@ pub async fn try_tool_call_parse(
         }
         ToolCallParserType::Harmony => {
             let (results, normal_content) =
-                parse_tool_calls_harmony_complete(message, &config.json)?;
+                parse_tool_calls_harmony_complete(message, &config.json).await?;
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
