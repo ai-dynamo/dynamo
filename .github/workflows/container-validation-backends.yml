@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: NVIDIA Dynamo Backends Github Validation
+name: Dynamo Backend Validation
 
 on:
   push:
@@ -11,12 +11,41 @@ on:
       - "pull-request/[0-9]+"
 
 concurrency:
-  group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    group: ${{ github.workflow }}-build-test-${{ github.ref_name || github.run_id }}
+    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Check for changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+            code:
+              - '**'
+              - '!docs/**'
+
+  pr-backend-check:
+    runs-on: ubuntu-latest
+    needs: [changes, build-test-vllm, build-test-sglang]
+    if: always()
+    steps:
+      - name: "Check all dependent jobs"
+        run: jq -en 'env.NEEDS | fromjson | all(.result as $result | ["success", "skipped"] | any($result == .))'
+
   build-test-vllm:
     runs-on: gpu-l40-amd64
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,6 +69,8 @@ jobs:
 
   build-test-sglang:
     runs-on: gpu-l40-amd64
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
