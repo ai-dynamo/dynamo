@@ -42,8 +42,8 @@ def nats_and_etcd():
 
 @pytest.fixture(scope="session")
 async def runtime():
-    """Create a DistributedRuntime for testing"""
+    """Create a DistributedRuntime for testing. static runtime."""
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, True)
     yield runtime
-    runtime.shutdown
+    runtime.shutdown()
