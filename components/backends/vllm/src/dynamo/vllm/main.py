@@ -69,7 +69,7 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
-    etcd_client = runtime.etcd_client()
+    etcd_client = runtime.do_not_use_etcd_client()
     await configure_ports_with_etcd(config, etcd_client)
     overwrite_args(config)
 

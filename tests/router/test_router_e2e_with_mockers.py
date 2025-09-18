@@ -235,7 +235,7 @@ async def check_registration_in_etcd(
         List of registered KV router entries from etcd
     """
     runtime = get_runtime()
-    etcd = runtime.etcd_client()
+    etcd = runtime.do_not_use_etcd_client()
 
     # Extract component path from endpoint if provided
     prefix = "kv_routers/"

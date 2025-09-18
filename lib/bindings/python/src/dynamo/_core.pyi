@@ -41,9 +41,10 @@ class DistributedRuntime:
         """
         ...
 
-    def etcd_client(self) -> Optional[EtcdClient]:
+    def do_not_use_etcd_client(self) -> Optional[EtcdClient]:
         """
         Get the `EtcdClient` object. Not available for static workers.
+        This will be removed soon, do not use it.
         """
         ...
 
@@ -52,6 +53,7 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
@@ -169,12 +171,6 @@ class EtcdKvCache:
     async def delete(self, key: str) -> None:
         """
         Delete a key-value pair from the cache and etcd.
-        """
-        ...
-
-    async def clear_all(self) -> None:
-        """
-        Delete all key-value pairs from the cache and etcd.
         """
         ...
 
