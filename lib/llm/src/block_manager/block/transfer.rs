@@ -139,7 +139,7 @@ pub fn handle_local_transfer<RB, WB>(
     sources: &[RB],
     targets: &mut [WB],
     ctx: Arc<TransferContext>,
-) -> Result<oneshot::Receiver<()>, TransferError>
+) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError>
 where
     RB: ReadableBlock + WriteToStrategy<WB> + Local,
     WB: WritableBlock,
@@ -156,7 +156,11 @@ where
                 memcpy::copy_block(src, dst)?;
             }
 
-            tx.send(()).unwrap();
+            if tx.send(Ok(())).is_err() {
+                tracing::warn!(
+                    "Failed to send transfer completion signal - receiver may have been dropped"
+                );
+            }
             Ok(rx)
         }
         TransferStrategy::CudaAsyncH2D
@@ -166,7 +170,21 @@ where
                 cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
             }
 
-            ctx.cuda_event(tx)?;
+            let event = ctx
+                .record_event()
+                .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
+
+            ctx.async_rt_handle().spawn(async move {
+                let result = match event.synchronize().await {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(TransferError::ExecutionError(e.to_string())),
+                };
+                if tx.send(result).is_err() {
+                    tracing::warn!(
+                        "Failed to send transfer completion signal - receiver may have been dropped"
+                    );
+                }
+            });
             Ok(rx)
         }
         TransferStrategy::Nixl(transfer_type) => {
@@ -174,7 +192,11 @@ where
 
             ctx.async_rt_handle().spawn(async move {
                 transfer_fut.await;
-                tx.send(()).unwrap();
+                if tx.send(Ok(())).is_err() {
+                    tracing::warn!(
+                        "Failed to send transfer completion signal - receiver may have been dropped"
+                    );
+                }
             });
             Ok(rx)
         }
@@ -190,7 +212,7 @@ pub trait WriteTo<Target> {
         &self,
         dst: &mut Vec<Target>,
         ctx: Arc<TransferContext>,
-    ) -> Result<oneshot::Receiver<()>, TransferError>;
+    ) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError>;
 }
 
 impl<RB, WB, L: LocalityProvider> WriteTo<WB> for Vec<RB>
@@ -205,7 +227,7 @@ where
         &self,
         dst: &mut Vec<WB>,
         ctx: Arc<TransferContext>,
-    ) -> Result<oneshot::Receiver<()>, TransferError> {
+    ) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError> {
         L::handle_transfer(self, dst, ctx)
     }
 }

@@ -12,7 +12,7 @@ impl LogicalResources for NullResources {
         _sources: &[RB],
         _targets: &mut [WB],
         _ctx: Arc<TransferContext>,
-    ) -> Result<oneshot::Receiver<()>, TransferError>
+    ) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
