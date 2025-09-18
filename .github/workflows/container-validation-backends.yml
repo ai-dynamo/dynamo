@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: gpu-l40-amd64
+    runs-on: gpu-l40-amd64-test
     strategy:
       fail-fast: false
       matrix:
