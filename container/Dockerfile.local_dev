@@ -22,7 +22,8 @@ ARG WORKSPACE_DIR=/workspace
 
 ARG ARCH
 
-# Update package lists and install additional developer utilities
+# Update package lists and install developer utilities. Some of these may exist in the base image,
+# but to ensure consistency across all dev images, we explicitly list all required dev tools here.
 RUN apt-get update && apt-get install -y \
     # Development utilities
     curl wget git vim nano \
