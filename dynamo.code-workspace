@@ -17,5 +17,57 @@
             "ms-python.python",
             "rust-lang.rust-analyzer"
         ]
-    }
+    },
+    "launch": {
+        // REQUIRES:
+        // export RUSTFLAGS="-g"
+        // cargo b --features cuda --profile dev
+        "configurations": [
+            {
+                "name": "Dynamo Frontend",
+                "type": "lldb",
+                "request": "launch",
+                "program": "${workspaceFolder}/.venv/bin/python",
+                "args": [
+                    "-m",
+                    "dynamo.frontend",
+                ],
+                "initCommands": [
+                    "settings set target.disable-aslr false"
+                ],
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/frontend/src:${workspaceFolder}/components/planner/src:${workspaceFolder}/components/backends/llama_cpp/src:${workspaceFolder}/components/backends/mocker/src:${workspaceFolder}/components/backends/trtllm/src:${workspaceFolder}/components/backends/sglang/src:${workspaceFolder}/components/backends/vllm/src"
+                },
+                "sourceLanguages": [
+                    "rust"
+                ]
+            },
+            {
+                "name": "Dynamo vLLM Backend",
+                "type": "lldb",
+                "request": "launch",
+                "program": "${workspaceFolder}/.venv/bin/python",
+                "args": [
+                    "-m",
+                    "dynamo.vllm",
+                    "--model",
+                    "${env:DYNAMO_MODEL_NAME}",
+                    "--enforce-eager",
+                    "--no-enable-prefix-caching",
+                ],
+                "initCommands": [
+                    "settings set target.disable-aslr false"
+                ],
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/frontend/src:${workspaceFolder}/components/planner/src:${workspaceFolder}/components/backends/llama_cpp/src:${workspaceFolder}/components/backends/mocker/src:${workspaceFolder}/components/backends/trtllm/src:${workspaceFolder}/components/backends/sglang/src:${workspaceFolder}/components/backends/vllm/src"
+                },
+                "sourceLanguages": [
+                    "rust"
+                ]
+            }
+        ]
 }

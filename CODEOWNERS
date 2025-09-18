@@ -31,6 +31,10 @@ CODEOWNERS @ai-dynamo/Devops @nnshah1
 /benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
 /tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
 
+# recipes
+
+/recipes/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops
 /ATTRIBUTIONS.md @ai-dynamo/Devops
