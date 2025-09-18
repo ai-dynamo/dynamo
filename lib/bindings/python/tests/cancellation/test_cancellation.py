@@ -14,13 +14,12 @@
 # limitations under the License.
 
 import asyncio
-import random
-import string
-import threading
 
 import pytest
 
-from dynamo._core import DistributedRuntime
+from dynamo.runtime import Context
+
+pytestmark = pytest.mark.pre_merge
 
 
 class MockServer:
@@ -125,75 +124,43 @@ class MockServer:
         raise asyncio.CancelledError
 
 
-def random_string(length=10):
-    """Generate a random string for namespace isolation"""
-    # Start with a letter to satisfy Prometheus naming requirements
-    first_char = random.choice(string.ascii_lowercase)
-    remaining_chars = string.ascii_lowercase + string.digits
-    rest = "".join(random.choices(remaining_chars, k=length - 1))
-    return first_char + rest
-
-
 @pytest.fixture
 def namespace():
-    """Generate a random namespace for test isolation"""
-    return random_string()
+    """Namespace for this test file"""
+    return "cancellation_unit_test"
 
 
 @pytest.fixture
 async def server(runtime, namespace):
     """Start a test server in the background"""
-    # TODO(michaelfeil): spawn using threading.Thread(target=asyncio.run, args=(server(),shutdown_signal: threading.Event()))
 
     handler = MockServer()
-    stop_event = threading.Event()
 
-    async def init_server(runtime, namespace, stop_event):
+    async def init_server():
         """Initialize the test server component and serve the generate endpoint"""
         component = runtime.namespace(namespace).component("backend")
         await component.create_service()
-
         endpoint = component.endpoint("generate")
         print("Started test server instance")
 
         # Serve the endpoint - this will block until shutdown
-        serve_task = asyncio.create_task(endpoint.serve_endpoint(handler.generate))
-        event_done_task = asyncio.create_task(asyncio.to_thread(stop_event.wait))
+        await endpoint.serve_endpoint(handler.generate)
 
-        done, pending = await asyncio.wait(
-            {serve_task, event_done_task},
-            return_when=asyncio.FIRST_COMPLETED,
-            timeout=30.0,
-        )
-        if serve_task in done:
-            print("Server task completed")
-            await serve_task  # Propagate exceptions if any
-        else:
-            serve_task.cancel()
-
-    # # Start server in background task
-    # server_task = asyncio.create_task(init_server())
-    thread = threading.Thread(
-        target=asyncio.run, args=(init_server(runtime, namespace, stop_event),)
-    )
-    thread.start()
+    # Start server in background task
+    server_task = asyncio.create_task(init_server())
 
     # Give server time to start up
     await asyncio.sleep(0.5)
 
-    yield thread, handler
-    stop_event.set()
-    await asyncio.to_thread(thread.join, 5)
+    yield server_task, handler
 
-
-@pytest.fixture(scope="session")
-async def runtime():
-    """Create a DistributedRuntime for testing"""
-    # TODO(michaelfeil): consider re-using runtime across tests to not have to launch tests via subprocess.
-    loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
-    yield runtime
-    runtime.shutdown()
+    # Cleanup - cancel server task
+    if not server_task.done():
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
 
 
 @pytest.fixture
@@ -205,3 +172,120 @@ async def client(runtime, namespace):
     await client.wait_for_instances()
 
     return client
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+async def test_client_context_cancel(server, client):
+    _, handler = server
+    context = Context()
+    stream = await client.generate("_generate_until_context_cancelled", context=context)
+
+    iteration_count = 0
+    async for annotated in stream:
+        number = annotated.data()
+        print(f"Received iteration: {number}")
+
+        # Verify received valid number
+        assert number == iteration_count
+
+        # Break after receiving 2 responses
+        if iteration_count >= 2:
+            print("Cancelling after 2 responses...")
+            context.stop_generating()
+            break
+
+        iteration_count += 1
+
+    # Give server a moment to process the cancellation
+    await asyncio.sleep(0.2)
+
+    # Verify server detected the cancellation
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed
+
+    # TODO: Test with _generate_until_asyncio_cancelled server handler
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+async def test_client_loop_break(server, client):
+    _, handler = server
+    stream = await client.generate("_generate_until_context_cancelled")
+
+    iteration_count = 0
+    async for annotated in stream:
+        number = annotated.data()
+        print(f"Received iteration: {number}")
+
+        # Verify received valid number
+        assert number == iteration_count
+
+        # Break after receiving 2 responses
+        if iteration_count >= 2:
+            print("Cancelling after 2 responses...")
+            break
+
+        iteration_count += 1
+
+    # Give server a moment to process the cancellation
+    await asyncio.sleep(0.2)
+
+    # TODO: Implicit cancellation is not yet implemented, so the server context will not
+    #       show any cancellation.
+    assert not handler.context_is_stopped
+    assert not handler.context_is_killed
+
+    # TODO: Test with _generate_until_asyncio_cancelled server handler
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+async def test_server_context_cancel(server, client):
+    _, handler = server
+    stream = await client.generate("_generate_and_cancel_context")
+
+    iteration_count = 0
+    try:
+        async for annotated in stream:
+            number = annotated.data()
+            print(f"Received iteration: {number}")
+            assert number == iteration_count
+            iteration_count += 1
+        assert False, "Stream completed without cancellation"
+    except ValueError as e:
+        # Verify the expected cancellation exception is received
+        # TODO: Should this be a asyncio.CancelledError?
+        assert str(e) == "Stream ended before generation completed"
+
+    # Verify server context cancellation status
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+async def test_server_raise_cancelled(server, client):
+    _, handler = server
+    stream = await client.generate("_generate_and_raise_cancelled")
+
+    iteration_count = 0
+    try:
+        async for annotated in stream:
+            number = annotated.data()
+            print(f"Received iteration: {number}")
+            assert number == iteration_count
+            iteration_count += 1
+        assert False, "Stream completed without cancellation"
+    except ValueError as e:
+        # Verify the expected cancellation exception is received
+        # TODO: Should this be a asyncio.CancelledError?
+        assert (
+            str(e)
+            == "a python exception was caught while processing the async generator: CancelledError: "
+        )
+
+    # Verify server context cancellation status
+    # TODO: Server to gracefully stop the stream?
+    assert not handler.context_is_stopped
+    assert not handler.context_is_killed
