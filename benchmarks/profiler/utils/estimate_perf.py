@@ -170,6 +170,9 @@ class AIConfiguratorPerfEstimator:
         model = self._get_model(**model_config_kwargs)
 
         def get_mem_usage(bs: int):
+            # TODO: _get_memory_usage might be underestimating because
+            # 1. it doesn't account for runtime buffers
+            # 2. it calculates num_tokens = isl*bs which ignores osl
             return self.backend._get_memory_usage(
                 model, self.database, bs, 1, isl, osl
             )["total"]
