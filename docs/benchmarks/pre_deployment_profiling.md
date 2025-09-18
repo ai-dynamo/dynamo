@@ -100,31 +100,6 @@ pip install -r deploy/utils/requirements.txt
 
 Use the injector utility to place your DGD manifest into the PVC. The profiling job will read the path you specify.
 
-```bash
-# Inject your disagg manifest
-python3 -m deploy.utils.inject_manifest \
-  --namespace $NAMESPACE \
-  --src components/backends/vllm/deploy/disagg.yaml \
-  --dest /data/configs/disagg.yaml
-
-# Set the docker image for the profiling job; any docker image that contains your script.
-export DOCKER_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
-```
-
-### Configure container image (optional)
-
-You have two options for configuring your profiling setup:
-
-**Option A: Use pre-built image with custom config injection (recommended)**
-
-Use the default pre-built image and inject custom configurations via PVC:
-
-1. **Set the container image:**
-   ```bash
-   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag
-   ```
-
-2. **Inject your custom disagg configuration:**
    ```bash
    # Use default disagg.yaml config
    python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
@@ -137,16 +112,6 @@ Use the default pre-built image and inject custom configurations via PVC:
    ```
 
    > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
-
-3. **Set the config path for the profiling job:**
-   ```bash
-   export DGD_CONFIG_FILE=/workspace/profiling_results/disagg.yaml # or your custom path
-   ```
-
-This approach allows you to:
-- Customize DGD configurations without rebuilding container images
-- Test different model configurations easily
-- Version control your DGD configs alongside your code
 
 > **Important**: For profiling, disagg configs should be run with Grove disabled by adding the annotation `nvidia.com/enable-grove: "false"` to avoid alpha Grove status issues.
 
@@ -173,13 +138,25 @@ spec:
             - <vllm/sglang>
 ```
 
-**Step 3: Run profiling (required)**
+**Step 3: Define the container image and config path**
+
+1. **Set the container image:**
+   ```bash
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag (TODO: update to 0.5.0 upon release as profiling with 0.4.1 is broken)
+   ```
+
+3. **Set the config path for the profiling job:**
+   ```bash
+   export DGD_CONFIG_FILE=/data/configs/disagg.yaml # should be the same path you set for --dest in Step 1
+   ```
+
+**Step 4: Run profiling (required)**
 
 ```bash
 envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
 ```
 
-**Step 4: Wait for profiling to complete**
+**Step 5: Wait for profiling to complete**
 ```bash
 kubectl get jobs -n $NAMESPACE
 kubectl logs job/profile-sla -n $NAMESPACE
