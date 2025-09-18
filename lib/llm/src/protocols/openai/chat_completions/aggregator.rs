@@ -34,10 +34,6 @@ pub struct DeltaAggregator {
     error: Option<String>,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
-    /// Audit request JSON if audit annotation was found
-    audit_request_json: Option<String>,
-    /// Whether audit logging is enabled for this completion.
-    audit_on: bool,
 }
 
 /// Represents the accumulated state of a single chat choice during streaming aggregation.
@@ -101,8 +97,6 @@ impl DeltaAggregator {
             choices: HashMap::new(),
             error: None,
             service_tier: None,
-            audit_request_json: None,
-            audit_on: false,
         }
     }
 
@@ -121,16 +115,6 @@ impl DeltaAggregator {
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
-                if delta.event.as_deref() == Some(crate::audit::ANNOTATION_AUDIT_REQUEST)
-                    && delta.data.is_none()
-                    && let Some(comment) = &delta.comment
-                    && let Some(req_json) = comment.first()
-                {
-                    aggregator.audit_request_json = Some(req_json.clone());
-                    aggregator.audit_on = true;
-                    return aggregator;
-                }
-
                 // Attempt to unwrap the delta, capturing any errors.
                 let delta = match delta.ok() {
                     Ok(delta) => delta,
@@ -265,11 +249,12 @@ impl DeltaAggregator {
             service_tier: aggregator.service_tier,
         };
 
-        // Emit audit log if we have audit request JSON
-        if aggregator.audit_on
-            && let Some(req_json) = &aggregator.audit_request_json
-        {
-            crate::audit::log::log_stored_completion(&response.id, req_json, &response);
+        // Emit audit response event (no serialization on hot path)
+        if crate::audit::config::policy().enabled {
+            crate::audit::bus::publish(crate::audit::event::AuditEvent::Response {
+                id: response.id.clone(),
+                resp: std::sync::Arc::new(response.clone()),
+            });
         }
 
         Ok(response)

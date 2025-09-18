@@ -694,10 +694,19 @@ impl
         // unpack the request
         let (request, context) = request.into_parts();
 
+        let store = request.inner.store.unwrap_or(false);
+        if crate::audit::config::policy().enabled && store {
+            crate::audit::bus::publish(crate::audit::event::AuditEvent::Request {
+                id: context.id().to_string(),
+                req: std::sync::Arc::new(request.clone()),
+            });
+        }
+
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
+
         let (common_request, mut annotations) = self.preprocess_request(&request)?;
 
         let mut response_generator = Box::new(response_generator);
@@ -718,6 +727,8 @@ impl
             });
             annotations.insert(crate::audit::ANNOTATION_AUDIT_REQUEST.to_string(), req_json);
         }
+
+        let (common_request, annotations) = self.preprocess_request(&request)?;
         // update isl
         response_generator.update_isl(common_request.token_ids.len() as u32);
 
