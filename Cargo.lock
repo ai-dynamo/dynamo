@@ -1942,6 +1942,8 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tokio-util",
  "tracing",
+ "url",
+ "uuid 1.18.0",
 ]
 
 [[package]]
@@ -2078,6 +2080,7 @@ dependencies = [
  "rustpython-parser",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid 1.18.0",
 ]

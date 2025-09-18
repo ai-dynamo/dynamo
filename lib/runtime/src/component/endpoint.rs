@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use derive_getters::Dissolve;
 use tokio_util::sync::CancellationToken;
@@ -49,6 +37,13 @@ pub struct EndpointConfig {
     /// Whether to wait for inflight requests to complete during shutdown
     #[builder(default = "true")]
     graceful_shutdown: bool,
+
+    /// Health check payload for this endpoint
+    /// This payload will be sent to the endpoint during health checks
+    /// to verify it's responding properly
+    #[educe(Debug(ignore))]
+    #[builder(default, setter(into, strip_option))]
+    health_check_payload: Option<serde_json::Value>,
 }
 
 impl EndpointConfigBuilder {
@@ -64,8 +59,15 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler, metrics_labels, graceful_shutdown) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            lease,
+            handler,
+            stats_handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+        ) = self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
@@ -126,6 +128,23 @@ impl EndpointConfigBuilder {
         let subject = endpoint.subject_to(lease_id);
         let etcd_path = endpoint.etcd_path_with_lease_id(lease_id);
         let etcd_client = endpoint.component.drt.etcd_client.clone();
+
+        // Register health check target in SystemHealth if provided
+        if let Some(health_check_payload) = &health_check_payload {
+            let instance = Instance {
+                component: component_name.clone(),
+                endpoint: endpoint_name.clone(),
+                namespace: namespace_name.clone(),
+                instance_id: lease_id,
+                transport: TransportType::NatsTcp(subject.clone()),
+            };
+            tracing::debug!(subject = %subject, "Registering endpoint health check target");
+            let guard = system_health.lock().unwrap();
+            guard.register_health_check_target(&subject, instance, health_check_payload.clone());
+            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&subject) {
+                handler.set_endpoint_health_check_notifier(notifier)?;
+            }
+        }
 
         let cancel_token = if let Some(lease) = lease.as_ref() {
             // Create a new token that will be cancelled when EITHER the lease expires OR runtime shutdown occurs

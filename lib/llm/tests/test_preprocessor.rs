@@ -1,13 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
 use async_trait::async_trait;
+use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+use dynamo_async_openai::types::CreateChatCompletionRequest;
 use dynamo_async_openai::types::{
     ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason as OAIFinishReason, Role,
 };
 use dynamo_llm::preprocessor::{
     ANNOTATION_POSSIBLE_TOOL_CALL, PossibleToolCallAnnotation, apply_tool_calling_jail_internal,
+    maybe_enable_tool_call,
 };
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
 use dynamo_parsers::tool_calling::parsers::detect_tool_call_start;
 use dynamo_runtime::pipeline::ResponseStream;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -168,7 +174,7 @@ async fn test_apply_tool_calling_jail_internal_with_tool_call_detection() {
 
     // Apply the jail with nemotron_deci parser - should trigger jailing on first chunk
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string())).await;
 
     // Collect all results
     let results: Vec<_> = jailed_stream.collect().await;
@@ -224,7 +230,7 @@ async fn test_apply_tool_calling_jail_internal_no_tool_calls() {
 
     // Apply the jail with nemotron_deci parser - regular text should NOT be jailed
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("nemotron_deci".to_string())).await;
 
     // Collect all results
     let results: Vec<_> = jailed_stream.collect().await;
@@ -275,7 +281,7 @@ async fn test_apply_tool_calling_jail_internal_with_empty_stream() {
     let input_stream = stream::iter(chunks);
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
-    let jailed_stream = apply_tool_calling_jail_internal(response_stream, None);
+    let jailed_stream = apply_tool_calling_jail_internal(response_stream, None).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(results.is_empty(), "Empty stream should produce no results");
@@ -299,7 +305,7 @@ async fn test_apply_tool_calling_jail_internal_with_different_parsers() {
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(!results.is_empty(), "Should have results for hermes parser");
@@ -359,7 +365,7 @@ async fn test_apply_tool_calling_jail_internal_hermes_parser() {
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("hermes".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(!results.is_empty(), "Should have results for hermes parser");
@@ -457,7 +463,7 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_no_tool_call_
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string())).await;
 
     let results: Vec<_> = jailed_stream.collect().await;
 
@@ -531,7 +537,7 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_false_positiv
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(
@@ -582,7 +588,7 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_false_positiv
     let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
 
     let jailed_stream =
-        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string()));
+        apply_tool_calling_jail_internal(response_stream, Some("mistral".to_string())).await;
     let results: Vec<_> = jailed_stream.collect().await;
 
     assert!(
@@ -633,4 +639,125 @@ async fn test_apply_tool_calling_jail_internal_mistral_parser_with_false_positiv
     assert_eq!(name, "get_weather");
     assert_eq!(arguments["location"], "San Francisco");
     assert_eq!(arguments["unit"], "fahrenheit");
+}
+
+#[tokio::test]
+async fn test_tool_calling_jail_internal_with_harmony_parser() {
+    let mock_context = Arc::new(MockAsyncEngineContext::new(
+        "test-request-id-harmony".to_string(),
+    ));
+
+    // Harmony Format:
+    // <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
+    // <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
+    // <|message|>{"location":"San Francisco"}<|call|>
+    let chunks = vec![
+        create_mock_response_chunk(
+            "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
+                .to_string(),
+            0,
+        ),
+        create_mock_response_chunk("<|start|>".to_string(), 0),
+        create_mock_response_chunk("assistant".to_string(), 0),
+        create_mock_response_chunk("<|channel|>".to_string(), 0),
+        create_mock_response_chunk(
+            "commentary to=functions.get_current_weather <|constrain|>json".to_string(),
+            0,
+        ),
+        create_mock_response_chunk(
+            "<|message|>{\"location\":\"San Francisco\"}<|call|>".to_string(),
+            0,
+        ),
+        create_final_response_chunk(0),
+    ];
+
+    let input_stream = stream::iter(chunks);
+    let response_stream = ResponseStream::new(Box::pin(input_stream), mock_context.clone());
+
+    let jailed_stream =
+        apply_tool_calling_jail_internal(response_stream, Some("harmony".to_string())).await;
+    let results: Vec<_> = jailed_stream.collect().await;
+
+    assert!(
+        !results.is_empty(),
+        "Should have results for harmony parser"
+    );
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[1].data.as_ref().unwrap().choices[0].delta.content,
+        Some("Need to use function get_current_weather.".to_string())
+    );
+    assert!(
+        results[1].data.as_ref().unwrap().choices[0]
+            .delta
+            .tool_calls
+            .is_some()
+    );
+    let tools = results[1].data.as_ref().unwrap().choices[0]
+        .delta
+        .tool_calls
+        .as_ref()
+        .unwrap();
+    assert_eq!(tools.len(), 1);
+    let name = tools[0].function.as_ref().unwrap().name.as_ref().unwrap();
+    let arguments = serde_json::from_str::<serde_json::Value>(
+        tools[0]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(name, "get_current_weather");
+    assert_eq!(arguments["location"], "San Francisco");
+}
+
+#[test]
+fn test_enable_tool_call() {
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::Auto),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(maybe_enable_tool_call(Some("nemotron_deci"), &request));
+
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::None),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
+
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::Required),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(maybe_enable_tool_call(Some("nemotron_deci"), &request));
+
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::Auto),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(!maybe_enable_tool_call(None, &request));
 }

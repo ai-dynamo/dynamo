@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod tools;
 
 use anyhow::Result;
+use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 use dynamo_async_openai::types::EncodingFormat;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
@@ -75,6 +76,20 @@ pub struct JailState {
     accumulated_content: HashMap<u32, String>, // choice index -> accumulated content
     last_response_metadata: Option<NvCreateChatCompletionStreamResponse>, // for response structure
     finished: bool,                            // Add this flag to track if stream is finished
+}
+
+pub fn maybe_enable_tool_call(
+    parser_str: Option<&str>,
+    request: &NvCreateChatCompletionRequest,
+) -> bool {
+    // Enable tool call if the below two conditions are satisfied
+    // 1. parser_str is not None
+    // 2. tool_choice is not None
+    parser_str.is_some()
+        && !matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::None)
+        )
 }
 
 impl LLMMetricAnnotation {
@@ -473,6 +488,8 @@ impl OpenAIPreprocessor {
             context: Arc<dyn AsyncEngineContext>,
             cancelled: bool,
             cumulative_output_tokens: usize,
+            finish_reason_sent: bool,
+            usage_chunk_sent: bool,
             finished: bool, // Add this flag to track if stream is finished
         }
 
@@ -482,6 +499,8 @@ impl OpenAIPreprocessor {
             context: context.clone(),
             cancelled: false,
             cumulative_output_tokens: 0,
+            finish_reason_sent: false,
+            usage_chunk_sent: false,
             finished: false, // Initialize as not finished
         };
 
@@ -508,6 +527,13 @@ impl OpenAIPreprocessor {
                         "Processing common response: {:?}",
                         response
                     );
+
+                    // Check if this response has a finish_reason
+                    let has_finish_reason = response
+                        .data
+                        .as_ref()
+                        .map(|d| d.finish_reason.is_some())
+                        .unwrap_or(false);
 
                     let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
                         let chunk_tokens = backend_output.token_ids.len();
@@ -553,6 +579,11 @@ impl OpenAIPreprocessor {
                         }
                     }
 
+                    // Mark if we've seen a finish_reason
+                    if has_finish_reason {
+                        inner.finish_reason_sent = true;
+                    }
+
                     tracing::trace!(
                         request_id = inner.context.id(),
                         "OpenAI NvCreateChatCompletionStreamResponse: {:?}",
@@ -561,10 +592,34 @@ impl OpenAIPreprocessor {
 
                     Some((response, inner))
                 } else {
-                    // stream closed with out graceful closure
-                    // we did not detect an is_finished/completed message
-                    inner.finished = true; // Mark as finished
-                    None
+                    // Stream has ended - check if we need to send a usage chunk
+                    if inner.response_generator.is_usage_enabled()
+                        && inner.finish_reason_sent
+                        && !inner.usage_chunk_sent
+                        && !inner.finished
+                    {
+                        inner.usage_chunk_sent = true;
+
+                        // Create the final usage chunk
+                        let usage_chunk = inner.response_generator.create_usage_chunk();
+                        let annotated_usage = Annotated::<Resp> {
+                            id: None,
+                            data: Some(usage_chunk),
+                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
+                            comment: None,
+                        };
+
+                        tracing::trace!(
+                            request_id = inner.context.id(),
+                            "Sending final usage chunk for OpenAI compliance"
+                        );
+
+                        Some((annotated_usage, inner))
+                    } else {
+                        // stream closed
+                        inner.finished = true; // Mark as finished
+                        None
+                    }
                 }
             }
         });
@@ -613,17 +668,17 @@ impl OpenAIPreprocessor {
     }
 
     /// Apply tool calling jail to the stream using the preprocessor's tool call parser
-    pub fn apply_tool_calling_jail_with_parser(
+    pub async fn apply_tool_calling_jail_with_parser(
         &self,
         stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
-        apply_tool_calling_jail_internal(stream, self.tool_call_parser.clone())
+        apply_tool_calling_jail_internal(stream, self.tool_call_parser.clone()).await
     }
 }
 
 /// Apply tool calling jail to the stream - stops/jails the stream under certain conditions
 /// When jailed, the stream will be unjailed when the input stream ends
-pub fn apply_tool_calling_jail_internal(
+pub async fn apply_tool_calling_jail_internal(
     stream: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     tool_call_parser: Option<String>,
 ) -> ManyOut<Annotated<NvCreateChatCompletionStreamResponse>> {
@@ -637,6 +692,7 @@ pub fn apply_tool_calling_jail_internal(
         last_response_metadata: None,
         finished: false,
     };
+
     // Transform the stream using unfold to maintain state
     // Input: ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>
     // Returns None if the stream is finished
@@ -774,7 +830,9 @@ pub fn apply_tool_calling_jail_internal(
                         if let Ok((tool_calls, normal_text)) = try_tool_call_parse_aggregate(
                             accumulated_text,
                             state.tool_call_parser.as_deref(),
-                        ) {
+                        )
+                        .await
+                        {
                             // Found tool calls, create a final response with them
                             tracing::debug!(
                                 "Parsed {} tool calls from accumulated content",
@@ -890,6 +948,8 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
         let mut response_generator = Box::new(response_generator);
 
+        let enable_tool_calling =
+            maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
         // convert the chat completion request to a common completion request
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
@@ -912,7 +972,13 @@ impl
         // transform the postprocessor stream
         let stream = Self::transform_postprocessor_stream(response_stream, response_generator);
 
-        let stream = self.apply_tool_calling_jail_with_parser(stream);
+        // Apply tool calling jail to the stream if tool call parser is present
+        let stream = if enable_tool_calling {
+            self.apply_tool_calling_jail_with_parser(stream).await
+        } else {
+            stream
+        };
+
         let context = stream.context();
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
