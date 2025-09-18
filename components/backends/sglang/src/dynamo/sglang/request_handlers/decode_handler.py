@@ -54,6 +54,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return sampling_params
 
     async def generate(self, request: str):
+        print(request)
         sampling_params = self._build_sampling_params(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
