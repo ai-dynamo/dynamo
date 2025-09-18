@@ -409,7 +409,6 @@ get_options() {
         TARGET_STR="--target dev"
     fi
 
-
     # Validate sccache configuration
     if [ "$USE_SCCACHE" = true ]; then
         if [ -z "$SCCACHE_BUCKET" ]; then
