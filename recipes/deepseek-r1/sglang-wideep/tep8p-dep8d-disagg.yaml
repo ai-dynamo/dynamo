@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sgl-dsr1-8gpu
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: sgl-dsr1-8gpu
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
+    decode:
+      dynamoNamespace: sgl-dsr1-8gpu
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
+          workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              exec python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-R1
+              --served-model-name deepseek-ai/DeepSeek-R1
+              --tp 8
+              --dp 8
+              --enable-dp-attention
+              --ep-size 8
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+    prefill:
+      dynamoNamespace: sgl-dsr1-8gpu
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      pvc:
+        create: false
+        name: model-cache
+        mountPoint: /root/.cache/huggingface
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
+          workingDir: /workspace/components/backends/sglang
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              exec python3 -m dynamo.sglang
+              --model-path deepseek-ai/DeepSeek-R1
+              --served-model-name deepseek-ai/DeepSeek-R1
+              --tp 8
+              --ep-size 8
+              --trust-remote-code
+              --skip-tokenizer-init
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001

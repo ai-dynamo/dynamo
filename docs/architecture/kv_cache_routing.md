@@ -203,6 +203,10 @@ The two types of events are:
 
 The publisher can be initialized and used through C bindings or Python bindings.
 
+### Deterministic Event IDs
+
+For KV-aware routing to work across multiple workers and restarts, engines must emit deterministic block identifiers in KV events. Ensure all workers use identical engine versions/configuration so that block IDs for the same token content remain consistent. If your engine relies on Python's builtin `hash()` for any event IDs, set `PYTHONHASHSEED=0`; otherwise this setting has no effect. The router recomputes local block hashes from tokens for matching, but parent/child links and removals depend on engine-provided IDs being stable.
+
 ### KVIndexer
 The KVIndexer builds and maintains a global view of cached blocks in a prefix tree. We modify the original prefix tree by also storing the worker id on each node. This is so we can return the number of matched blocks for each worker.
 

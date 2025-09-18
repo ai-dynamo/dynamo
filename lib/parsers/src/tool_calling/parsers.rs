@@ -1219,6 +1219,197 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     #[tokio::test]
+    async fn test_phi4_token_leak_reproduction() {
+        // Reproduce the issue where "functools" appears in content field
+        // This might happen when there's malformed JSON or parsing issues
+        let input = r#"functools{"name": "get_weather","arguments":{"location":"San Francisco"}}"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
+        // Content should be empty, not contain "functools"
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco");
+    }
+
+    #[tokio::test]
+    async fn test_phi4_token_leak_edge_case() {
+        // Test the case where only the token appears without JSON
+        // This case is less critical but shouldn't leak the full token
+        let input = r#"functools"#;
+        let (result, _content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
+        // Content may contain the token if no valid JSON follows, but shouldn't crash
+        // The important thing is that no tool calls are returned
+        assert_eq!(result.len(), 0); // No tool calls found
+        // Content behavior is less critical for this edge case
+    }
+
+    #[tokio::test]
+    async fn test_phi4_token_with_invalid_json() {
+        // Test the case where token is followed by invalid JSON
+        let input = r#"functools{invalid json}"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
+        // Content should be empty, not contain "functools" or leak the token
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 0); // No tool calls found due to invalid JSON
+    }
+
+    #[tokio::test]
+    async fn test_phi4_streaming_partial_tokens() {
+        // Test that our fix handles the actual streaming scenario described by the user
+        // Where "fun", "ct", "ools" arrive as separate chunks
+
+        // Test that "fun" is detected as a potential tool call start (for streaming jailing)
+        let config = super::get_tool_parser_map().get("phi4").unwrap();
+
+        // Test detection of partial tokens
+        use super::super::json::detect_tool_call_start_json;
+        assert!(
+            detect_tool_call_start_json("fun", &config.json),
+            "'fun' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_json("f", &config.json),
+            "'f' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_json("func", &config.json),
+            "'func' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_json("functo", &config.json),
+            "'functo' should be detected as potential start"
+        );
+
+        // Test that unrelated text is not detected
+        assert!(
+            !detect_tool_call_start_json("hello", &config.json),
+            "'hello' should not be detected"
+        );
+        assert!(
+            !detect_tool_call_start_json("xyz", &config.json),
+            "'xyz' should not be detected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phi4_false_positive_words() {
+        // Test that words like "funk" or text starting with "func" but not "functools"
+        // are correctly treated as normal content, not tool calls
+
+        let input = r#"funk music is great"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
+        // Should be treated as normal content, not tool call
+        assert_eq!(
+            result.len(),
+            0,
+            "No tool calls should be found in 'funk music is great'"
+        );
+        assert_eq!(
+            content,
+            Some("funk music is great".to_string()),
+            "Content should contain the original text"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phi4_partial_but_complete_words() {
+        // Test words that start with "func" but are not "functools"
+
+        let input = r#"The function works well"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.len(),
+            0,
+            "No tool calls should be found in 'The function works well'"
+        );
+        assert_eq!(content, Some("The function works well".to_string()));
+
+        let input = r#"functional programming"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.len(),
+            0,
+            "No tool calls should be found in 'functional programming'"
+        );
+        assert_eq!(content, Some("functional programming".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_phi4_funk_variations() {
+        // Test various "funk" related words to ensure they're not treated as tool calls
+
+        let test_cases = vec![
+            "funk",
+            "funky",
+            "funktion", // German word for function
+            "funked",
+            "I love funk music",
+            "This is funky stuff",
+        ];
+
+        for test_input in test_cases {
+            let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4"))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.len(),
+                0,
+                "No tool calls should be found in '{}'",
+                test_input
+            );
+            assert_eq!(
+                content,
+                Some(test_input.to_string()),
+                "Content should match input for '{}'",
+                test_input
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_phi4_func_but_not_functools() {
+        // Test words starting with "func" that are complete words, not partial "functools"
+
+        let test_cases = vec![
+            "func()",  // Programming syntax
+            "funcdef", // Python keyword variant
+            "functions are useful",
+            "functionally speaking",
+        ];
+
+        for test_input in test_cases {
+            let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4"))
+                .await
+                .unwrap();
+            assert_eq!(
+                result.len(),
+                0,
+                "No tool calls should be found in '{}'",
+                test_input
+            );
+            assert_eq!(
+                content,
+                Some(test_input.to_string()),
+                "Content should match input for '{}'",
+                test_input
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_pythonic_parser_basic_with_constants() {
         let input = r#"[get_weather(location="San Francisco", unit="fahrenheit"), get_weather(location="New York", unit="fahrenheit")]"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("pythonic"))
