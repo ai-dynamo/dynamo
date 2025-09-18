@@ -352,7 +352,7 @@ get_options() {
 
     if [ -z "$TAG" ]; then
         TAG="--tag dynamo:${VERSION}-${FRAMEWORK,,}"
-        if [ -n "${TARGET}" ]; then
+        if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
             TAG="${TAG}-${TARGET}"
         fi
     fi
@@ -366,6 +366,7 @@ get_options() {
     else
         TARGET_STR="--target dev"
     fi
+
 
     # Validate sccache configuration
     if [ "$USE_SCCACHE" = true ]; then
@@ -468,20 +469,10 @@ fi
 # Add NIXL_REF as a build argument
 BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
+# Handle local-dev target
 if [[ $TARGET == "local-dev" ]]; then
-    cat << EOF
-NOTE: The 'local-dev' target has been moved to a separate build process.
-Please use the build_local_dev.sh script instead:
-
-  # First build a dev image (this creates dynamo:latest-${FRAMEWORK,,}):
-  ./build.sh --framework $FRAMEWORK --target dev
-
-  # Then convert it to local-dev (this creates dynamo:latest-${FRAMEWORK,,}-local-dev)
-  ./build_local_dev.sh --dev-image dynamo:latest-${FRAMEWORK,,}
-
-For more information, see: ./build_local_dev.sh --help
-EOF
-    exit 1
+    LOCAL_DEV_BUILD=true
+    TARGET_STR="--target dev"
 fi
 
 # BUILD DEV IMAGE
@@ -619,7 +610,7 @@ if [ "$USE_SCCACHE" = true ]; then
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"
-if [ -n "${TARGET}" ]; then
+if [ -n "${TARGET}" ] && [ "${TARGET}" != "local-dev" ]; then
     LATEST_TAG="${LATEST_TAG}-${TARGET}"
 fi
 
@@ -628,6 +619,7 @@ show_image_options
 if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
+
 
 # TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
@@ -648,5 +640,36 @@ else
     $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 fi
 
+if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
+    # Convert dev image to local-dev
+    echo "======================================"
+    echo "Starting Build 3: Local-Dev Image"
+    echo "======================================"
+    # Use the first tag name (TAG) if available, otherwise use latest
+    if [[ -n "$TAG" ]]; then
+        DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
+    else
+        DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
+    fi
+
+    # Build command for build_local_dev.sh
+    LOCAL_DEV_CMD=("${SOURCE_DIR}/build_local_dev.sh" --dev-image "$DEV_IMAGE")
+
+    # Use existing tags and convert them to local-dev tags
+    if [[ -n "$TAG" ]]; then
+        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
+        TAG_NAME=$(echo "$TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
+        LOCAL_DEV_CMD+=(--tag "${TAG_NAME}-local-dev")
+    fi
+
+    if [[ -n "$LATEST_TAG" ]]; then
+        # Extract tag name, remove any existing -local-dev suffix, then add -local-dev
+        LATEST_TAG_NAME=$(echo "$LATEST_TAG" | sed 's/--tag //' | sed 's/-local-dev$//')
+        LOCAL_DEV_CMD+=(--tag "${LATEST_TAG_NAME}-local-dev")
+    fi
+
+    # Execute the build_local_dev.sh command
+    $RUN_PREFIX "${LOCAL_DEV_CMD[@]}"
+fi
 
 { set +x; } 2>/dev/null

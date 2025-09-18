@@ -91,16 +91,21 @@ Follow these steps to get your NVIDIA Dynamo development environment up and runn
 
 ### Step 1: Build the Development Container Image
 
-Build `dynamo:latest-vllm` from scratch from the source:
+Build `dynamo:latest-vllm-local-dev` from scratch from the source:
 
 ```bash
+# Single command approach (recommended)
+./container/build.sh --framework VLLM --target local-dev
+# Creates both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
+
+# Alternatively, you can build a development container then local-dev
 ./container/build.sh --framework VLLM
-# Now you have a dev image dynamo:latest-vllm
-./container/build_local_dev --image dynamo:latest-vllm
+# Now you have a development image dynamo:latest-vllm
+./container/build_local_dev.sh --dev-image dynamo:latest-vllm
 # Now you have a local-dev image dynamo:latest-vllm-local-dev
 ```
 
-The container will be built and give certain file permissions to your local uid and gid.
+The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
 
 ### Step 2: Install Dev Containers Extension
 

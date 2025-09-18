@@ -22,11 +22,8 @@ ARG WORKSPACE_DIR=/workspace
 
 ARG ARCH
 
-# Update package lists once at the beginning
-RUN apt-get update
-
-# Install additional developer utilities
-RUN apt-get install -y \
+# Update package lists and install additional developer utilities
+RUN apt-get update && apt-get install -y \
     # Development utilities
     curl wget git vim nano \
     # System utilities

@@ -13,8 +13,9 @@ DOCKERFILE_LOCAL_DEV="${SCRIPT_DIR}/Dockerfile.local_dev"
 ARCH="amd64"
 USER_UID=$(id -u)
 USER_GID=$(id -g)
-DRY_RUN=false
-CUSTOM_TAG=""
+RUN_PREFIX=
+SQUASH=false
+CUSTOM_TAGS=()
 
 usage() {
     cat << EOF
@@ -30,6 +31,7 @@ OPTIONS:
     -u, --uid UID           User UID (default: current user UID)
     -g, --gid GID           User GID (default: current user GID)
     -d, --dry-run           Show what would be done without building
+    --squash                Squash the layers in the resulting image
     -h, --help              Show this help message
 
 EXAMPLES:
@@ -54,24 +56,9 @@ EXAMPLES:
 EOF
 }
 
-log_info() {
-    echo "[INFO] $1"
-}
-
-log_success() {
-    echo "[SUCCESS] $1"
-}
-
-log_warning() {
-    echo "[WARNING] $1"
-}
-
-log_error() {
-    echo "[ERROR] $1"
-}
 
 list_dev_images() {
-    log_info "Searching for dynamo dev/latest images..."
+    echo "Searching for dynamo dev/latest images..."
 
     # Look for dynamo images with dev patterns or latest patterns
     local dev_images
@@ -82,7 +69,7 @@ list_dev_images() {
         head -20)
 
     if [[ -z "$dev_images" ]]; then
-        log_warning "No dynamo dev/latest images found. Looking for any dynamo images..."
+        echo "No dynamo dev/latest images found. Looking for any dynamo images..."
         dev_images=$(docker images --format "{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedSince}}|{{.Size}}" | \
             grep "dynamo:" | \
             grep -v "local-dev" | \
@@ -101,19 +88,25 @@ list_dev_images() {
         done <<< "$dev_images"
 
         echo
-        log_info "Use --dev-image <IMAGE:TAG> to convert one of these images"
+        echo "Use --dev-image <IMAGE:TAG> to convert one of these images"
     else
-        log_warning "No dynamo images found"
-        log_info "Make sure you have built dynamo images first"
+        echo "No dynamo images found"
+        echo "Make sure you have built dynamo images first"
     fi
 }
 
 validate_image() {
     local image="$1"
 
+    if [[ "$image" == *"-local-dev" ]]; then
+        echo "ERROR: Cannot use local-dev image as dev image input: '$image'"
+        echo "Please use a dev image (without -local-dev suffix) instead"
+        return 1
+    fi
+
     if ! docker image inspect "$image" &>/dev/null; then
-        log_error "Image '$image' not found locally"
-        log_info "Available images:"
+        echo "ERROR: Image '$image' not found locally"
+        echo "Available images:"
         docker images --format "table {{.Repository}}:{{.Tag}}"
         return 1
     fi
@@ -124,88 +117,18 @@ validate_image() {
 validate_uid_gid() {
     # Check for valid UID/GID values (should be positive integers)
     if ! [[ "$USER_UID" =~ ^[0-9]+$ ]] || [ "$USER_UID" -le 0 ]; then
-        log_error "Invalid USER_UID: $USER_UID (should be a positive integer)"
+        echo "ERROR: Invalid USER_UID: $USER_UID (should be a positive integer)"
         return 1
     fi
 
     if ! [[ "$USER_GID" =~ ^[0-9]+$ ]] || [ "$USER_GID" -le 0 ]; then
-        log_error "Invalid USER_GID: $USER_GID (should be a positive integer)"
+        echo "ERROR: Invalid USER_GID: $USER_GID (should be a positive integer)"
         return 1
     fi
 
     return 0
 }
 
-convert_image() {
-    local base_image="$1"
-
-    # Use custom tag if provided, otherwise use default naming
-    if [[ -n "$CUSTOM_TAG" ]]; then
-        local output_image="$CUSTOM_TAG"
-    else
-        # Extract tag from base image and create dynamo:tag-local-dev
-        if [[ "$base_image" == *:* ]]; then
-            local tag="${base_image#*:}"
-            local output_image="dynamo:${tag}-local-dev"
-        else
-            local output_image="dynamo:${base_image}-local-dev"
-        fi
-    fi
-
-    log_info "Converting '$base_image' to '$output_image'"
-    log_info "Using UID: $USER_UID, GID: $USER_GID, ARCH: $ARCH"
-
-    if [[ ! -f "$DOCKERFILE_LOCAL_DEV" ]]; then
-        log_error "Dockerfile.local_dev not found at: $DOCKERFILE_LOCAL_DEV"
-        return 1
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo
-        log_info "DRY RUN - Would execute the following command:"
-        echo "docker build \\"
-        echo "    --build-arg LOCAL_DEV_BASE=\"$base_image\" \\"
-        echo "    --build-arg USER_UID=\"$USER_UID\" \\"
-        echo "    --build-arg USER_GID=\"$USER_GID\" \\"
-        echo "    --build-arg ARCH=\"$ARCH\" \\"
-        echo "    --file \"$DOCKERFILE_LOCAL_DEV\" \\"
-        echo "    --tag \"$output_image\" \\"
-        echo "    \"$SCRIPT_DIR\""
-        echo
-        log_info "No actual build performed (dry run mode)"
-        return 0
-    fi
-
-    # Build the local_dev image
-    log_info "Building local_dev image..."
-
-    # Show the docker command being executed
-    set -x
-    docker build \
-        --build-arg LOCAL_DEV_BASE="$base_image" \
-        --build-arg USER_UID="$USER_UID" \
-        --build-arg USER_GID="$USER_GID" \
-        --build-arg ARCH="$ARCH" \
-        --file "$DOCKERFILE_LOCAL_DEV" \
-        --tag "$output_image" \
-        "$SCRIPT_DIR" || {
-        set +x > /dev/null 2>&1
-        log_error "Failed to build local_dev image"
-        return 1
-    }
-    set +x > /dev/null 2>&1
-
-    log_info "Successfully added local-dev image: '$output_image'"
-
-    # Show the new image info
-    docker images "$output_image" --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}\t{{.Size}}"
-
-    echo
-    log_info "Usage options:"
-    log_info "  - Dev Container IDE Extension: Use directly with VS Code/Cursor Dev Container extension"
-    log_info "  - Command line: run.sh --image $output_image --mount-workspace ..."
-    log_info "    where the ubuntu user inside the container is mapped to $(whoami) (UID:$USER_UID, GID:$USER_GID)"
-}
 
 # Parse command line arguments
 PARSE_ARGS=true
@@ -223,7 +146,7 @@ while [[ $# -gt 0 ]] && [[ "$PARSE_ARGS" == "true" ]]; do
             shift 2
             ;;
         -t|--tag)
-            CUSTOM_TAG="$2"
+            CUSTOM_TAGS+=("$2")
             shift 2
             ;;
         -a|--arch)
@@ -239,7 +162,11 @@ while [[ $# -gt 0 ]] && [[ "$PARSE_ARGS" == "true" ]]; do
             shift 2
             ;;
         -d|--dry-run|--dryrun)
-            DRY_RUN=true
+            RUN_PREFIX="echo"
+            shift
+            ;;
+        --squash)
+            SQUASH=true
             shift
             ;;
         -h|--help)
@@ -265,14 +192,65 @@ if [[ "$LIST_IMAGES" == "true" ]]; then
 fi
 
 if [[ -z "$BASE_IMAGE" ]]; then
-    log_error "No dev image specified"
+    echo "ERROR: No dev image specified"
     echo
     usage
     exit 1
 fi
 
-# Validate and convert
+# Validate inputs
 validate_image "$BASE_IMAGE" || exit 1
 validate_uid_gid || exit 1
-convert_image "$BASE_IMAGE" || exit 1
+
+# Build tag arguments
+if [[ ${#CUSTOM_TAGS[@]} -eq 0 ]]; then
+    # No custom tags provided, use default naming
+    if [[ "$BASE_IMAGE" == *:* ]]; then
+        tag="${BASE_IMAGE#*:}"
+        CUSTOM_TAGS=("dynamo:${tag}-local-dev")
+    else
+        CUSTOM_TAGS=("dynamo:${BASE_IMAGE}-local-dev")
+    fi
+fi
+
+TAG_ARGS=""
+for tag in "${CUSTOM_TAGS[@]}"; do
+    TAG_ARGS+=" --tag $tag"
+done
+
+# Add squash flag if requested
+SQUASH_ARG=""
+if [[ "$SQUASH" == "true" ]]; then
+    SQUASH_ARG=" --squash"
+fi
+
+echo "Using UID: $USER_UID, GID: $USER_GID, ARCH: $ARCH"
+
+if [[ ! -f "$DOCKERFILE_LOCAL_DEV" ]]; then
+    echo "ERROR: Dockerfile.local_dev not found at: $DOCKERFILE_LOCAL_DEV"
+    exit 1
+fi
+
+# Show the docker command being executed if not in dry-run mode
+if [ -z "$RUN_PREFIX" ]; then
+    set -x
+fi
+
+$RUN_PREFIX docker build \
+    --build-arg LOCAL_DEV_BASE="$BASE_IMAGE" \
+    --build-arg USER_UID="$USER_UID" \
+    --build-arg USER_GID="$USER_GID" \
+    --build-arg ARCH="$ARCH" \
+    --file "$DOCKERFILE_LOCAL_DEV" \
+    $TAG_ARGS$SQUASH_ARG \
+    "$SCRIPT_DIR" || {
+    { set +x; } 2>/dev/null
+    echo "ERROR: Failed to build local_dev image"
+    exit 1
+}
+{ set +x; } 2>/dev/null
+
+# Show usage example with run.sh
+echo "# To run.sh with --mount-workspace (remember, local-dev images will give you proper local user permissions):"
+echo "# ./run.sh --image ${CUSTOM_TAGS[0]} --mount-workspace <... additional options ...>"
 
