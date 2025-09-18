@@ -10,28 +10,6 @@ use dynamo_llm::protocols::openai::{
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
-#[tokio::test]
-#[ignore] // Requires full distributed setup
-async fn test_worker_selection_pipeline() {
-    // This test would require:
-    // - A real ModelDeploymentCard
-    // - A Component client connected to workers
-    // - A KvRouter with actual worker state
-
-    // Example test structure:
-    // let engine = build_worker_selection_pipeline(...).await.unwrap();
-    //
-    // // Create a request with query_instance_id annotation
-    // let request = create_test_request_with_annotation("query_instance_id");
-    // let response_stream = engine.generate(request).await.unwrap();
-    //
-    // // Use the helper function to extract worker selection information
-    // let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await.unwrap();
-    //
-    // assert!(worker_id > 0);
-    // assert!(!tokens.is_empty());
-}
-
 #[test]
 fn test_add_query_instance_id() {
     // Test adding annotation to request without nvext

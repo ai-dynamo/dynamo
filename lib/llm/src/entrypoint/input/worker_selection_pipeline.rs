@@ -36,9 +36,12 @@ use std::{pin::Pin, sync::Arc};
 
 use serde_json;
 
+// Constants
+const GENERATE_ENDPOINT: &str = "generate";
+
 use crate::{
     backend::Backend,
-    kv_router::{KvPushRouter, KvRouter},
+    kv_router::{KvPushRouter, KvRouter, KvRouterConfig},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
@@ -320,27 +323,37 @@ pub async fn query_worker_selection_and_annotate(
 ///
 /// This function creates all the necessary parameters for `build_worker_selection_pipeline`
 /// when you have namespace, component, and model information as strings.
+/// Uses the "generate" endpoint by default.
 ///
 /// # Parameters
 /// - `namespace`: namespace name
 /// - `component_name`: component name
-/// - `endpoint_name`: Name of the endpoint to connect to (e.g., "inference")
 /// - `model_name`: Name/slug of the model to load
 /// - `router_mode`: How to route requests (KV, RoundRobin, etc.)
 /// - `busy_threshold`: Optional threshold for busy worker detection
+/// - `kv_router_config`: Optional KV router configuration (only used when router_mode is KV)
 ///
 /// # Returns
 /// A configured worker selection pipeline ready to use
 ///
 /// # Example Usage:
 /// ```rust,ignore
+/// let kv_config = KvRouterConfig::new(
+///     Some(1.5),        // overlap_score_weight
+///     Some(0.2),        // temperature
+///     None,             // use_kv_events (default)
+///     None,             // replica_sync (default)
+///     None,             // max_num_batched_tokens (default)
+///     None,             // router_snapshot_threshold (default)
+///     None,             // router_reset_states (default)
+/// );
 /// let pipeline = create_worker_selection_pipeline(
 ///     "my-namespace",
 ///     "backend",
-///     "inference",
 ///     "llama3-8b-instruct",
 ///     RouterMode::KV,
-///     Some(0.8)
+///     Some(0.8),
+///     Some(kv_config),
 /// ).await?;
 ///
 /// // Use pipeline to get worker selection
@@ -351,10 +364,10 @@ pub async fn query_worker_selection_and_annotate(
 pub async fn create_worker_selection_pipeline<Req>(
     namespace: &str,
     component_name: &str,
-    endpoint_name: &str,
     model_name: &str,
     router_mode: RouterMode,
     busy_threshold: Option<f64>,
+    kv_router_config: Option<KvRouterConfig>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
     Req: dynamo_runtime::engine::Data,
@@ -380,7 +393,7 @@ where
     // Create Component and Client
     let ns = distributed_runtime.namespace(namespace)?;
     let component = ns.component(component_name)?;
-    let endpoint = component.endpoint(endpoint_name);
+    let endpoint = component.endpoint(GENERATE_ENDPOINT);
     let client = endpoint.client().await?;
 
     // Load ModelDeploymentCard
@@ -407,7 +420,7 @@ where
                     &card.display_name,
                     &component,
                     card.kv_cache_block_size,
-                    None, // Use default KV router config
+                    kv_router_config,
                 )
                 .await?,
         )

@@ -344,18 +344,28 @@ pub struct WorkerSelectionPipeline {
 ///
 /// Returns a pipeline handle that can be used repeatedly for queries.
 /// Call dynamo_destroy_worker_selection_pipeline when done.
+/// Uses the "generate" endpoint by default.
 ///
 /// # Safety
-/// The namespace_c_str, component_c_str, endpoint_name_c_str, and model_name_c_str
+/// The namespace_c_str, component_c_str, and model_name_c_str
 /// are passed as pointers to C strings
+///
+/// # KV Router Configuration Parameters
+/// - overlap_score_weight: Weight for KV cache overlap in worker selection (use negative value for default)
+/// - router_temperature: Randomness in worker selection, 0.0 = deterministic (use negative value for default)
+/// - use_kv_events: Whether to use KV cache events for tracking
+/// - router_replica_sync: Whether to synchronize router state across replicas
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
-    endpoint_name_c_str: *const c_char,
     model_name_c_str: *const c_char,
     use_kv_routing: bool,
-    busy_threshold: f64, // Use negative value to indicate None
+    busy_threshold: f64,       // Use negative value to indicate None
+    overlap_score_weight: f64, // Use negative value for default
+    router_temperature: f64,   // Use negative value for default
+    use_kv_events: bool,
+    router_replica_sync: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
     let wk = match WK.get() {
@@ -387,14 +397,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             }
         };
 
-        let endpoint_name = match unsafe { CStr::from_ptr(endpoint_name_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to convert endpoint_name C string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
-
         let model_name = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
             Ok(s) => s,
             Err(e) => {
@@ -416,14 +418,39 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             Some(busy_threshold)
         };
 
+        // Create KV router config if using KV routing
+        let kv_router_config = if use_kv_routing {
+            use dynamo_llm::kv_router::KvRouterConfig;
+
+            Some(KvRouterConfig::new(
+                if overlap_score_weight < 0.0 {
+                    None
+                } else {
+                    Some(overlap_score_weight)
+                },
+                if router_temperature < 0.0 {
+                    None
+                } else {
+                    Some(router_temperature)
+                },
+                Some(use_kv_events),
+                Some(router_replica_sync),
+                None, // max_num_batched_tokens - use default
+                None, // router_snapshot_threshold - use default
+                None, // router_reset_states - use default
+            ))
+        } else {
+            None
+        };
+
         // Create the worker selection pipeline
         let pipeline = match create_worker_selection_pipeline::<NvCreateChatCompletionRequest>(
             namespace,
             component_name,
-            endpoint_name,
             model_name,
             router_mode,
             busy_threshold_opt,
+            kv_router_config,
         )
         .await
         {
@@ -441,63 +468,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 
         unsafe {
             *pipeline_out = pipeline_ptr;
-        }
-
-        DynamoLlmResult::OK
-    });
-
-    result
-}
-
-/// Run a query on an existing worker selection pipeline
-///
-/// # Safety
-/// The pipeline pointer must be valid and prompt_c_str must be a valid C string
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_worker_selection_pipeline_query(
-    pipeline: *mut WorkerSelectionPipeline,
-    prompt_c_str: *const c_char,
-    worker_instance_id_out: *mut i64,
-    token_ids_out: *mut *mut u32,
-    token_count_out: *mut usize,
-) -> DynamoLlmResult {
-    if pipeline.is_null() {
-        eprintln!("Pipeline pointer is null");
-        return DynamoLlmResult::ERR;
-    }
-
-    let wk = match WK.get() {
-        Some(wk) => wk,
-        None => {
-            eprintln!("Runtime not initialized - call dynamo_llm_init first");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let rt = wk.runtime();
-    let secondary = rt.secondary().clone();
-
-    let result = secondary.block_on(async {
-        // Convert C string to Rust string
-        let prompt = match unsafe { CStr::from_ptr(prompt_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to convert prompt C string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        // TODO: Actually use the pipeline to run the query
-        // For now, return placeholder values
-        eprintln!(
-            "Query '{}' on pipeline - TODO: implement actual query",
-            prompt
-        );
-
-        unsafe {
-            *worker_instance_id_out = 1;
-            *token_ids_out = std::ptr::null_mut();
-            *token_count_out = 0;
         }
 
         DynamoLlmResult::OK
