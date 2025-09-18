@@ -39,7 +39,7 @@ class DynamoPortRange:
 
 @dataclass
 class PortMetadata:
-    """Metadata to store with port reservations in ETCD"""
+    """Metadata to store with port reservations"""
 
     worker_id: str  # Worker identifier (e.g., "vllm-backend-dp0")
     reason: str  # Purpose of the port (e.g., "nixl_side_channel_port")
@@ -52,6 +52,16 @@ class PortAllocationRequest:
     metadata: PortMetadata
     port_range: DynamoPortRange
     block_size: int = 1
+
+    def __post_init__(self):
+        if self.block_size < 1:
+            raise ValueError("block_size must be >= 1")
+        range_len = self.port_range.max - self.port_range.min + 1
+        if self.block_size > range_len:
+            raise ValueError(
+                f"block_size {self.block_size} exceeds range length {range_len} "
+                f"({self.port_range.min}-{self.port_range.max})"
+            )
 
 
 def check_port_available(port: int) -> bool:
@@ -119,6 +129,8 @@ async def allocate_and_reserve_port(
         block_size=1,
     )
     allocated_ports = await allocate_and_reserve_port_block(runtime, namespace, request)
+    if not allocated_ports:
+        raise RuntimeError("allocate_port_block returned no ports")
     return allocated_ports[0]  # Return the single allocated port
 
 
