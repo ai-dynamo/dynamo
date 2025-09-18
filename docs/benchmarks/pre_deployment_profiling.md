@@ -285,7 +285,7 @@ The profiling script can be run much quicker by using `aiconfigurator` to estima
 * `aiconfigurator`'s database has a limited list of systems and backends.
 
 ### Prerequisites
-You will need a virtual environment with `dynamo` installed. As before, also install the required dependencies:
+You will need a virtual environment with `dynamo` installed. Either use the local dev environment or the docker images. If using local environment, install the required dependencies:
 ```bash
 pip install -r deploy/utils/requirements.txt
 ```
