@@ -166,6 +166,7 @@ python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
 mkdir -p ${log_path}/results
 echo "Starting benchmark..."
 for concurrency in ${concurrency_list}; do
+    original_concurrency=${concurrency}
     concurrency=$((concurrency * num_gen_servers))
     num_prompts=$((concurrency * multi_round))
     echo "Benchmarking with concurrency ${concurrency} ... ${num_prompts} prompts"
@@ -190,7 +191,7 @@ for concurrency in ${concurrency_list}; do
         --port ${port} \
         --save-result \
         --result-dir "${log_path}/results" \
-        --result-filename "results_concurrency_${concurrency}.json"
+        --result-filename "results_concurrency_${original_concurrency}.json"
 
     echo "Benchmark with concurrency ${concurrency} done"
     do_get_logs ${log_path}/output_workers.log ${log_path}/concurrency_${concurrency}
