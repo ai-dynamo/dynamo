@@ -95,6 +95,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _process_stream(self, stream_source):
         num_output_tokens_so_far = 0
+        output_type = (
+            "output_ids" if self.config.server_args.skip_tokenizer_init else "text"
+        )
 
         async for res in stream_source:
             finish_reason = res["meta_info"]["finish_reason"]
@@ -103,7 +106,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out = {"token_ids": [], "finish_reason": finish_reason["type"]}
             else:
                 try:
-                    next_total_toks = len(res["output_ids"])
+                    next_total_toks = len(res[output_type])
                 except KeyError:
                     raise ValueError(
                         f"Missing 'output_ids' in response. This often happens when using skip_tokenizer_init=True. "
