@@ -16,6 +16,7 @@
 import asyncio
 import random
 import string
+import threading
 
 import pytest
 
@@ -134,15 +135,6 @@ def random_string(length=10):
 
 
 @pytest.fixture
-async def runtime():
-    """Create a DistributedRuntime for testing"""
-    loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
-    yield runtime
-    runtime.shutdown()
-
-
-@pytest.fixture
 def namespace():
     """Generate a random namespace for test isolation"""
     return random_string()
@@ -151,10 +143,12 @@ def namespace():
 @pytest.fixture
 async def server(runtime, namespace):
     """Start a test server in the background"""
+    # TODO(michaelfeil): spawn using threading.Thread(target=asyncio.run, args=(server(),shutdown_signal: threading.Event()))
 
     handler = MockServer()
+    stop_event = threading.Event()
 
-    async def init_server():
+    async def init_server(runtime, namespace, stop_event):
         """Initialize the test server component and serve the generate endpoint"""
         component = runtime.namespace(namespace).component("backend")
         await component.create_service()
@@ -163,23 +157,43 @@ async def server(runtime, namespace):
         print("Started test server instance")
 
         # Serve the endpoint - this will block until shutdown
-        await endpoint.serve_endpoint(handler.generate)
+        serve_task = asyncio.create_task(endpoint.serve_endpoint(handler.generate))
+        event_done_task = asyncio.create_task(asyncio.to_thread(stop_event.wait))
 
-    # Start server in background task
-    server_task = asyncio.create_task(init_server())
+        done, pending = await asyncio.wait(
+            {serve_task, event_done_task},
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=30.0,
+        )
+        if serve_task in done:
+            print("Server task completed")
+            await serve_task  # Propagate exceptions if any
+        else:
+            serve_task.cancel()
+
+    # # Start server in background task
+    # server_task = asyncio.create_task(init_server())
+    thread = threading.Thread(
+        target=asyncio.run, args=(init_server(runtime, namespace, stop_event),)
+    )
+    thread.start()
 
     # Give server time to start up
     await asyncio.sleep(0.5)
 
-    yield server_task, handler
+    yield thread, handler
+    stop_event.set()
+    await asyncio.to_thread(thread.join, 5)
 
-    # Cleanup - cancel server task
-    if not server_task.done():
-        server_task.cancel()
-        try:
-            await server_task
-        except asyncio.CancelledError:
-            pass
+
+@pytest.fixture(scope="session")
+async def runtime():
+    """Create a DistributedRuntime for testing"""
+    # TODO(michaelfeil): consider re-using runtime across tests to not have to launch tests via subprocess.
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, True)
+    yield runtime
+    runtime.shutdown()
 
 
 @pytest.fixture

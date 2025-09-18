@@ -17,6 +17,8 @@ import asyncio
 
 import pytest
 
+pytestmark = pytest.mark.pre_merge
+
 
 @pytest.mark.asyncio
 async def test_client_loop_break(server, client):

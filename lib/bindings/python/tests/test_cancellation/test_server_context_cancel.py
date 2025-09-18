@@ -16,6 +16,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.pre_merge
+
 
 @pytest.mark.asyncio
 async def test_server_context_cancel(server, client):

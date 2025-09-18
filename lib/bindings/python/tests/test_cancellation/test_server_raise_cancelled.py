@@ -16,6 +16,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.pre_merge
+
 
 @pytest.mark.asyncio
 async def test_server_raise_cancelled(server, client):
