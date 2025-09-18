@@ -45,7 +45,7 @@
                 ]
             },
             {
-                "name": "Dynamo Backend",
+                "name": "Dynamo vLLM Backend",
                 "type": "lldb",
                 "request": "launch",
                 "program": "${workspaceFolder}/.venv/bin/python",
