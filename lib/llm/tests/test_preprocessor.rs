@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
+use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+use dynamo_async_openai::types::CreateChatCompletionRequest;
 use dynamo_async_openai::types::{
     ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason as OAIFinishReason, Role,
 };
 use dynamo_llm::preprocessor::{
     ANNOTATION_POSSIBLE_TOOL_CALL, PossibleToolCallAnnotation, apply_tool_calling_jail_internal,
+    maybe_enable_tool_call,
 };
-use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_llm::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
 use dynamo_parsers::tool_calling::parsers::detect_tool_call_start;
 use dynamo_runtime::pipeline::ResponseStream;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -708,4 +713,51 @@ async fn test_tool_calling_jail_internal_with_harmony_parser() {
     .unwrap();
     assert_eq!(name, "get_current_weather");
     assert_eq!(arguments["location"], "San Francisco");
+}
+
+#[test]
+fn test_enable_tool_call() {
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::Auto),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(maybe_enable_tool_call(Some("nemotron_deci"), &request));
+
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::None),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(!maybe_enable_tool_call(Some("nemotron_deci"), &request));
+
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::Required),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(maybe_enable_tool_call(Some("nemotron_deci"), &request));
+
+    let request = NvCreateChatCompletionRequest {
+        inner: CreateChatCompletionRequest {
+            tool_choice: Some(ChatCompletionToolChoiceOption::Auto),
+            ..Default::default()
+        },
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+    };
+    assert!(!maybe_enable_tool_call(None, &request));
 }
