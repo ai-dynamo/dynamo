@@ -312,41 +312,12 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
     if trimmed.is_empty() {
         return false;
     }
-
-    // Check if chunk contains any complete start token
-    let contains_complete_token = config
+    config
         .tool_call_start_tokens
         .iter()
-        .any(|token| !token.is_empty() && trimmed.contains(token));
-
-    if contains_complete_token {
-        return true;
-    }
-
-    // Check for partial start tokens (streaming scenario)
-    // This handles cases where start tokens are split across multiple chunks
-    let has_partial_token = config
-        .tool_call_start_tokens
-        .iter()
-        .any(|token| {
-            if token.is_empty() {
-                return false;
-            }
-            // Check if the chunk could be a prefix of this start token
-            // We need to be careful to avoid false positives
-            // Handle Unicode character boundaries properly
-            for i in 1..=token.chars().count() {
-                if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
-                    let prefix_str = &prefix[..prefix.len()];
-                    if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
-                        return true;
-                    }
-                }
-            }
-            false
-        });
-
-    has_partial_token || trimmed.contains('{') || trimmed.contains('[')
+        .any(|token| trimmed.contains(token))
+        || trimmed.contains('{')
+        || trimmed.contains('[')
 }
 
 #[cfg(test)]
@@ -463,83 +434,5 @@ mod detect_parser_tests {
         };
         let result = detect_tool_call_start_basic_json(text, &config);
         assert!(result);
-    }
-
-    #[test]
-    fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_fun() {
-        // Test the streaming scenario where "fun" arrives first
-        let text = r#"fun"#;
-        let config = JsonParserConfig {
-            tool_call_start_tokens: vec!["functools".to_string()],
-            tool_call_end_tokens: vec!["".to_string()],
-            ..Default::default()
-        };
-        let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect 'fun' as potential start of 'functools'");
-    }
-
-    #[test]
-    fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_func() {
-        let text = r#"func"#;
-        let config = JsonParserConfig {
-            tool_call_start_tokens: vec!["functools".to_string()],
-            tool_call_end_tokens: vec!["".to_string()],
-            ..Default::default()
-        };
-        let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect 'func' as potential start of 'functools'");
-    }
-
-    #[test]
-    fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_f() {
-        let text = r#"f"#;
-        let config = JsonParserConfig {
-            tool_call_start_tokens: vec!["functools".to_string()],
-            tool_call_end_tokens: vec!["".to_string()],
-            ..Default::default()
-        };
-        let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect 'f' as potential start of 'functools'");
-    }
-
-    #[test]
-    fn detect_tool_call_start_basic_json_chunk_phi4_partial_with_prefix() {
-        // Test case where text ends with a partial token (more realistic streaming scenario)
-        let text = r#"Hello fun"#;
-        let config = JsonParserConfig {
-            tool_call_start_tokens: vec!["functools".to_string()],
-            tool_call_end_tokens: vec!["".to_string()],
-            ..Default::default()
-        };
-        let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect text ending with 'fun' as potential tool call start");
-    }
-
-    #[test]
-    fn detect_tool_call_start_basic_json_chunk_phi4_avoid_false_positive() {
-        // Test to ensure we don't get false positives for unrelated text
-        let text = r#"funny joke"#;
-        let config = JsonParserConfig {
-            tool_call_start_tokens: vec!["functools".to_string()],
-            tool_call_end_tokens: vec!["".to_string()],
-            ..Default::default()
-        };
-        let result = detect_tool_call_start_basic_json(text, &config);
-        // This should still return true because "fun" is a prefix, but that's expected behavior
-        // The key is that we detect potential starts, and false positives are acceptable
-        // in streaming scenarios to avoid missing real tool calls
-        assert!(result);
-    }
-
-    #[test]
-    fn detect_tool_call_start_basic_json_chunk_phi4_no_match() {
-        let text = r#"hello world"#;
-        let config = JsonParserConfig {
-            tool_call_start_tokens: vec!["functools".to_string()],
-            tool_call_end_tokens: vec!["".to_string()],
-            ..Default::default()
-        };
-        let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(!result, "Should not detect unrelated text as tool call start");
     }
 }
