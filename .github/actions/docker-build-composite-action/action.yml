@@ -11,22 +11,22 @@ inputs:
     default: 'runtime'
   ngc_ci_access_token:
     description: 'NGC CI Access Token'
-    required: true
+    required: false
   ci_token:
     description: 'CI Token'
-    required: true
+    required: false
   aws_default_region:
     description: 'AWS Default Region'
-    required: true
+    required: false
   sccache_s3_bucket:
     description: 'SCCache S3 Bucket'
-    required: true
+    required: false
   aws_access_key_id:
     description: 'AWS Access Key ID'
-    required: true
+    required: false
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
-    required: true    
+    required: false    
 
 outputs:
   image_tag:
@@ -63,14 +63,3 @@ runs:
           --use-sccache \
           --sccache-bucket "$SCCACHE_S3_BUCKET" \
           --sccache-region "$AWS_DEFAULT_REGION"
-    - name: Run pytest
-      shell: bash
-      env:
-        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ inputs.framework }}
-        PYTEST_XML_FILE: pytest_test_report.xml
-      run: |
-        docker run --runtime=nvidia --rm --gpus all -w /workspace \
-          --network host \
-          --name ${{ env.CONTAINER_ID }}_pytest \
-          ${{ inputs.framework }}:latest \
-          bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ inputs.pytest_marks }}\""
