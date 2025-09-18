@@ -38,7 +38,7 @@ helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./com
 
 ### Installation using Grove
 
-Same example as above, but using Grove PodGangSet resources.
+Same example as above, but using Grove PodCliqueSet resources.
 
 ```bash
 helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml --set deploymentType=grove
@@ -72,10 +72,10 @@ The following table shows which deployment features are supported by the **Helm 
 | Feature | Helm Chart | Operator | Description |
 |---------|------------|----------|-------------|
 | **Singlenode** (k8sDeployments) | ✅ Supported | ✅ Supported | Single-node deployments using standard Kubernetes Deployments |
-| **Singlenode** (Grove PodGangSet) | ✅ Supported | ✅ Supported | Single-node deployments using Grove PodGangSet resources |
-| **Multinode** (Grove PodGangSet and LWS) | ❌ Not Supported | ✅ Supported | Multi-node deployments requiring Grove PodGangSet and LeaderWorkerSet (LWS) |
+| **Singlenode** (Grove PodCliqueSet) | ✅ Supported | ✅ Supported | Single-node deployments using Grove PodCliqueSet resources |
+| **Multinode** (Grove PodCliqueSet and LWS) | ❌ Not Supported | ✅ Supported | Multi-node deployments requiring Grove PodCliqueSet and LeaderWorkerSet (LWS) |
 
 **Key Differences:**
-- **Helm Chart**: Best for simple single-node deployments and quick testing. Supports both basic Kubernetes deployments and Grove PodGangSet resources.
+- **Helm Chart**: Best for simple single-node deployments and quick testing. Supports both basic Kubernetes deployments and Grove PodCliqueSet resources.
 - **Operator**: Required for advanced multi-node deployments. Provides full feature support including complex distributed inference configurations.
 

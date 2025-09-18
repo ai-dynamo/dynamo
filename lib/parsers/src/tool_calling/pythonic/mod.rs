@@ -4,4 +4,4 @@
 pub mod pythonic_parser;
 
 pub use super::{config, response};
-pub use pythonic_parser::try_tool_call_parse_pythonic;
+pub use pythonic_parser::{detect_tool_call_start_pythonic, try_tool_call_parse_pythonic};

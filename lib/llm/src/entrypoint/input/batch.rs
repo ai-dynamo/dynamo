@@ -67,7 +67,9 @@ pub async fn run(
     let mut prepared_engine = common::prepare_engine(runtime, engine_config).await?;
 
     let pre_processor = if prepared_engine.has_tokenizer() {
-        Some(OpenAIPreprocessor::new(prepared_engine.card.take().unwrap()).await?)
+        Some(OpenAIPreprocessor::new(
+            prepared_engine.card.take().unwrap(),
+        )?)
     } else {
         None
     };
@@ -226,6 +228,7 @@ async fn evaluate(
         inner,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
     let mut stream = engine.generate(Context::new(req)).await?;
     let mut output = String::new();

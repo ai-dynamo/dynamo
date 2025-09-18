@@ -22,9 +22,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.6
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000"
+          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -47,7 +45,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.6
+          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -66,31 +64,36 @@ spec:
               --ttft=0.1
               --itl=0.01
               --load-predictor=constant
+              --no-correction
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: vllm-disagg-planner
-      componentType: prometheus
+      componentType: frontend
       replicas: 1
       envs:
         - name: PYTHONPATH
           value: "/workspace/components/planner/src"
       livenessProbe:
-        httpGet:
-          path: /
-          port: 9090
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
       readinessProbe:
-        httpGet:
-          path: /
-          port: 9090
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
         initialDelaySeconds: 30
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.6
+          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -113,7 +116,7 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.6
+          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -136,7 +139,7 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.6
+          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

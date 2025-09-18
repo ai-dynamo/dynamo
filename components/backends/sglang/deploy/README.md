@@ -74,7 +74,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Installing Dynamo Cloud](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+1. **Dynamo Cloud Platform installed** - See [Installing Dynamo Cloud](../../../../docs/guides/dynamo_deploy/installation_guide.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for SGLang runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -146,7 +146,7 @@ All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
 - **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/README.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/installation_guide.md)
 - **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 

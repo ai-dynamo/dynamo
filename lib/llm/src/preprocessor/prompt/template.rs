@@ -17,25 +17,43 @@ use super::{OAIChatLikeRequest, OAIPromptFormatter, PromptFormatter};
 use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
-    pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<PromptFormatter> {
+    pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
         match mdc
             .prompt_formatter
+            .as_ref()
             .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
         {
-            PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
-                let content = std::fs::read_to_string(&file)
-                    .with_context(|| format!("fs:read_to_string '{file}'"))?;
-                let mut config: ChatTemplate = serde_json::from_str(&content)?;
+            PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
+                let Some(file) = checked_file.path() else {
+                    anyhow::bail!(
+                        "HfTokenizerConfigJson for {} is a URL, cannot load",
+                        mdc.display_name
+                    );
+                };
+                let contents = std::fs::read_to_string(file)
+                    .with_context(|| format!("fs:read_to_string '{}'", file.display()))?;
+                let mut config: ChatTemplate =
+                    serde_json::from_str(&contents).inspect_err(|err| {
+                        crate::log_json_err(&file.display().to_string(), &contents, err)
+                    })?;
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
-                    mdc.chat_template_file
+                if let Some(PromptFormatterArtifact::HfChatTemplate(checked_file)) =
+                    mdc.chat_template_file.as_ref()
                 {
-                    let chat_template = std::fs::read_to_string(&chat_template_file)
-                        .with_context(|| format!("fs:read_to_string '{}'", chat_template_file))?;
+                    let Some(chat_template_file) = checked_file.path() else {
+                        anyhow::bail!(
+                            "HfChatTemplate for {} is a URL, cannot load",
+                            mdc.display_name
+                        );
+                    };
+                    let chat_template =
+                        std::fs::read_to_string(chat_template_file).with_context(|| {
+                            format!("fs:read_to_string '{}'", chat_template_file.display())
+                        })?;
                     // clean up the string to remove newlines
                     let chat_template = chat_template.replace('\n', "");
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
@@ -43,6 +61,7 @@ impl PromptFormatter {
                 Self::from_parts(
                     config,
                     mdc.prompt_context
+                        .clone()
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
                 )
             }
@@ -50,7 +69,7 @@ impl PromptFormatter {
                 "prompt_formatter should not have type HfChatTemplate"
             )),
             PromptFormatterArtifact::GGUF(gguf_path) => {
-                let config = ChatTemplate::from_gguf(&gguf_path)?;
+                let config = ChatTemplate::from_gguf(gguf_path)?;
                 Self::from_parts(config, ContextMixins::default())
             }
         }

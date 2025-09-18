@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! NATS transport
 //!
@@ -173,10 +161,10 @@ impl Client {
     }
 
     /// Upload file to NATS at this URL
-    pub async fn object_store_upload(&self, filepath: &Path, nats_url: Url) -> anyhow::Result<()> {
+    pub async fn object_store_upload(&self, filepath: &Path, nats_url: &Url) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::open(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -193,12 +181,12 @@ impl Client {
     /// Download file from NATS at this URL
     pub async fn object_store_download(
         &self,
-        nats_url: Url,
+        nats_url: &Url,
         filepath: &Path,
     ) -> anyhow::Result<()> {
         let mut disk_file = TokioFile::create(filepath).await?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
@@ -225,7 +213,7 @@ impl Client {
     }
 
     /// Upload a serializable struct to NATS object store using bincode
-    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: Url) -> anyhow::Result<()>
+    pub async fn object_store_upload_data<T>(&self, data: &T, nats_url: &Url) -> anyhow::Result<()>
     where
         T: Serialize,
     {
@@ -233,7 +221,7 @@ impl Client {
         let binary_data = bincode::serialize(data)
             .map_err(|e| anyhow::anyhow!("Failed to serialize data with bincode: {e}"))?;
 
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, true).await?;
 
         let key_meta = async_nats::jetstream::object_store::ObjectMetadata {
@@ -251,11 +239,11 @@ impl Client {
     }
 
     /// Download and deserialize a struct from NATS object store using bincode
-    pub async fn object_store_download_data<T>(&self, nats_url: Url) -> anyhow::Result<T>
+    pub async fn object_store_download_data<T>(&self, nats_url: &Url) -> anyhow::Result<T>
     where
         T: DeserializeOwned,
     {
-        let (bucket_name, key) = url_to_bucket_and_key(&nats_url)?;
+        let (bucket_name, key) = url_to_bucket_and_key(nats_url)?;
         let bucket = self.get_or_create_bucket(&bucket_name, false).await?;
 
         let mut obj_reader = bucket.get(&key).await.map_err(|e| {
@@ -526,12 +514,17 @@ impl NatsQueue {
 
             let client = client_options.connect().await?;
 
+            // messages older than a hour in the stream will be automatically purged
+            let max_age = std::env::var("DYN_NATS_STREAM_MAX_AGE")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(time::Duration::from_secs)
+                .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
             // Always try to create the stream (removes the race condition)
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
-                // messages older than a hour in the stream will be automatically purged
-                max_age: time::Duration::from_secs(60 * 60),
+                max_age,
                 ..Default::default()
             };
 
@@ -1078,13 +1071,13 @@ mod tests {
 
         // Upload the data
         client
-            .object_store_upload_data(&test_data, url.clone())
+            .object_store_upload_data(&test_data, &url)
             .await
             .expect("Failed to upload data");
 
         // Download the data
         let downloaded_data: TestData = client
-            .object_store_download_data(url.clone())
+            .object_store_download_data(&url)
             .await
             .expect("Failed to download data");
 

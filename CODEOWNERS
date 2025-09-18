@@ -19,7 +19,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Examples
 /examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ishandhanani @ai-dynamo/dynamo-rust-codeowners
 /examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
-/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16
+/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16 @biswapanda
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
@@ -30,6 +30,10 @@ CODEOWNERS @ai-dynamo/Devops @nnshah1
 /components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
 /benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
 /tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
+
+# recipes
+
+/recipes/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops

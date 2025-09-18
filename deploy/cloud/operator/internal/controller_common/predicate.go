@@ -33,7 +33,7 @@ import (
 type GroveConfig struct {
 	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
 	Enabled bool
-	// TerminationDelay configures the termination delay for Grove PodGangSets
+	// TerminationDelay configures the termination delay for Grove PodCliqueSets
 	TerminationDelay time.Duration
 }
 
@@ -58,6 +58,8 @@ type Config struct {
 	IngressConfig       IngressConfig
 	// ModelExpressURL is the URL of the Model Express server to inject into all pods
 	ModelExpressURL string
+	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
+	PrometheusEndpoint string
 }
 
 type IngressConfig struct {
