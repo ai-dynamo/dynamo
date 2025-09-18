@@ -112,6 +112,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --namespace=${NAMESPACE}
 
 # 4. Install CRDs
+cd ../helm
 helm upgrade --install dynamo-crds ./crds/ --namespace default
 
 # 5. Install Platform
