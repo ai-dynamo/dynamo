@@ -215,13 +215,6 @@ python3 -m dynamo.sglang ... --migration-limit=3
 
 This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
 
-## Hashing Consistency for KV Events
-
-When emitting KV events for KV-aware routing, ensure event identifiers are deterministic across processes and restarts so the router can correctly apply parent links and removals:
-
-- Ensure the block IDs published in events are deterministic across ranks and restarts.
-- See the high-level notes in [KV Cache Routing](../../../docs/architecture/kv_cache_routing.md) on deterministic event IDs.
-
 ## Advanced Examples
 
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
