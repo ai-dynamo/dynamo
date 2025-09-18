@@ -22,6 +22,7 @@ use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use dynamo_runtime::DistributedRuntime;
+use dynamo_llm::block_manager::layout::LayoutType;
 
 pub trait Worker: Send + Sync {
     fn register_kv_caches(
@@ -134,7 +135,9 @@ impl Worker for KvConnectorWorker {
             .tensors(kv_cache_tensors)
             .device_id(device_id)
             .dtype_width_bytes(dtype_width_bytes)
-            .is_fully_contiguous_layout(true)
+            .device_layout_type(LayoutType::FullyContiguous)
+            .host_layout_type(LayoutType::FullyContiguous)
+            .disk_layout_type(LayoutType::FullyContiguous)
             .barrier_id_prefix(get_barrier_id_prefix())
             .scheduler_client(Some(self.transfer_client.clone()))
             .build()?;

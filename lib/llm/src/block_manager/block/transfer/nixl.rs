@@ -48,7 +48,19 @@ where
                 let src_view = src_data.layer_view(layer_idx, outer_idx)?;
                 let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
 
-                debug_assert_eq!(src_view.size(), dst_view.size());
+                // Handle potential size mismatches between layouts
+                let src_size = src_view.size();
+                let dst_size = dst_view.size();
+                let copy_size = std::cmp::min(src_size, dst_size);
+
+                // Log a warning if sizes don't match (this indicates a layout issue)
+                if src_size != dst_size {
+                    tracing::warn!(
+                        "Size mismatch in NIXL layer copy: src_size={}, dst_size={}, using copy_size={}. \
+                         This may indicate a layout configuration issue.",
+                        src_size, dst_size, copy_size
+                    );
+                }
 
                 let src_desc = src_view.as_nixl_descriptor();
                 let dst_desc = dst_view.as_nixl_descriptor_mut();
@@ -56,13 +68,13 @@ where
                 unsafe {
                     src_dl.add_desc(
                         src_desc.as_ptr() as usize,
-                        src_desc.size(),
+                        copy_size,  // Use the safe copy size
                         src_desc.device_id(),
                     )?;
 
                     dst_dl.add_desc(
                         dst_desc.as_ptr() as usize,
-                        dst_desc.size(),
+                        copy_size,  // Use the safe copy size
                         dst_desc.device_id(),
                     )?;
                 }

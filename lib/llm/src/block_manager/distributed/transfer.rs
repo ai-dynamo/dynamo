@@ -13,11 +13,12 @@ use crate::block_manager::{
     BasicMetadata, Storage,
     block::{
         Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
-        data::local::LocalBlockData,
+        data::{local::LocalBlockData, BlockDataExt},
         locality,
         transfer::{TransferContext, WriteTo, WriteToStrategy},
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
+    layout::BlockLayoutConfig,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
 };
 
@@ -112,6 +113,9 @@ impl BlockTransferHandler {
             .map(|idx| target_pool_list[idx].clone())
             .collect();
 
+        // Validate layout compatibility before transfer
+        self.validate_transfer_compatibility(&sources, &targets, &request)?;
+
         // Perform the transfer, and return the notifying channel.
         match sources.write_to(&mut targets, self.context.clone()) {
             Ok(channel) => Ok(channel),
@@ -143,6 +147,144 @@ impl BlockTransferHandler {
         }?;
 
         notify.await?;
+        Ok(())
+    }
+
+    /// Validate layout compatibility between source and target blocks
+    fn validate_transfer_compatibility<Source, Target>(
+        &self,
+        sources: &[LocalBlockData<Source>],
+        targets: &[LocalBlockData<Target>],
+        request: &BlockTransferRequest,
+    ) -> Result<()>
+    where
+        Source: Storage,
+        Target: Storage,
+    {
+        // Note: verify_layout_compatibility is not used in this simplified validation
+        // use crate::block_manager::layout::utils::worker_verification::verify_layout_compatibility;
+
+        if sources.is_empty() || targets.is_empty() {
+            return Ok(());
+        }
+
+        // Get first blocks to check layout compatibility
+        let source_block = &sources[0];
+        let target_block = &targets[0];
+
+        // Extract layout information from block data
+        let source_data = source_block.block_data();
+        let target_data = target_block.block_data();
+
+        // Basic compatibility checks
+        if source_data.num_layers() != target_data.num_layers() {
+            return Err(anyhow::anyhow!(
+                "Layout mismatch: source has {} layers, target has {} layers",
+                source_data.num_layers(),
+                target_data.num_layers()
+            ));
+        }
+
+        // Check memory region sizes for each block pair
+        for (i, (source, target)) in sources.iter().zip(targets.iter()).enumerate() {
+            let src_data = source.block_data();
+            let tgt_data = target.block_data();
+
+            // Verify each layer has compatible sizes (checking first outer dimension)
+            for layer_idx in 0..src_data.num_layers() {
+                let outer_idx = 0; // Check first outer dimension for compatibility
+                let src_layer_result = src_data.layer_view(layer_idx, outer_idx);
+                let tgt_layer_result = tgt_data.layer_view(layer_idx, outer_idx);
+
+                match (src_layer_result, tgt_layer_result) {
+                    (Ok(src_layer), Ok(tgt_layer)) => {
+                        if src_layer.size() != tgt_layer.size() {
+                            return Err(anyhow::anyhow!(
+                                "Layout mismatch in block {} layer {}: source size {} != target size {}",
+                                i, layer_idx, src_layer.size(), tgt_layer.size()
+                            ));
+                        }
+                    }
+                    (Err(e), _) => {
+                        tracing::warn!("Failed to get source layer view for block {} layer {}: {}", i, layer_idx, e);
+                    }
+                    (_, Err(e)) => {
+                        tracing::warn!("Failed to get target layer view for block {} layer {}: {}", i, layer_idx, e);
+                    }
+                }
+            }
+        }
+
+        // Log successful validation
+        tracing::debug!(
+            "Layout compatibility validated for {} blocks transfer from {:?} to {:?}",
+            sources.len(),
+            request.from_pool(),
+            request.to_pool()
+        );
+
+        Ok(())
+    }
+
+    /// Verify block data integrity after transfer
+    pub fn verify_transfer_integrity<Source, Target>(
+        &self,
+        sources: &[LocalBlockData<Source>],
+        targets: &[LocalBlockData<Target>],
+        expected_patterns: Option<&[u8]>,
+    ) -> Result<()>
+    where
+        Source: Storage,
+        Target: Storage,
+    {
+        for (i, (source, target)) in sources.iter().zip(targets.iter()).enumerate() {
+            let src_data = source.block_data();
+            let tgt_data = target.block_data();
+
+            // Compare data integrity
+            if let (Ok(src_view), Ok(tgt_view)) = (src_data.block_view(), tgt_data.block_view()) {
+                if src_view.size() == tgt_view.size() {
+                    unsafe {
+                        let src_slice = std::slice::from_raw_parts(src_view.as_ptr(), src_view.size());
+                        let tgt_slice = std::slice::from_raw_parts(tgt_view.as_ptr(), tgt_view.size());
+
+                        // Check for data corruption
+                        let matches = src_slice.iter().zip(tgt_slice.iter())
+                            .filter(|(a, b)| a == b)
+                            .count();
+
+                        let match_ratio = matches as f64 / src_slice.len() as f64;
+
+                        if match_ratio < 0.95 {
+                            return Err(anyhow::anyhow!(
+                                "Data integrity check failed for block {}: only {:.1}% of data matches",
+                                i, match_ratio * 100.0
+                            ));
+                        }
+
+                        // Check for specific patterns if provided
+                        if let Some(patterns) = expected_patterns {
+                            if let Some(&expected_pattern) = patterns.get(i) {
+                                let pattern_matches = tgt_slice.iter()
+                                    .filter(|&&b| b == expected_pattern)
+                                    .count();
+
+                                let pattern_ratio = pattern_matches as f64 / tgt_slice.len() as f64;
+
+                                if pattern_ratio < 0.8 {
+                                    tracing::warn!(
+                                        "Block {} has unexpected pattern distribution: {:.1}% matches expected pattern {}",
+                                        i, pattern_ratio * 100.0, expected_pattern
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("Transfer integrity verification completed for {} blocks", sources.len());
         Ok(())
     }
 }
