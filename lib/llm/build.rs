@@ -17,6 +17,9 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Declare our custom cfg flag to avoid unexpected_cfgs warnings
+    println!("cargo:rustc-check-cfg=cfg(have_vec_copy_fatbin)");
+
     println!("cargo:warning=Building with CUDA KV off");
     build_protos()?;
 
@@ -29,7 +32,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = std::fs::copy(&fatbin_path, &dest_path) {
             println!("cargo:warning=Failed to copy FATBIN to OUT_DIR: {}", e);
         } else {
-            println!("cargo:rustc-env=DYNAMO_FATBIN_AVAILABLE=1");
+            // Emit cfg flag for conditional compilation
+            println!("cargo:rustc-cfg=have_vec_copy_fatbin");
             println!(
                 "cargo:warning=CUDA FATBIN found at: {} - copied to OUT_DIR",
                 fatbin_path.display()

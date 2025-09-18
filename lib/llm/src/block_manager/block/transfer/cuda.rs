@@ -543,31 +543,38 @@ fn get_copy_kernel() -> Result<cudarc::driver::sys::CUfunction, TransferError> {
     Ok(func as cudarc::driver::sys::CUfunction)
 }
 
-// Try to load embedded FATBIN (compile-time)
+// Try to load embedded FATBIN (compile-time) - only compiled when FATBIN is available
+#[cfg(have_vec_copy_fatbin)]
 fn load_embedded_fatbin() -> Result<cudarc::driver::sys::CUmodule, cudarc::driver::DriverError> {
-    // Check if FATBIN was embedded at compile time
-    if option_env!("DYNAMO_FATBIN_AVAILABLE").is_some() {
-        // FATBIN was copied to OUT_DIR by build.rs and embedded here
-        const FATBIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vectorized_copy.fatbin"));
-        tracing::debug!("Loading embedded FATBIN ({} bytes)", FATBIN.len());
-        unsafe {
-            let mut module = std::ptr::null_mut();
-            let result = cudarc::driver::sys::cuModuleLoadData(
-                &mut module,
-                FATBIN.as_ptr() as *const std::ffi::c_void,
+    // FATBIN was copied to OUT_DIR by build.rs and embedded here
+    const FATBIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vectorized_copy.fatbin"));
+    tracing::debug!("Loading embedded FATBIN ({} bytes)", FATBIN.len());
+    unsafe {
+        let mut module = std::ptr::null_mut();
+        let result = cudarc::driver::sys::cuModuleLoadData(
+            &mut module,
+            FATBIN.as_ptr() as *const std::ffi::c_void,
+        );
+        if result == cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+            tracing::debug!("Embedded FATBIN module loaded successfully: {:p}", module);
+            return Ok(module);
+        } else {
+            tracing::error!(
+                "Embedded FATBIN cuModuleLoadData failed with CUDA error: {:?}",
+                result
             );
-            if result == cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                tracing::debug!("Embedded FATBIN module loaded successfully: {:p}", module);
-                return Ok(module);
-            } else {
-                tracing::error!(
-                    "Embedded FATBIN cuModuleLoadData failed with CUDA error: {:?}",
-                    result
-                );
-            }
         }
     }
 
+    Err(cudarc::driver::DriverError(
+        cudarc::driver::sys::cudaError_enum::CUDA_ERROR_FILE_NOT_FOUND,
+    ))
+}
+
+// Fallback implementation when FATBIN is not available at compile time
+#[cfg(not(have_vec_copy_fatbin))]
+fn load_embedded_fatbin() -> Result<cudarc::driver::sys::CUmodule, cudarc::driver::DriverError> {
+    tracing::debug!("No embedded FATBIN available (not compiled with have_vec_copy_fatbin)");
     Err(cudarc::driver::DriverError(
         cudarc::driver::sys::cudaError_enum::CUDA_ERROR_FILE_NOT_FOUND,
     ))

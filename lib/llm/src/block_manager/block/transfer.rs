@@ -154,7 +154,10 @@ where
 }
 
 #[inline]
-fn resolve_cuda_transfer_mode(base_strategy: TransferStrategy, is_contiguous: bool) -> CudaTransferMode {
+fn resolve_cuda_transfer_mode(
+    base_strategy: TransferStrategy,
+    is_contiguous: bool,
+) -> CudaTransferMode {
     match base_strategy {
         TransferStrategy::CudaAsyncH2D => {
             if is_contiguous {
@@ -170,7 +173,10 @@ fn resolve_cuda_transfer_mode(base_strategy: TransferStrategy, is_contiguous: bo
                 CudaTransferMode::Custom
             }
         }
-        other => panic!("resolve_cuda_strategy called with non-CUDA strategy: {:?}", other),
+        other => panic!(
+            "resolve_cuda_strategy called with non-CUDA strategy: {:?}",
+            other
+        ),
     }
 }
 
@@ -209,8 +215,10 @@ where
             if RB::write_to_strategy() == TransferStrategy::CudaAsyncH2D
                 || RB::write_to_strategy() == TransferStrategy::CudaAsyncD2H
             {
-                let is_contiguous = sources[0].block_data().is_fully_contiguous() && targets[0].block_data().is_fully_contiguous();
-                let transfer_mode = resolve_cuda_transfer_mode(RB::write_to_strategy(), is_contiguous);
+                let is_contiguous = sources[0].block_data().is_fully_contiguous()
+                    && targets[0].block_data().is_fully_contiguous();
+                let transfer_mode =
+                    resolve_cuda_transfer_mode(RB::write_to_strategy(), is_contiguous);
 
                 match transfer_mode {
                     CudaTransferMode::Custom => {
@@ -224,7 +232,12 @@ where
                     }
                     CudaTransferMode::Default => {
                         for (src, dst) in sources.iter().zip(targets.iter_mut()) {
-                            cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
+                            cuda::copy_block(
+                                src,
+                                dst,
+                                ctx.stream().as_ref(),
+                                RB::write_to_strategy(),
+                            )?;
                         }
                     }
                 }
