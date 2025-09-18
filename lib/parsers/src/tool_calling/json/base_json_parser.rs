@@ -73,9 +73,9 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         if s.is_empty() {
             continue;
         }
-        // Only consider segments that start like JSON
+        // Only consider segments that start like JSON (objects or arrays)
         if s.starts_with('{') {
-            // Trim trailing non-JSON by cutting at the last closing brace/bracket
+            // Trim trailing non-JSON by cutting at the last closing brace
             if let Some(pos) = s.rfind('}') {
                 let candidate = &s[..=pos].trim();
                 // Keep only valid JSON candidates
@@ -83,17 +83,30 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                     items.push(candidate.to_string());
                 }
             }
+        } else if s.starts_with('[') {
+            // Handle array format (like phi4: functools[{...}])
+            if let Some(pos) = s.rfind(']') {
+                let candidate = &s[..=pos].trim();
+                // Keep only valid JSON arrays
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    // For arrays, we need to extract the individual objects
+                    if let Ok(serde_json::Value::Array(arr)) =
+                        serde_json::from_str::<serde_json::Value>(candidate)
+                    {
+                        for item in arr {
+                            if let Ok(item_str) = serde_json::to_string(&item) {
+                                items.push(item_str);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     if items.is_empty() {
-        // Remove everything up to and including the first occurrence of the start token
-        if let Some(idx) = input.find(start_token) {
-            let rest = &input[idx + start_token.len()..];
-            return Some(rest.trim_start().to_string());
-        } else {
-            // Shouldn't happen because we checked contains() above, but be defensive
-            return None;
-        }
+        // If we found the start token but no valid JSON after it, return empty string
+        // to avoid leaking the invalid content (important for phi4 and similar models)
+        return Some(String::new());
     }
     Some(format!("[{}]", items.join(",")))
 }
@@ -174,6 +187,7 @@ pub fn try_tool_call_parse_basic_json(
     // Assumption : One message will not contain different tags for tool calls. Iteration over tags is to support different tags by default for multiple models
     let mut json = trimmed.to_string();
     let mut normal_text = trimmed.to_string();
+    let mut found_start_token_with_no_valid_json = false;
 
     // First, check if ANY start token exists in the input
     let has_start_token = tool_call_start_tokens
@@ -204,9 +218,16 @@ pub fn try_tool_call_parse_basic_json(
                     // Single token case
                     let result = handle_single_token_tool_calls(&json, start_token);
                     if let Some(content) = result {
+                        // Check if we found a start token but got empty JSON back
+                        // This indicates the token was found but no valid JSON followed
+                        if content.is_empty() {
+                            found_start_token_with_no_valid_json = true;
+                        }
+
                         json = content;
                         // For single token case, use the normal text we extracted earlier
                         normal_text = new_normal_text;
+
                         break; // Found content, exit early
                     }
                 }
@@ -214,8 +235,15 @@ pub fn try_tool_call_parse_basic_json(
                     // Start and end token case
                     let result = extract_tool_call_content(&json, start_token, end_token);
                     if let Some(content) = result {
+                        // Check if we found a start token but got empty JSON back
+                        // This indicates the token was found but no valid JSON followed
+                        if content.is_empty() {
+                            found_start_token_with_no_valid_json = true;
+                        }
+
                         json = content;
                         normal_text = new_normal_text;
+
                         break; // Found content, exit early
                     }
                 }
@@ -304,7 +332,13 @@ pub fn try_tool_call_parse_basic_json(
         return Ok((results, Some(normal_text)));
     }
 
-    Ok((vec![], Some(trimmed.to_string())))
+    // If we found a start token but no valid JSON, return empty content
+    // to avoid leaking the token and invalid JSON content
+    if found_start_token_with_no_valid_json {
+        Ok((vec![], Some(String::new())))
+    } else {
+        Ok((vec![], Some(trimmed.to_string())))
+    }
 }
 
 pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig) -> bool {
@@ -330,12 +364,22 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
             return false;
         }
         // Check if the chunk could be a prefix of this start token
-        // We need to be careful to avoid false positives
         // Handle Unicode character boundaries properly
         for i in 1..=token.chars().count() {
             if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
                 let prefix_str = &prefix[..prefix.len()];
-                if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
+                // Check for exact prefix match
+                if trimmed == prefix_str {
+                    return true;
+                }
+                // For longer prefixes (3+ chars), allow them anywhere in the input
+                // This allows "funny joke" to match "functools" via "fun"
+                // but prevents "<tool_call>" from matching "<TOOLCALL>" via single char "<"
+                if prefix_str.len() >= 3 && trimmed.contains(prefix_str) {
+                    return true;
+                }
+                // For shorter prefixes, only match if they're at the end (streaming scenario)
+                if prefix_str.len() < 3 && trimmed.ends_with(prefix_str) {
                     return true;
                 }
             }
