@@ -33,6 +33,7 @@ jobs:
             code:
               - '**'
               - '!docs/**'
+              - '!.github/**'
 
   pr-backend-check:
     runs-on: ubuntu-latest
