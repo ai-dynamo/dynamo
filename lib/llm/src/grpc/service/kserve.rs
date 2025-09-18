@@ -191,7 +191,7 @@ impl GrpcInferenceService for KserveService {
         let request_id = request.id.clone();
 
         // [gluo TODO] refactor to reuse code, inference logic is largely the same
-        let mut reply = if self.state().is_tensor_model(&model) {
+        if self.state().is_tensor_model(&model) {
             // Fallback handling by assuming the model is OpenAI Completions model
             let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
@@ -205,55 +205,55 @@ impl GrpcInferenceService for KserveService {
                     Status::internal(format!("Failed to fold completions stream: {}", e))
                 })?;
 
-            let reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
+            let mut reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
                 Status::invalid_argument(format!("Failed to parse response: {}", e))
             })?;
-            reply
-        } else {
-            // Fallback handling by assuming the model is OpenAI Completions model
-            let mut completion_request: NvCreateCompletionRequest = request
-                .try_into()
-                .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
+            reply.id = request_id;
 
-            if completion_request.inner.stream.unwrap_or(false) {
-                // return error that streaming is not supported
-                return Err(Status::invalid_argument(
-                    "Streaming is not supported for this endpoint",
-                ));
+            return Ok(Response::new(reply));
+        }
+
+        // Fallback handling by assuming the model is OpenAI Completions model
+        let mut completion_request: NvCreateCompletionRequest = request
+            .try_into()
+            .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
+
+        if completion_request.inner.stream.unwrap_or(false) {
+            // return error that streaming is not supported
+            return Err(Status::invalid_argument(
+                "Streaming is not supported for this endpoint",
+            ));
+        }
+
+        // Apply template values if present
+        if let Some(template) = self.request_template.as_ref() {
+            if completion_request.inner.model.is_empty() {
+                completion_request.inner.model = template.model.clone();
             }
-
-            // Apply template values if present
-            if let Some(template) = self.request_template.as_ref() {
-                if completion_request.inner.model.is_empty() {
-                    completion_request.inner.model = template.model.clone();
-                }
-                if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
-                    completion_request.inner.temperature = Some(template.temperature);
-                }
-                if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
-                    completion_request.inner.max_tokens = Some(template.max_completion_tokens);
-                }
+            if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+                completion_request.inner.temperature = Some(template.temperature);
             }
+            if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+                completion_request.inner.max_tokens = Some(template.max_completion_tokens);
+            }
+        }
 
-            let model = completion_request.inner.model.clone();
-            let parsing_options = self.state.manager.get_parsing_options(&model);
+        let model = completion_request.inner.model.clone();
+        let parsing_options = self.state.manager.get_parsing_options(&model);
 
-            let stream = completion_response_stream(self.state_clone(), completion_request).await?;
+        let stream = completion_response_stream(self.state_clone(), completion_request).await?;
 
-            let completion_response =
-                NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Failed to fold completions stream: {:?}", e);
-                        Status::internal(format!("Failed to fold completions stream: {}", e))
-                    })?;
+        let completion_response =
+            NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to fold completions stream: {:?}", e);
+                    Status::internal(format!("Failed to fold completions stream: {}", e))
+                })?;
 
-            let reply: ModelInferResponse = completion_response.try_into().map_err(|e| {
-                Status::invalid_argument(format!("Failed to parse response: {}", e))
-            })?;
-            reply
-        };
-
+        let mut reply: ModelInferResponse = completion_response
+            .try_into()
+            .map_err(|e| Status::invalid_argument(format!("Failed to parse response: {}", e)))?;
         reply.id = request_id;
 
         Ok(Response::new(reply))
@@ -318,73 +318,73 @@ impl GrpcInferenceService for KserveService {
                             },
                         }
                     }
-                } else {
-                    // Fallback handling by assuming the model is OpenAI Completions model
-                    // Must keep track of 'request_id' which will be returned in corresponding response
-                    let request_id = request.id.clone();
-                    let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
-                        Status::invalid_argument(format!("Failed to parse request: {}", e))
-                    })?;
+                    continue;
+                }
 
-                    // Apply template values if present
-                    if let Some(template) = &template {
-                        if completion_request.inner.model.is_empty() {
-                            completion_request.inner.model = template.model.clone();
-                        }
-                        if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
-                            completion_request.inner.temperature = Some(template.temperature);
-                        }
-                        if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
-                            completion_request.inner.max_tokens = Some(template.max_completion_tokens);
-                        }
+                // Fallback handling by assuming the model is OpenAI Completions model
+                // Must keep track of 'request_id' which will be returned in corresponding response
+                let request_id = request.id.clone();
+                let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
+                    Status::invalid_argument(format!("Failed to parse request: {}", e))
+                })?;
+
+                // Apply template values if present
+                if let Some(template) = &template {
+                    if completion_request.inner.model.is_empty() {
+                        completion_request.inner.model = template.model.clone();
                     }
-
-                    let model = completion_request.inner.model.clone();
-                    let parsing_options = state.manager.get_parsing_options(&model);
-
-                    let streaming = completion_request.inner.stream.unwrap_or(false);
-
-                    let stream = completion_response_stream(state.clone(), completion_request).await?;
-
-                    if streaming {
-                        pin_mut!(stream);
-                        while let Some(response) = stream.next().await {
-                            match response.data {
-                                Some(data) => {
-                                    let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
-                                        Status::invalid_argument(format!("Failed to parse response: {}", e))
-                                    })?;
-                                    if reply.infer_response.is_some() {
-                                        reply.infer_response.as_mut().unwrap().id = request_id.clone();
-                                    }
-                                    yield reply;
-                                },
-                                None => {
-                                    // Skip if no data is present, the response is for annotation
-                                },
-                            }
-                        }
-                    } else {
-                        let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
-                            .await
-                            .map_err(|e| {
-                                tracing::error!(
-                                    "Failed to fold completions stream: {:?}",
-                                    e
-                                );
-                                Status::internal(format!("Failed to fold completions stream: {}", e))
-                            })?;
-
-                        let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
-                            Status::invalid_argument(format!("Failed to parse response: {}", e))
-                        })?;
-                        if response.infer_response.is_some() {
-                            response.infer_response.as_mut().unwrap().id = request_id.clone();
-                        }
-                        yield response;
+                    if completion_request.inner.temperature.unwrap_or(0.0) == 0.0 {
+                        completion_request.inner.temperature = Some(template.temperature);
+                    }
+                    if completion_request.inner.max_tokens.unwrap_or(0) == 0 {
+                        completion_request.inner.max_tokens = Some(template.max_completion_tokens);
                     }
                 }
 
+                let model = completion_request.inner.model.clone();
+                let parsing_options = state.manager.get_parsing_options(&model);
+
+                let streaming = completion_request.inner.stream.unwrap_or(false);
+
+                let stream = completion_response_stream(state.clone(), completion_request).await?;
+
+                if streaming {
+                    pin_mut!(stream);
+                    while let Some(response) = stream.next().await {
+                        match response.data {
+                            Some(data) => {
+                                let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                    Status::invalid_argument(format!("Failed to parse response: {}", e))
+                                })?;
+                                if reply.infer_response.is_some() {
+                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                }
+                                yield reply;
+                            },
+                            None => {
+                                // Skip if no data is present, the response is for annotation
+                            },
+                        }
+                    }
+                } else {
+                    let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(
+                                "Failed to fold completions stream: {:?}",
+                                e
+                            );
+                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                        })?;
+
+                    let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
+                        Status::invalid_argument(format!("Failed to parse response: {}", e))
+                    })?;
+                    if response.infer_response.is_some() {
+                        response.infer_response.as_mut().unwrap().id = request_id.clone();
+                    }
+                    yield response;
+                }
             }
         };
 
