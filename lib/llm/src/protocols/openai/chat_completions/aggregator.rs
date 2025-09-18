@@ -639,7 +639,8 @@ mod tests {
     #[tokio::test]
     async fn test_tool_calling_finish_reason_override_from_stop() {
         // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
-        let tool_call_json = r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
+        let tool_call_json =
+            r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;
 
         let annotated_delta = create_test_delta(
             0,
@@ -909,7 +910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calling_finish_reason_override_from_stop() {
+    async fn test_tool_calling_finish_reason_override_from_stop_alternative() {
         // Test that when tool calls are present but finish reason is Stop, it gets overridden to ToolCalls
         let tool_call_json =
             r#"{"name": "get_weather", "arguments": {"location": "New York", "unit": "celsius"}}"#;

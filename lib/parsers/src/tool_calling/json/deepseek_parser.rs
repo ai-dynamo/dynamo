@@ -119,25 +119,22 @@ pub fn detect_tool_call_start_deepseek_v3_1(chunk: &str, config: &JsonParserConf
 
     // Check for partial start tokens (streaming scenario)
     // This handles cases where start tokens are split across multiple chunks
-    config
-        .tool_call_start_tokens
-        .iter()
-        .any(|token| {
-            if token.is_empty() {
-                return false;
-            }
-            // Check if the chunk could be a prefix of this start token
-            // Handle Unicode character boundaries properly
-            for i in 1..=token.chars().count() {
-                if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
-                    let prefix_str = &prefix[..prefix.len()];
-                    if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
-                        return true;
-                    }
+    config.tool_call_start_tokens.iter().any(|token| {
+        if token.is_empty() {
+            return false;
+        }
+        // Check if the chunk could be a prefix of this start token
+        // Handle Unicode character boundaries properly
+        for i in 1..=token.chars().count() {
+            if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
+                let prefix_str = &prefix[..prefix.len()];
+                if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
+                    return true;
                 }
             }
-            false
-        })
+        }
+        false
+    })
 }
 
 #[cfg(test)]
@@ -304,13 +301,31 @@ mod detect_parser_tests {
         };
 
         // Test various partial prefixes
-        assert!(detect_tool_call_start_deepseek_v3_1("<", &config), "'<' should be detected as potential start");
-        assert!(detect_tool_call_start_deepseek_v3_1("<｜", &config), "'<｜' should be detected as potential start");
-        assert!(detect_tool_call_start_deepseek_v3_1("<｜tool", &config), "'<｜tool' should be detected as potential start");
-        assert!(detect_tool_call_start_deepseek_v3_1("<｜tool▁calls", &config), "'<｜tool▁calls' should be detected as potential start");
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<", &config),
+            "'<' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<｜", &config),
+            "'<｜' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<｜tool", &config),
+            "'<｜tool' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_deepseek_v3_1("<｜tool▁calls", &config),
+            "'<｜tool▁calls' should be detected as potential start"
+        );
 
         // Test that unrelated text is not detected
-        assert!(!detect_tool_call_start_deepseek_v3_1("hello world", &config), "'hello world' should not be detected");
-        assert!(!detect_tool_call_start_deepseek_v3_1("xyz", &config), "'xyz' should not be detected");
+        assert!(
+            !detect_tool_call_start_deepseek_v3_1("hello world", &config),
+            "'hello world' should not be detected"
+        );
+        assert!(
+            !detect_tool_call_start_deepseek_v3_1("xyz", &config),
+            "'xyz' should not be detected"
+        );
     }
 }

@@ -185,25 +185,22 @@ pub fn detect_tool_call_start_harmony(
 
         // Check for partial start tokens (streaming scenario)
         // This handles cases where start tokens are split across multiple chunks
-        config
-            .tool_call_start_tokens
-            .iter()
-            .any(|token| {
-                if token.is_empty() {
-                    return false;
-                }
-                // Check if the chunk could be a prefix of this start token
-                // Handle Unicode character boundaries properly
-                for i in 1..=token.chars().count() {
-                    if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
-                        let prefix_str = &prefix[..prefix.len()];
-                        if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
-                            return true;
-                        }
+        config.tool_call_start_tokens.iter().any(|token| {
+            if token.is_empty() {
+                return false;
+            }
+            // Check if the chunk could be a prefix of this start token
+            // Handle Unicode character boundaries properly
+            for i in 1..=token.chars().count() {
+                if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
+                    let prefix_str = &prefix[..prefix.len()];
+                    if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
+                        return true;
                     }
                 }
-                false
-            })
+            }
+            false
+        })
     } else {
         // Non-strict mode: check complete tokens and some heuristics
         let has_complete_token = config
@@ -216,25 +213,22 @@ pub fn detect_tool_call_start_harmony(
         }
 
         // Check for partial start tokens or known patterns
-        let has_partial_token = config
-            .tool_call_start_tokens
-            .iter()
-            .any(|token| {
-                if token.is_empty() {
-                    return false;
-                }
-                // Check if the chunk could be a prefix of this start token
-                // Handle Unicode character boundaries properly
-                for i in 1..=token.chars().count() {
-                    if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
-                        let prefix_str = &prefix[..prefix.len()];
-                        if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
-                            return true;
-                        }
+        let has_partial_token = config.tool_call_start_tokens.iter().any(|token| {
+            if token.is_empty() {
+                return false;
+            }
+            // Check if the chunk could be a prefix of this start token
+            // Handle Unicode character boundaries properly
+            for i in 1..=token.chars().count() {
+                if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
+                    let prefix_str = &prefix[..prefix.len()];
+                    if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
+                        return true;
                     }
                 }
-                false
-            });
+            }
+            false
+        });
 
         has_partial_token || trimmed.contains("<|channel|>")
     }
@@ -393,13 +387,31 @@ mod detect_parser_tests {
         };
 
         // Test various partial prefixes in strict mode
-        assert!(detect_tool_call_start_harmony("<", &config, true), "'<' should be detected as potential start");
-        assert!(detect_tool_call_start_harmony("<|", &config, true), "'<|' should be detected as potential start");
-        assert!(detect_tool_call_start_harmony("<|start|>", &config, true), "'<|start|>' should be detected as potential start");
-        assert!(detect_tool_call_start_harmony("<|start|>assistant", &config, true), "'<|start|>assistant' should be detected as potential start");
+        assert!(
+            detect_tool_call_start_harmony("<", &config, true),
+            "'<' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_harmony("<|", &config, true),
+            "'<|' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_harmony("<|start|>", &config, true),
+            "'<|start|>' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_harmony("<|start|>assistant", &config, true),
+            "'<|start|>assistant' should be detected as potential start"
+        );
 
         // Test that unrelated text is not detected in strict mode
-        assert!(!detect_tool_call_start_harmony("hello world", &config, true), "'hello world' should not be detected in strict mode");
-        assert!(!detect_tool_call_start_harmony("xyz", &config, true), "'xyz' should not be detected in strict mode");
+        assert!(
+            !detect_tool_call_start_harmony("hello world", &config, true),
+            "'hello world' should not be detected in strict mode"
+        );
+        assert!(
+            !detect_tool_call_start_harmony("xyz", &config, true),
+            "'xyz' should not be detected in strict mode"
+        );
     }
 }

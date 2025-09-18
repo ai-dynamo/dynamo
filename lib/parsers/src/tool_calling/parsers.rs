@@ -1270,14 +1270,32 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
         // Test detection of partial tokens
         use super::super::json::detect_tool_call_start_json;
-        assert!(detect_tool_call_start_json("fun", &config.json), "'fun' should be detected as potential start");
-        assert!(detect_tool_call_start_json("f", &config.json), "'f' should be detected as potential start");
-        assert!(detect_tool_call_start_json("func", &config.json), "'func' should be detected as potential start");
-        assert!(detect_tool_call_start_json("functo", &config.json), "'functo' should be detected as potential start");
+        assert!(
+            detect_tool_call_start_json("fun", &config.json),
+            "'fun' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_json("f", &config.json),
+            "'f' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_json("func", &config.json),
+            "'func' should be detected as potential start"
+        );
+        assert!(
+            detect_tool_call_start_json("functo", &config.json),
+            "'functo' should be detected as potential start"
+        );
 
         // Test that unrelated text is not detected
-        assert!(!detect_tool_call_start_json("hello", &config.json), "'hello' should not be detected");
-        assert!(!detect_tool_call_start_json("xyz", &config.json), "'xyz' should not be detected");
+        assert!(
+            !detect_tool_call_start_json("hello", &config.json),
+            "'hello' should not be detected"
+        );
+        assert!(
+            !detect_tool_call_start_json("xyz", &config.json),
+            "'xyz' should not be detected"
+        );
     }
 
     #[tokio::test]
@@ -1290,8 +1308,16 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             .await
             .unwrap();
         // Should be treated as normal content, not tool call
-        assert_eq!(result.len(), 0, "No tool calls should be found in 'funk music is great'");
-        assert_eq!(content, Some("funk music is great".to_string()), "Content should contain the original text");
+        assert_eq!(
+            result.len(),
+            0,
+            "No tool calls should be found in 'funk music is great'"
+        );
+        assert_eq!(
+            content,
+            Some("funk music is great".to_string()),
+            "Content should contain the original text"
+        );
     }
 
     #[tokio::test]
@@ -1302,14 +1328,22 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
             .await
             .unwrap();
-        assert_eq!(result.len(), 0, "No tool calls should be found in 'The function works well'");
+        assert_eq!(
+            result.len(),
+            0,
+            "No tool calls should be found in 'The function works well'"
+        );
         assert_eq!(content, Some("The function works well".to_string()));
 
         let input = r#"functional programming"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
             .await
             .unwrap();
-        assert_eq!(result.len(), 0, "No tool calls should be found in 'functional programming'");
+        assert_eq!(
+            result.len(),
+            0,
+            "No tool calls should be found in 'functional programming'"
+        );
         assert_eq!(content, Some("functional programming".to_string()));
     }
 
@@ -1330,8 +1364,18 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4"))
                 .await
                 .unwrap();
-            assert_eq!(result.len(), 0, "No tool calls should be found in '{}'", test_input);
-            assert_eq!(content, Some(test_input.to_string()), "Content should match input for '{}'", test_input);
+            assert_eq!(
+                result.len(),
+                0,
+                "No tool calls should be found in '{}'",
+                test_input
+            );
+            assert_eq!(
+                content,
+                Some(test_input.to_string()),
+                "Content should match input for '{}'",
+                test_input
+            );
         }
     }
 
@@ -1340,7 +1384,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         // Test words starting with "func" that are complete words, not partial "functools"
 
         let test_cases = vec![
-            "func()", // Programming syntax
+            "func()",  // Programming syntax
             "funcdef", // Python keyword variant
             "functions are useful",
             "functionally speaking",
@@ -1350,8 +1394,18 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4"))
                 .await
                 .unwrap();
-            assert_eq!(result.len(), 0, "No tool calls should be found in '{}'", test_input);
-            assert_eq!(content, Some(test_input.to_string()), "Content should match input for '{}'", test_input);
+            assert_eq!(
+                result.len(),
+                0,
+                "No tool calls should be found in '{}'",
+                test_input
+            );
+            assert_eq!(
+                content,
+                Some(test_input.to_string()),
+                "Content should match input for '{}'",
+                test_input
+            );
         }
     }
 

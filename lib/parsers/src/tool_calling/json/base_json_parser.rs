@@ -325,26 +325,23 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
 
     // Check for partial start tokens (streaming scenario)
     // This handles cases where start tokens are split across multiple chunks
-    let has_partial_token = config
-        .tool_call_start_tokens
-        .iter()
-        .any(|token| {
-            if token.is_empty() {
-                return false;
-            }
-            // Check if the chunk could be a prefix of this start token
-            // We need to be careful to avoid false positives
-            // Handle Unicode character boundaries properly
-            for i in 1..=token.chars().count() {
-                if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
-                    let prefix_str = &prefix[..prefix.len()];
-                    if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
-                        return true;
-                    }
+    let has_partial_token = config.tool_call_start_tokens.iter().any(|token| {
+        if token.is_empty() {
+            return false;
+        }
+        // Check if the chunk could be a prefix of this start token
+        // We need to be careful to avoid false positives
+        // Handle Unicode character boundaries properly
+        for i in 1..=token.chars().count() {
+            if let Some(prefix) = token.chars().take(i).collect::<String>().get(..) {
+                let prefix_str = &prefix[..prefix.len()];
+                if trimmed == prefix_str || trimmed.ends_with(prefix_str) {
+                    return true;
                 }
             }
-            false
-        });
+        }
+        false
+    });
 
     has_partial_token || trimmed.contains('{') || trimmed.contains('[')
 }
@@ -475,7 +472,10 @@ mod detect_parser_tests {
             ..Default::default()
         };
         let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect 'fun' as potential start of 'functools'");
+        assert!(
+            result,
+            "Should detect 'fun' as potential start of 'functools'"
+        );
     }
 
     #[test]
@@ -487,7 +487,10 @@ mod detect_parser_tests {
             ..Default::default()
         };
         let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect 'func' as potential start of 'functools'");
+        assert!(
+            result,
+            "Should detect 'func' as potential start of 'functools'"
+        );
     }
 
     #[test]
@@ -499,7 +502,10 @@ mod detect_parser_tests {
             ..Default::default()
         };
         let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect 'f' as potential start of 'functools'");
+        assert!(
+            result,
+            "Should detect 'f' as potential start of 'functools'"
+        );
     }
 
     #[test]
@@ -512,7 +518,10 @@ mod detect_parser_tests {
             ..Default::default()
         };
         let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(result, "Should detect text ending with 'fun' as potential tool call start");
+        assert!(
+            result,
+            "Should detect text ending with 'fun' as potential tool call start"
+        );
     }
 
     #[test]
@@ -540,6 +549,9 @@ mod detect_parser_tests {
             ..Default::default()
         };
         let result = detect_tool_call_start_basic_json(text, &config);
-        assert!(!result, "Should not detect unrelated text as tool call start");
+        assert!(
+            !result,
+            "Should not detect unrelated text as tool call start"
+        );
     }
 }
