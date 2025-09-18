@@ -93,6 +93,14 @@ impl NixlTransfer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CudaTransferMode {
+    /// Use the custom CUDA kernel for G1 <-> G2 transfers
+    Custom,
+    /// Use the default CUDA async memcpy for G1 <-> G2 transfers
+    Default,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStrategy {
     Memcpy,
     CudaAsyncH2D,
@@ -145,6 +153,27 @@ where
     }
 }
 
+#[inline]
+fn resolve_cuda_transfer_mode(base_strategy: TransferStrategy, is_contiguous: bool) -> CudaTransferMode {
+    match base_strategy {
+        TransferStrategy::CudaAsyncH2D => {
+            if is_contiguous {
+                CudaTransferMode::Default
+            } else {
+                CudaTransferMode::Custom
+            }
+        }
+        TransferStrategy::CudaAsyncD2H => {
+            if is_contiguous {
+                CudaTransferMode::Default
+            } else {
+                CudaTransferMode::Custom
+            }
+        }
+        other => panic!("resolve_cuda_strategy called with non-CUDA strategy: {:?}", other),
+    }
+}
+
 pub fn handle_local_transfer<RB, WB>(
     sources: &[RB],
     targets: &mut [WB],
@@ -176,17 +205,29 @@ where
                 "Transfer: Using CUDA strategy: {:?}",
                 RB::write_to_strategy()
             );
+
             if RB::write_to_strategy() == TransferStrategy::CudaAsyncH2D
                 || RB::write_to_strategy() == TransferStrategy::CudaAsyncD2H
             {
-                // Use simplified single kernel approach - let CUDA handle large transfers
-                let selected_stream = ctx.stream();
-                cuda::copy_blocks_with_customized_kernel(
-                    sources,
-                    targets,
-                    selected_stream.as_ref(),
-                    &ctx,
-                )?;
+                let is_contiguous = sources[0].block_data().is_fully_contiguous() && targets[0].block_data().is_fully_contiguous();
+                let transfer_mode = resolve_cuda_transfer_mode(RB::write_to_strategy(), is_contiguous);
+
+                match transfer_mode {
+                    CudaTransferMode::Custom => {
+                        let selected_stream = ctx.stream();
+                        cuda::copy_blocks_with_customized_kernel(
+                            sources,
+                            targets,
+                            selected_stream.as_ref(),
+                            &ctx,
+                        )?;
+                    }
+                    CudaTransferMode::Default => {
+                        for (src, dst) in sources.iter().zip(targets.iter_mut()) {
+                            cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
+                        }
+                    }
+                }
                 ctx.cuda_event(tx)?;
 
                 Ok(rx)
