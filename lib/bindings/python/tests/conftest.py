@@ -40,7 +40,7 @@ def nats_and_etcd():
     etcd.wait()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 async def runtime():
     """Create a DistributedRuntime for testing. static runtime."""
     loop = asyncio.get_running_loop()
