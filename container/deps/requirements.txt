@@ -6,7 +6,7 @@ accelerate==1.6.0
 aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator@ec152ec
 aiofiles
 av==15.0.0
-fastapi==0.115.6
+fastapi==0.115.12
 ftfy
 genai-perf==0.0.15
 grpcio-tools==1.66.0
@@ -27,7 +27,7 @@ pre-commit
 prometheus-api-client
 prophet
 protobuf==5.29.5
-pydantic>=2.7.1
+pydantic==2.10.6
 pyright
 PyYAML
 scikit-learn
