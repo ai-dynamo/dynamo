@@ -325,7 +325,7 @@ def extract_markdown_links(
 
     # Regex to match markdown links: [text](url)
     # This captures the link text and URL, excluding image links (![text](url))
-    link_pattern = r"(?<!!)\[([^\]]+)\]\(([^)]+)\)"
+    link_pattern = r"(?<!\!)\[([^\]]+)\]\(([^)]+)\)"
 
     for line_num, line in enumerate(content.split("\n"), 1):
         matches = re.finditer(link_pattern, line)
