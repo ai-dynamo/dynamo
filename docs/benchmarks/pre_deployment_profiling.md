@@ -280,7 +280,7 @@ The profiling script can be run much quicker by using `aiconfigurator` to estima
 * No k8s or GPU access is required.
 
 **Disadvantages**:
-* Estimated perf could be wrong.
+* Estimated perf could contain some error, especially when the input dimensions out-of-distribution compared to the sampled values in aiconfigurator.
 * `aiconfigurator` has a limited list of supported models.
 * `aiconfigurator`'s database has a limited list of systems and backends.
 
