@@ -115,6 +115,16 @@ pub async fn run_input(
         Either::Left(rt) => rt.clone(),
         Either::Right(drt) => drt.runtime().clone(),
     };
+
+    // Initialize audit bus and spawn background logger
+    if crate::audit::config::policy().enabled {
+        let rx = crate::audit::bus::init(1024);
+        runtime
+            .secondary()
+            .spawn(crate::audit::collector::spawn_stderr(rx));
+        tracing::info!("Audit logging initialized");
+    }
+
     match in_opt {
         Input::Http => {
             http::run(runtime, engine_config).await?;
