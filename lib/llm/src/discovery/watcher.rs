@@ -270,7 +270,7 @@ impl ModelWatcher {
                     card.runtime_config = rc;
                 }
                 card
-            },
+            }
             Ok(None) => {
                 anyhow::bail!("Missing ModelDeploymentCard in storage under key {model_slug}");
             }
