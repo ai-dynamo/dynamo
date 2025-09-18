@@ -375,16 +375,22 @@ class Planner:
                 if expect_ttft > 0:
                     self.p_correction_factor = self.last_metrics.ttft / expect_ttft
                 else:
-                    logger.warning(f"Expected TTFT is {expect_ttft}, using default correction factor 1.0")
+                    logger.warning(
+                        f"Expected TTFT is {expect_ttft}, using default correction factor 1.0"
+                    )
                     self.p_correction_factor = 1.0
                 # for ITL, we expect the correction factor to be close to 1
                 if len(self.d_endpoints) > 0:
-                    concurrency = (self.last_metrics.num_req  # type: ignore
+                    concurrency = (
+                        self.last_metrics.num_req  # type: ignore
                         / len(self.d_endpoints)
                         * self.last_metrics.request_duration  # type: ignore
-                        / self.args.adjustment_interval)
+                        / self.args.adjustment_interval
+                    )
                 else:
-                    logger.warning("No decode workers available, using default concurrency of 1.0")
+                    logger.warning(
+                        "No decode workers available, using default concurrency of 1.0"
+                    )
                     concurrency = 1.0
 
                 expect_itl = self.decode_interpolator.interpolate_itl(
@@ -394,7 +400,9 @@ class Planner:
                 if expect_itl > 0:
                     self.d_correction_factor = self.last_metrics.itl / expect_itl
                 else:
-                    logger.warning(f"Expected ITL is {expect_itl}, using default correction factor 1.0")
+                    logger.warning(
+                        f"Expected ITL is {expect_itl}, using default correction factor 1.0"
+                    )
                     self.d_correction_factor = 1.0
                 logger.info(
                     f"Correction factors: TTFT: {self.p_correction_factor:.3f}, ITL: {self.d_correction_factor:.3f}"
