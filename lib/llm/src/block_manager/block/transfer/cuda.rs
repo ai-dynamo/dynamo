@@ -413,11 +413,6 @@ unsafe fn cuda_memcpy_h2d(
 ) -> Result<(), TransferError> {
     debug_assert!(!src_ptr.is_null(), "Source host pointer is null");
     debug_assert!(!dst_ptr.is_null(), "Destination device pointer is null");
-    debug_assert!(
-        (src_ptr as usize + size <= dst_ptr as usize)
-            || (dst_ptr as usize + size <= src_ptr as usize),
-        "Source and destination device memory regions must not overlap for H2D copy"
-    );
 
     unsafe {
         let src_slice = std::slice::from_raw_parts(src_ptr, size);
@@ -437,11 +432,6 @@ unsafe fn cuda_memcpy_d2h(
 ) -> Result<(), TransferError> {
     debug_assert!(!src_ptr.is_null(), "Source device pointer is null");
     debug_assert!(!dst_ptr.is_null(), "Destination host pointer is null");
-    debug_assert!(
-        (src_ptr as usize + size <= dst_ptr as usize)
-            || (dst_ptr as usize + size <= src_ptr as usize),
-        "Source and destination memory regions must not overlap"
-    );
 
     unsafe {
         let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
