@@ -99,7 +99,9 @@ impl Drop for CancelOnLastDrop {
 pub struct KvBlockManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     state: Arc<state::KvBlockManagerState<Locality, Metadata>>,
     _cancellation_token: Arc<CancelOnLastDrop>,
-    block_size: usize,
+    offload_block_size: usize,
+    engine_block_size: usize,
+    offload_block_size_ratio: usize,
 }
 
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
@@ -109,15 +111,27 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
         Self {
             state: self.state.clone(),
             _cancellation_token: self._cancellation_token.clone(),
-            block_size: self.block_size,
+            offload_block_size: self.offload_block_size,
+            engine_block_size: self.engine_block_size,
+            offload_block_size_ratio: self.offload_block_size_ratio,
         }
     }
 }
 
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Locality, Metadata> {
     /// Get the block size
-    pub fn block_size(&self) -> usize {
-        self.block_size
+    pub fn engine_block_size(&self) -> usize {
+        self.engine_block_size
+    }
+
+    /// Get the block size
+    pub fn offload_block_size(&self) -> usize {
+        self.offload_block_size
+    }
+
+    /// Get the offload block size ratio
+    pub fn offload_block_size_ratio(&self) -> usize {
+        self.offload_block_size_ratio
     }
 
     /// Get a reference to the disk block pool
@@ -171,6 +185,7 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
         let _cancellation_token = build_cancel_token(&mut config);
 
         let block_size = config.model.page_size;
+        let offload_block_size_ratio = config.offload_block_size_ratio;
 
         // Create the internal state
         let state = state::KvBlockManagerState::<locality::Local, Metadata>::new(config).await?;
@@ -178,7 +193,9 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
         Ok(Self {
             state,
             _cancellation_token,
-            block_size,
+            engine_block_size: block_size,
+            offload_block_size: block_size * offload_block_size_ratio,
+            offload_block_size_ratio,
         })
     }
 
@@ -215,6 +232,7 @@ impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
 impl<R: LogicalResources, Metadata: BlockMetadata> KvBlockManager<locality::Logical<R>, Metadata> {
     pub async fn new(mut config: KvBlockManagerConfig, logical_resources: R) -> Result<Self> {
         let block_size = config.model.page_size;
+        let offload_block_size_ratio = config.offload_block_size_ratio;
 
         let _cancellation_token = build_cancel_token(&mut config);
 
@@ -227,7 +245,9 @@ impl<R: LogicalResources, Metadata: BlockMetadata> KvBlockManager<locality::Logi
         Ok(Self {
             state,
             _cancellation_token,
-            block_size,
+            engine_block_size: block_size,
+            offload_block_size: block_size * offload_block_size_ratio,
+            offload_block_size_ratio,
         })
     }
 }

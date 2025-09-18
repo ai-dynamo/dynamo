@@ -157,6 +157,7 @@ memmap2 = "0.9.5"
 zeromq = "0.4.1"
 rmp-serde = "1.3"
 ahash = "0.8.12"
+smallvec = { version = "1.15.1", features = ["serde"] }
 
 [dev-dependencies]
 approx = "0.5"

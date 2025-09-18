@@ -161,8 +161,12 @@ impl BlockManager {
         })
     }
 
-    fn block_size(&self) -> usize {
-        self.inner.block_size()
+    fn engine_block_size(&self) -> usize {
+        self.inner.engine_block_size()
+    }
+
+    fn offload_block_size(&self) -> usize {
+        self.inner.offload_block_size()
     }
 
     fn init_controller(&mut self, component: Component) -> PyResult<()> {
@@ -214,14 +218,16 @@ impl BlockManager {
 pub struct BlockManagerBuilder {
     worker_id: u64,
     leader: Option<distributed::KvbmLeader>,
-    page_size: usize,
+    offload_page_size: usize,
+    engine_page_size: usize,
     disable_device_pool: bool,
 }
 
 impl BlockManagerBuilder {
     pub fn new() -> Self {
         Self {
-            page_size: 32, // default consistent with BlockManager::new
+            engine_page_size: 32,    // default consistent with BlockManager::new
+            offload_page_size: 1024, // default consistent with BlockManager::new
             ..Default::default()
         }
     }
@@ -230,8 +236,12 @@ impl BlockManagerBuilder {
         self.worker_id = id;
         self
     }
-    pub fn page_size(mut self, ps: usize) -> Self {
-        self.page_size = ps;
+    pub fn engine_page_size(mut self, ps: usize) -> Self {
+        self.engine_page_size = ps;
+        self
+    }
+    pub fn offload_page_size(mut self, ps: usize) -> Self {
+        self.offload_page_size = ps;
         self
     }
     pub fn leader(mut self, l: distributed::KvbmLeader) -> Self {
@@ -267,7 +277,7 @@ impl BlockManagerBuilder {
         let model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
             .num_layers(1)
             .outer_dim(1)
-            .page_size(self.page_size)
+            .page_size(self.engine_page_size)
             .inner_dim(1)
             .build()?;
 
