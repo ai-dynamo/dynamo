@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony::{detect_tool_call_start_harmony, parse_tool_calls_harmony};
+use super::harmony::{detect_tool_call_start_harmony, parse_tool_calls_harmony_complete};
 use super::json::{detect_tool_call_start_json, try_tool_call_parse_json};
 use super::pythonic::{detect_tool_call_start_pythonic, try_tool_call_parse_pythonic};
 use super::response::ToolCallResponse;
@@ -43,7 +43,8 @@ pub async fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ToolCallParserType::Harmony => {
-            let (results, normal_content) = parse_tool_calls_harmony(message, &config.json).await?;
+            let (results, normal_content) =
+                parse_tool_calls_harmony_complete(message, &config.json).await?;
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
@@ -1450,10 +1451,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_harmony_parser_basic() {
         let input = r#"
-        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>
-        <|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json
-        <|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>
-        "#;
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"))
             .await
             .unwrap();

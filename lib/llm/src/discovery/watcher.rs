@@ -263,7 +263,14 @@ impl ModelWatcher {
         let client = component.endpoint(&endpoint_id.name).client().await?;
         let model_slug = model_entry.slug();
         let card = match ModelDeploymentCard::load_from_store(&model_slug, &self.drt).await {
-            Ok(Some(card)) => card,
+            Ok(Some(mut card)) => {
+                tracing::debug!(card.display_name, "adding model");
+                // Ensure runtime_config is populated
+                if let Some(rc) = model_entry.runtime_config.clone() {
+                    card.runtime_config = rc;
+                }
+                card
+            }
             Ok(None) => {
                 anyhow::bail!("Missing ModelDeploymentCard in storage under key {model_slug}");
             }
