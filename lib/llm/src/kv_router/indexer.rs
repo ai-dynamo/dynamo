@@ -52,9 +52,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3;
 
-/// Canonical seed used by the router for xxh3-64 local block/sequence hashes.
-/// Changing it invalidates persisted local hashes (e.g., snapshots). Internal only;
-/// engines must emit their own deterministic external IDs via KV events.
 pub const XXH3_SEED: u64 = 1337;
 
 use crate::kv_router::protocols::*;
@@ -89,15 +86,19 @@ pub type WorkerId = i64;
 /// A shared reference to a [`RadixBlock`].
 type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 
-/// xxh3-64 with seed [`XXH3_SEED`].
-#[inline]
 pub fn compute_hash(data: &[u8]) -> u64 {
     xxh3::xxh3_64_with_seed(data, XXH3_SEED)
 }
 
-/// Hash one local block (xxh3-64, seed [`XXH3_SEED`]); caller must serialize
-/// integers as little-endian. Returns a [`LocalBlockHash`] used only for
-/// router-local matching; engine external IDs are separate.
+/// Compute the hash of a local block.
+///
+/// ### Arguments
+///
+/// * `data` - A byte slice representing the data to hash.
+///
+/// ### Returns
+///
+/// A `LocalBlockHash` representing the computed hash.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
     LocalBlockHash(compute_hash(data))
 }
@@ -112,12 +113,15 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 //     let hash = xxh3::xxh3_64_with_seed(&bytes, XXH3_SEED);
 // }
 
-/// Compute local block hashes from tokens.
-/// - Split into `kv_block_size` chunks.
-/// - LE-serialize `u32` tokens per chunk.
-/// - Hash each full chunk with xxh3-64 + [`XXH3_SEED`]; trailing partial chunk is ignored.
+/// Compute the hash for a sequence of tokens.
 ///
-/// Deterministic for identical inputs.
+/// ### Arguments
+///
+/// * `tokens` - A vector of `u32` tokens.
+///
+/// ### Returns
+///
+/// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
 pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
     tokens
         .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
@@ -132,9 +136,19 @@ pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<Loc
         .collect()
 }
 
-/// Rolling sequence hashes over local block hashes:
-/// seq[0] = block[0]; seq[i] = xxh3_64_with_seed(LE(seq[i-1])||LE(block[i]),
-/// [`XXH3_SEED`]). Internal to routing; distinct from engine external IDs.
+/// Compute rolling sequence hashes for a vector of block hashes.
+///
+/// This mirrors the behavior in tokens.rs where:
+/// - The first block's sequence hash equals its block hash
+/// - Subsequent blocks' sequence hash = hash([parent_sequence_hash, current_block_hash], seed)
+///
+/// ### Arguments
+///
+/// * `block_hashes` - A vector of `LocalBlockHash` values representing the block hashes.
+///
+/// ### Returns
+///
+/// A vector of u64 values representing the sequence hashes for each block.
 pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<SequenceHash> {
     if block_hashes.is_empty() {
         return Vec::new();
@@ -1271,6 +1285,7 @@ mod tests {
             },
         }
     }
+
     fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
         RouterEvent {
             worker_id,
