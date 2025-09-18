@@ -712,7 +712,10 @@ impl
 
         // If auditing applies to this request, add audit annotation
         if crate::audit::config::policy().enabled && store {
-            let req_json = serde_json::to_string(&request)?;
+            let req_json = serde_json::to_string(&request).unwrap_or_else(|e| {
+                tracing::warn!("Failed to serialize request for audit: {e}");
+                "{}".to_string()
+            });
             annotations.insert(crate::audit::ANNOTATION_AUDIT_REQUEST.to_string(), req_json);
         }
         // update isl
