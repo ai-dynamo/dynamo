@@ -316,9 +316,6 @@ class SystemInfo(NodeInfo):
         # Add Framework info (vllm, sglang, tensorrt_llm)
         self.add_child(FrameworkInfo())
 
-        # Add Dynamo workspace info (always show, even if not found)
-        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
-
         # In terse mode, only add other components if they have errors
         if not self.terse:
             # Add file permissions check
@@ -335,6 +332,9 @@ class SystemInfo(NodeInfo):
         else:
             # In terse mode, only add components that have errors
             self._add_error_only_components()
+
+        # Add Dynamo workspace info (always show, even if not found)
+        self.add_child(DynamoInfo(thorough_check=self.thorough_check))
 
     def _get_ip_address(self) -> Optional[str]:
         """Get the primary IP address of the system."""

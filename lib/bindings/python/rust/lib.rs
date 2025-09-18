@@ -358,6 +358,15 @@ impl DistributedRuntime {
         })
     }
 
+    /// Remove everything in an etcd namespace.
+    /// Will be removed once we can clear the MDC automatically.
+    fn temp_clear_namespace<'p>(&self, py: Python<'p>, name: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.temp_clear_namespace(&name).await.map_err(to_pyerr)
+        })
+    }
+
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
             inner: self.inner.namespace(name).map_err(to_pyerr)?,
@@ -365,7 +374,7 @@ impl DistributedRuntime {
         })
     }
 
-    fn etcd_client(&self) -> PyResult<Option<EtcdClient>> {
+    fn do_not_use_etcd_client(&self) -> PyResult<Option<EtcdClient>> {
         match self.inner.etcd_client().clone() {
             Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
             None => Ok(None),
@@ -497,32 +506,6 @@ impl EtcdKvCache {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner.delete(&key).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get all keys with the prefix
-            let all_keys = inner
-                .get_all()
-                .await
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
-
-            // Delete each key
-            for key in all_keys {
-                // Strip the prefix from the key before deleting
-                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
-                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
-                } else {
-                    inner.delete(&key).await.map_err(to_pyerr)?;
-                }
-            }
-
             Ok(())
         })
     }

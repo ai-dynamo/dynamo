@@ -65,6 +65,8 @@ jobs:
             --sccache-bucket "$SCCACHE_S3_BUCKET" \
             --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
+        env:
+          HF_HOME: /runner/_work/_temp
         run: |
           docker run --runtime=nvidia --rm --gpus all -w /workspace \
             --network host \
