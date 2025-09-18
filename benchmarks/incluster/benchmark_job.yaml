@@ -34,10 +34,8 @@ spec:
             value: ${NAMESPACE}-etcd:2379
         command: ["python3", "-m", "benchmarks.utils.benchmark"]
         args:
-          - --namespace
-          - ${NAMESPACE}
           - --model
-          - Qwen/Qwen3-0.6B
+          - deepseek-ai/DeepSeek-R1
           - --isl
           - "2000"
           - --std
@@ -46,13 +44,8 @@ spec:
           - "256"
           - --output-dir
           - /data/results
-          # Add your --input arguments here
-          # Example: --input agg=/manifests/agg.yaml --input disagg=/manifests/disagg.yaml
-          # Example: --input external=http://external-service:8000
           - --input
-          - agg=/workspace/components/backends/vllm/deploy/agg.yaml
-          - --input
-          - disagg=/workspace/components/backends/vllm/deploy/disagg.yaml
+          - dsr1=${NAMESPACE}-sgl-dsr1-8gpu-frontend:8000
         volumeMounts:
           - name: data-volume
             mountPath: /data

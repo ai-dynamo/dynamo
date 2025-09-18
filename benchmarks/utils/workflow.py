@@ -6,6 +6,7 @@ from typing import Dict, List
 
 from benchmarks.utils.genai import run_concurrency_sweep
 from benchmarks.utils.plot import generate_plots
+from deploy.utils.kubernetes import is_running_in_cluster
 
 
 def print_concurrency_start(
@@ -30,7 +31,14 @@ def run_endpoint_benchmark(
     output_dir: Path,
 ) -> None:
     """Run benchmark for an existing endpoint with custom label"""
-    print(f"🚀 Starting benchmark of endpoint '{label}': {endpoint}")
+    # Handle internal service URLs by adding http:// prefix if needed
+    service_url = endpoint
+    if is_running_in_cluster() and not endpoint.lower().startswith(
+        ("http://", "https://")
+    ):
+        service_url = f"http://{endpoint}"
+
+    print(f"🚀 Starting benchmark of endpoint '{label}': {service_url}")
     print(f"📁 Results will be saved to: {output_dir / label}")
     print_concurrency_start(label, model, isl, osl, std)
 
@@ -38,7 +46,7 @@ def run_endpoint_benchmark(
     (output_dir / label).mkdir(parents=True, exist_ok=True)
 
     run_concurrency_sweep(
-        service_url=endpoint,
+        service_url=service_url,
         model_name=model,
         isl=isl,
         osl=osl,

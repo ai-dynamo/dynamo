@@ -1,21 +1,30 @@
+<!-- # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License. -->
+
 # In-Cluster Benchmarking
 
-This directory contains a simple Kubernetes Job manifest for running Dynamo benchmarks directly within a Kubernetes cluster, eliminating the need for port forwarding.
+This in-cluster benchmarking solution runs Dynamo benchmarks directly within a Kubernetes cluster, eliminating the need for port forwarding and providing better resource utilization.
 
-## Overview
+## What This Tool Does
 
-The in-cluster benchmarking solution consists of:
-
-- **Kubernetes Job manifest** (`benchmark_job.yaml`) - Simple wrapper around the existing benchmarking infrastructure
-- **Documentation** - Instructions for using the job manifest
-
-## Key Benefits
-
-- **No port forwarding required** - Uses Kubernetes service DNS for direct communication
-- **Better resource utilization** - Runs within the cluster alongside your deployments
-- **Persistent results** - Uses `dynamo-pvc` for storing manifests and results
-- **Simple deployment** - Just edit the YAML and run `kubectl apply -f`
-- **Uses existing infrastructure** - Leverages the existing `/benchmarks` and `/benchmarks/utils` code
+The in-cluster benchmarking solution:
+- Runs benchmarks directly within the Kubernetes cluster using internal service URLs
+- Uses Kubernetes service DNS for direct communication (no port forwarding required)
+- Leverages the existing benchmarking infrastructure (`benchmarks.utils.benchmark`)
+- Stores results persistently using `dynamo-pvc`
+- Provides isolated execution environment with configurable resources
 
 ## Prerequisites
 
@@ -26,27 +35,13 @@ The in-cluster benchmarking solution consists of:
 
 ## Quick Start
 
-### 1. Edit the Job Manifest
+### Step 1: Deploy Your DynamoGraphDeployment
+Deploy your DynamoGraphDeployment using the [deployment documentation](../../components/backends/). Ensure it has a frontend service exposed.
 
-Edit `benchmark_job.yaml` to specify your benchmark inputs:
-
-```yaml
-# Set your namespace and docker image
-NAMESPACE: your-namespace
-DOCKER_IMAGE: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-
-# Add your --input arguments
-INPUT_ARGS: --input agg=/manifests/agg.yaml --input disagg=/manifests/disagg.yaml
-```
-
-### 2. Deploy and Run
-
+### Step 2: Deploy and Run Benchmark Job
 ```bash
-# Deploy the benchmark job
-kubectl apply -f benchmark_job.yaml
-
-# With a custom namespace
-NAMESPACE=hannahz envsubst < benchmark_job.yaml | kubectl apply -f -
+# Deploy the benchmark job with your namespace
+NAMESPACE=your-namespace envsubst < benchmark_job.yaml | kubectl apply -f -
 
 # Monitor the job
 kubectl logs -f job/dynamo-benchmark -n your-namespace
@@ -55,112 +50,79 @@ kubectl logs -f job/dynamo-benchmark -n your-namespace
 kubectl get jobs -n your-namespace
 ```
 
-### 3. Retrieve Results
-
+### Step 3: Retrieve Results
 ```bash
-# Copy results from PVC
-kubectl cp <pod-name>:/results ./benchmark_results -n your-namespace
+# Download results from PVC (recommended)
+python3 -m deploy.utils.download_pvc_results \
+  --namespace your-namespace \
+  --output-dir ./benchmark_results \
+  --folder /data/results \
+  --no-config
+
+# Alternative: Copy results directly (requires pod name)
+kubectl cp <pod-name>:/data/results ./benchmark_results -n your-namespace
 ```
 
 ## Configuration
 
-### Environment Variables
+The job manifest uses these default parameters:
+- **Model**: `Qwen/Qwen3-0.6B`
+- **Input sequence length**: 2000 tokens
+- **Output sequence length**: 256 tokens
+- **Input**: `dsr1=${NAMESPACE}-dsr1-frontend:8000` (internal service URL)
 
-The job manifest supports these environment variables with reasonable defaults:
+### Customizing the Job Manifest
 
-- `NAMESPACE` - Kubernetes namespace (default: benchmarking)
-- `DOCKER_IMAGE` - Docker image to use (default: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0)
-- `MODEL` - Model name (default: Qwen/Qwen3-0.6B)
-- `ISL` - Input sequence length (default: 2000)
-- `STD` - Input sequence standard deviation (default: 10)
-- `OSL` - Output sequence length (default: 256)
-- `INPUT_ARGS` - Your --input arguments (no default - you must specify these)
-
-### Input Arguments
-
-Specify your benchmark inputs using the `INPUT_ARGS` variable:
+Edit `benchmark_job.yaml` to modify:
 
 ```yaml
-# Compare DynamoGraphDeployment manifests
-INPUT_ARGS: --input agg=/manifests/agg.yaml --input disagg=/manifests/disagg.yaml
+# Change model
+args:
+  - --model
+  - "meta-llama/Meta-Llama-3-8B"
 
-# Compare Dynamo vs external services
-INPUT_ARGS: --input dynamo=/manifests/dynamo.yaml --input external=http://external-service:8000
+# Change sequence lengths
+args:
+  - --isl
+  - "1500"
+  - --osl
+  - "200"
 
-# Single deployment benchmark
-INPUT_ARGS: --input my-deployment=/manifests/my-config.yaml
+# Change input service
+args:
+  - --input
+  - my-service=${NAMESPACE}-my-service:8000
 ```
 
-## Usage Examples
+## Understanding Your Results
 
-### Compare Multiple Dynamo Deployments
+Results are stored in `/data/results` and follow the same structure as local benchmarking:
 
-```yaml
-# In benchmark_job.yaml
-NAMESPACE: benchmarking
-DOCKER_IMAGE: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-INPUT_ARGS: --input vllm-agg=/manifests/vllm-agg.yaml --input vllm-disagg=/manifests/vllm-disagg.yaml --input trtllm-agg=/manifests/trtllm-agg.yaml
+```text
+/data/results/
+├── plots/                           # Performance visualization plots
+│   ├── SUMMARY.txt                  # Human-readable benchmark summary
+│   ├── p50_inter_token_latency_vs_concurrency.png
+│   ├── avg_inter_token_latency_vs_concurrency.png
+│   ├── request_throughput_vs_concurrency.png
+│   ├── efficiency_tok_s_gpu_vs_user.png
+│   └── avg_time_to_first_token_vs_concurrency.png
+└── dsr1/                           # Results for dsr1 input
+    ├── c1/                          # Concurrency level 1
+    │   └── profile_export_genai_perf.json
+    ├── c2/                          # Concurrency level 2
+    └── ...                          # Other concurrency levels
 ```
-
-```bash
-kubectl apply -f benchmark_job.yaml
-kubectl logs -f job/dynamo-benchmark -n benchmarking
-```
-
-### Compare Dynamo vs External Services
-
-```yaml
-# In benchmark_job.yaml
-NAMESPACE: benchmarking
-DOCKER_IMAGE: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-INPUT_ARGS: --input dynamo=/manifests/dynamo-config.yaml --input external-vllm=http://external-vllm-service:8000 --input external-trtllm=http://external-trtllm-service:8000
-```
-
-```bash
-kubectl apply -f benchmark_job.yaml
-kubectl logs -f job/dynamo-benchmark -n benchmarking
-```
-
-### Custom Model and Parameters
-
-```yaml
-# In benchmark_job.yaml
-NAMESPACE: benchmarking
-DOCKER_IMAGE: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
-MODEL: meta-llama/Meta-Llama-3-8B
-ISL: 1500
-OSL: 200
-INPUT_ARGS: --input my-deployment=/manifests/my-config.yaml
-```
-
-```bash
-kubectl apply -f benchmark_job.yaml
-kubectl logs -f job/dynamo-benchmark -n benchmarking
-```
-
-## Job Manifest Structure
-
-The job manifest includes:
-
-- **Service Account**: Uses `dynamo-sa` for Kubernetes API access
-- **Resource Limits**: Configurable CPU/memory limits
-- **Environment Variables**: HuggingFace token, NATS, ETCD endpoints
-- **Volume Mounts**:
-  - `/manifests`: Read-only access to deployment manifests
-  - `/results`: Read-write access for benchmark results
-- **Cleanup**: Automatic job cleanup after 1 hour
 
 ## Monitoring and Debugging
 
 ### Check Job Status
-
 ```bash
 kubectl get jobs -n <namespace>
 kubectl describe job dynamo-benchmark -n <namespace>
 ```
 
 ### View Logs
-
 ```bash
 # Follow logs in real-time
 kubectl logs -f job/dynamo-benchmark -n <namespace>
@@ -170,61 +132,12 @@ kubectl logs job/dynamo-benchmark -c benchmark-runner -n <namespace>
 ```
 
 ### Debug Failed Jobs
-
 ```bash
 # Check pod status
 kubectl get pods -n <namespace> -l job-name=dynamo-benchmark
 
 # Describe failed pod
 kubectl describe pod <pod-name> -n <namespace>
-
-# Get events
-kubectl get events -n <namespace> --sort-by='.lastTimestamp'
-```
-
-## Results Structure
-
-Results are organized in the `/results` directory:
-
-```
-/results/
-├── plots/                           # Performance visualization plots
-│   ├── SUMMARY.txt                  # Human-readable benchmark summary
-│   ├── p50_inter_token_latency_vs_concurrency.png
-│   ├── avg_inter_token_latency_vs_concurrency.png
-│   ├── request_throughput_vs_concurrency.png
-│   ├── efficiency_tok_s_gpu_vs_user.png
-│   └── avg_time_to_first_token_vs_concurrency.png
-├── <label-1>/                       # Results for first input
-│   ├── c1/                          # Concurrency level 1
-│   │   └── profile_export_genai_perf.json
-│   ├── c2/                          # Concurrency level 2
-│   └── ...                          # Other concurrency levels
-└── <label-N>/                       # Results for additional inputs
-    └── c*/                          # Same structure as above
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Manifest not found**: Ensure manifests are copied to `/manifests` in the PVC
-2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
-3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
-4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
-5. **Resource constraints**: Adjust resource limits if the job is being evicted
-
-### Debug Commands
-
-```bash
-# Check PVC status
-kubectl get pvc dynamo-pvc -n <namespace>
-
-# Verify service account
-kubectl get sa dynamo-sa -n <namespace>
-
-# Check RBAC permissions
-kubectl auth can-i create dynamographdeployments --as=system:serviceaccount:<namespace>:dynamo-sa -n <namespace>
 ```
 
 ## Comparison with Local Benchmarking
@@ -243,3 +156,26 @@ The in-cluster approach is recommended for:
 - Multiple deployment comparisons
 - Resource-constrained environments
 - Automated CI/CD pipelines
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
+2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
+3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
+4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
+5. **Resource constraints**: Adjust resource limits if the job is being evicted
+
+### Debug Commands
+
+```bash
+# Check PVC status
+kubectl get pvc dynamo-pvc -n <namespace>
+
+# Verify service account
+kubectl get sa dynamo-sa -n <namespace>
+
+# Check service endpoints
+kubectl get svc -n <namespace>
+```

@@ -9,15 +9,28 @@ import sys
 from typing import Dict, Tuple
 
 from benchmarks.utils.workflow import run_benchmark_workflow
+from deploy.utils.kubernetes import is_running_in_cluster
 
 
 def validate_inputs(inputs: Dict[str, str]) -> None:
-    """Validate that all inputs are HTTP endpoints"""
+    """Validate that all inputs are HTTP endpoints or internal service URLs when running in cluster"""
     for label, value in inputs.items():
-        if not value.lower().startswith(("http://", "https://")):
-            raise ValueError(
-                f"Input '{label}' must be an HTTP endpoint (starting with http:// or https://). Got: {value}"
-            )
+        # Check if running in cluster and allow internal service URLs
+        if is_running_in_cluster():
+            # When running in cluster, allow internal service URLs (e.g., service.namespace.svc.cluster.local:port)
+            if not (
+                value.lower().startswith(("http://", "https://"))
+                or (":" in value and not value.startswith("/"))
+            ):
+                raise ValueError(
+                    f"Input '{label}' must be an HTTP endpoint or internal service URL (e.g., service.namespace.svc.cluster.local:port). Got: {value}"
+                )
+        else:
+            # When running outside cluster, only allow HTTP endpoints
+            if not value.lower().startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Input '{label}' must be an HTTP endpoint (starting with http:// or https://). Got: {value}"
+                )
 
         # Validate reserved labels
         if label.lower() == "plots":
