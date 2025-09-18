@@ -13,18 +13,21 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:tokeni-log
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-agg
       componentType: worker
       replicas: 1
+      envs:
+        - name: RUST_LOG
+          value: "debug"
       resources:
         limits:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:tokeni-log
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
