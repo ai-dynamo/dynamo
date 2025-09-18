@@ -11,8 +11,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+const (
+	mpiRunSecretName = "mpi-run-ssh-secret"
+)
+
 func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
-	mpiRunSecretName := "mpi-run-ssh-secret"
 	tests := []struct {
 		name                   string
 		numberOfNodes          int32
@@ -286,7 +289,6 @@ func validateProbeDetails(t *testing.T, actual, expected *corev1.Probe) {
 }
 
 func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
-	mpiRunSecretName := "mpi-run-ssh-secret"
 	tests := []struct {
 		name                string
 		numberOfNodes       int32
@@ -483,7 +485,6 @@ func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 }
 
 func TestTRTLLMBackend_addSSHVolumeMount(t *testing.T) {
-	mpiRunSecretName := "mpi-run-ssh-secret"
 	expectedSSHVolumeMount := corev1.VolumeMount{
 		Name:      mpiRunSecretName,
 		MountPath: "/ssh-pk",
