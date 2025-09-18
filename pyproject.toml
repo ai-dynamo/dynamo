@@ -77,13 +77,7 @@ path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "components/frontend/src/dynamo",
-    "components/planner/src/dynamo",
-    "components/backends/llama_cpp/src/dynamo",
-    "components/backends/mocker/src/dynamo",
-    "components/backends/trtllm/src/dynamo",
-    "components/backends/sglang/src/dynamo",
-    "components/backends/vllm/src/dynamo"
+    "components/src/dynamo",
 ]
 
 [tool.hatch.metadata]
