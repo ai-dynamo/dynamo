@@ -40,10 +40,14 @@ def nats_and_etcd():
     etcd.wait()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def runtime():
     """Create a DistributedRuntime for testing. static runtime."""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
-    yield runtime
-    runtime.shutdown()
+    try:
+        # try get a detached runtime from the running one
+        yield DistributedRuntime.detached()
+    except Exception:
+        runtime = DistributedRuntime(loop, True)
+        yield runtime
+        runtime.shutdown()
