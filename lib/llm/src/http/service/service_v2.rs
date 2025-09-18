@@ -294,6 +294,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
+        let etcd_client = config.etcd_client.clone();
         let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
 
         state
@@ -312,6 +313,24 @@ impl HttpServiceConfigBuilder {
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
+
+        // Start background task to poll runtime config metrics
+        // Poll every 30 seconds to keep metrics current as backends come and go
+        // Metrics are never removed - only marked as healthy/unhealthy
+        let poll_interval = Duration::from_secs(
+            std::env::var("DYN_RUNTIME_CONFIG_METRICS_POLL_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+        );
+
+        let _polling_task = super::metrics::Metrics::start_runtime_config_polling_task(
+            state.metrics_clone(),
+            state.manager_clone(),
+            etcd_client,
+            poll_interval,
+        );
+        // Note: We don't need to store the JoinHandle as the task will run for the lifetime of the service
 
         let mut router = axum::Router::new();
 
