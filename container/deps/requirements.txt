@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 accelerate==1.6.0
+# Latest aiconfigurator release has dep on numpy>=2.0 which conflicts with numpy below
+aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator@ec152ec
 aiofiles
 av==15.0.0
 fastapi==0.115.6

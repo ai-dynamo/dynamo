@@ -144,6 +144,7 @@ def profile_decode_aiconfigurator(
             isl,
             osl,
             num_request,
+            mode="decode",
             **model_config_kwargs,
         )
         return perf_dict["tpot"], perf_dict["tokens/s/gpu"]

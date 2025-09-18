@@ -345,6 +345,7 @@ async def run_profile(args):
                             args.isl,
                             args.osl,
                             num_request,
+                            mode="decode",
                             tp_size=tp_size,
                         )
 

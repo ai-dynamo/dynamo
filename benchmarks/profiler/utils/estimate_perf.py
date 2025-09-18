@@ -74,6 +74,7 @@ class AIConfiguratorPerfEstimator:
         isl: int,
         osl: int,
         batch_size: int,
+        mode: str = "full",
         **model_config_kwargs,
     ) -> dict[str, Any]:
         """
@@ -84,6 +85,10 @@ class AIConfiguratorPerfEstimator:
             isl: Input sequence length
             osl: Output sequence length
             batch_size: Batch size
+            mode: Indicates what perf data to estimate.
+                "full": Estimate prefill and decode perf.
+                "prefill": Only estimate context perf.
+                "decode": Only estimate decode perf.
             **model_config_kwargs: aiconfigurator model config kwargs
                                    (such as tp_size, moe_tp_size, etc).
 
@@ -91,6 +96,16 @@ class AIConfiguratorPerfEstimator:
             dict: Perf metrics returned by aiconfigurator
         """
         aiconfigurator = _try_import_aiconfigurator()
+
+        mode_to_aic_mode = {
+            "full": "static",
+            "prefill": "static_ctx",
+            "decode": "static_gen",
+        }
+        if mode not in mode_to_aic_mode:
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be one of {list(mode_to_aic_mode.keys())}."
+            )
 
         self.runtime_config = aiconfigurator.sdk.config.RuntimeConfig(
             batch_size=batch_size,
@@ -105,7 +120,7 @@ class AIConfiguratorPerfEstimator:
         )
 
         summary = session.run_static(
-            mode="agg", runtime_config=self.runtime_config, stride=32
+            mode=mode_to_aic_mode[mode], runtime_config=self.runtime_config, stride=32
         )
         summary_df = summary.get_summary_df()
 
@@ -131,6 +146,7 @@ class AIConfiguratorPerfEstimator:
             isl,
             5,  # small osl
             1,  # concurrency = 1
+            mode="prefill",
             **model_config_kwargs,
         )
 
