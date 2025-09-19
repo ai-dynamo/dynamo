@@ -563,6 +563,10 @@ impl ActiveSequencesMultiWorker {
             if let Some((_, handle)) = self.handles.remove(worker_id) {
                 handle.abort();
             }
+
+            // Clean up request_to_worker mappings for this worker
+            self.request_to_worker
+                .retain(|_request_id, mapped_worker_id| *mapped_worker_id != *worker_id);
         }
 
         // Add new workers
