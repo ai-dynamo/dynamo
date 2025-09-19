@@ -164,8 +164,16 @@ impl KvRouterConfig {
 // TODO: is there a way (macro) to auto-derive the KvIndexerInterface trait for this
 // since both variants implement it
 pub enum Indexer {
+    /// Updates itself based on KV events emitted by backend workers.
+    /// Has the ability to persist and snapshot states.
     KvIndexer(KvIndexer),
+
+    /// Predicts the cached blocks based on requests on a TTL basis.
+    /// Currently does not persist or snapshot states (WIP to enable that).
     ApproxKvIndexer(ApproxKvIndexer),
+
+    /// Used when we do not wish to use the indexer at all (e.g., when overlap_score_weight is 0).
+    /// Note: This will cause KV events to accumulate in JetStream as we do not regularly purge them.
     None,
 }
 

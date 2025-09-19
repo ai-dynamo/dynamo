@@ -31,6 +31,8 @@ The main KV-aware routing arguments:
 
 >[!Note]
 > State persistence is only available when KV events are enabled (default). When using `--no-kv-events` with `ApproxKvIndexer`, state persistence is not currently supported.
+>
+> When `--kv-overlap-score-weight` is set to 0, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream.
 
 ## Architecture
 
