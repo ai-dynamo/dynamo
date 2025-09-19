@@ -150,7 +150,7 @@ impl ReasoningParser for GptOssReasoningParser {
 
     fn parse_reasoning_streaming_incremental(
         &mut self,
-        _text: &str,
+        text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
         tracing::debug!(
@@ -173,9 +173,8 @@ impl ReasoningParser for GptOssReasoningParser {
         }
 
         if let Some(channel) = self.parser.current_channel() {
-            tracing::debug!("Current channel: {}", channel);
+            tracing::debug!("Current channel {}", channel);
             if channel == "final" {
-                tracing::debug!("In final channel, processing normal text");
                 // If we're in the final channel, we should not parse reasoning
                 if let Some(current) = self.parser.last_content_delta().unwrap_or_default() {
                     tracing::debug!("Got normal text delta of {} chars", current.len());
@@ -186,6 +185,64 @@ impl ReasoningParser for GptOssReasoningParser {
                 }
                 tracing::debug!("No content delta in final channel");
                 ParserResult::default()
+            } else if channel == "commentary" {
+                // If we're in the commentary channel, we should return raw token content and recover content that has been consumed by the parser
+                // so that the tool parser can process it properly
+                if let Ok(enc) = get_harmony_encoding() {
+                    let current_content = self.parser.current_content().unwrap_or_default();
+                    let mut final_text = text.to_string();
+
+                    // Restore commentary metadata consumed by the parser so the tool-call parser can
+                    // process it correctly.
+                    //
+                    // Example:
+                    //   Before parsing:
+                    //   "<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{\"format\":\"celsius\",\"location\":\"San Francisco\"}<|call|>"
+                    //   After parsing, the header is stripped, so we must reconstruct it:
+                    //   "<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>"
+                    //
+                    // This ensures downstream tool-call parsing receives the channel, target, and
+                    // constraint metadata together with the message payload.
+
+                    // Recovery should only happen once, and only when `current_content` is empty.
+                    if current_content.is_empty() {
+                        let tokens = self.parser.tokens();
+
+                        // Get the token id for " <|channel|>"
+                        let channel_token_id = enc
+                            .tokenizer()
+                            .encode_with_special_tokens("<|channel|>")
+                            .last()
+                            .copied();
+
+                        // Find the last occurrence of the <|channel|> token (id 20005) in the tokens vector
+                        let last_channel_token_idx = channel_token_id
+                            .and_then(|token_id| {
+                                tokens.iter().rposition(|token| *token == token_id)
+                            })
+                            .unwrap_or(0);
+
+                        // Then get the generated text from the last <|channel|> to the end of self.parser.tokens()
+                        let end_token_idx = self.parser.tokens().len();
+                        // Use Harmony's decode_utf8 to decode tokens into text
+                        let generated_text = enc
+                            .tokenizer()
+                            .decode_utf8(
+                                &self.parser.tokens()[last_channel_token_idx..end_token_idx],
+                            )
+                            .unwrap_or_default();
+
+                        final_text = generated_text;
+                    }
+
+                    ParserResult {
+                        normal_text: final_text,
+                        reasoning_text: String::new(),
+                    }
+                } else {
+                    tracing::warn!("Failed to get harmony encoding for raw token decoding");
+                    ParserResult::default()
+                }
             } else {
                 tracing::debug!("In reasoning channel: {}", channel);
                 if let Some(current) = self.parser.last_content_delta().unwrap_or_default() {
