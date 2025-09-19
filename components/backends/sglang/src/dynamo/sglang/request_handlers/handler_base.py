@@ -42,7 +42,8 @@ class BaseWorkerHandler(ABC):
         if self.skip_tokenizer_init:
             return {"input_ids": request["token_ids"]}
         else:
-            # use sglang's tokenizer itself
+            # use sglang's chat templating itself but leave tokenization to the 
+            # interal engine's TokenizerManager
             prompt = self.engine.tokenizer_manager.tokenizer.apply_chat_template(
                 request["messages"],
                 tokenize=False,

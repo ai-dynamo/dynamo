@@ -25,15 +25,17 @@ async def register_llm_with_runtime_config(
     """
     runtime_config = await _get_runtime_config(engine, dynamo_args)
     input_type = ModelInput.Tokens
+    output_type = ModelType.Chat | ModelType.Completions
     if not server_args.skip_tokenizer_init:
         logging.warning(
-            "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used"
+            "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
+        output_type = ModelType.Chat
     try:
         await register_llm(
             input_type,
-            ModelType.Chat | ModelType.Completions,
+            output_type,
             endpoint,
             server_args.model_path,
             server_args.served_model_name,

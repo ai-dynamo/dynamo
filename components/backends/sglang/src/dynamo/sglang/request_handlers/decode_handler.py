@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import time
 
 import sglang as sgl
 
@@ -95,18 +96,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_info["bootstrap_room"],
             )
 
-            async for out in self._process_stream(decode):
-                yield out
+            if self.skip_tokenizer_init:
+                async for out in self._process_token_stream(decode):
+                    yield out
+            else:
+                async for out in self._process_text_stream(decode):
+                    yield out
         else:
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
             )
-            async for out in self._process_stream(agg):
-                yield out
+            if self.skip_tokenizer_init:
+                async for out in self._process_token_stream(agg):
+                    yield out
+            else:
+                async for out in self._process_text_stream(agg):
+                    yield out
 
-    async def _process_stream(self, stream_source):
+    async def _process_token_stream(self, stream_source):
         num_output_tokens_so_far = 0
 
         async for res in stream_source:
@@ -120,11 +129,39 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     next_total_toks = len(res["output_ids"])
                 except KeyError:
                     raise ValueError(
-                        f"Missing 'output_ids' in response. This often happens when using skip_tokenizer_init=True. "
-                        f"If you're using ModelType.CHAT or custom model configurations, you may need to modify "
-                        f"the tokenization/detokenization logic in your handler. Response keys: {list(res.keys())}"
+                        f"Missing 'output_ids' in response. Response keys: {list(res.keys())}"
                     )
                 out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
                 num_output_tokens_so_far = next_total_toks
 
             yield out
+
+    async def _process_text_stream(self, stream_source):
+        """Process stream for text input mode"""
+        count = 0  
+
+        async for res in stream_source:
+            print(res)
+            index = res.get("index", 0)
+            text = res.get("text", "")
+            
+            finish_reason = res["meta_info"]["finish_reason"]
+            finish_reason_type = finish_reason["type"] if finish_reason else None
+            next_count = len(text)
+            delta = text[count:]
+            
+            choice_data = {
+                "index": index,
+                "delta": {"role": "assistant", "content": delta},
+                "finish_reason": finish_reason_type,
+            }
+            
+            response = {
+                "id": res["meta_info"]["id"],
+                "created": int(time.time()),
+                "choices": [choice_data],
+                "model": self.config.server_args.served_model_name,
+                "object": "chat.completion.chunk",
+            }
+            yield response
+            count = next_count
