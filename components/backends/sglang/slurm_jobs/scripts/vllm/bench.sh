@@ -60,7 +60,7 @@ for concurrency in "${chosen_concurrencies[@]}"
 do
     num_prompts=$((concurrency * 5))
     echo "Running benchmark with concurrency: $concurrency and num-prompts: $num_prompts, writing to file ${result_dir}"
-    result_filename="isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}_gpus_${total_gpus}.json"
+    result_filename="isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}_gpus${total_gpus}.json"
 
     set -x
     python3 benchmark_serving.py \
