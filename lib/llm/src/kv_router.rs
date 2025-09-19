@@ -399,11 +399,11 @@ impl KvRouter {
             .await;
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) {
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    pub async fn free(&self, request_id: &str) {
+    pub async fn free(&self, request_id: &str) -> Result<()> {
         self.scheduler.free(request_id).await
     }
 
@@ -456,14 +456,12 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                     overlap_blocks,
                 }
             }
-            RouterRequest::MarkPrefill => {
-                self.mark_prefill_completed(&context_id).await;
-                RouterResponse::PrefillMarked { success: true }
-            }
-            RouterRequest::MarkFree => {
-                self.free(&context_id).await;
-                RouterResponse::FreeMarked { success: true }
-            }
+            RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {
+                success: self.mark_prefill_completed(&context_id).await.is_ok(),
+            },
+            RouterRequest::MarkFree => RouterResponse::FreeMarked {
+                success: self.free(&context_id).await.is_ok(),
+            },
         };
 
         let response = Annotated::from_data(response);
@@ -593,7 +591,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                 let wrapped_stream = Box::pin(async_stream::stream! {
                     if let Some(first_item) = response_stream.next().await {
-                        chooser.mark_prefill_completed(&context_id).await;
+                        if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                            tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                        }
                         yield first_item;
                     }
 
@@ -601,7 +601,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         yield item;
                     }
 
-                    chooser.free(&context_id).await;
+                    if let Err(e) = chooser.free(&context_id).await {
+                        tracing::warn!("Failed to free request {context_id}: {e:?}");
+                    }
                 });
                 Ok(ResponseStream::new(wrapped_stream, stream_context))
             }

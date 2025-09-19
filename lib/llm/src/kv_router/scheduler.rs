@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use anyhow::Result;
 use dynamo_runtime::component::{Component, Instance};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::traits::events::EventPublisher;
@@ -329,15 +330,14 @@ impl KvScheduler {
             .await;
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) {
-        let _ = self
-            .slots
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
+        self.slots
             .mark_prefill_completed(&request_id.to_string())
-            .await;
+            .await
     }
 
-    pub async fn free(&self, request_id: &str) {
-        let _ = self.slots.free(&request_id.to_string()).await;
+    pub async fn free(&self, request_id: &str) -> Result<()> {
+        self.slots.free(&request_id.to_string()).await
     }
 
     pub async fn get_potential_loads(
