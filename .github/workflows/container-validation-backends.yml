@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: "Check all dependent jobs"
         run: |
-          echo '${{ toJson(needs) }}' | jq 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   vllm:
     runs-on: gpu-l40-amd64
