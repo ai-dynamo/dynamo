@@ -35,7 +35,7 @@ class SamplingOptions(BaseModel):
 
 class PreprocessedRequest(BaseModel):
     token_ids: List[TokenIdType]
-    batch_token_ids: Optional[List[List[TokenIdType]]] = None
+    text: Optional[str] = None
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
