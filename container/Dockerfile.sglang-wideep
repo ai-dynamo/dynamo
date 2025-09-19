@@ -18,7 +18,7 @@ RUN apt-get update -y && \
     apt-get install -y \
       cmake meson ninja-build pybind11-dev patchelf net-tools \
       build-essential protobuf-compiler libssl-dev pkg-config \
-      clang libclang-dev git rapidjson-dev zlib1g-dev && \
+      clang libclang-dev git rapidjson-dev zlib1g-dev jq && \
     pip install --break-system-packages meson-python wheel build
 
 # Build UCX + NIXL for x86/hopper until its fully tested on GB200

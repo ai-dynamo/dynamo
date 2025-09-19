@@ -2080,6 +2080,7 @@ dependencies = [
  "rustpython-parser",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid 1.18.0",
 ]
