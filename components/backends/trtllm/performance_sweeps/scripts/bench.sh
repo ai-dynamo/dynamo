@@ -78,13 +78,6 @@ apt install curl
 
 # try client
 
-do_get_logs(){
-    worker_log_path=$1
-    output_folder=$2
-    grep -a "'num_ctx_requests': 0, 'num_ctx_tokens': 0" ${worker_log_path} > ${output_folder}/gen_only.txt || true
-    grep -a "'num_generation_tokens': 0" ${worker_log_path} > ${output_folder}/ctx_only.txt || true
-}
-
 # The configuration is dumped to a JSON file which hold details of the OAI service
 # being benchmarked.
 deployment_config=$(cat << EOF
@@ -153,8 +146,6 @@ curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
   "max_tokens": 30
 }'
 
-cp ${log_path}/output_workers.log ${log_path}/workers_start.log
-
 python3 ${SCRIPTS_DIR}/scripts/bench/benchmark_serving.py \
         --served-model-name ${model} \
         --model ${model_path} \
@@ -203,8 +194,6 @@ for concurrency in ${concurrency_list}; do
         --result-filename "results_concurrency_${original_concurrency}_gpus_${total_gpus}.json"
 
     echo "Benchmark with concurrency ${concurrency} done"
-    do_get_logs ${log_path}/output_workers.log ${log_path}/concurrency_${concurrency}
-    echo -n "" > ${log_path}/output_workers.log
 done
 
 
