@@ -161,11 +161,11 @@ def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
 
 class ConfigModifierProtocol(Protocol):
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
+    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
         ...
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int) -> dict:
+    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False) -> dict:
         ...
 
     @classmethod
@@ -177,17 +177,20 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
         ...
 
 
 class VllmV1ConfigModifier:
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
+    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "vllm-agg"
+        if is_moe_model:
+            cfg.metadata.name = "vllm-moe-agg"
+        else:
+            cfg.metadata.name = "vllm-agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -266,7 +269,7 @@ class VllmV1ConfigModifier:
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
+    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False):
         cfg = Config.model_validate(config)
 
         worker_service = cfg.spec.services[
@@ -365,7 +368,7 @@ class VllmV1ConfigModifier:
             return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
         # TODO
         try:
             with open(dynamo_log_fn, "r") as f:
@@ -390,11 +393,14 @@ class VllmV1ConfigModifier:
 
 class SGLangConfigModifier:
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
+    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "sglang-agg"
+        if is_moe_model:
+            cfg.metadata.name = "sglang-moe-agg"
+        else:
+            cfg.metadata.name = "sglang-agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -474,7 +480,7 @@ class SGLangConfigModifier:
         return config
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
+    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False):
         cfg = Config.model_validate(config)
 
         worker_service = cfg.spec.services[
@@ -573,7 +579,7 @@ class SGLangConfigModifier:
             return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
         # TODO
         try:
             with open(dynamo_log_fn, "r") as f:
@@ -590,11 +596,14 @@ class SGLangConfigModifier:
 
 class TrtllmConfigModifier:
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
+    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "trtllm-agg"
+        if is_moe_model:
+            cfg.metadata.name = "trtllm-moe-agg"
+        else:
+            cfg.metadata.name = "trtllm-agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -708,7 +717,7 @@ class TrtllmConfigModifier:
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
+    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False):
         cfg = Config.model_validate(config)
 
         worker_service = cfg.spec.services["TRTLLMWorker"]
@@ -810,7 +819,7 @@ class TrtllmConfigModifier:
         return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
         try:
