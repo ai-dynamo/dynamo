@@ -16,12 +16,7 @@
 #######################################################################
 # 🚨 DEPRECATION NOTICE 🚨
 #
-# This Earthfile for the operator is being replaced by:
-# - `make docker-build-operator` (uses Dockerfile in this directory)
-# - `make test-operator` for testing
-# - `make lint-operator` for linting
-# - See ../../BUILD_SYSTEM_MIGRATION.md for migration guide
-#
+# This Earthfile for the operator is being replaced by docker
 # This file is kept temporarily for backward compatibility but will
 # be removed in a future release. Please migrate to the new system.
 #######################################################################
