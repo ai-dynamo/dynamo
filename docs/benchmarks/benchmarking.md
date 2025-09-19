@@ -314,7 +314,8 @@ Deploy your DynamoGraphDeployment using the [deployment documentation](../../com
 
 ### Step 2: Deploy and Run Benchmark Job
 
-**Option A: Set environment variables (recommended for multiple commands)**
+#### Option A: Set environment variables (recommended for multiple commands)
+
 ```bash
 # Set environment variables for your deployment
 export NAMESPACE=benchmarking
@@ -333,7 +334,8 @@ kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
 kubectl get jobs -n $NAMESPACE
 ```
 
-**Option B: One-liner deployment**
+#### Option B: One-liner deployment
+
 ```bash
 NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVICE_URL=vllm-agg-frontend:8000 DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0 envsubst < benchmarks/incluster/benchmark_job.yaml | kubectl apply -f -
 ```
@@ -447,8 +449,10 @@ kubectl get sa dynamo-sa -n $NAMESPACE
 # Check service endpoints
 kubectl get svc -n $NAMESPACE
 
-# Verify your service URL is accessible
-kubectl get svc $SERVICE_URL -n $NAMESPACE
+# Verify your service exists and has endpoints
+SVC_NAME="${SERVICE_URL%%:*}"
+kubectl get svc "$SVC_NAME" -n "$NAMESPACE"
+kubectl get endpoints "$SVC_NAME" -n "$NAMESPACE"
 ```
 
 ---

@@ -12,9 +12,20 @@ spec:
       serviceAccountName: dynamo-sa
       imagePullSecrets:
       - name: docker-imagepullsecret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: benchmark-runner
         image: ${DOCKER_IMAGE}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
         resources:
           requests:
             cpu: "4"

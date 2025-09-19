@@ -9,6 +9,20 @@ from benchmarks.utils.plot import generate_plots
 from deploy.utils.kubernetes import is_running_in_cluster
 
 
+def has_http_scheme(url: str) -> bool:
+    """Check if URL has HTTP or HTTPS scheme."""
+    return url.lower().startswith(("http://", "https://"))
+
+
+def normalize_service_url(endpoint: str) -> str:
+    e = endpoint.strip()
+    if has_http_scheme(e):
+        return e
+    if is_running_in_cluster():
+        return f"http://{e}"
+    return e  # Outside cluster, validation will have ensured scheme is present
+
+
 def print_concurrency_start(
     label: str, model: str, isl: int, osl: int, std: int
 ) -> None:
@@ -31,12 +45,8 @@ def run_endpoint_benchmark(
     output_dir: Path,
 ) -> None:
     """Run benchmark for an existing endpoint with custom label"""
-    # Handle internal service URLs by adding http:// prefix if needed
-    service_url = endpoint
-    if is_running_in_cluster() and not endpoint.lower().startswith(
-        ("http://", "https://")
-    ):
-        service_url = f"http://{endpoint}"
+    # Normalize endpoint to a usable URL (handles in-cluster scheme-less inputs)
+    service_url = normalize_service_url(endpoint)
 
     print(f"🚀 Starting benchmark of endpoint '{label}': {service_url}")
     print(f"📁 Results will be saved to: {output_dir / label}")
@@ -81,7 +91,7 @@ def run_benchmark_workflow(
     model: str = "Qwen/Qwen3-0.6B",
     output_dir: str = "benchmarks/results",
 ) -> None:
-    """Main benchmark workflow orchestrator for HTTP endpoints only"""
+    """Main benchmark workflow orchestrator for HTTP endpoints (and in-cluster internal service URLs)"""
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
