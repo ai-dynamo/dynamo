@@ -11,16 +11,17 @@ head_port=8000
 
 n_prefill=$1
 n_decode=$2
+total_gpus=$3
 
 source /scripts/benchmark_utils.sh
 work_dir="/scripts/vllm/"
 cd $work_dir
 
-chosen_isl=$3
-chosen_osl=$4
-concurrency_list=$5
+chosen_isl=$4
+chosen_osl=$5
+concurrency_list=$6
 IFS='x' read -r -a chosen_concurrencies <<< "$concurrency_list"
-chosen_req_rate=$6
+chosen_req_rate=$7
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
@@ -59,7 +60,7 @@ for concurrency in "${chosen_concurrencies[@]}"
 do
     num_prompts=$((concurrency * 5))
     echo "Running benchmark with concurrency: $concurrency and num-prompts: $num_prompts, writing to file ${result_dir}"
-    result_filename="isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}.json"
+    result_filename="gpus_${total_gpus}_isl_${chosen_isl}_osl_${chosen_osl}_concurrency_${concurrency}_req_rate_${chosen_req_rate}.json"
 
     set -x
     python3 benchmark_serving.py \
