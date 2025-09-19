@@ -166,6 +166,7 @@ impl KvRouterConfig {
 pub enum Indexer {
     KvIndexer(KvIndexer),
     ApproxKvIndexer(ApproxKvIndexer),
+    None,
 }
 
 impl Indexer {
@@ -176,6 +177,10 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Indexer::ApproxKvIndexer(indexer) => indexer.find_matches(sequence).await,
+            Indexer::None => Ok(OverlapScores {
+                scores: HashMap::new(),
+                frequencies: Vec::new(),
+            }),
         }
     }
 
@@ -183,6 +188,11 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
             Indexer::ApproxKvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::None => {
+                panic!(
+                    "Cannot dump events: indexer does not exist (is overlap_score_weight set to 0?)"
+                );
+            }
         }
     }
 }
@@ -243,7 +253,10 @@ impl KvRouter {
         .await?;
         let runtime_configs_rx = runtime_configs_watcher.receiver();
 
-        let indexer = if kv_router_config.use_kv_events {
+        let indexer = if kv_router_config.overlap_score_weight == 0.0 {
+            // When overlap_score_weight is zero, we don't need to track prefixes
+            Indexer::None
+        } else if kv_router_config.use_kv_events {
             let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(&component);
             Indexer::KvIndexer(KvIndexer::new(
                 cancellation_token.clone(),
