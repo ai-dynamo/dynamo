@@ -1594,69 +1594,7 @@ class FrameworkInfo(NodeInfo):
         frameworks_found = 0
 
         for module_name, display_name in frameworks_to_check:
-            # Special handling for TensorRT-LLM to avoid NVML crashes
-            if module_name == "tensorrt_llm":
-                # Check if it's installed in system packages first
-                python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-                system_packages = [
-                    f"/usr/local/lib/python{python_version}/dist-packages",
-                    f"/usr/lib/python{python_version}/dist-packages",
-                ]
-
-                for pkg_path in system_packages:
-                    if os.path.exists(pkg_path):
-                        tensorrt_dirs = [
-                            d for d in os.listdir(pkg_path) if "tensorrt_llm" in d
-                        ]
-                        if tensorrt_dirs:
-                            frameworks_found += 1
-                            # Try to get version safely
-                            try:
-                                result = subprocess.run(
-                                    [
-                                        sys.executable,
-                                        "-c",
-                                        "import tensorrt_llm; print(tensorrt_llm.__version__)",
-                                    ],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10,
-                                )
-                                if result.returncode == 0:
-                                    version = result.stdout.strip()
-                                    package_info = PythonPackageInfo(
-                                        package_name=display_name,
-                                        version=version,
-                                        module_path=f"{pkg_path}/tensorrt_llm/__init__.py",
-                                        is_framework=True,
-                                        is_installed=True,
-                                    )
-                                else:
-                                    package_info = PythonPackageInfo(
-                                        package_name=display_name,
-                                        version=f"Found in {pkg_path} but not importable",
-                                        is_framework=True,
-                                        is_installed=True,
-                                    )
-                                self.add_child(package_info)
-                                break
-                            except (
-                                subprocess.TimeoutExpired,
-                                subprocess.CalledProcessError,
-                            ):
-                                package_info = PythonPackageInfo(
-                                    package_name=display_name,
-                                    version=f"Found in {pkg_path} but not importable",
-                                    is_framework=True,
-                                    is_installed=True,
-                                )
-                                self.add_child(package_info)
-                                break
-
-                # Don't add anything if not found in system
-                continue
-
-            # Regular import for other frameworks
+            # Regular import for all frameworks
             try:
                 module = __import__(module_name)
                 version = getattr(module, "__version__", "installed")
