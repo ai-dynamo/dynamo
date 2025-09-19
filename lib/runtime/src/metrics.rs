@@ -1444,7 +1444,7 @@ mod test_metricsregistry_nats {
             ), // Wide range around 2
             // Component NATS metrics (ordered to match COMPONENT_NATS_METRICS)
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 0.0,
             ), // No processing yet
@@ -1573,7 +1573,7 @@ mod test_metricsregistry_nats {
             ), // Wide range around 16
             // Component NATS metrics
             (
-                build_component_metric_name(nats_service::AVG_PROCESSING_MS),
+                build_component_metric_name(nats_service::PROCESSING_MS_AVG),
                 0.0,
                 1.0,
             ), // Low processing time
@@ -1619,7 +1619,7 @@ mod test_metricsregistry_nats {
                 23000.0,
             ), // ~75-125% of 20660
             (
-                build_component_metric_name(work_handler::INFLIGHT_REQUESTS),
+                build_component_metric_name(work_handler::INFLIGHT_REQUESTS_TOTAL),
                 0.0,
                 1.0,
             ), // 0 or very low
