@@ -261,6 +261,11 @@ async fn handle_writer(
                 break;
             }
 
+            _ = context.stopped() => {
+                tracing::trace!("context stop signal received; shutting down");
+                break;
+            }
+
             msg = bytes_rx.recv() => {
                 match msg {
                     Some(msg) => msg,
