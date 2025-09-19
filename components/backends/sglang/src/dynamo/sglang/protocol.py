@@ -34,7 +34,7 @@ class SamplingOptions(BaseModel):
 
 
 class PreprocessedRequest(BaseModel):
-    token_ids: List[TokenIdType]
+    token_ids: Optional[List[TokenIdType]] = None
     text: Optional[str] = None
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
