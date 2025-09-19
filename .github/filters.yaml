@@ -1,0 +1,17 @@
+docs:
+  - "docs/**"
+  - "**/*.md"
+  - "**/*.rst"
+ci:
+  - ".github/**"
+  - ".devcontainer/**"
+  - "container/**"
+code:
+  - "benchmarks/**"
+  - "components/**"
+  - "deploy/**"
+  - "examples/**"
+  - "launch/**"
+  - "lib/**"
+  - "recipes/**"
+  - "tests/**"

@@ -27,13 +27,7 @@ jobs:
         uses: dorny/paths-filter@v3
         id: filter
         with:
-          filters: |
-            docs:
-              - 'docs/**'
-            code:
-              - '**'
-              - '!docs/**'
-              - '!.github/**'
+          filters: .github/filters.yaml
 
   pr-backend-check:
     runs-on: ubuntu-latest
