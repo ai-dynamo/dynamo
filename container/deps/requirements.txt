@@ -23,6 +23,7 @@ pip
 pmdarima
 pre-commit
 prometheus-api-client
+prometheus_client
 prophet
 protobuf==5.29.5
 pydantic==2.7.1

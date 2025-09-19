@@ -102,7 +102,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
-    m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -359,6 +358,15 @@ impl DistributedRuntime {
         })
     }
 
+    /// Remove everything in an etcd namespace.
+    /// Will be removed once we can clear the MDC automatically.
+    fn temp_clear_namespace<'p>(&self, py: Python<'p>, name: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.temp_clear_namespace(&name).await.map_err(to_pyerr)
+        })
+    }
+
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
             inner: self.inner.namespace(name).map_err(to_pyerr)?,
@@ -366,7 +374,7 @@ impl DistributedRuntime {
         })
     }
 
-    fn etcd_client(&self) -> PyResult<Option<EtcdClient>> {
+    fn do_not_use_etcd_client(&self) -> PyResult<Option<EtcdClient>> {
         match self.inner.etcd_client().clone() {
             Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
             None => Ok(None),
@@ -501,32 +509,6 @@ impl EtcdKvCache {
             Ok(())
         })
     }
-
-    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get all keys with the prefix
-            let all_keys = inner
-                .get_all()
-                .await
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
-
-            // Delete each key
-            for key in all_keys {
-                // Strip the prefix from the key before deleting
-                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
-                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
-                } else {
-                    inner.delete(&key).await.map_err(to_pyerr)?;
-                }
-            }
-
-            Ok(())
-        })
-    }
 }
 
 #[pymethods]
@@ -565,24 +547,51 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self
+
+        // Convert Python dict to serde_json::Value if provided and validate it's an object
+        let health_payload_json = health_check_payload
+            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .transpose()
+            .map_err(|err| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Failed to convert health_check_payload: {}",
+                    err
+                ))
+            })?;
+
+        // Require an object/dict
+        if let Some(ref payload) = health_payload_json {
+            if !payload.is_object() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "health_check_payload must be a JSON object (dict)",
+                ));
+            }
+        }
+
+        let mut builder = self
             .inner
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
+
+        if let Some(payload) = health_payload_json {
+            builder = builder.health_check_payload(payload);
+        }
+
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder

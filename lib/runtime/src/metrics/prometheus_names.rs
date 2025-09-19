@@ -6,6 +6,34 @@
 //! This module provides centralized Prometheus metric name constants and sanitization functions
 //! for various components to ensure consistency and avoid duplication across the codebase.
 //!
+//! ## Naming Conventions
+//!
+//! All metric names should follow: `{prefix}_{name}_{suffix}`
+//!
+//! **Prefix**: Component identifier (`dynamo_component_`, `dynamo_frontend_`, etc.)
+//! **Name**: Descriptive snake_case name indicating what is measured
+//! **Suffix**:
+//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`
+//!   - Counters: `_total` (not `total_` prefix)
+//!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
+//!
+//! **Common Transformations**:
+//! - ❌ `_counter` → ✅ `_total`
+//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
+//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
+//! - ❌ `_gauge` → ✅ (no suffix needed for current values)
+//! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
+//!
+//! **Examples**:
+//! - ✅ `dynamo_frontend_requests_total` - Total request counter (not `incoming_requests`)
+//! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
+//! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
+//! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
+//! - ✅ `dynamo_frontend_inflight_requests_total` - Current inflight requests gauge
+//! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
+//! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
+//!
 //! ## Key Differences: Prometheus Metric Names vs Prometheus Label Names
 //!
 //! **Metric names**: Allow colons and `__` anywhere. **Label names**: No colons, no `__` prefix.
@@ -45,8 +73,11 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of inflight requests
-    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+    /// Number of requests waiting in HTTP queue before receiving the first response.
+    pub const QUEUED_REQUESTS_TOTAL: &str = "queued_requests_total";
+
+    /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
+    pub const INFLIGHT_REQUESTS_TOTAL: &str = "inflight_requests_total";
 
     /// Duration of LLM requests
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
