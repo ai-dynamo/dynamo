@@ -331,6 +331,104 @@ async def async_request_openai_completions(
     return output
 
 
+async def async_request_dynamo_completions(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(
+        ("completions", "profile")
+    ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
+
+    async with aiohttp.ClientSession(
+        trust_env=True, timeout=AIOHTTP_TIMEOUT
+    ) as session:
+        payload = {
+            "model": request_func_input.model_name
+            if request_func_input.model_name
+            else request_func_input.model,
+            "prompt": request_func_input.prompt,
+            "temperature": 0.0,
+            "best_of": request_func_input.best_of,
+            "max_tokens": request_func_input.output_len,
+            "logprobs": request_func_input.logprobs,
+            "stream": True,
+            "stream_options": {
+                "include_usage": True,
+            },
+        }
+        if request_func_input.ignore_eos:
+            payload["ignore_eos"] = request_func_input.ignore_eos
+        if request_func_input.extra_body:
+            payload.update(request_func_input.extra_body)
+        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+
+        output = RequestFuncOutput()
+        output.prompt_len = request_func_input.prompt_len
+
+        generated_text = ""
+        st = time.perf_counter()
+        most_recent_timestamp = st
+        try:
+            async with session.post(
+                url=api_url, json=payload, headers=headers
+            ) as response:
+                if response.status == 200:
+                    first_chunk_received = False
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
+                            continue
+
+                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        if chunk != "[DONE]":
+                            data = json.loads(chunk)
+
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
+                            if choices := data.get("choices"):
+                                # Note that text could be empty here
+                                # e.g. for special tokens
+                                text = choices[0].get("text")
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp - most_recent_timestamp)
+
+                                most_recent_timestamp = timestamp
+                                generated_text += text or ""
+                            if usage := data.get("usage"):
+                                output.output_tokens = usage.get("completion_tokens")
+                    if first_chunk_received:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!"
+                        )
+                    output.generated_text = generated_text
+                    output.latency = most_recent_timestamp - st
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
@@ -470,160 +568,10 @@ def get_tokenizer(
         )
 
 
-async def async_request_dynamo_chat_completions(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
-) -> RequestFuncOutput:
-    api_url = request_func_input.api_url
-    assert api_url.endswith(
-        "chat/completions"
-    ), "Dynamo Chat API URL must end with 'chat/completions'."
-
-    headers = {"Content-Type": "application/json"}
-    user_content = request_func_input.prompt
-    if request_func_input.multi_modal_content:
-        pass
-    payload = {
-        "model": (
-            request_func_input.model_name
-            if request_func_input.model_name
-            else request_func_input.model
-        ),
-        "messages": [{"role": "user", "content": user_content}],
-        "temperature": 0.0,  # keep deterministic for benchmarks unless you want entropy
-        "max_tokens": request_func_input.output_len,
-        "stream": True,
-    }
-    if request_func_input.ignore_eos:
-        payload["ignore_eos"] = True  # if unsupported, we’ll retry w/o it below
-
-    output = RequestFuncOutput(prompt_len=request_func_input.prompt_len)
-
-    async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
-    ) as session:
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        ttft = 0.0
-        got_stream_chunk = False
-        parts: list[str] = []
-
-        async def _do_request(json_payload):
-            return await session.post(url=api_url, json=json_payload, headers=headers)
-
-        try:
-            # First try with the requested flags
-            response = await _do_request(payload)
-
-            # If server errors, fall back progressively by removing the usual culprits.
-            if response.status >= 500:
-                # remove ignore_eos
-                if "ignore_eos" in payload:
-                    payload.pop("ignore_eos", None)
-                    response = await _do_request(payload)
-            if response.status >= 500:
-                # disable streaming
-                payload["stream"] = False
-                response = await _do_request(payload)
-
-            # --- STREAMING (SSE) ---
-            if response.status == 200 and response.headers.get(
-                "content-type", ""
-            ).startswith("text/event-stream"):
-                async for chunk_bytes in response.content:
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
-                    s = chunk_bytes.decode("utf-8").lstrip()
-                    if s.startswith(":"):  # ping/keepalive
-                        continue
-                    if s.startswith("data:"):
-                        s = s.partition("data:")[2].strip()
-                    if s == "[DONE]":
-                        continue
-
-                    data = json.loads(s)
-                    timestamp = time.perf_counter()
-
-                    if choices := data.get("choices"):
-                        got_stream_chunk = True
-                        delta = choices[0].get("delta", {})
-                        # preserve order; keep <think> intact
-                        rc = delta.get("reasoning_content")
-                        if rc is not None:
-                            parts.append(rc)
-                        c = delta.get("content")
-                        if c is not None:
-                            parts.append(c)
-
-                        if ttft == 0.0:
-                            ttft = timestamp - st
-                            output.ttft = ttft
-                        else:
-                            output.itl.append(timestamp - most_recent_timestamp)
-                        most_recent_timestamp = timestamp
-
-                    elif usage := data.get("usage"):
-                        output.output_tokens = usage.get(
-                            "completion_tokens", output.output_tokens
-                        )
-
-                output.generated_text = "".join(parts)
-                output.latency = (
-                    most_recent_timestamp if got_stream_chunk else time.perf_counter()
-                ) - st
-                output.success = got_stream_chunk
-                if not got_stream_chunk:
-                    # capture error body if available
-                    try:
-                        output.error = await response.text()
-                    except Exception:
-                        output.error = "No stream token chunks received."
-
-            # --- NON-STREAMING JSON ---
-            elif response.status == 200:
-                body = await response.json()
-                ch0 = (body.get("choices") or [{}])[0]
-                msg = ch0.get("message") or {}
-
-                # Prefer reasoning + content from message
-                if msg.get("reasoning_content") is not None:
-                    parts.append(msg["reasoning_content"])
-                if msg.get("content") is not None:
-                    parts.append(msg["content"])
-
-                # Fallbacks (some implementations put text/rc at choice-level)
-                if not parts:
-                    if ch0.get("reasoning_content") is not None:
-                        parts.append(ch0["reasoning_content"])
-                    if ch0.get("text") is not None:
-                        parts.append(ch0["text"])
-
-                output.generated_text = "".join(parts)
-                output.latency = time.perf_counter() - st
-                output.ttft = 0.0
-                if usage := body.get("usage"):
-                    output.output_tokens = usage.get("completion_tokens", 0)
-                output.success = True
-
-            else:
-                # Better error visibility for your “Initial test run failed”
-                output.success = False
-                output.error = f"HTTP {response.status}: " + (await response.text())
-
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
-
-    if pbar:
-        pbar.update(1)
-    return output
-
-
 ASYNC_REQUEST_FUNCS = {
     "tgi": async_request_tgi,
     "vllm": async_request_openai_completions,
+    "dynamo": async_request_dynamo_completions,
     "lmdeploy": async_request_openai_completions,
     "deepspeed-mii": async_request_deepspeed_mii,
     "openai": async_request_openai_completions,
@@ -631,5 +579,4 @@ ASYNC_REQUEST_FUNCS = {
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
-    "dynamo": async_request_dynamo_chat_completions,
 }
