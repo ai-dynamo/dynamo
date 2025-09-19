@@ -82,7 +82,7 @@ jobs:
         uses: ./.github/actions/pytest-composite-action
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1 and not slow"
+          pytest_marks: "e2e and sglang and gpu_1"
 
   build-test-trtllm:
     runs-on: gpu-l40-amd64

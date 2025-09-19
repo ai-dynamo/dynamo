@@ -26,7 +26,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 .. admonition:: 💎 Discover the latest developments!
    :class: seealso
 
-   This guide is a snapshot at a specific point in time. For the latest information and examples, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo>`_.
+   This guide is a snapshot of a specific point in time. For the latest information, examples, and Release Assets, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo/releases/latest>`_.
 
 Quickstart
 ==========

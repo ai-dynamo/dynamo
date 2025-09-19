@@ -303,3 +303,9 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 ## Performance Sweep
 
 For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](./performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+
+## Dynamo KV Block Manager Integration
+
+Dynamo with TensorRT-LLM currently supports integration with the Dynamo KV Block Manager. This integration can significantly reduce time-to-first-token (TTFT) latency, particularly in usage patterns such as multi-turn conversations and repeated long-context requests.
+
+Here is the instruction: [Running KVBM in TensorRT-LLM](./../../../docs/guides/run_kvbm_in_trtllm.md) .

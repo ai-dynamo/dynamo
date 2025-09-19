@@ -41,7 +41,12 @@ The framework is a Python-based wrapper around `genai-perf` that:
 
 3. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster.
 
-4. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
+4. **HTTP endpoints** - Ensure you have HTTP endpoints available for benchmarking. These can be:
+   - DynamoGraphDeployments exposed via HTTP endpoints
+   - External services (vLLM, llm-d, AIBrix, etc.)
+   - Any HTTP endpoint serving HuggingFace-compatible models
+
+5. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
    ```bash
    pip install -r deploy/utils/requirements.txt
    ```
@@ -59,11 +64,11 @@ Deploy your DynamoGraphDeployments separately using the [deployment documentatio
 ### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
 # Port-forward the frontend service for deployment A
-kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 &
+kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev/null 2>&1 &
 # Note: remember to stop the port-forward process after benchmarking.
 
 # Benchmark deployment A using Python scripts
-python3 -m benchmarks.utils.benchmark --namespace <namespace> \
+python3 -m benchmarks.utils.benchmark \
    --input deployment-a=http://localhost:8000 \
    --model "your-model-name" \
    --output-dir ./benchmarks/results
@@ -75,10 +80,10 @@ If comparing multiple deployments, teardown deployment A and deploy deployment B
 ### Step 5: [If Comparative] Port-Forward and Benchmark Deployment B
 ```bash
 # Port-forward the frontend service for deployment B
-kubectl port-forward -n <namespace> <frontend-service-name> 8001:8000 &
+kubectl port-forward -n <namespace> svc/<frontend-service-name> 8001:8000 > /dev/null 2>&1 &
 
 # Benchmark deployment B using Python scripts
-python3 -m benchmarks.utils.benchmark --namespace <namespace> \
+python3 -m benchmarks.utils.benchmark \
    --input deployment-b=http://localhost:8001 \
    --model "your-model-name" \
    --output-dir ./benchmarks/results
@@ -87,35 +92,6 @@ python3 -m benchmarks.utils.benchmark --namespace <namespace> \
 ### Step 6: Generate Summary and Visualization
 ```bash
 # Generate plots and summary using Python plotting script
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
-```
-
-## Example Commands
-
-### Single Deployment Benchmark
-```bash
-# Port-forward and benchmark a single deployment
-kubectl port-forward -n my-namespace svc/my-frontend-service 8000:8000 &
-python3 -m benchmarks.utils.benchmark --namespace my-namespace \
-   --input my-deployment=http://localhost:8000 \
-   --model "meta-llama/Meta-Llama-3-8B"
-```
-
-### Comparative Benchmark
-```bash
-# Benchmark deployment A
-kubectl port-forward -n my-namespace svc/agg-frontend 8000:8000 &
-python3 -m benchmarks.utils.benchmark --namespace my-namespace \
-   --input aggregated=http://localhost:8000 \
-   --model "meta-llama/Meta-Llama-3-8B"
-
-# Benchmark deployment B (different port)
-kubectl port-forward -n my-namespace svc/disagg-frontend 8001:8000 &
-python3 -m benchmarks.utils.benchmark --namespace my-namespace \
-   --input disaggregated=http://localhost:8001 \
-   --model "meta-llama/Meta-Llama-3-8B"
-
-# Generate comparison plots
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 ```
 
@@ -135,12 +111,11 @@ The benchmarking framework supports various comparative analysis scenarios:
 ### Command Line Options
 
 ```bash
-python3 -m benchmarks.utils.benchmark --namespace NAMESPACE --input <label>=<endpoint_url> [--input <label>=<endpoint_url>]... [OPTIONS]
+python3 -m benchmarks.utils.benchmark --input <label>=<endpoint_url> [--input <label>=<endpoint_url>]... [OPTIONS]
 
 REQUIRED:
-  -n, --namespace NAMESPACE           Kubernetes namespace
   --input <label>=<endpoint_url>     Benchmark input with custom label
-                                        - <label>: becomes the name/label in plots
+                                        - <label>: becomes the name/label in plots (see Important Notes for restrictions)
                                         - <endpoint_url>: HTTP endpoint URL (e.g., http://localhost:8000)
                                         Can be specified multiple times for comparisons
 
@@ -179,35 +154,8 @@ The Python plotting module:
 
 The benchmarking framework supports any HuggingFace-compatible LLM model. Specify your model in the benchmark script's `--model` parameter. It must match the model name of the deployment. You can override the default sequence lengths (2000/256 tokens) with `--isl` and `--osl` flags if needed for your specific workload.
 
-### Python Script Usage
+The benchmarking framework is built around Python modules that provide direct control over the benchmark workflow. The Python benchmarking module connects to your existing endpoints, runs the benchmarks, and can generate plots. Deployment is user-managed and out of scope for this tool.
 
-The benchmarking framework is built around Python modules that provide direct control over the benchmark workflow:
-
-```bash
-# Endpoint benchmarking
-python3 -u -m benchmarks.utils.benchmark \
-   --input experiment-a=http://your-endpoint:8000 \
-   --namespace $NAMESPACE \
-   --isl 2000 \
-   --std 10 \
-   --osl 256 \
-   --output-dir $OUTPUT_DIR
-
-# Deployment benchmarking (any combination)
-python3 -u -m benchmarks.utils.benchmark \
-   --input experiment-a=http://localhost:8000 \
-   --input experiment-b=http://localhost:8005 \
-   --namespace my-namespace \
-   --isl 2000 \
-   --std 10 \
-   --osl 256 \
-   --output-dir ./benchmarks/results
-
-# Generate plots separately
-python3 -m benchmarks.utils.plot --data-dir $OUTPUT_DIR
-```
-
-**Note**: The Python benchmarking module connects to your existing endpoints, runs the benchmarks, and can generate plots. Deployment is user-managed and out of scope for this tool.
 ### Comparison Limitations
 
 The plotting system supports up to 12 different inputs in a single comparison. If you need to compare more than 12 different deployments/endpoints, consider running separate benchmark sessions or grouping related comparisons together.
@@ -218,11 +166,13 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 
 ```bash
 # Custom concurrency levels
-CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input my-test=http://localhost:8000
+CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark \
+    --input my-test=http://localhost:8000
 
 # Or set permanently
 export CONCURRENCIES="1,2,5,10,25,50,100"
-python3 -m benchmarks.utils.benchmark --namespace $NAMESPACE --input test=http://localhost:8000
+python3 -m benchmarks.utils.benchmark \
+    --input test=http://localhost:8000
 ```
 
 ## Understanding Your Results
