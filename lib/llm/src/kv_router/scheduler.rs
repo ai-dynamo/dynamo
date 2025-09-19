@@ -56,7 +56,7 @@ pub struct SchedulingResponse {
 
 pub struct SchedulingRequest {
     pub request_id: String,
-    pub token_seq: Vec<SequenceHash>,
+    pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub overlaps: OverlapScores,
     pub decode_blocks: HashMap<i64, usize>,
@@ -96,6 +96,7 @@ impl KvScheduler {
         runtime_configs_rx: watch::Receiver<HashMap<i64, ModelRuntimeConfig>>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
+        router_uuid: String,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let instances: Vec<Instance> = instances_rx.borrow().clone();
@@ -124,6 +125,7 @@ impl KvScheduler {
             block_size as usize,
             worker_ids,
             replica_sync,
+            router_uuid,
         ));
 
         // Spawn background task to monitor and update workers_with_configs
@@ -283,7 +285,7 @@ impl KvScheduler {
         &self,
         request_id: String,
         isl_tokens: usize,
-        token_seq: Vec<SequenceHash>,
+        token_seq: Option<Vec<SequenceHash>>,
         overlaps: OverlapScores,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
@@ -316,7 +318,7 @@ impl KvScheduler {
     pub async fn add_request(
         &self,
         request_id: String,
-        token_sequence: Vec<SequenceHash>,
+        token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
         worker_id: i64,
@@ -340,7 +342,7 @@ impl KvScheduler {
 
     pub async fn get_potential_loads(
         &self,
-        token_seq: Vec<SequenceHash>,
+        token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
         overlaps: OverlapScores,
     ) -> Vec<PotentialLoad> {
