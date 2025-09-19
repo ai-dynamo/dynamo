@@ -1804,7 +1804,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1955,7 +1955,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2739,7 +2739,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block",
+													"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -3182,7 +3182,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3", "-m", "dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang.worker"},
 						},
 					},
 				},
@@ -3201,7 +3201,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3", "-m", "dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang.worker"},
 						},
 					},
 				},
@@ -3219,7 +3219,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3", "-m", "dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang.worker"},
 						},
 					},
 				},
@@ -3377,7 +3377,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleWorker,
 			numberOfNodes:     3,
 			expectError:       false,
-			expectContains:    []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectContains:    []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 			expectNotContains: []string{"python3 -m dynamo.vllm"},
 		},
 		{
@@ -4671,8 +4671,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
-							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
+							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{

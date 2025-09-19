@@ -623,7 +623,7 @@ func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 type MultinodeDeployer interface {
 	GetLeaderHostname(serviceName string) string
 	GetHostNames(serviceName string, numberOfNodes int32) []string
-	GetNodeRank() string
+	GetNodeRank() (string, bool) // returns (rank, needsShellInterpretation)
 }
 
 // BackendFactory creates backend instances based on the framework type
