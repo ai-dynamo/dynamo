@@ -100,7 +100,15 @@ export IMAGE_TAG=${RELEASE_VERSION}
 
 # 2. Build operator
 cd deploy/cloud/operator
-earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+
+# 2.1 Alternative 1 : Build and push the operator image for multiple platforms
+docker buildx create --name multiplatform --driver docker-container --bootstrap
+docker buildx use multiplatform
+docker buildx build --platform linux/amd64,linux/arm64 -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG --push .
+
+# 2.2 Alternative 2 : Build and push the operator image for a single platform
+docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG . && docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
+
 cd -
 
 # 3. Create namespace and secrets to be able to pull the operator image
