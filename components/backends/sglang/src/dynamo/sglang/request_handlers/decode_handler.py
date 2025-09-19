@@ -113,6 +113,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         async for res in stream_source:
+            print(res)
             finish_reason = res["meta_info"]["finish_reason"]
 
             if finish_reason:
