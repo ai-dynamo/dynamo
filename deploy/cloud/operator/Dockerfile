@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build stage
-FROM golang:1.24 as builder
+FROM golang:1.24 AS builder
 
 # Docker buildx automatically provides these
 ARG TARGETOS=linux
