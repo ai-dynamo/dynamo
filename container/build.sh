@@ -730,8 +730,8 @@ fi
 
 # Skip Build 1 and Build 2 if DEV_IMAGE_INPUT is set (we'll handle it at the bottom)
 if [[ -z "${DEV_IMAGE_INPUT:-}" ]]; then
-    # TODO: Follow 2-step build process for all frameworks once necessary changes are made to the sglang and TRT-LLM backend Dockerfiles.
-    if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+    # Follow 2-step build process for all frameworks
+    if [[ $FRAMEWORK != "NONE" ]]; then
         # Define base image tag before using it
         DYNAMO_BASE_IMAGE="dynamo-base:${VERSION}"
         # Start base image build
@@ -791,5 +791,6 @@ elif [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
 
     build_local_dev_with_header "$DEV_IMAGE" "$LOCAL_DEV_TAGS" "Successfully built local-dev images" "Starting Build 3: Local-Dev Image"
 fi
+
 
 { set +x; } 2>/dev/null
