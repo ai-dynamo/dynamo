@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"net/url"
 	"os"
@@ -133,6 +134,7 @@ func main() {
 	var groveTerminationDelay time.Duration
 	var modelExpressURL string
 	var prometheusEndpoint string
+	var mpiRunSecretName string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -164,6 +166,8 @@ func main() {
 		"URL of the Model Express server to inject into all pods")
 	flag.StringVar(&prometheusEndpoint, "prometheus-endpoint", "",
 		"URL of the Prometheus endpoint to use for metrics")
+	flag.StringVar(&mpiRunSecretName, "mpi-run-ssh-secret-name", "",
+		"Name of the secret containing the SSH key for MPI Run")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -177,6 +181,11 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("Model Express URL configured", "url", modelExpressURL)
+	}
+
+	if mpiRunSecretName == "" {
+		setupLog.Error(errors.New("mpi-run-ssh-secret-name is required"), "mpi-run-ssh-secret-name is required")
+		os.Exit(1)
 	}
 
 	ctrlConfig := commonController.Config{
@@ -201,6 +210,9 @@ func main() {
 		},
 		ModelExpressURL:    modelExpressURL,
 		PrometheusEndpoint: prometheusEndpoint,
+		MpiRun: commonController.MpiRunConfig{
+			SecretName: mpiRunSecretName,
+		},
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()

@@ -553,14 +553,6 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment
 	return res
 }
 
-// Helper: mergeContainerCommand returns userCmd if specified, else defaultCmd
-func mergeContainerCommand(defaultCmd, userCmd []string) []string {
-	if len(userCmd) > 0 {
-		return userCmd
-	}
-	return defaultCmd
-}
-
 // Define Role enum for leader/worker/main
 // Use this type everywhere instead of string for role
 
@@ -627,14 +619,16 @@ type MultinodeDeployer interface {
 }
 
 // BackendFactory creates backend instances based on the framework type
-func BackendFactory(backendFramework BackendFramework) Backend {
+func BackendFactory(backendFramework BackendFramework, controllerConfig controller_common.Config) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
 		return &VLLMBackend{}
 	case BackendFrameworkTRTLLM:
-		return &TRTLLMBackend{}
+		return &TRTLLMBackend{
+			MpiRunSecretName: controllerConfig.MpiRun.SecretName,
+		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
 	default:
@@ -811,7 +805,7 @@ func GenerateBasePodSpec(
 	if multinodeDeployer == nil {
 		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
-	backend := BackendFactory(backendFramework)
+	backend := BackendFactory(backendFramework, controllerConfig)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}

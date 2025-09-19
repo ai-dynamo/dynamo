@@ -3520,55 +3520,6 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 	}
 }
 
-func TestMergeContainerCommand(t *testing.T) {
-	tests := []struct {
-		name       string
-		defaultCmd []string
-		userCmd    []string
-		expected   []string
-	}{
-		{
-			name:       "user command overrides default",
-			defaultCmd: []string{"python", "default.py"},
-			userCmd:    []string{"python", "custom.py"},
-			expected:   []string{"python", "custom.py"},
-		},
-		{
-			name:       "empty user command returns default",
-			defaultCmd: []string{"python", "default.py"},
-			userCmd:    []string{},
-			expected:   []string{"python", "default.py"},
-		},
-		{
-			name:       "nil user command returns default",
-			defaultCmd: []string{"python", "default.py"},
-			userCmd:    nil,
-			expected:   []string{"python", "default.py"},
-		},
-		{
-			name:       "both empty returns empty",
-			defaultCmd: []string{},
-			userCmd:    []string{},
-			expected:   []string{},
-		},
-		{
-			name:       "default empty user provided",
-			defaultCmd: []string{},
-			userCmd:    []string{"python", "user.py"},
-			expected:   []string{"python", "user.py"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := mergeContainerCommand(tt.defaultCmd, tt.userCmd)
-			if !reflect.DeepEqual(result, tt.expected) {
-				t.Errorf("mergeContainerCommand() = %v, want %v", result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestExpandRolesForService(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -4671,8 +4622,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
-							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 							{Name: "DYN_SYSTEM_PORT", Value: "9090"},
+							{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "[\"generate\"]"},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{
