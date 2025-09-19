@@ -243,20 +243,26 @@ impl KvScheduler {
                         };
                         request.respond(response);
 
-                        // Only update the state if update_states is true
-                        if request.update_states {
-                            let _ = slots_clone
-                                .add_request(
-                                    request.request_id,
-                                    request.token_seq,
-                                    request.isl_tokens,
-                                    selection.overlap_blocks,
-                                    selection.worker_id,
-                                )
-                                .await;
+                        // Skip state update if not requested
+                        if !request.update_states {
+                            continue;
                         }
 
-                        continue;
+                        let request_id = request.request_id;
+                        if let Err(e) = slots_clone
+                            .add_request(
+                                request_id.clone(),
+                                request.token_seq,
+                                request.isl_tokens,
+                                selection.overlap_blocks,
+                                selection.worker_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to add request {request_id} to local slot tracker: {e:?}"
+                            );
+                        }
                     }
                     Err(KvSchedulerError::NoEndpoints) => {
                         tracing::trace!("no endpoints available; waiting for endpoints update");
