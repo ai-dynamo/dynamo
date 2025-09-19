@@ -24,6 +24,7 @@ import yaml
 
 from benchmarks.profiler.utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
 from benchmarks.profiler.utils.defaults import DECODE_NUM_REQUESTS_RANGE
+from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.plot import (
     plot_decode_performance,
@@ -35,8 +36,14 @@ from benchmarks.profiler.utils.profile_cache import (
     load_existing_decode_results,
     load_existing_prefill_results,
 )
-from benchmarks.profiler.utils.profile_decode import profile_decode
-from benchmarks.profiler.utils.profile_prefill import profile_prefill
+from benchmarks.profiler.utils.profile_decode import (
+    profile_decode,
+    profile_decode_aiconfigurator,
+)
+from benchmarks.profiler.utils.profile_prefill import (
+    profile_prefill,
+    profile_prefill_aiconfigurator,
+)
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
@@ -86,6 +93,34 @@ async def run_profile(args):
         else:
             logger.info("Skip existing results disabled - will re-run all tests")
 
+        if args.use_ai_configurator:
+            if not args.aic_system:
+                raise ValueError(
+                    "Must provide --aic-system when using --use-ai-configurator."
+                )
+            if not args.aic_model_name:
+                raise ValueError(
+                    "Must provide --aic-model-name when using --use-ai-configurator."
+                )
+            if not args.backend_version:
+                raise ValueError(
+                    "Must provide --backend-version when using --use-ai-configurator."
+                )
+
+            logger.info("Will use aiconfigurator to estimate perf.")
+            ai_configurator_perf_estimator = AIConfiguratorPerfEstimator(
+                args.aic_model_name,
+                args.aic_system.lower(),
+                args.backend,
+                args.backend_version,
+            )
+        else:
+            if args.aic_system or args.aic_model_name or args.backend_version:
+                logger.warning(
+                    "Will ignore --aic-system, --aic-model-name, and/or --backend-version "
+                    "when not using --use-ai-configurator."
+                )
+
         # first profile prefill
         prefill_tp_size = []
         prefill_ttft = []
@@ -93,6 +128,8 @@ async def run_profile(args):
         logger.info("Profiling prefill...")
         prefill_config = config_modifier.convert_config(config, "prefill")
         frontend_port = config_modifier.get_port(config)
+        itl: float | None = None
+        thpt_per_gpu: float | None = None
         for tp_size in profile_tp_size:
             logger.info(f"Profiling prefill with TP size {tp_size}...")
 
@@ -125,8 +162,17 @@ async def run_profile(args):
             with open(prefill_config_fn, "w") as f:
                 yaml.dump(prefill_config, f)
 
+            ttft = None
             if args.dry_run:
                 logger.info("Skipping deployment creation in dry run mode")
+            elif args.use_ai_configurator:
+                logger.info("Using ai-configurator to estimate prefill latency.")
+                perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
+                    args.isl,
+                    tp_size=tp_size,
+                )
+                ttft = perf_dict["context_latency"]
+                logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
             else:
                 client = DynamoDeploymentClient(
                     namespace=args.namespace,
@@ -161,14 +207,16 @@ async def run_profile(args):
                 )
                 if gap_result is not None:
                     ttft = gap_result["time_to_first_token"]["avg"]
-                    prefill_tp_size.append(tp_size)
-                    prefill_ttft.append(ttft)
-                    prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
 
                 logger.info("Cleaning up deployment...")
                 await client.delete_deployment()
                 deployment_clients.remove(client)
                 logger.info("Deployment deleted")
+
+            if ttft is not None:
+                prefill_tp_size.append(tp_size)
+                prefill_ttft.append(ttft)
+                prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
 
         # Plot the results as a 2D scatter plot
         if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
@@ -242,6 +290,15 @@ async def run_profile(args):
 
             if args.dry_run:
                 logger.info("Skipping deployment creation in dry run mode")
+
+            elif args.use_ai_configurator:
+                # Compute max_concurrency and max_kv_tokens to know which
+                # num_request to sweep over.
+                max_concurrency = ai_configurator_perf_estimator.get_max_batch_size(
+                    args.isl, args.osl, tp_size=tp_size
+                )
+                max_kv_tokens = max_concurrency * (args.isl + args.osl)
+
             else:
                 client = DynamoDeploymentClient(
                     namespace=args.namespace,
@@ -263,10 +320,14 @@ async def run_profile(args):
                     f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
                 )
 
+                # Compute max_concurrency and max_kv_tokens to know which
+                # num_request to sweep over.
                 max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
                     f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
                 )
                 max_concurrency = max_kv_tokens // (args.isl + args.osl)
+
+            if not args.dry_run:
                 sweep_num_request = [
                     num for num in DECODE_NUM_REQUESTS_RANGE if num <= max_concurrency
                 ]
@@ -276,23 +337,43 @@ async def run_profile(args):
 
                 engine_decode_itl = []
                 engine_decode_thpt_per_gpu = []
-                base_url = client.get_service_url()
                 for num_request in sweep_num_request:
-                    genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
-                    gap_result = benchmark_decode(
-                        args.isl,
-                        args.osl,
-                        num_request,
-                        genai_perf_artifact_dir,
-                        model_name,
-                        model_name,
-                        base_url=base_url,
-                    )
-                    if gap_result is not None:
-                        itl = gap_result["inter_token_latency"]["avg"]
-                        thpt_per_gpu = (
-                            gap_result["output_token_throughput"]["avg"] / tp_size
+                    itl = thpt_per_gpu = None
+                    if args.use_ai_configurator:
+                        logger.info("Using ai-configurator to estimate decode latency.")
+                        perf_dict = ai_configurator_perf_estimator.estimate_perf(
+                            args.isl,
+                            args.osl,
+                            num_request,
+                            mode="decode",
+                            tp_size=tp_size,
                         )
+
+                        itl = perf_dict["tpot"]
+                        thpt_per_gpu = perf_dict["tokens/s/gpu"]
+                        logger.info(f"Estimated decode ITL: {itl:.2f}ms")
+                        logger.info(
+                            f"Estimated decode throughput per GPU: {thpt_per_gpu:.2f} tokens/s/GPU"
+                        )
+                    else:
+                        base_url = client.get_service_url()
+                        genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
+                        gap_result = benchmark_decode(
+                            args.isl,
+                            args.osl,
+                            num_request,
+                            genai_perf_artifact_dir,
+                            model_name,
+                            model_name,
+                            base_url=base_url,
+                        )
+                        if gap_result is not None:
+                            itl = gap_result["inter_token_latency"]["avg"]
+                            thpt_per_gpu = (
+                                gap_result["output_token_throughput"]["avg"] / tp_size
+                            )
+
+                    if itl is not None and thpt_per_gpu is not None:
                         engine_decode_itl.append(itl)
                         engine_decode_thpt_per_gpu.append(thpt_per_gpu)
                         decode_tp_size.append(tp_size)
@@ -301,15 +382,16 @@ async def run_profile(args):
                         decode_concurrency.append(num_request)
                         decode_kv_cache_size.append(max_kv_tokens)
 
-                logger.info("Cleaning up deployment...")
-                await client.delete_deployment()
-                deployment_clients.remove(client)
-                logger.info("Deployment deleted")
-
                 # Store partial results for plotting later
                 decode_results.append(
                     (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
                 )
+
+            if not args.dry_run and not args.use_ai_configurator:
+                logger.info("Cleaning up deployment...")
+                await client.delete_deployment()
+                deployment_clients.remove(client)
+                logger.info("Deployment deleted")
 
         # Plot all decode results after profiling is complete
         if decode_results:
@@ -418,6 +500,15 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
+        elif args.use_ai_configurator:
+            profile_prefill_aiconfigurator(
+                work_dir,
+                best_prefill_tp,  # num_gpus
+                args.max_context_length,
+                args.prefill_interpolation_granularity,
+                ai_configurator_perf_estimator,
+                tp_size=best_prefill_tp,
+            )
         else:
             client = DynamoDeploymentClient(
                 namespace=args.namespace,
@@ -481,6 +572,19 @@ async def run_profile(args):
 
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
+        elif args.use_ai_configurator:
+            max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
+                args.isl, args.osl, tp_size=best_decode_tp
+            )
+            profile_decode_aiconfigurator(
+                work_dir,
+                best_decode_tp,  # num_gpus
+                max_kv_tokens,
+                args.max_context_length,
+                args.decode_interpolation_granularity,
+                ai_configurator_perf_estimator,
+                tp_size=best_decode_tp,
+            )
         else:
             client = DynamoDeploymentClient(
                 namespace=args.namespace,
@@ -626,6 +730,26 @@ if __name__ == "__main__":
         "--dry-run",
         action="store_true",
         help="Dry run the profile job",
+    )
+    parser.add_argument(
+        "--use-ai-configurator",
+        action="store_true",
+        help="Use ai-configurator to estimate benchmarking results instead of running actual deployment.",
+    )
+    parser.add_argument(
+        "--aic-system",
+        type=str,
+        help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
+    )
+    parser.add_argument(
+        "--aic-model-name",
+        type=str,
+        help="aiconfigurator name of the target model (e.g. QWEN3_32B, DEEPSEEK_V3)",
+    )
+    parser.add_argument(
+        "--backend-version",
+        type=str,
+        help="Specify backend version when using aiconfigurator to estimate perf.",
     )
     args = parser.parse_args()
 

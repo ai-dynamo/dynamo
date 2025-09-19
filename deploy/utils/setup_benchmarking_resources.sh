@@ -70,6 +70,12 @@ log "Applying benchmarking manifests to namespace $NAMESPACE"
 export NAMESPACE  # ensure envsubst can see it
 for mf in "$(dirname "$0")/manifests"/*.yaml; do
   if [[ -f "$mf" ]]; then
+    # Skip pvc-access-pod.yaml as it's managed by inject_manifest.py
+    if [[ "$(basename "$mf")" == "pvc-access-pod.yaml" ]]; then
+      log "Skipping $mf (managed by inject_manifest.py)"
+      continue
+    fi
+
     if command -v envsubst >/dev/null 2>&1; then
       envsubst < "$mf" | kubectl -n "$NAMESPACE" apply -f -
     else

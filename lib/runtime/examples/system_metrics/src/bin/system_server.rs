@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_runtime::{logging, DistributedRuntime, Result, Runtime, Worker};
+use dynamo_runtime::{DistributedRuntime, Result, Runtime, Worker, logging};
 use system_metrics::backend;
 
 fn main() -> Result<()> {
