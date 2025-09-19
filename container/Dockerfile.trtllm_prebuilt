@@ -69,6 +69,13 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 
 RUN pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && pip install /workspace/dist/ai_dynamo*any.whl
 
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:git-core/ppa \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git
+
 # Copy files for legal compliance
 COPY ATTRIBUTION* LICENSE /workspace/
 
