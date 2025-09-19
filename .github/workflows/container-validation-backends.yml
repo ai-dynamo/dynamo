@@ -97,7 +97,7 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build-composite-action
         with:
-          framework: sglang
+          framework: trtllm
           target: runtime
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -109,4 +109,4 @@ jobs:
         uses: ./.github/actions/pytest-composite-action
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1 and not slow"
+          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
