@@ -3,7 +3,6 @@
 # For more information about CODEOWNERS files, see:
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Rust - Keep these two the same. Or better make an alias like devops have.
 *.rs @ai-dynamo/dynamo-rust-codeowners
 Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
@@ -11,15 +10,15 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 *.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Container/Environments
-/container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
+/container/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners
 
 # Dynamo deploy
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab @atchernych
 
 # Examples
-/examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ishandhanani @ai-dynamo/dynamo-rust-codeowners
+/examples/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners
 /examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
-/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16 @biswapanda
+/examples/multimodal/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
@@ -27,9 +26,9 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Planner
-/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
-/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
-/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
+/components/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/benchmarks/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # recipes
 
