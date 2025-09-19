@@ -83,6 +83,7 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            local_engines: Arc::new(Mutex::new(HashMap::new())),
             hierarchy_to_metricsregistry: Arc::new(std::sync::RwLock::new(HashMap::<
                 String,
                 crate::MetricsRegistryEntry,
@@ -344,6 +345,35 @@ impl DistributedRuntime {
     fn get_registered_hierarchies(&self) -> Vec<String> {
         let registries = self.hierarchy_to_metricsregistry.read().unwrap();
         registries.keys().cloned().collect()
+    }
+
+    /// Register a local engine for direct access without network overhead
+    pub(crate) async fn register_local_engine(
+        &self,
+        key: String,
+        engine: Arc<dyn crate::engine::AnyAsyncEngine>,
+    ) -> Result<()> {
+        let mut engines = self.local_engines.lock().await;
+        engines.insert(key, engine);
+        Ok(())
+    }
+
+    /// Retrieve a local engine by key
+    pub(crate) async fn get_local_engine(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        let engines = self.local_engines.lock().await;
+        engines.get(key).cloned()
+    }
+
+    /// Unregister a local engine
+    pub(crate) async fn unregister_local_engine(
+        &self,
+        key: &str,
+    ) -> Option<Arc<dyn crate::engine::AnyAsyncEngine>> {
+        let mut engines = self.local_engines.lock().await;
+        engines.remove(key)
     }
 }
 

@@ -78,6 +78,12 @@ use futures::stream::Stream;
 pub trait Data: Send + Sync + 'static {}
 impl<T: Send + Sync + 'static> Data for T {}
 
+/// A trait for stream data that only requires Send, not Sync.
+/// This is used for response types that are consumed sequentially, not shared between threads.
+/// **Do not manually implement this trait** - the blanket implementation covers all valid types.
+pub trait StreamData: Send + 'static {}
+impl<T: Send + 'static> StreamData for T {}
+
 /// [`DataStream`] is a type alias for a stream of [`Data`] items. This can be adapted to a [`ResponseStream`]
 /// by associating it with a [`AsyncEngineContext`].
 pub type DataUnary<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -338,6 +344,41 @@ where
     }
 }
 
+/// A variant of AnyEngineWrapper that uses StreamData for the response type.
+/// This allows non-Sync response types (like streams) to be stored in the registry.
+struct StreamAnyEngineWrapper<Req, Resp, E>
+where
+    Req: Data,
+    Resp: StreamData + AsyncEngineContextProvider,
+    E: Data,
+{
+    engine: Arc<dyn AsyncEngine<Req, Resp, E>>,
+    _phantom: PhantomData<fn(Req, Resp, E)>,
+}
+
+impl<Req, Resp, E> AnyAsyncEngine for StreamAnyEngineWrapper<Req, Resp, E>
+where
+    Req: Data,
+    Resp: StreamData + AsyncEngineContextProvider,
+    E: Data,
+{
+    fn request_type_id(&self) -> TypeId {
+        TypeId::of::<Req>()
+    }
+
+    fn response_type_id(&self) -> TypeId {
+        TypeId::of::<Resp>()
+    }
+
+    fn error_type_id(&self) -> TypeId {
+        TypeId::of::<E>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        &self.engine
+    }
+}
+
 /// An extension trait that provides a convenient way to type-erase an `AsyncEngine`.
 ///
 /// This trait provides the `.into_any_engine()` method on any `Arc<dyn AsyncEngine<...>>`,
@@ -366,6 +407,38 @@ where
             engine: self,
             _phantom: PhantomData,
         })
+    }
+}
+
+/// An extension trait for converting AsyncEngine with StreamData response to AnyAsyncEngine.
+/// This is used for engines whose response types don't need to be Sync.
+pub trait AsStreamAnyAsyncEngine {
+    /// Converts a typed `AsyncEngine` with StreamData response into a type-erased `AnyAsyncEngine`.
+    fn into_stream_any_engine(self) -> Arc<dyn AnyAsyncEngine>;
+
+    /// Converts a typed `AsyncEngine` with StreamData response into a type-erased `AnyAsyncEngine`.
+    /// This is the non-consuming version of into_stream_any_engine.
+    fn as_stream_any(&self) -> Option<Arc<dyn AnyAsyncEngine>>;
+}
+
+impl<Req, Resp, E> AsStreamAnyAsyncEngine for Arc<dyn AsyncEngine<Req, Resp, E>>
+where
+    Req: Data,
+    Resp: StreamData + AsyncEngineContextProvider,
+    E: Data,
+{
+    fn into_stream_any_engine(self) -> Arc<dyn AnyAsyncEngine> {
+        Arc::new(StreamAnyEngineWrapper {
+            engine: self,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn as_stream_any(&self) -> Option<Arc<dyn AnyAsyncEngine>> {
+        Some(Arc::new(StreamAnyEngineWrapper {
+            engine: self.clone(),
+            _phantom: PhantomData,
+        }))
     }
 }
 
@@ -398,6 +471,16 @@ pub trait DowncastAnyAsyncEngine {
         Req: Data,
         Resp: Data + AsyncEngineContextProvider,
         E: Data;
+
+    /// Attempts to downcast an `AnyAsyncEngine` to a specific `AsyncEngine` type with StreamData response.
+    ///
+    /// Returns `Some(engine)` if the type parameters match the original engine,
+    /// or `None` if the types don't match.
+    fn downcast_stream<Req, Resp, E>(&self) -> Option<Arc<dyn AsyncEngine<Req, Resp, E>>>
+    where
+        Req: Data,
+        Resp: StreamData + AsyncEngineContextProvider,
+        E: Data;
 }
 
 impl DowncastAnyAsyncEngine for Arc<dyn AnyAsyncEngine> {
@@ -405,6 +488,24 @@ impl DowncastAnyAsyncEngine for Arc<dyn AnyAsyncEngine> {
     where
         Req: Data,
         Resp: Data + AsyncEngineContextProvider,
+        E: Data,
+    {
+        if self.request_type_id() == TypeId::of::<Req>()
+            && self.response_type_id() == TypeId::of::<Resp>()
+            && self.error_type_id() == TypeId::of::<E>()
+        {
+            self.as_any()
+                .downcast_ref::<Arc<dyn AsyncEngine<Req, Resp, E>>>()
+                .cloned()
+        } else {
+            None
+        }
+    }
+
+    fn downcast_stream<Req, Resp, E>(&self) -> Option<Arc<dyn AsyncEngine<Req, Resp, E>>>
+    where
+        Req: Data,
+        Resp: StreamData + AsyncEngineContextProvider,
         E: Data,
     {
         if self.request_type_id() == TypeId::of::<Req>()
@@ -470,7 +571,7 @@ mod tests {
         let typed_engine: Arc<dyn AsyncEngine<Req1, Resp1, Err1>> = Arc::new(MockEngine);
 
         // 4. Use the extension trait to erase the type
-        let any_engine = typed_engine.into_any_engine();
+        let any_engine = AsAnyAsyncEngine::into_any_engine(typed_engine);
 
         // Check type IDs are preserved
         assert_eq!(any_engine.request_type_id(), TypeId::of::<Req1>());

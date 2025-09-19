@@ -41,6 +41,7 @@ pub mod system_health;
 pub mod traits;
 pub mod transports;
 pub mod utils;
+pub mod v2;
 pub mod worker;
 
 pub mod distributed;
@@ -53,6 +54,7 @@ pub use worker::Worker;
 use crate::metrics::prometheus_names::distributed_runtime;
 
 use component::{Endpoint, InstanceSource};
+use engine::AnyAsyncEngine;
 use utils::GracefulShutdownTracker;
 
 use config::HealthStatus;
@@ -164,6 +166,10 @@ pub struct DistributedRuntime {
     is_static: bool,
 
     instance_sources: Arc<tokio::sync::Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Local engine registry for direct access without network overhead
+    // Keys are endpoint paths from EndpointDescriptor::path_string()
+    local_engines: Arc<tokio::sync::Mutex<HashMap<String, Arc<dyn AnyAsyncEngine>>>>,
 
     // Health Status
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
