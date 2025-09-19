@@ -85,8 +85,8 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of requests waiting in HTTP queue before receiving the first response.
-    pub const QUEUED_REQUESTS_TOTAL: &str = "queued_requests_total";
+    /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
+    pub const QUEUED_REQUESTS: &str = "queued_requests";
 
     /// Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
     /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
