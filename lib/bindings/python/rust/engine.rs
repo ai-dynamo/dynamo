@@ -180,7 +180,7 @@ where
                 let py_request = pythonize(py, &request)?;
                 let py_ctx = Py::new(py, Context::new(ctx_python.clone()))?;
 
-                let gen = if has_context {
+                let gen_result = if has_context {
                     // Pass context as a kwarg
                     let kwarg = PyDict::new(py);
                     kwarg.set_item("context", &py_ctx)?;
@@ -191,7 +191,7 @@ where
                 }?;
 
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
+                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen_result.into_bound(py))
             })
         })
         .await??;

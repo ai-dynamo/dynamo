@@ -735,13 +735,12 @@ impl Endpoint {
             })?;
 
         // Require an object/dict
-        if let Some(ref payload) = health_payload_json {
-            if !payload.is_object() {
+        if let Some(ref payload) = health_payload_json
+            && !payload.is_object() {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
                     "health_check_payload must be a JSON object (dict)",
                 ));
             }
-        }
 
         let mut builder = self
             .inner
@@ -1087,11 +1086,11 @@ async fn process_stream(
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            let result = Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+            
+            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
-            });
-            result
+            })
         });
 
         let is_error = annotated.is_error();
