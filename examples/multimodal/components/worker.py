@@ -28,7 +28,7 @@ from publisher import StatLoggerFactory
 from utils.args import (
     Config,
     base_parse_args,
-    configure_ports_with_etcd,
+    configure_ports,
     overwrite_args,
     parse_endpoint,
 )
@@ -420,8 +420,7 @@ async def worker(runtime: DistributedRuntime):
     args, config = VllmBaseWorker.parse_args()
 
     # vLLM config overwrites
-    etcd_client = runtime.do_not_use_etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    await configure_ports(runtime, config)
     overwrite_args(config)
     await init(runtime, args, config)
 

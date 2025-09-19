@@ -34,12 +34,13 @@
 
 use super::block::{
     BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,
-    locality::LocalityProvider, transfer::TransferContext,
+    locality::LocalityProvider,
+    transfer::{PoolConfig, TransferContext},
 };
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::{BlockPool, BlockPoolError};
 use super::storage::{Cuda, Storage};
-use super::{DeviceStorage, DiskStorage, PinnedStorage};
+use super::{DeviceStorage, DiskStorage, KvManagerModelConfig, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -63,8 +64,17 @@ use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
-const MAX_CONCURRENT_TRANSFERS: usize = 4;
-const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
+pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+
+/// Configuration for creating an OffloadManager
+pub struct OffloadManagerConfig {
+    pub nixl_agent: Arc<Option<NixlAgent>>,
+    pub async_rt_handle: Handle,
+    pub metrics: Arc<BlockManagerMetrics>,
+    pub cancellation_token: CancellationToken,
+    pub model_config: KvManagerModelConfig,
+}
 
 /// The offload manager handles all block transfers between different cache levels.
 pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
@@ -94,10 +104,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         disk: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
         host: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
         device: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
-        nixl_agent: Arc<Option<NixlAgent>>,
-        async_rt_handle: Handle,
-        metrics: Arc<BlockManagerMetrics>,
-        cancellation_token: CancellationToken,
+        config: OffloadManagerConfig,
     ) -> Result<Arc<Self>> {
         let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
         let (host_offload_tx, host_offload_rx) = mpsc::unbounded_channel();
@@ -118,16 +125,25 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let cuda_ctx = Cuda::device_or_create(0)?;
 
+        let pool_config = PoolConfig {
+            enable_pool: true,
+            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
+            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            num_outer_components: config.model_config.outer_dim,
+            num_layers: config.model_config.num_layers,
+        };
+
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
         let device_offload_transfer_ctx = Arc::new(TransferContext::new(
-            nixl_agent.clone(),
+            config.nixl_agent.clone(),
             cuda_ctx.new_stream()?,
-            async_rt_handle.clone(),
+            config.async_rt_handle.clone(),
+            Some(pool_config),
         ));
 
-        let device_metrics = metrics.pool("device");
-        let host_metrics = metrics.pool("host");
-        let disk_metrics = metrics.pool("disk");
+        let device_metrics = config.metrics.pool("device");
+        let host_metrics = config.metrics.pool("host");
+        let disk_metrics = config.metrics.pool("disk");
 
         // Device -> Host offload
         let device_to_host_task = OffloadManager::offload_worker(
@@ -138,30 +154,31 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 LocalTransferManager::new(
                     device_offload_transfer_ctx,
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
-                    cancellation_token.clone(),
+                    &config.async_rt_handle,
+                    config.cancellation_token.clone(),
                     device_metrics.clone(),
                     "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
-                cancellation_token.clone(),
+                &config.async_rt_handle,
+                config.cancellation_token.clone(),
             )),
             device_metrics.clone(),
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
             |_| device_to_host_task,
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
             "Device -> Host offload worker",
-            &async_rt_handle,
+            &config.async_rt_handle,
         )?
         .detach();
 
         let transfer_ctx = Arc::new(TransferContext::new(
-            nixl_agent.clone(),
+            config.nixl_agent.clone(),
             cuda_ctx.new_stream()?,
-            async_rt_handle.clone(),
+            config.async_rt_handle.clone(),
+            None,
         ));
 
         // Host -> Disk offload
@@ -173,23 +190,23 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
-                    cancellation_token.clone(),
+                    &config.async_rt_handle,
+                    config.cancellation_token.clone(),
                     host_metrics.clone(),
                     "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
-                cancellation_token.clone(),
+                &config.async_rt_handle,
+                config.cancellation_token.clone(),
             )),
             host_metrics.clone(),
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
             |_| host_to_disk_task,
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
             "Host -> Disk offload worker",
-            &async_rt_handle,
+            &config.async_rt_handle,
         )?
         .detach();
 
@@ -202,23 +219,23 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
-                    cancellation_token.clone(),
+                    &config.async_rt_handle,
+                    config.cancellation_token.clone(),
                     host_metrics.clone(),
                     "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
-                cancellation_token.clone(),
+                &config.async_rt_handle,
+                config.cancellation_token.clone(),
             )),
             host_metrics.clone(),
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
             |_| host_to_device_task,
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
             "Host -> Device onboarding worker",
-            &async_rt_handle,
+            &config.async_rt_handle,
         )?
         .detach();
 
@@ -231,23 +248,23 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
-                    cancellation_token.clone(),
+                    &config.async_rt_handle,
+                    config.cancellation_token.clone(),
                     disk_metrics.clone(),
                     "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
-                cancellation_token.clone(),
+                &config.async_rt_handle,
+                config.cancellation_token.clone(),
             )),
             disk_metrics.clone(),
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
             |_| disk_to_device_task,
-            cancellation_token.clone(),
+            config.cancellation_token.clone(),
             "Disk -> Device onboarding worker",
-            &async_rt_handle,
+            &config.async_rt_handle,
         )?
         .detach();
 
@@ -734,14 +751,27 @@ mod tests {
 
         let async_rt_handle = Handle::current();
 
+        let minimal_config = KvManagerModelConfig::builder()
+            .num_layers(config.num_layers)
+            .outer_dim(config.outer_dim) // K and V
+            .page_size(config.page_size) // Minimal page size
+            .inner_dim(config.inner_dim) // Small inner dim
+            .build()
+            .expect("Failed to build minimal config");
+
+        let config = OffloadManagerConfig {
+            nixl_agent: agent_arc,
+            async_rt_handle,
+            metrics: BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
+            cancellation_token: CancellationToken::new(),
+            model_config: minimal_config,
+        };
+
         let manager = OffloadManager::new(
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
-            agent_arc,
-            async_rt_handle,
-            BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
-            CancellationToken::new(),
+            config,
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
