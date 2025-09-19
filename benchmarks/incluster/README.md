@@ -68,8 +68,8 @@ NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVI
 # Download results from PVC (recommended)
 python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
-  --output-dir ./benchmarks/results/dsr1 \
-  --folder /data/results/dsr1 \
+  --output-dir ./benchmarks/results/${INPUT_NAME} \
+  --folder /data/results/${INPUT_NAME} \
   --no-config
 ```
 
