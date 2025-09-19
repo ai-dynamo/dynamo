@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang]
+        framework: [vllm, sglang, trtllm]
         include:
           - framework: vllm
             target: runtime
@@ -23,6 +23,9 @@ jobs:
           - framework: sglang
             target: runtime
             pytest_marks: "e2e and sglang and gpu_1 and not slow"
+          - framework: trtllm
+            target: runtime
+            pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
 
     # Do not cancel main branch runs
     concurrency:

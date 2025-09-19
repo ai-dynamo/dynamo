@@ -27,7 +27,7 @@ To learn what KVBM is, please check [here](https://docs.nvidia.com/dynamo/latest
 > - KVBM only supports TensorRT-LLM’s PyTorch backend.
 > - To enable disk cache offloading, you must first enable a CPU memory cache offloading.
 > - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
-> - KVBM requires TensorRT-LLM at commit ce580ce4f52af3ad0043a800b3f9469e1f1109f6 or newer.
+> - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
 > - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
 ## Quick Start
@@ -38,12 +38,8 @@ To use KVBM in TensorRT-LLM, you can follow the steps below:
 # start up etcd for KVBM leader/worker registration and discovery
 docker compose -f deploy/docker-compose.yml up -d
 
-# Build a container that includes TensorRT-LLM and KVBM. Note: KVBM integration is only available in TensorRT-LLM commit dcd110cfac07e577ce01343c455917832b0f3d5e or newer.
-# When building with the --tensorrtllm-commit option, you may notice that https://github.com keeps prompting for a username and password.
-# This happens because cloning TensorRT-LLM can hit GitHub’s rate limit.
-# To work around this, you can keep pressing "Enter" or "Return.".
-# Setting "export GIT_LFS_SKIP_SMUDGE=1" may also reduce the number of prompts.
-./container/build.sh --framework trtllm --tensorrtllm-commit dcd110cfac07e577ce01343c455917832b0f3d5e --enable-kvbm
+# Build a container that includes TensorRT-LLM and KVBM.
+./container/build.sh --framework trtllm --enable-kvbm
 
 # launch the container
 ./container/run.sh --framework trtllm -it --mount-workspace --use-nixl-gds
