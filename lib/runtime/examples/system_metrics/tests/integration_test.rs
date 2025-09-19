@@ -106,7 +106,7 @@ async fn test_backend_with_metrics() -> Result<()> {
                 println!("{}", metrics_content);
                 println!("=== END METRICS CONTENT ===");
 
-                // Parse and verify ingress metrics are greater than 0 (except inflight_requests)
+                // Parse and verify ingress metrics are greater than 0 (except inflight_requests_total)
                 verify_ingress_metrics_greater_than_0(&metrics_content);
 
                 println!("Successfully retrieved and verified metrics!");
@@ -131,7 +131,7 @@ async fn test_backend_with_metrics() -> Result<()> {
 }
 
 fn verify_ingress_metrics_greater_than_0(metrics_content: &str) {
-    // Define the work handler metrics we want to verify (excluding inflight_requests which can be 0)
+    // Define the work handler metrics we want to verify (excluding inflight_requests_total which can be 0)
     let metrics_to_verify = [
         "my_custom_bytes_processed_total",
         "requests_total",
