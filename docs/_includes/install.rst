@@ -41,4 +41,4 @@ Pull and run prebuilt images from NVIDIA NGC (`nvcr.io`).
    docker run --rm -it \
      --gpus all \
      --network host \
-     nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.4.1  # or vllm, tensorrtllm
+     nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.5.0  # or vllm, tensorrtllm
