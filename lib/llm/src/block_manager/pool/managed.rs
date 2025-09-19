@@ -47,6 +47,7 @@ use super::*;
 
 pub mod active;
 pub mod controller;
+pub mod direct;
 pub mod inactive;
 pub mod priority_key;
 pub mod state;
@@ -750,7 +751,7 @@ mod tests {
         // Commit the block - this will generate a sequence hash
         // This will put the block in a Complete state
         block.commit().unwrap();
-        assert!(block.state().is_complete()); // perhaps renamed to Commited
+        assert!(block.is_complete()); // perhaps renamed to Commited
 
         let sequence_hash = block.sequence_hash().unwrap();
         assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
@@ -760,7 +761,7 @@ mod tests {
         // This will take ownership of the block and return an immutable block
         let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
         let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
+        assert!(block.is_registered());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
         // Dropping the immutable block should return the block to the pool
@@ -1049,7 +1050,7 @@ mod tests {
         // Commit the block - this will generate a sequence hash
         // This will put the block in a Complete state
         block.commit().unwrap();
-        assert!(block.state().is_complete()); // perhaps renamed to Commited
+        assert!(block.is_complete()); // perhaps renamed to Commited
 
         let sequence_hash = block.sequence_hash().unwrap();
         assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
@@ -1059,7 +1060,7 @@ mod tests {
         // This will take ownership of the block and return an immutable block
         let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
         let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
+        assert!(block.is_registered());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
         block

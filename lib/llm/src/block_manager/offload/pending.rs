@@ -36,7 +36,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
-    BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
+    BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, ImmutableBlock,
     MutableBlock, ReadableBlock, WritableBlock,
     locality::LocalityProvider,
     transfer::{TransferContext, WriteTo, WriteToStrategy},
@@ -127,7 +127,7 @@ fn transfer_metadata<
     target: &mut MutableBlock<Target, Locality, Metadata>,
 ) -> Result<()> {
     // Only registered blocks can be transferred. There are upstream checks for this, so this shouldn't ever fail.
-    if let BlockState::Registered(reg_handle, _) = source.state() {
+    if let Some(reg_handle) = source.registration_handle() {
         // Bring the block back to the 'Reset' state.
         target.reset();
         // Transfer metadata.
