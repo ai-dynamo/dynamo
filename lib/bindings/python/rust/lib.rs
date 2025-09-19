@@ -1086,7 +1086,7 @@ async fn process_stream(
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            
+
             Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
