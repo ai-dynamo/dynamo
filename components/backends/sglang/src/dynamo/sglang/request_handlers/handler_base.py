@@ -27,6 +27,7 @@ class BaseWorkerHandler(ABC):
         self.kv_publisher = kv_publisher
         self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
+        self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
 
     @abstractmethod
     async def generate(self, request: str):
@@ -34,3 +35,11 @@ class BaseWorkerHandler(ABC):
 
     def cleanup(self):
         pass
+
+    def _get_input_param(self, request: dict) -> dict:
+        """Get the appropriate input parameter for SGLang"""
+        return (
+            {"input_ids": request["token_ids"]} 
+            if self.skip_tokenizer_init 
+            else {"prompt": request["messages"]}
+        )

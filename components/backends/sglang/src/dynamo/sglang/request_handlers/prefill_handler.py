@@ -58,8 +58,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         yield bootstrap_info
 
+        input_param = self._get_input_param(req)
+
         results = await self.engine.async_generate(
-            input_ids=req["request"]["token_ids"],
+            **input_param,
             sampling_params=req["sampling_params"],
             stream=True,
             bootstrap_host=self.bootstrap_host,

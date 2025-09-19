@@ -41,21 +41,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         super().cleanup()
 
     def _build_sampling_params(self, request: dict) -> dict:
-        sampling_params = {}
-        if request["sampling_options"]["temperature"]:
-            sampling_params["temperature"] = request["sampling_options"]["temperature"]
-        if request["sampling_options"]["top_p"]:
-            sampling_params["top_p"] = request["sampling_options"]["top_p"]
-        if request["sampling_options"]["top_k"]:
-            sampling_params["top_k"] = request["sampling_options"]["top_k"]
-        sampling_params["max_new_tokens"] = request["stop_conditions"]["max_tokens"]
-        if request["stop_conditions"]["ignore_eos"]:
-            sampling_params["ignore_eos"] = request["stop_conditions"]["ignore_eos"]
-        return sampling_params
+        """Build sampling params depending on request from frontend"""
+        if self.skip_tokenizer_init:
+            # Token-based request format
+            sampling_opts = request.get("sampling_options", {})
+            stop_conditions = request.get("stop_conditions", {})
+            
+            param_mapping = {
+                "temperature": sampling_opts.get("temperature"),
+                "top_p": sampling_opts.get("top_p"), 
+                "top_k": sampling_opts.get("top_k"),
+                "max_new_tokens": stop_conditions.get("max_tokens"),
+                "ignore_eos": stop_conditions.get("ignore_eos"),
+            }
+        else:
+            # OpenAI request format
+            param_mapping = {
+                "temperature": request.get("temperature"),
+                "top_p": request.get("top_p"),
+                "top_k": request.get("top_k"), 
+                "max_new_tokens": request.get("max_tokens"),
+            }
+        
+        return {k: v for k, v in param_mapping.items() if v is not None}
 
     async def generate(self, request: str):
-        print(request)
         sampling_params = self._build_sampling_params(request)
+        input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # request the bootstrap info from the target prefill worker
@@ -75,7 +87,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 raise RuntimeError("No bootstrap info received from prefill worker")
 
             decode = await self.engine.async_generate(
-                input_ids=request["token_ids"],
+                **input_param,
                 sampling_params=sampling_params,
                 stream=True,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
