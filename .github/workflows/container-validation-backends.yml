@@ -16,6 +16,8 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
