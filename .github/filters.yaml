@@ -1,6 +1,5 @@
 docs: &docs
   - 'docs/**'
-  - '.github/**'
   - '**/*.md'
   - '**/*.rst'
   - '**/*.yml'
@@ -27,3 +26,5 @@ backends:
   - *vllm
   - *sglang
   - *trtllm
+sdk:
+  - 'deploy/**'  
