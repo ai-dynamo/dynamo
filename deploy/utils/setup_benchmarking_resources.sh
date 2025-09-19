@@ -75,7 +75,7 @@ for mf in "$(dirname "$0")/manifests"/*.yaml; do
       log "Skipping $mf (managed by inject_manifest.py)"
       continue
     fi
-    
+
     if command -v envsubst >/dev/null 2>&1; then
       envsubst < "$mf" | kubectl -n "$NAMESPACE" apply -f -
     else
