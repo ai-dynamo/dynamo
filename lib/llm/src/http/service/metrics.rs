@@ -20,6 +20,10 @@ use std::{
 
 use crate::discovery::ModelEntry;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::model_card::{ModelDeploymentCard, ROOT_PATH as MDC_ROOT_PATH};
+use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
+use dynamo_runtime::slug::Slug;
 
 pub use prometheus::Registry;
 
@@ -43,7 +47,7 @@ pub struct Metrics {
     model_context_length: IntGaugeVec,
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
-    model_health_status: IntGaugeVec,
+    model_workers_total: IntGaugeVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -138,21 +142,27 @@ impl Metrics {
     /// - `{prefix}_output_sequence_tokens` - HistogramVec for output sequence length in tokens
     /// - `{prefix}_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
-    /// - `{prefix}_model_total_kv_blocks` - IntGaugeVec for total KV cache blocks available per model
-    /// - `{prefix}_model_max_num_seqs` - IntGaugeVec for maximum sequences per model
-    /// - `{prefix}_model_max_num_batched_tokens` - IntGaugeVec for maximum batched tokens per model
-    /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length per model
-    /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size per model
-    /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit per model
-    /// - `{prefix}_model_health_status` - IntGaugeVec for model health status (1=healthy, 0=unhealthy, -1=unknown)
+    ///
+    /// ## Model Configuration Metrics
+    ///
+    /// Runtime config metrics (from ModelRuntimeConfig):
+    /// - `{prefix}_model_total_kv_blocks` - IntGaugeVec for total KV cache blocks available for a worker serving the model
+    /// - `{prefix}_model_max_num_seqs` - IntGaugeVec for maximum sequences for a worker serving the model
+    /// - `{prefix}_model_max_num_batched_tokens` - IntGaugeVec for maximum batched tokens for a worker serving the model
+    ///
+    /// MDC metrics (from ModelDeploymentCard):
+    /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
+    /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
+    /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
+    /// - `{prefix}_model_workers_total` - IntGaugeVec for number of worker instances serving each model
     ///
     /// ## Runtime Config Polling Configuration
     ///
     /// The polling behavior can be configured via environment variables:
-    /// - `DYN_RUNTIME_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds (default: 30)
+    /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds
     ///
-    /// Metrics are never removed to preserve historical data. Models are marked as
-    /// healthy (1) or unhealthy (0) based on their current availability.
+    /// Metrics are never removed to preserve historical data. Runtime config and MDC
+    /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
         let raw_prefix = std::env::var(frontend_service::METRICS_PREFIX_ENV)
             .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
@@ -265,8 +275,8 @@ impl Metrics {
         // Runtime configuration metrics
         let model_total_kv_blocks = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_total_kv_blocks"),
-                "Total KV cache blocks available for the model",
+                frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
+                "Total KV cache blocks available for a worker serving the model",
             ),
             &["model"],
         )
@@ -274,8 +284,8 @@ impl Metrics {
 
         let model_max_num_seqs = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_max_num_seqs"),
-                "Maximum number of sequences the model can handle",
+                frontend_metric_name(frontend_service::MODEL_MAX_NUM_SEQS),
+                "Maximum number of sequences for a worker serving the model",
             ),
             &["model"],
         )
@@ -283,8 +293,8 @@ impl Metrics {
 
         let model_max_num_batched_tokens = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_max_num_batched_tokens"),
-                "Maximum number of batched tokens for the model",
+                frontend_metric_name(frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS),
+                "Maximum number of batched tokens for a worker serving the model",
             ),
             &["model"],
         )
@@ -292,8 +302,8 @@ impl Metrics {
 
         let model_context_length = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_context_length"),
-                "Maximum context length in tokens for the model",
+                frontend_metric_name(frontend_service::MODEL_CONTEXT_LENGTH),
+                "Maximum context length in tokens for a worker serving the model",
             ),
             &["model"],
         )
@@ -301,8 +311,8 @@ impl Metrics {
 
         let model_kv_cache_block_size = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_kv_cache_block_size"),
-                "KV cache block size in tokens for the model",
+                frontend_metric_name(frontend_service::MODEL_KV_CACHE_BLOCK_SIZE),
+                "KV cache block size in tokens for a worker serving the model",
             ),
             &["model"],
         )
@@ -310,17 +320,17 @@ impl Metrics {
 
         let model_migration_limit = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_migration_limit"),
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_LIMIT),
                 "Maximum number of request migrations allowed for the model",
             ),
             &["model"],
         )
         .unwrap();
 
-        let model_health_status = IntGaugeVec::new(
+        let model_workers_total = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name("model_health_status"),
-                "Health status of the model (1=healthy, 0=unhealthy, -1=unknown)",
+                frontend_metric_name(frontend_service::MODEL_WORKERS_TOTAL),
+                "Number of worker instances currently serving the model",
             ),
             &["model"],
         )
@@ -342,7 +352,7 @@ impl Metrics {
             model_context_length,
             model_kv_cache_block_size,
             model_migration_limit,
-            model_health_status,
+            model_workers_total,
         }
     }
 
@@ -439,7 +449,7 @@ impl Metrics {
         registry.register(Box::new(self.model_context_length.clone()))?;
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
-        registry.register(Box::new(self.model_health_status.clone()))?;
+        registry.register(Box::new(self.model_workers_total.clone()))?;
 
         Ok(())
     }
@@ -454,19 +464,19 @@ impl Metrics {
         if let Some(total_kv_blocks) = runtime_config.total_kv_blocks {
             self.model_total_kv_blocks
                 .with_label_values(&[model_name])
-                .set(total_kv_blocks as i64);
+                .set(clamp_u64_to_i64(total_kv_blocks));
         }
 
         if let Some(max_num_seqs) = runtime_config.max_num_seqs {
             self.model_max_num_seqs
                 .with_label_values(&[model_name])
-                .set(max_num_seqs as i64);
+                .set(clamp_u64_to_i64(max_num_seqs));
         }
 
         if let Some(max_batched_tokens) = runtime_config.max_num_batched_tokens {
             self.model_max_num_batched_tokens
                 .with_label_values(&[model_name])
-                .set(max_batched_tokens as i64);
+                .set(clamp_u64_to_i64(max_batched_tokens));
         }
     }
 
@@ -492,23 +502,6 @@ impl Metrics {
             .set(migration_limit as i64);
     }
 
-    /// Set model health status
-    /// 1 = healthy (model is active and responding)
-    /// 0 = unhealthy (model is known but not responding)
-    /// -1 = unknown (model status is unclear)
-    pub fn set_model_health_status(&self, model_name: &str, healthy: bool) {
-        let status = if healthy { 1 } else { 0 };
-        self.model_health_status
-            .with_label_values(&[model_name])
-            .set(status);
-    }
-
-    /// Mark model as having unknown health status
-    pub fn set_model_health_unknown(&self, model_name: &str) {
-        self.model_health_status
-            .with_label_values(&[model_name])
-            .set(-1);
-    }
 
     /// Update metrics from a ModelEntry
     /// This is a convenience method that extracts runtime config from a ModelEntry
@@ -532,35 +525,55 @@ impl Metrics {
         }
 
         // Load and update MDC metrics
-        match model_entry.load_mdc(etcd_client).await {
-            Ok(mdc) => {
+        let model_slug = Slug::from_string(&model_entry.name);
+        let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+        let card_store = Arc::new(KeyValueStoreManager::new(store));
+
+        match card_store.load::<ModelDeploymentCard>(MDC_ROOT_PATH, &model_slug).await {
+            Ok(Some(mdc)) => {
                 self.update_mdc_metrics(
                     &model_entry.name,
                     mdc.context_length,
                     mdc.kv_cache_block_size,
                     mdc.migration_limit,
                 );
-                Ok(())
+                tracing::debug!(
+                    model = %model_entry.name,
+                    "Successfully updated MDC metrics"
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    model = %model_entry.name,
+                    "No MDC found in storage, skipping MDC metrics"
+                );
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::debug!(
                     model = %model_entry.name,
                     error = %e,
-                    "Failed to load ModelDeploymentCard for metrics update"
+                    "Failed to load MDC for metrics update"
                 );
-                Err(e)
             }
         }
+
+        Ok(())
     }
 
     /// Start a background task that periodically updates runtime config metrics
     /// This polls the ModelManager for current models and updates metrics accordingly
     /// Models are never removed - only marked as healthy/unhealthy to preserve historical data
+    ///
+    /// Note: If multiple model instances have the same name, only the first instance's metrics are used.
+    /// Subsequent instances with duplicate names will be skipped.
+    ///
+    /// The task will run until the provided cancellation token is cancelled.
     pub fn start_runtime_config_polling_task(
         metrics: Arc<Self>,
         manager: Arc<crate::discovery::ModelManager>,
         etcd_client: Option<dynamo_runtime::transports::etcd::Client>,
         poll_interval: Duration,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(poll_interval);
@@ -572,18 +585,56 @@ impl Metrics {
             );
 
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("Runtime config metrics polling task cancelled");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // Continue with polling logic
+                    }
+                }
 
                 // Get current model entries from the manager
                 let current_entries = manager.get_model_entries();
                 let mut current_models = std::collections::HashSet::new();
+                let mut model_worker_counts = std::collections::HashMap::new();
 
-                // Update metrics for current models
+                // Count worker instances per model
+                for entry in &current_entries {
+                    *model_worker_counts.entry(entry.name.clone()).or_insert(0) += 1;
+                }
+
+                // Update worker count metrics for all models
+                for (model_name, count) in &model_worker_counts {
+                    metrics.model_workers_total
+                        .with_label_values(&[model_name])
+                        .set(*count);
+                }
+
+                // Reset worker count to 0 for models that no longer have any workers
+                let current_models_with_workers: std::collections::HashSet<String> =
+                    model_worker_counts.keys().cloned().collect();
+                for model_name in known_models.difference(&current_models_with_workers) {
+                    metrics.model_workers_total
+                        .with_label_values(&[model_name])
+                        .set(0);
+                }
+
+                // Note: If multiple model instances have the same name, only the first instance's config metrics are recorded.
+                // Subsequent instances with duplicate names will be skipped for config updates.
+
+                // Update configuration metrics for current models
                 for entry in current_entries {
-                    current_models.insert(entry.name.clone());
-
-                    // Mark model as healthy since it's currently active
-                    metrics.set_model_health_status(&entry.name, true);
+                    // Skip config processing if we've already seen this model name
+                    if !current_models.insert(entry.name.clone()) {
+                        tracing::debug!(
+                            model_name = %entry.name,
+                            endpoint = ?entry.endpoint_id,
+                            "Skipping duplicate model instance - only first instance config metrics are recorded"
+                        );
+                        continue;
+                    }
 
                     // Update runtime config metrics if available
                     if let Some(runtime_config) = &entry.runtime_config {
@@ -604,12 +655,11 @@ impl Metrics {
                     }
                 }
 
-                // Mark models that are no longer active as unhealthy (but keep their metrics)
-                for model_name in known_models.difference(&current_models) {
-                    metrics.set_model_health_status(model_name, false);
+                // Log models that are no longer active (worker count reset to 0, other metrics preserved)
+                for model_name in known_models.difference(&current_models_with_workers) {
                     tracing::debug!(
                         model = %model_name,
-                        "Model no longer active, marked as unhealthy (metrics preserved)"
+                        "Model no longer active (worker count reset to 0, other metrics preserved)"
                     );
                 }
 

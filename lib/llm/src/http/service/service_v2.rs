@@ -133,6 +133,9 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+
+    // Metrics polling configuration
+    etcd_client: Option<dynamo_runtime::transports::etcd::Client>,
 }
 
 #[derive(Clone, Builder)]
@@ -200,6 +203,22 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
+
+        // Start background task to poll runtime config metrics with proper cancellation
+        let poll_interval = Duration::from_secs(
+            std::env::var("DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8),
+        );
+
+        let _polling_task = super::metrics::Metrics::start_runtime_config_polling_task(
+            self.state.metrics_clone(),
+            self.state.manager_clone(),
+            self.etcd_client.clone(),
+            poll_interval,
+            cancel_token.child_token(),
+        );
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -314,23 +333,7 @@ impl HttpServiceConfigBuilder {
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
 
-        // Start background task to poll runtime config metrics
-        // Poll every 30 seconds to keep metrics current as backends come and go
-        // Metrics are never removed - only marked as healthy/unhealthy
-        let poll_interval = Duration::from_secs(
-            std::env::var("DYN_RUNTIME_CONFIG_METRICS_POLL_INTERVAL_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(30),
-        );
-
-        let _polling_task = super::metrics::Metrics::start_runtime_config_polling_task(
-            state.metrics_clone(),
-            state.manager_clone(),
-            etcd_client,
-            poll_interval,
-        );
-        // Note: We don't need to store the JoinHandle as the task will run for the lifetime of the service
+        // Note: Metrics polling task will be started in run() method to have access to cancellation token
 
         let mut router = axum::Router::new();
 
@@ -363,6 +366,7 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            etcd_client,
         })
     }
 
