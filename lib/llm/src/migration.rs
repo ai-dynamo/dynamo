@@ -331,10 +331,8 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response = Annotated::from_err(
-                                anyhow::Error::msg("Stream ended before generation completed")
-                                    .into(),
-                            );
+                            let error_response =
+                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
                             let _ = tx.send(error_response).await;
                         });
                     } else {
@@ -373,10 +371,8 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response = Annotated::from_err(
-                                anyhow::Error::msg("Stream ended before generation completed")
-                                    .into(),
-                            );
+                            let error_response =
+                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
                             let _ = tx.send(error_response).await;
                         });
 
@@ -409,10 +405,8 @@ mod tests {
                                 }
                             }
                             // Send the specific error that triggers retry logic
-                            let error_response = Annotated::from_err(
-                                anyhow::Error::msg("Stream ended before generation completed")
-                                    .into(),
-                            );
+                            let error_response =
+                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
                             let _ = tx.send(error_response).await;
                         });
 
@@ -426,10 +420,8 @@ mod tests {
                         // Subsequent calls - immediately send stream error (no successful responses)
                         tokio::spawn(async move {
                             // Send the stream error immediately
-                            let error_response = Annotated::from_err(
-                                anyhow::Error::msg("Stream ended before generation completed")
-                                    .into(),
-                            );
+                            let error_response =
+                                Annotated::from_err(anyhow::Error::msg(STREAM_ERR_MSG).into());
                             let _ = tx.send(error_response).await;
                         });
 
@@ -669,11 +661,7 @@ mod tests {
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
-            assert!(
-                error
-                    .to_string()
-                    .contains("Stream ended before generation completed")
-            );
+            assert!(error.to_string().contains(STREAM_ERR_MSG));
         }
     }
 
@@ -722,11 +710,7 @@ mod tests {
         let error_response = &responses[3];
         assert!(error_response.err().is_some());
         if let Some(error) = error_response.err() {
-            assert!(
-                error
-                    .to_string()
-                    .contains("Stream ended before generation completed")
-            );
+            assert!(error.to_string().contains(STREAM_ERR_MSG));
         }
     }
 }
