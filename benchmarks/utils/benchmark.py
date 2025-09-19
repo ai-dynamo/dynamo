@@ -4,24 +4,39 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import asyncio
+import re
 import sys
-from typing import Tuple
+from typing import Dict, Tuple
 
-from benchmarks.utils.workflow import categorize_inputs, run_benchmark_workflow
+from benchmarks.utils.workflow import run_benchmark_workflow
+
+
+def validate_inputs(inputs: Dict[str, str]) -> None:
+    """Validate that all inputs are HTTP endpoints"""
+    for label, value in inputs.items():
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                f"Input '{label}' must be an HTTP endpoint (starting with http:// or https://). Got: {value}"
+            )
+
+        # Validate reserved labels
+        if label.lower() == "plots":
+            raise ValueError(
+                "Label 'plots' is reserved and cannot be used. Please choose a different label."
+            )
 
 
 def parse_input(input_str: str) -> Tuple[str, str]:
     """Parse input string in format key=value with additional validation"""
     if "=" not in input_str:
         raise ValueError(
-            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
+            f"Invalid input format. Expected: <label>=<endpoint>, got: {input_str}"
         )
 
     parts = input_str.split("=", 1)  # Split on first '=' only
     if len(parts) != 2:
         raise ValueError(
-            f"Invalid input format. Expected: <label>=<manifest_path_or_endpoint>, got: {input_str}"
+            f"Invalid input format. Expected: <label>=<endpoint>, got: {input_str}"
         )
 
     label, value = parts
@@ -35,8 +50,6 @@ def parse_input(input_str: str) -> Tuple[str, str]:
     value = value.strip()
 
     # Validate label characters
-    import re
-
     if not re.match(r"^[a-zA-Z0-9_-]+$", label):
         raise ValueError(
             f"Label must contain only letters, numbers, hyphens, and underscores. Invalid label: {label}"
@@ -51,9 +64,8 @@ def main() -> int:
         "--input",
         action="append",
         dest="inputs",
-        help="Input in format <label>=<manifest_path_or_endpoint>. Can be specified multiple times for comparisons.",
+        help="Input in format <label>=<endpoint>. Can be specified multiple times for comparisons.",
     )
-    parser.add_argument("--namespace", required=True, help="Kubernetes namespace")
     parser.add_argument("--isl", type=int, default=2000, help="Input sequence length")
     parser.add_argument(
         "--std",
@@ -102,23 +114,21 @@ def main() -> int:
             )
             print()
 
-        endpoints, manifests = categorize_inputs(parsed_inputs)
+        # Validate that all inputs are HTTP endpoints
+        validate_inputs(parsed_inputs)
 
-    except (ValueError, FileNotFoundError) as e:
+    except ValueError as e:
         print(f"ERROR: {e}")
         return 1
 
     # Run the benchmark workflow with the parsed inputs
-    asyncio.run(
-        run_benchmark_workflow(
-            namespace=args.namespace,
-            inputs=parsed_inputs,
-            isl=args.isl,
-            std=args.std,
-            osl=args.osl,
-            model=args.model,
-            output_dir=args.output_dir,
-        )
+    run_benchmark_workflow(
+        inputs=parsed_inputs,
+        isl=args.isl,
+        std=args.std,
+        osl=args.osl,
+        model=args.model,
+        output_dir=args.output_dir,
     )
     return 0
 

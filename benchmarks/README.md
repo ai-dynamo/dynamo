@@ -24,10 +24,10 @@ First, deploy your DynamoGraphDeployment using the [deployment documentation](..
 
 ```bash
 # Port-forward your deployment to http://localhost:8000
-kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 &
+kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev/null 2>&1 &
 
 # Run benchmark
-python3 -m benchmarks.utils.benchmark --namespace <namespace> \
+python3 -m benchmarks.utils.benchmark \
     --input my-benchmark=http://localhost:8000 \
     --model "<your-model>"
 

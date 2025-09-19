@@ -264,13 +264,12 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err() {
-                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                if format!("{:?}", err) == STREAM_ERR_MSG {
-                    tracing::warn!(STREAM_ERR_MSG);
-                    send_complete_final = false;
-                    break;
-                }
+            if let Some(err) = resp.err()
+                && format!("{:?}", err) == STREAM_ERR_MSG
+            {
+                tracing::warn!(STREAM_ERR_MSG);
+                send_complete_final = false;
+                break;
             }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
