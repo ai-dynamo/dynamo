@@ -231,6 +231,7 @@ where
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
+                    // TODO: Standardize error type to avoid using string matching DIS-364
                     if let Some(err) = res.err()
                         && format!("{:?}", err) == STREAM_ERR_MSG
                     {
