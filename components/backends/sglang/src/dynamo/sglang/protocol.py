@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -34,16 +34,15 @@ class SamplingOptions(BaseModel):
 
 
 class PreprocessedRequest(BaseModel):
-    token_ids: Optional[List[TokenIdType]] = None
-    messages: Optional[List[dict]] = None
+    token_ids: List[TokenIdType]
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
-    eos_token_ids: Optional[List[TokenIdType]] = None
+    eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
-    annotations: Optional[List[str]] = Field(default_factory=list)
+    annotations: List[str] = Field(default_factory=list)
 
 
 class DisaggPreprocessedRequest(BaseModel):
-    request: PreprocessedRequest
+    request: Union[PreprocessedRequest, dict]
     sampling_params: dict
     data_parallel_rank: Optional[int] = None
