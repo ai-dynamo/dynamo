@@ -84,6 +84,7 @@ jobs:
       matrix:
         framework: ["vllm"]
         platform: ["linux/arm64"]
+        target: ["runtime"]
 
     name: Build and Test - ${{ matrix.framework }}
     env:
