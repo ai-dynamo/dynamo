@@ -117,7 +117,7 @@ impl Metrics {
     ///
     /// The following metrics will be created with the configured prefix:
     /// - `{prefix}_requests_total` - IntCounterVec for the total number of requests processed
-    /// - `{prefix}_inflight_requests_total` - IntGaugeVec for the number of inflight/concurrent requests
+    /// - `{prefix}_inflight_requests` - IntGaugeVec for the number of inflight/concurrent requests
     /// - `{prefix}_disconnected_clients_total` - IntGauge for the number of connections dropped by clients
     /// - `{prefix}_request_duration_seconds` - HistogramVec for the duration of requests
     /// - `{prefix}_input_sequence_tokens` - HistogramVec for input sequence length in tokens
@@ -149,7 +149,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS_TOTAL),
+                frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
             ),
             &["model"],

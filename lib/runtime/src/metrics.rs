@@ -1619,7 +1619,7 @@ mod test_metricsregistry_nats {
                 23000.0,
             ), // ~75-125% of 20660
             (
-                build_component_metric_name(work_handler::INFLIGHT_REQUESTS_TOTAL),
+                build_component_metric_name(work_handler::INFLIGHT_REQUESTS),
                 0.0,
                 1.0,
             ), // 0 or very low

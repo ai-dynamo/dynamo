@@ -14,7 +14,8 @@
 //! **Name**: Descriptive snake_case name indicating what is measured
 //! **Suffix**:
 //!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`, `_messages`, `_connections`
-//!   - Counters: `_total` (not `total_` prefix)
+//!   - Counters: `_total` (not `total_` prefix) - for cumulative metrics that only increase
+//!   - Gauges: No `_total` suffix - for current state metrics that can go up and down
 //!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
 //!
 //! **Common Transformations**:
@@ -30,7 +31,7 @@
 //! - ❌ `_some_request_size` → ✅ `_some_request_bytes_avg`
 //! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
 //! - ❌ `client_disconnects_total` → ✅ `disconnected_clients_total`
-//! - ❌ `inflight_requests` → ✅ `inflight_requests_total` (keep _total for consistency)
+//! - ❌ `inflight_requests_total` → ✅ `inflight_requests` (gauge, not counter)
 //! - ❌ `connections_total` → ✅ `current_connections` (gauge, not counter)
 //!
 //! **Examples**:
@@ -38,7 +39,7 @@
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests_total` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
 //! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
@@ -87,8 +88,9 @@ pub mod frontend_service {
     /// Number of requests waiting in HTTP queue before receiving the first response.
     pub const QUEUED_REQUESTS_TOTAL: &str = "queued_requests_total";
 
-    /// Number of inflight requests going to the engine (vLLM, SGLang, ...)
-    pub const INFLIGHT_REQUESTS_TOTAL: &str = "inflight_requests_total";
+    /// Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
+    /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
     /// Number of connections dropped by clients
     pub const DISCONNECTED_CLIENTS_TOTAL: &str = "disconnected_clients_total";
@@ -139,7 +141,8 @@ pub mod work_handler {
     pub const RESPONSE_BYTES_TOTAL: &str = "response_bytes_total";
 
     /// Number of requests currently being processed by work handler
-    pub const INFLIGHT_REQUESTS_TOTAL: &str = "inflight_requests_total";
+    /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
+    pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
     /// Time spent processing requests by work handler (histogram)
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";

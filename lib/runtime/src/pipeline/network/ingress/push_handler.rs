@@ -61,7 +61,7 @@ impl WorkHandlerMetrics {
         )?;
 
         let inflight_requests = endpoint.create_intgauge(
-            work_handler::INFLIGHT_REQUESTS_TOTAL,
+            work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
             metrics_labels,
         )?;
