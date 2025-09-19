@@ -159,7 +159,7 @@ impl Metrics {
     /// ## Runtime Config Polling Configuration
     ///
     /// The polling behavior can be configured via environment variables:
-    /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds
+    /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds (must be > 0, defaults to 8)
     ///
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
