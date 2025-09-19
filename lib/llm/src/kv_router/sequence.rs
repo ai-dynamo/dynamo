@@ -126,6 +126,11 @@ impl ActiveSequences {
         isl: usize,
         overlap: u32,
     ) -> HashSet<RequestId> {
+        // Check for double-add and panic early
+        if self.active_seqs.contains_key(&request_id) {
+            panic!("Request {request_id} is already active. Cannot accept double-add.");
+        }
+
         // Lazily check and clean up expired requests, capturing removed IDs
         let removed_requests = self.force_expiry();
 
@@ -134,12 +139,14 @@ impl ActiveSequences {
             .insert(request_id.clone(), prefill_tokens);
         self.active_tokens += prefill_tokens;
 
-        // Only add blocks if token_sequence is provided
         if let Some(sequence) = token_sequence {
             for block in &sequence {
                 self.add_block(request_id.clone(), block);
             }
             self.active_seqs.insert(request_id.clone(), sequence);
+        } else {
+            // dummy empty sequence
+            self.active_seqs.insert(request_id.clone(), Vec::new());
         }
 
         removed_requests
@@ -195,17 +202,18 @@ impl ActiveSequences {
 
         self.expiry_requests.remove(request_id);
 
-        let Some(token_seq) = self.active_seqs.get(request_id) else {
-            // this may happen if active_seqs were never added with token_seq (prefill-only)
-            tracing::trace!("Trying to free non-existent request {request_id}");
-            return 0;
+        // Remove from active_seqs and get the token sequence
+        let token_seq = match self.active_seqs.remove(request_id) {
+            Some(seq) => seq,
+            None => {
+                tracing::warn!("Trying to free non-existent request {request_id}");
+                return self.active_blocks;
+            }
         };
 
-        for block in token_seq.clone() {
+        for block in token_seq {
             self.remove_block(request_id, &block)
         }
-
-        self.active_seqs.remove(request_id).unwrap();
 
         self.active_blocks
     }
