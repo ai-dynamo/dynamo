@@ -251,9 +251,6 @@ def gen_config_file(
             "backend": "DEFAULT",
         },
         "stream_interval": 20,
-        # Should be unused in Dynamo integration when TRTLLM detokenization
-        # is disabled, but set it here for config parity.
-        "num_postprocess_workers": 8,
     }
 
     if gen_tp_size == 8 and not gen_enable_attention_dp:
