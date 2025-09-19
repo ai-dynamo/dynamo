@@ -15,6 +15,7 @@
 
 import json
 import logging
+import math
 import re
 import shlex
 from typing import Literal, Optional, Protocol
@@ -77,6 +78,10 @@ class Config(BaseModel):
     metadata: Metadata
     spec: Spec
     model_config = {"extra": "allow"}
+
+
+class MultinodeConfig(BaseModel):
+    nodeCount: int
 
 
 def break_arguments(args: list[str] | None) -> list[str]:
@@ -159,13 +164,49 @@ def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
     return override_dict, args
 
 
+def set_multinode_config(worker_service, gpu_count: int, num_gpus_per_node: int):
+    """Helper function to set multinode configuration based on GPU count and GPUs per node."""
+    if gpu_count <= num_gpus_per_node:
+        # Single node: remove multinode configuration if present
+        if (
+            hasattr(worker_service, "multinode")
+            and worker_service.multinode is not None
+        ):
+            worker_service.multinode = None
+    else:
+        # Multi-node: set nodeCount = math.ceil(gpu_count / num_gpus_per_node)
+        node_count = math.ceil(gpu_count / num_gpus_per_node)
+        if not hasattr(worker_service, "multinode") or worker_service.multinode is None:
+            # Create multinode configuration if it doesn't exist
+            worker_service.multinode = MultinodeConfig(nodeCount=node_count)
+        else:
+            worker_service.multinode.nodeCount = node_count
+
+
 class ConfigModifierProtocol(Protocol):
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
+    def convert_config(
+        cls,
+        config: dict,
+        target: Literal["prefill", "decode"],
+        is_moe_model: bool = False,
+    ) -> dict:
         ...
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False) -> dict:
+    def set_config_tp_size(cls, config: dict, tp_size: int) -> dict:
+        ...
+
+    @classmethod
+    def set_config_tep_size(
+        cls, config: dict, tep_size: int, num_gpus_per_node: int
+    ) -> dict:
+        ...
+
+    @classmethod
+    def set_config_dep_size(
+        cls, config: dict, dep_size: int, num_gpus_per_node: int
+    ) -> dict:
         ...
 
     @classmethod
@@ -177,20 +218,29 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
+    def get_kv_cache_size_from_dynamo_log(
+        cls, dynamo_log_fn: str, attention_dp_size: int = 1
+    ) -> int:
         ...
 
 
 class VllmV1ConfigModifier:
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
+    def convert_config(
+        cls,
+        config: dict,
+        target: Literal["prefill", "decode"],
+        is_moe_model: bool = False,
+    ) -> dict:
+        if is_moe_model:
+            raise NotImplementedError(
+                "MoE model support is not implemented for VLLM backend"
+            )
+
         cfg = Config.model_validate(config)
 
         # set metadata name
-        if is_moe_model:
-            cfg.metadata.name = "vllm-moe-agg"
-        else:
-            cfg.metadata.name = "vllm-agg"
+        cfg.metadata.name = "vllm-agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -269,7 +319,7 @@ class VllmV1ConfigModifier:
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False):
+    def set_config_tp_size(cls, config: dict, tp_size: int):
         cfg = Config.model_validate(config)
 
         worker_service = cfg.spec.services[
@@ -310,6 +360,18 @@ class VllmV1ConfigModifier:
         worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         return cfg.model_dump()
+
+    @classmethod
+    def set_config_tep_size(cls, config: dict, tep_size: int, num_gpus_per_node: int):
+        raise NotImplementedError(
+            "TEP (Tensor Expert Parallelism) is not implemented for VLLM backend"
+        )
+
+    @classmethod
+    def set_config_dep_size(cls, config: dict, dep_size: int, num_gpus_per_node: int):
+        raise NotImplementedError(
+            "DEP (Data Expert Parallelism) is not implemented for VLLM backend"
+        )
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
@@ -368,8 +430,9 @@ class VllmV1ConfigModifier:
             return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
-        # TODO
+    def get_kv_cache_size_from_dynamo_log(
+        cls, dynamo_log_fn: str, attention_dp_size: int = 1
+    ) -> int:
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -393,14 +456,16 @@ class VllmV1ConfigModifier:
 
 class SGLangConfigModifier:
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
+    def convert_config(
+        cls,
+        config: dict,
+        target: Literal["prefill", "decode"],
+        is_moe_model: bool = False,
+    ) -> dict:
         cfg = Config.model_validate(config)
 
         # set metadata name
-        if is_moe_model:
-            cfg.metadata.name = "sglang-moe-agg"
-        else:
-            cfg.metadata.name = "sglang-agg"
+        cfg.metadata.name = "sglang-agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -431,9 +496,10 @@ class SGLangConfigModifier:
 
             args = break_arguments(args)
 
-            # remove `--disaggregation-mode` and `--disaggregation-transfer-backend`
+            # remove disagg flags
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
+            args = remove_valued_arguments(args, "--disaggregation-bootstrap-port")
 
             # disable prefix caching
             if "--disable-radix-cache" not in args:
@@ -461,13 +527,24 @@ class SGLangConfigModifier:
 
             args = break_arguments(args)
 
-            # remove `--disaggregation-mode` and `--disaggregation-transfer-backend`
+            # remove disagg flags
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
+            args = remove_valued_arguments(args, "--disaggregation-bootstrap-port")
 
             # enable prefix caching
             if "--disable-radix-cache" in args:
                 args.remove("--disable-radix-cache")
+
+            if is_moe_model:
+                # need to use round_robin dp attention routing for MoE models to ensure kv reuse can skip prefill
+                if "--load-balance-method" in args:
+                    idx = args.index("--load-balance-method")
+                    args[idx + 1] = "round_robin"
+                else:
+                    args = append_argument(
+                        args, ["--load-balance-method", "round_robin"]
+                    )
 
             worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
@@ -480,7 +557,7 @@ class SGLangConfigModifier:
         return config
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False):
+    def set_config_tp_size(cls, config: dict, tp_size: int):
         cfg = Config.model_validate(config)
 
         worker_service = cfg.spec.services[
@@ -517,6 +594,132 @@ class SGLangConfigModifier:
             args[idx + 1] = str(tp_size)
         except ValueError:
             args = append_argument(args, ["--tp", str(tp_size)])
+
+        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_tep_size(cls, config: dict, tep_size: int, num_gpus_per_node: int):
+        cfg = Config.model_validate(config)
+
+        worker_service = cfg.spec.services[
+            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        ]
+
+        # Handle multinode configuration
+        set_multinode_config(worker_service, tep_size, num_gpus_per_node)
+
+        # Ensure resources exists
+        if worker_service.resources is None:
+            worker_service.resources = ServiceResources()
+
+        # Ensure requests exists
+        if worker_service.resources.requests is None:
+            worker_service.resources.requests = {}
+
+        worker_service.resources.requests["gpu"] = str(tep_size)
+
+        # Update limits if they exist
+        if worker_service.resources.limits is not None:
+            worker_service.resources.limits["gpu"] = str(tep_size)
+
+        if (
+            not worker_service.extraPodSpec
+            or not worker_service.extraPodSpec.mainContainer
+        ):
+            raise ValueError(
+                f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
+            )
+        args = worker_service.extraPodSpec.mainContainer.args
+
+        args = break_arguments(args)
+
+        # 1. Set --tp=tep_size, if not present add it
+        try:
+            idx = args.index("--tp")
+            args[idx + 1] = str(tep_size)
+        except ValueError:
+            args = append_argument(args, ["--tp", str(tep_size)])
+
+        # 2. Set --ep-size=tep_size, if not present add it
+        try:
+            idx = args.index("--ep-size")
+            args[idx + 1] = str(tep_size)
+        except ValueError:
+            args = append_argument(args, ["--ep-size", str(tep_size)])
+
+        # 3. Remove --dp if present
+        args = remove_valued_arguments(args, "--dp")
+
+        # 4. Remove --enable-dp-attention if present
+        if "--enable-dp-attention" in args:
+            args.remove("--enable-dp-attention")
+
+        worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
+
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_dep_size(cls, config: dict, dep_size: int, num_gpus_per_node: int):
+        cfg = Config.model_validate(config)
+
+        worker_service = cfg.spec.services[
+            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        ]
+
+        # Handle multinode configuration
+        set_multinode_config(worker_service, dep_size, num_gpus_per_node)
+
+        # Ensure resources exists
+        if worker_service.resources is None:
+            worker_service.resources = ServiceResources()
+
+        # Ensure requests exists
+        if worker_service.resources.requests is None:
+            worker_service.resources.requests = {}
+
+        worker_service.resources.requests["gpu"] = str(dep_size)
+
+        # Update limits if they exist
+        if worker_service.resources.limits is not None:
+            worker_service.resources.limits["gpu"] = str(dep_size)
+
+        if (
+            not worker_service.extraPodSpec
+            or not worker_service.extraPodSpec.mainContainer
+        ):
+            raise ValueError(
+                f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
+            )
+        args = worker_service.extraPodSpec.mainContainer.args
+
+        args = break_arguments(args)
+
+        # 1. Set --tp=1 (single GPU per expert)
+        try:
+            idx = args.index("--tp")
+            args[idx + 1] = "1"
+        except ValueError:
+            args = append_argument(args, ["--tp", "1"])
+
+        # 2. Set --dp=dep_size (data parallelism across experts)
+        try:
+            idx = args.index("--dp")
+            args[idx + 1] = str(dep_size)
+        except ValueError:
+            args = append_argument(args, ["--dp", str(dep_size)])
+
+        # 3. Enable --enable-dp-attention
+        if "--enable-dp-attention" not in args:
+            args = append_argument(args, "--enable-dp-attention")
+
+        # 4. Set --ep-size=dep_size (expert parallelism size)
+        try:
+            idx = args.index("--ep-size")
+            args[idx + 1] = str(dep_size)
+        except ValueError:
+            args = append_argument(args, ["--ep-size", str(dep_size)])
 
         worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
@@ -579,8 +782,9 @@ class SGLangConfigModifier:
             return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
-        # TODO
+    def get_kv_cache_size_from_dynamo_log(
+        cls, dynamo_log_fn: str, attention_dp_size: int = 1
+    ) -> int:
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -588,7 +792,7 @@ class SGLangConfigModifier:
                         # Extract the number after "#tokens:"
                         match = re.search(r"#tokens:\s*(\d+)", line)
                         if match:
-                            return int(match.group(1))
+                            return int(match.group(1)) * attention_dp_size
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
         return 0
@@ -596,14 +800,21 @@ class SGLangConfigModifier:
 
 class TrtllmConfigModifier:
     @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"], is_moe_model: bool = False) -> dict:
+    def convert_config(
+        cls,
+        config: dict,
+        target: Literal["prefill", "decode"],
+        is_moe_model: bool = False,
+    ) -> dict:
+        if is_moe_model:
+            raise NotImplementedError(
+                "MoE model support is not implemented for TrtLLM backend"
+            )
+
         cfg = Config.model_validate(config)
 
         # set metadata name
-        if is_moe_model:
-            cfg.metadata.name = "trtllm-moe-agg"
-        else:
-            cfg.metadata.name = "trtllm-agg"
+        cfg.metadata.name = "trtllm-agg"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -717,7 +928,7 @@ class TrtllmConfigModifier:
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int, is_moe_model: bool = False):
+    def set_config_tp_size(cls, config: dict, tp_size: int):
         cfg = Config.model_validate(config)
 
         worker_service = cfg.spec.services["TRTLLMWorker"]
@@ -760,6 +971,18 @@ class TrtllmConfigModifier:
         worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
         return cfg.model_dump()
+
+    @classmethod
+    def set_config_tep_size(cls, config: dict, tep_size: int, num_gpus_per_node: int):
+        raise NotImplementedError(
+            "TEP (Tensor Expert Parallelism) is not implemented for TrtLLM backend"
+        )
+
+    @classmethod
+    def set_config_dep_size(cls, config: dict, dep_size: int, num_gpus_per_node: int):
+        raise NotImplementedError(
+            "DEP (Data Expert Parallelism) is not implemented for TrtLLM backend"
+        )
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
@@ -819,7 +1042,9 @@ class TrtllmConfigModifier:
         return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str, is_moe_model: bool = False) -> int:
+    def get_kv_cache_size_from_dynamo_log(
+        cls, dynamo_log_fn: str, attention_dp_size: int = 1
+    ) -> int:
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
         try:
