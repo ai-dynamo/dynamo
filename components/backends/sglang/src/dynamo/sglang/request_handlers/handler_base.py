@@ -39,8 +39,13 @@ class BaseWorkerHandler(ABC):
     def _get_input_param(self, request: dict) -> dict:
         """Get the appropriate input parameter for SGLang"""
         print(request)
-        return (
-            {"input_ids": request["token_ids"]} 
-            if self.skip_tokenizer_init 
-            else {"prompt": request["messages"]}
-        )
+        if self.skip_tokenizer_init:
+            return {"input_ids": request["token_ids"]}
+        else:
+            # use sglang's tokenizer itself
+            prompt = self.engine.tokenizer_manager.tokenizer.apply_chat_template(
+                request["messages"],
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            return {"prompt": prompt}
