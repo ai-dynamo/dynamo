@@ -99,7 +99,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 yield out
         else:
             agg = await self.engine.async_generate(
-                input_ids=request["token_ids"],
+                **input_param,
                 sampling_params=sampling_params,
                 stream=True,
             )
