@@ -14,7 +14,7 @@ spec:
       - name: docker-imagepullsecret
       containers:
       - name: benchmark-runner
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+        image: ${DOCKER_IMAGE}
         resources:
           requests:
             cpu: "4"
@@ -35,7 +35,7 @@ spec:
         command: ["python3", "-m", "benchmarks.utils.benchmark"]
         args:
           - --model
-          - deepseek-ai/DeepSeek-R1
+          - ${MODEL_NAME}
           - --isl
           - "2000"
           - --std
@@ -45,7 +45,7 @@ spec:
           - --output-dir
           - /data/results
           - --input
-          - dsr1=${NAMESPACE}-sgl-dsr1-8gpu-frontend:8000
+          - ${INPUT_NAME}=${SERVICE_URL}
         volumeMounts:
           - name: data-volume
             mountPath: /data
