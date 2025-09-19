@@ -3,17 +3,15 @@
 
 import asyncio
 
-from dynamo._core import DistributedRuntime
+import pytest
 
 # Todo add support for launching etcd
 # pytestmark = pytest.mark.pre_merge
 
 
-async def test_simple_put_get():
+@pytest.mark.asyncio
+async def test_simple_put_get(runtime):
     # Initialize runtime
-    loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, False)
-
     # Get etcd client
     etcd = runtime.do_not_use_etcd_client()
 

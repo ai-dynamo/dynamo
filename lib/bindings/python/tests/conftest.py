@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import subprocess
 from time import sleep
 
 import pytest
+
+from dynamo.runtime import DistributedRuntime
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -35,3 +38,16 @@ def nats_and_etcd():
     nats_server.wait()
     etcd.terminate()
     etcd.wait()
+
+
+@pytest.fixture
+async def runtime():
+    """Create a DistributedRuntime for testing. static runtime."""
+    loop = asyncio.get_running_loop()
+    try:
+        # try get a detached runtime from the running one
+        yield DistributedRuntime.detached()
+    except Exception:
+        runtime = DistributedRuntime(loop, True)
+        yield runtime
+        runtime.shutdown()

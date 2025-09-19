@@ -75,7 +75,7 @@ def make_request(
     )
 
 
-def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
+def make_kv_cache_config(block_size: int, num_blocks: int) -> "KVCacheConfig":
     return KVCacheConfig(
         num_blocks=num_blocks,
         tensors={},
