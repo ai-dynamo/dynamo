@@ -60,7 +60,7 @@ kubectl get jobs -n $NAMESPACE
 
 **Option B: One-liner deployment**
 ```bash
-NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVICE_URL=vllm-agg-frontend:8000 DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0 envsubst < benchmark_job.yaml | kubectl apply -f -
+NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVICE_URL=vllm-agg-frontend:8000 DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0 envsubst < benchmarks/incluster/benchmark_job.yaml | kubectl apply -f -
 ```
 
 ### Step 3: Retrieve Results
@@ -68,12 +68,9 @@ NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVI
 # Download results from PVC (recommended)
 python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
-  --output-dir ./benchmark_results \
-  --folder /data/results \
+  --output-dir ./benchmarks/results/dsr1 \
+  --folder /data/results/dsr1 \
   --no-config
-
-# Alternative: Copy results directly (requires pod name)
-kubectl cp <pod-name>:/data/results ./benchmark_results -n $NAMESPACE
 ```
 
 ## Configuration
