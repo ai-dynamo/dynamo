@@ -1,17 +1,9 @@
 docs:
-  - "docs/**"
-  - "**/*.md"
-  - "**/*.rst"
-ci:
-  - ".github/**"
-  - ".devcontainer/**"
-  - "container/**"
+  - 'docs/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.yml'
 code:
-  - "benchmarks/**"
-  - "components/**"
-  - "deploy/**"
-  - "examples/**"
-  - "launch/**"
-  - "lib/**"
-  - "recipes/**"
-  - "tests/**"
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.yml'
