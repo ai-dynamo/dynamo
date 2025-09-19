@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example deployment configuration with cache initialization mode enabled
+# This configuration demonstrates the cache initialization strategy where:
+# 1. Planner starts with 1 replica for each worker type
+# 2. Workers initialize the cache collaboratively with file-based locking
+# 3. Planner scales to target replicas once cache is ready
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-planner-cache-init
+  annotations:
+    nvidia.com/enable-grove: "false" # temporarily disable grove because current k8s connector does not work with grove
+spec:
+  envs:
+    - name: DYNAMO_SERVICE_CONFIG
+      value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:8000"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend-cache-init:8000"]}]}]}}'
+    - name: DYNAMO_NAMESPACE
+      value: "vllm-disagg-planner-cache-init"
+  services:
+    Frontend:
+      dynamoNamespace: vllm-disagg-planner-cache-init
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+    Planner:
+      dynamoNamespace: vllm-disagg-planner-cache-init
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      pvc:
+        create: false
+        name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        mountPoint: /data/profiling_results
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # This should be updated to the latest RC version
+          workingDir: /workspace/components/planner/src/dynamo/planner
+          ports:
+            - name: metrics
+              containerPort: 9085
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m planner_sla
+              --environment=kubernetes
+              --backend=vllm
+              --adjustment-interval=60
+              --profile-results-dir=/data/profiling_results
+              --vllm-cache-initialization-mode
+              --post-vllm-cache-prefill-replicas=2
+              --post-vllm-cache-decode-replicas=2
+              --prometheus-port=8000
+    Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
+      dynamoNamespace: vllm-disagg-planner-cache-init
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: PYTHONPATH
+          value: "/workspace/components/planner/src"
+        - name: PROMETHEUS_PORT
+          value: "8000"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 30
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - "python3 -m dynamo.planner.prometheus"
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-disagg-planner-cache-init
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      pvc:
+        create: false
+        name: vllm-cache-pvc # Must be created before deployment
+        mountPoint: /root/.cache/vllm
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-disagg-planner-cache-init
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 0  # Start with 0 replica, will be scaled to TARGET_PREFILL_REPLICAS after cache init
+      resources:
+        limits:
+          gpu: "1"
+      pvc:
+        create: false
+        name: vllm-cache-pvc # Must be created before deployment
+        mountPoint: /root/.cache/vllm
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --is-prefill-worker

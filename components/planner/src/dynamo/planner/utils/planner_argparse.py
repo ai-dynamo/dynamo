@@ -124,4 +124,22 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         default=SLAPlannerDefaults.no_correction,
         help="Disable correction factor",
     )
+    parser.add_argument(
+        "--vllm-cache-initialization-mode",
+        action="store_true",
+        default=False,
+        help="Enable vLLM cache initialization mode - start with 1 replica to initialize vLLM cache, then scale up",
+    )
+    parser.add_argument(
+        "--post-vllm-cache-prefill-replicas",
+        type=int,
+        default=1,
+        help="Target number of prefill worker replicas after vLLM cache initialization",
+    )
+    parser.add_argument(
+        "--post-vllm-cache-decode-replicas",
+        type=int,
+        default=1,
+        help="Target number of decode worker replicas after vLLM cache initialization",
+    )
     return parser
