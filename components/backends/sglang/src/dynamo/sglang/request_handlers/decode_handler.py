@@ -119,7 +119,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         num_output_tokens_so_far = 0
 
         async for res in stream_source:
-            print(res)
             finish_reason = res["meta_info"]["finish_reason"]
             if finish_reason:
                 out = {"token_ids": [], "finish_reason": finish_reason["type"]}
