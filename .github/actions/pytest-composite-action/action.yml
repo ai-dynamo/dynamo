@@ -18,6 +18,7 @@ runs:
       env:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ inputs.framework }}
         PYTEST_XML_FILE: pytest_test_report.xml
+        HF_HOME: /runner/_work/_temp
       run: |
         docker run --runtime=nvidia --rm --gpus all -w /workspace \
           --network host \

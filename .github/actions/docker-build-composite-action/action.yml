@@ -26,7 +26,7 @@ inputs:
     required: false
   aws_secret_access_key:
     description: 'AWS Secret Access Key'
-    required: false    
+    required: false
 
 outputs:
   image_tag:

@@ -2,7 +2,6 @@ docs: &docs
   - 'docs/**'
   - '**/*.md'
   - '**/*.rst'
-  - '**/*.yml'
 vllm: &vllm
   - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
@@ -27,4 +26,4 @@ backends:
   - *sglang
   - *trtllm
 sdk:
-  - 'deploy/**'  
+  - 'deploy/**'
