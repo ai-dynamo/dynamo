@@ -19,6 +19,45 @@ This benchmarking framework lets you compare performance across any combination 
 - **DynamoGraphDeployments**
 - **External HTTP endpoints** (existing services deployed following standard documentation from vLLM, llm-d, AIBrix, etc.)
 
+## Choosing Your Benchmarking Approach
+
+Dynamo provides two benchmarking approaches to suit different use cases: **client-side** and **server-side**. Client-side refers to running benchmarks on your local machine and connecting to Kubernetes deployments via port-forwarding, while server-side refers to running benchmarks directly within the Kubernetes cluster using internal service URLs. Which method to use depends on your use case.
+
+### Use Client-Side Benchmarking When:
+- You already have an HTTP endpoint ready to go
+- You want to quickly test deployments across multiple namespaces
+- You want immediate access to results on your local machine
+- You're comparing external services or deployments (not necessarily just Dynamo deployments)
+- You need to run benchmarks from your laptop/workstation
+
+→ **[Go to Client-Side Benchmarking (Local)](#client-side-benchmarking-local)**
+
+### Use Server-Side Benchmarking When:
+- You have a local development environment with kubectl access
+- You're doing performance validation with high load/speed requirements
+- You're experiencing timeouts or performance issues with client-side benchmarking
+- You want optimal network performance (no port-forwarding overhead)
+- You're running automated CI/CD pipelines
+- You need isolated execution environments
+- You're doing resource-intensive benchmarking
+- You want persistent result storage in the cluster
+- You're testing deployments within a single Kubernetes namespace
+
+→ **[Go to Server-Side Benchmarking (In-Cluster)](#server-side-benchmarking-in-cluster)**
+
+### Quick Comparison
+
+| Feature | Client-Side | Server-Side |
+|---------|-------------|-------------|
+| **Location** | Your local machine | Kubernetes cluster |
+| **Network** | Port-forwarding required | Direct service DNS |
+| **Setup** | Quick and simple | Requires cluster resources |
+| **Performance** | Limited by local resources, may timeout under high load | Optimal cluster performance, handles high load |
+| **Namespace Support** | Multiple namespaces | Single namespace per job |
+| **Isolation** | Shared environment | Isolated job execution |
+| **Results** | Local filesystem | Persistent volumes |
+| **Best for** | Cross-namespace testing, light load | High load, single namespace |
+
 ## What This Tool Does
 
 The framework is a Python-based wrapper around `genai-perf` that:
@@ -26,12 +65,17 @@ The framework is a Python-based wrapper around `genai-perf` that:
 - Runs concurrency sweeps across configurable load levels
 - Generates comparison plots with your custom labels
 - Works with any HuggingFace-compatible model on NVIDIA GPUs (H200, H100, A100, etc.)
-- Runs locally and connects to your Kubernetes deployments/endpoints
 - Provides direct Python script execution for maximum flexibility
 
 **Default sequence lengths**: Input: 2000 tokens, Output: 256 tokens (configurable with `--isl` and `--osl`)
 
 **Important**: The `--model` parameter configures GenAI-Perf for benchmarking and provides logging context. The default `--model` value in the benchmarking script is `Qwen/Qwen3-0.6B`, but it must match the model deployed at the endpoint(s).
+
+---
+
+# Client-Side Benchmarking (Local)
+
+Client-side benchmarking runs on your local machine and connects to Kubernetes deployments via port-forwarding.
 
 ## Prerequisites
 
@@ -53,7 +97,7 @@ The framework is a Python-based wrapper around `genai-perf` that:
 
 ## User Workflow
 
-Follow these steps to benchmark Dynamo deployments:
+Follow these steps to benchmark Dynamo deployments using client-side benchmarking:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
 Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
@@ -206,9 +250,9 @@ Raw data is organized by deployment/benchmark type and concurrency level:
 
 **For Any Benchmarking (uses your custom labels):**
 ```text
-benchmarks/results/
-├── plots/                       # Performance visualization plots
-│   ├── SUMMARY.txt             # Human-readable benchmark summary
+results/                          # Client-side: ./benchmarks/results/ or custom dir
+├── plots/                        # Server-side: /data/results/
+│   ├── SUMMARY.txt              # Performance visualization plots
 │   ├── p50_inter_token_latency_vs_concurrency.png
 │   ├── avg_inter_token_latency_vs_concurrency.png
 │   ├── request_throughput_vs_concurrency.png
@@ -228,7 +272,7 @@ benchmarks/results/
 
 **Example with actual labels:**
 ```text
-benchmarks/results/
+results/
 ├── plots/
 ├── experiment-a/                  # --input experiment-a=http://localhost:8000
 ├── experiment-b/                  # --input experiment-b=http://localhost:8001
@@ -239,6 +283,175 @@ Each concurrency directory contains:
 - **`profile_export_genai_perf.json`** - Structured metrics from GenAI-Perf
 - **`profile_export.json`** - Raw GenAI-Perf results
 - **`inputs.json`** - Generated test inputs
+
+---
+
+# Server-Side Benchmarking (In-Cluster)
+
+Server-side benchmarking runs directly within the Kubernetes cluster, eliminating the need for port forwarding and providing better resource utilization.
+
+## What Server-Side Benchmarking Does
+
+The server-side benchmarking solution:
+- Runs benchmarks directly within the Kubernetes cluster using internal service URLs
+- Uses Kubernetes service DNS for direct communication (no port forwarding required)
+- Leverages the existing benchmarking infrastructure (`benchmarks.utils.benchmark`)
+- Stores results persistently using `dynamo-pvc`
+- Provides isolated execution environment with configurable resources
+- Handles high load/speed requirements without timeout issues
+- **Note**: Each benchmark job runs within a single Kubernetes namespace; modify the job configuration to test multiple deployments within that namespace
+
+## Prerequisites
+
+1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](../../guides/dynamo_deploy/README.md))
+2. **Storage and service account** PersistentVolumeClaim and service account configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
+3. **Docker image** containing the Dynamo benchmarking tools
+
+## Quick Start
+
+### Step 1: Deploy Your DynamoGraphDeployment
+Deploy your DynamoGraphDeployment using the [deployment documentation](../../components/backends/). Ensure it has a frontend service exposed.
+
+### Step 2: Deploy and Run Benchmark Job
+
+**Option A: Set environment variables (recommended for multiple commands)**
+```bash
+# Set environment variables for your deployment
+export NAMESPACE=benchmarking
+export MODEL_NAME=Qwen/Qwen3-0.6B
+export INPUT_NAME=qwen-vllm-agg
+export SERVICE_URL=vllm-agg-frontend:8000
+export DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0
+
+# Deploy the benchmark job
+envsubst < benchmarks/incluster/benchmark_job.yaml | kubectl apply -f -
+
+# Monitor the job
+kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
+
+# Check job status
+kubectl get jobs -n $NAMESPACE
+```
+
+**Option B: One-liner deployment**
+```bash
+NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVICE_URL=vllm-agg-frontend:8000 DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0 envsubst < benchmarks/incluster/benchmark_job.yaml | kubectl apply -f -
+```
+
+### Step 3: Retrieve Results
+```bash
+# Download results from PVC (recommended)
+python3 -m deploy.utils.download_pvc_results \
+  --namespace $NAMESPACE \
+  --output-dir ./benchmarks/results/${INPUT_NAME} \
+  --folder /data/results/${INPUT_NAME} \
+  --no-config
+```
+
+## Configuration
+
+The benchmark job is fully configurable through environment variables:
+
+### Required Environment Variables
+
+- **NAMESPACE**: Kubernetes namespace where the benchmark will run
+- **MODEL_NAME**: Hugging Face model identifier (e.g., `Qwen/Qwen3-0.6B`)
+- **INPUT_NAME**: Name identifier for the benchmark input (e.g., `qwen-agg`)
+- **SERVICE_URL**: Internal service URL for the DynamoGraphDeployment frontend
+- **DOCKER_IMAGE**: Docker image containing the Dynamo benchmarking tools
+
+## Understanding Your Results
+
+Results are stored in `/data/results` and follow the same structure as client-side benchmarking:
+
+```text
+/data/results/
+├── plots/                           # Performance visualization plots
+│   ├── SUMMARY.txt                  # Human-readable benchmark summary
+│   ├── p50_inter_token_latency_vs_concurrency.png
+│   ├── avg_inter_token_latency_vs_concurrency.png
+│   ├── request_throughput_vs_concurrency.png
+│   ├── efficiency_tok_s_gpu_vs_user.png
+│   └── avg_time_to_first_token_vs_concurrency.png
+└── dsr1/                           # Results for dsr1 input
+    ├── c1/                          # Concurrency level 1
+    │   └── profile_export_genai_perf.json
+    ├── c2/                          # Concurrency level 2
+    └── ...                          # Other concurrency levels
+```
+
+## Monitoring and Debugging
+
+### Check Job Status
+```bash
+kubectl get jobs -n $NAMESPACE
+kubectl describe job dynamo-benchmark -n $NAMESPACE
+```
+
+### View Logs
+```bash
+# Follow logs in real-time
+kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
+
+# Get logs from specific container
+kubectl logs job/dynamo-benchmark -c benchmark-runner -n $NAMESPACE
+```
+
+### Debug Failed Jobs
+```bash
+# Check pod status
+kubectl get pods -n $NAMESPACE -l job-name=dynamo-benchmark
+
+# Describe failed pod
+kubectl describe pod <pod-name> -n $NAMESPACE
+```
+
+## Comparison with Client-Side Benchmarking
+
+| Feature | Client-Side Benchmarking | Server-Side Benchmarking |
+|---------|------------------------|------------------------|
+| Port Forwarding | Required | Not needed |
+| Resource Usage | Local machine | Cluster resources |
+| Network Latency | Higher (port-forward) | Lower (direct service) |
+| Scalability | Limited, may timeout under high load | High, handles high load without timeouts |
+| Namespace Support | Multiple namespaces | Single namespace per job |
+| Isolation | Shared environment | Isolated job |
+| Results Storage | Local filesystem | Persistent PVC |
+
+The server-side approach is recommended for:
+- High load/speed benchmarking (avoids timeout issues)
+- Production benchmarking
+- Single namespace deployment comparisons
+- Resource-constrained environments
+- Automated CI/CD pipelines
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
+2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
+3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
+4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
+5. **Resource constraints**: Adjust resource limits if the job is being evicted
+
+### Debug Commands
+
+```bash
+# Check PVC status
+kubectl get pvc dynamo-pvc -n $NAMESPACE
+
+# Verify service account
+kubectl get sa dynamo-sa -n $NAMESPACE
+
+# Check service endpoints
+kubectl get svc -n $NAMESPACE
+
+# Verify your service URL is accessible
+kubectl get svc $SERVICE_URL -n $NAMESPACE
+```
+
+---
 
 ## Customize Benchmarking Behavior
 
