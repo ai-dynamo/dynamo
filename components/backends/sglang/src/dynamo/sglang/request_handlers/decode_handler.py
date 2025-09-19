@@ -47,10 +47,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
-            
+
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"), 
+                "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
@@ -60,10 +60,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             param_mapping = {
                 "temperature": request.get("temperature"),
                 "top_p": request.get("top_p"),
-                "top_k": request.get("top_k"), 
+                "top_k": request.get("top_k"),
                 "max_new_tokens": request.get("max_tokens"),
             }
-        
+
         return {k: v for k, v in param_mapping.items() if v is not None}
 
     async def generate(self, request: str):
@@ -136,24 +136,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _process_text_stream(self, stream_source):
         """Process stream for text input mode"""
-        count = 0  
+        count = 0
 
         async for res in stream_source:
             print(res)
             index = res.get("index", 0)
             text = res.get("text", "")
-            
+
             finish_reason = res["meta_info"]["finish_reason"]
             finish_reason_type = finish_reason["type"] if finish_reason else None
             next_count = len(text)
             delta = text[count:]
-            
+
             choice_data = {
                 "index": index,
                 "delta": {"role": "assistant", "content": delta},
                 "finish_reason": finish_reason_type,
             }
-            
+
             response = {
                 "id": res["meta_info"]["id"],
                 "created": int(time.time()),

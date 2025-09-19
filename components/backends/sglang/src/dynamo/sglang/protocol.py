@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List, Optional, Union
-from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from pydantic import BaseModel, Field
+from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 TokenIdType = int
 
