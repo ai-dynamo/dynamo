@@ -130,7 +130,7 @@ async def allocate_and_reserve_port(
     )
     allocated_ports = await allocate_and_reserve_port_block(runtime, namespace, request)
     if not allocated_ports:
-        raise RuntimeError("allocate_port_block returned no ports")
+        raise RuntimeError("Failed to allocate required ports")
     return allocated_ports[0]  # Return the single allocated port
 
 
