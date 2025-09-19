@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use service_metrics::{MyStats, DEFAULT_NAMESPACE};
+use service_metrics::{DEFAULT_NAMESPACE, MyStats};
 
 use dynamo_runtime::{
-    logging,
+    DistributedRuntime, Result, Runtime, Worker, logging,
     pipeline::{
-        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
     },
     protocols::annotated::Annotated,
-    stream, DistributedRuntime, Result, Runtime, Worker,
+    stream,
 };
 use std::sync::Arc;
 
