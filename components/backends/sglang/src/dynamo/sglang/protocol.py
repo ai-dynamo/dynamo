@@ -38,9 +38,9 @@ class PreprocessedRequest(BaseModel):
     messages: Optional[List[dict]] = None
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
-    eos_token_ids: List[TokenIdType] = Field(default_factory=list)
+    eos_token_ids: Optional[List[TokenIdType]] = None
     mdc_sum: Optional[str] = None
-    annotations: List[str] = Field(default_factory=list)
+    annotations: Optional[List[str]] = Field(default_factory=list)
 
 
 class DisaggPreprocessedRequest(BaseModel):
