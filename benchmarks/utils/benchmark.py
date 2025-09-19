@@ -7,53 +7,59 @@ import argparse
 import re
 import sys
 from typing import Dict, Tuple
+from urllib.parse import urlsplit
 
-from benchmarks.utils.workflow import run_benchmark_workflow
+from benchmarks.utils.workflow import has_http_scheme, run_benchmark_workflow
+from deploy.utils.kubernetes import is_running_in_cluster
 
 
 def validate_inputs(inputs: Dict[str, str]) -> None:
-    """Validate that all inputs are HTTP endpoints"""
+    """Validate that all inputs are HTTP endpoints or internal service URLs when running in cluster"""
     for label, value in inputs.items():
-        if not value.lower().startswith(("http://", "https://")):
-            raise ValueError(
-                f"Input '{label}' must be an HTTP endpoint (starting with http:// or https://). Got: {value}"
-            )
+        v = value.strip()
+        if is_running_in_cluster():
+            # Allow HTTP(S) or internal service URLs like host[:port][/path]
+            if has_http_scheme(v):
+                pass
+            else:
+                parts = urlsplit(f"//{v}")
+                host_ok = bool(parts.hostname)
+                port_ok = parts.port is None or (1 <= parts.port <= 65535)
+                if not (host_ok and port_ok):
+                    raise ValueError(
+                        f"Input '{label}' must be HTTP(S) or internal service URL. Got: {value}"
+                    )
+        else:
+            if not has_http_scheme(v):
+                raise ValueError(f"Input '{label}' must be HTTP endpoint. Got: {value}")
 
         # Validate reserved labels
         if label.lower() == "plots":
-            raise ValueError(
-                "Label 'plots' is reserved and cannot be used. Please choose a different label."
-            )
+            raise ValueError("Label 'plots' is reserved")
 
 
 def parse_input(input_str: str) -> Tuple[str, str]:
     """Parse input string in format key=value with additional validation"""
     if "=" not in input_str:
-        raise ValueError(
-            f"Invalid input format. Expected: <label>=<endpoint>, got: {input_str}"
-        )
+        raise ValueError(f"Invalid input format: {input_str}")
 
     parts = input_str.split("=", 1)  # Split on first '=' only
     if len(parts) != 2:
-        raise ValueError(
-            f"Invalid input format. Expected: <label>=<endpoint>, got: {input_str}"
-        )
+        raise ValueError(f"Invalid input format: {input_str}")
 
     label, value = parts
 
     if not label.strip():
-        raise ValueError("Label cannot be empty")
+        raise ValueError("Empty label")
     if not value.strip():
-        raise ValueError("Value cannot be empty")
+        raise ValueError("Empty value")
 
     label = label.strip()
     value = value.strip()
 
     # Validate label characters
     if not re.match(r"^[a-zA-Z0-9_-]+$", label):
-        raise ValueError(
-            f"Label must contain only letters, numbers, hyphens, and underscores. Invalid label: {label}"
-        )
+        raise ValueError(f"Invalid label: {label}")
 
     return label, value
 
@@ -114,7 +120,7 @@ def main() -> int:
             )
             print()
 
-        # Validate that all inputs are HTTP endpoints
+        # Validate that inputs are HTTP endpoints or in-cluster service URLs
         validate_inputs(parsed_inputs)
 
     except ValueError as e:

@@ -13,12 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import List
 
 PVC_ACCESS_POD_NAME = "pvc-access-pod"
+
+K8S_SA_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+
+
+def is_running_in_cluster() -> bool:
+    """Return True if running inside a Kubernetes cluster."""
+    # Prefer well-known env var; fall back to SA token presence
+    return bool(os.environ.get("KUBERNETES_SERVICE_HOST")) or K8S_SA_TOKEN.exists()
 
 
 def run_command(

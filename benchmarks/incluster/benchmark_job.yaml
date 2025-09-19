@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dynamo-benchmark
+  namespace: ${NAMESPACE}
+spec:
+  template:
+    spec:
+      serviceAccountName: dynamo-sa
+      imagePullSecrets:
+      - name: docker-imagepullsecret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: benchmark-runner
+        image: ${DOCKER_IMAGE}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+        resources:
+          requests:
+            cpu: "4"
+            memory: "8Gi"
+          limits:
+            cpu: "8"
+            memory: "16Gi"
+        env:
+          - name: HUGGING_FACE_HUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: HF_TOKEN
+          - name: NATS_SERVER
+            value: nats://${NAMESPACE}-nats:4222
+          - name: ETCD_ENDPOINTS
+            value: ${NAMESPACE}-etcd:2379
+        command: ["python3", "-m", "benchmarks.utils.benchmark"]
+        args:
+          - --model
+          - ${MODEL_NAME}
+          - --isl
+          - "2000"
+          - --std
+          - "10"
+          - --osl
+          - "256"
+          - --output-dir
+          - /data/results
+          - --input
+          - ${INPUT_NAME}=${SERVICE_URL}
+        volumeMounts:
+          - name: data-volume
+            mountPath: /data
+      restartPolicy: Never
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: dynamo-pvc
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600  # Clean up job after 1 hour
