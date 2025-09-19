@@ -306,6 +306,9 @@ mod tests {
 /// Flow: NATS Service → NatsStatsMetrics (Counters) → Metrics Callback → Prometheus Gauge
 /// Note: These are snapshots updated when execute_metrics_callbacks() is called.
 #[derive(Debug, Clone)]
+/// Prometheus metrics for NATS server components.
+/// Note: Metrics with `_total` names use IntGauge because we copy counter values
+/// from underlying services rather than incrementing directly.
 pub struct ComponentNatsServerPrometheusMetrics {
     /// Average processing time in milliseconds (maps to: average_processing_time)
     pub service_processing_ms_avg: prometheus::Gauge,
