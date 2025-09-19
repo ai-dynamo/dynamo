@@ -3,9 +3,10 @@
 
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-use openai_harmony::StreamableParser;
 use openai_harmony::chat::{Content::Text, Role};
-use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding};
+use openai_harmony::{
+    HarmonyEncoding, HarmonyEncodingName, StreamableParser, load_harmony_encoding,
+};
 use serde_json::Value;
 
 static GLOBAL_HARMONY_GPTOSS_ENCODING: tokio::sync::OnceCell<
@@ -162,6 +163,109 @@ pub async fn parse_tool_calls_harmony(
     Ok((res, Some(normal_text.to_string())))
 }
 
+/// Parse tool calls from a complete Harmony Format text chunk using direct token parsing.
+///
+/// This function is optimized for parsing complete text chunks where the entire content
+/// is available at once. It uses `parse_messages_from_completion_tokens` to directly
+/// parse all tokens into Harmony Format messages, then extracts tool calls from messages
+/// with the "commentary" channel and "functions.*" recipients.
+///
+/// Unlike `parse_tool_calls_harmony`, this function doesn't perform start token detection
+/// or token-by-token streaming, making it more efficient for complete chunks.
+///
+/// # Arguments
+/// * `text` - The full Harmony-format string to be parsed, excluding any trailing stop tokens.
+///   Example:
+///   `<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}`
+/// * `_config` - Parser configuration (currently unused but kept for API consistency)
+///
+/// # Returns
+/// * `Ok((tool_calls, normal_text))` - Tuple containing extracted tool calls and any normal text
+/// * `Err(e)` - If parsing fails due to encoding or tokenization errors
+pub async fn parse_tool_calls_harmony_complete(
+    text: &str,
+    _config: &JsonParserConfig,
+) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    let enc = match get_harmony_encoding().await.as_ref() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
+            return Ok((vec![], Some(text.to_string())));
+        }
+    };
+
+    // // Encode the text into tokens using harmony encoding
+    let tokens: Vec<u32> = enc.tokenizer().encode_with_special_tokens(text);
+    let messages = match enc.parse_messages_from_completion_tokens(tokens, Some(Role::Assistant)) {
+        Ok(messages) => messages,
+        Err(e) => {
+            tracing::debug!(
+                "Failed to parse messages from completion tokens: {e}. Tool calls will not be parsed."
+            );
+            return Ok((vec![], Some(text.to_string())));
+        }
+    };
+
+    let mut normal_text = String::new();
+
+    let mut res = Vec::with_capacity(messages.len());
+    let mut call_idx = 0; // Index of the tool call
+
+    for message in messages.iter() {
+        if message.author.role != Role::Assistant {
+            continue;
+        }
+
+        let channel = message.channel.as_deref();
+        let recipient = message.recipient.as_deref().unwrap_or_default();
+
+        // Handle commentary channel
+        if channel == Some("commentary") && recipient.starts_with("functions.") {
+            let Some(fname) = message
+                .recipient
+                .as_ref()
+                .and_then(|r| r.split('.').nth(1))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+
+            let args = match message.content.first() {
+                Some(Text(text)) => match serde_json::from_str::<Value>(text.text.trim()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        Value::Null // Set args to null if it's not valid JSON
+                    }
+                },
+                _ => {
+                    Value::Null // Set args to null if it's not a text content
+                }
+            };
+            // Add tool call to result if args is valid JSON
+            if !args.is_null() {
+                call_idx += 1;
+                res.push(ToolCallResponse {
+                    id: format!("call-{}", call_idx),
+                    tp: ToolCallType::Function,
+                    function: CalledFunction {
+                        name: fname.to_string(),
+                        // Safety: `Value::Object` is always valid JSON, so serialization cannot fail
+                        arguments: serde_json::to_string(&args).unwrap(),
+                    },
+                });
+            }
+        // Handle reasoning(analysis) channel
+        } else if channel == Some("analysis") {
+            normal_text.push_str(match &message.content[0] {
+                Text(t) => &t.text,
+                _ => "",
+            });
+        }
+    }
+    Ok((res, Some(normal_text.to_string())))
+}
+
 pub fn detect_tool_call_start_harmony(
     chunk: &str,
     config: &JsonParserConfig,
@@ -264,6 +368,20 @@ mod tests {
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
+    }
+
+    #[tokio::test]
+    async fn test_parse_tool_calls_harmony_complete_basic() {
+        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default())
+                .await
+                .unwrap();
+        assert_eq!(normal_content, Some("".to_string()));
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_current_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["format"], "celsius");
     }
 
     #[tokio::test]

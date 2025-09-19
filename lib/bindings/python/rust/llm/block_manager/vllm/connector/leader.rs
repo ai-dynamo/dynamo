@@ -218,7 +218,7 @@ impl Leader for KvConnectorLeader {
         );
 
         if slot.state() == SlotState::SkippedPrefill || slot.state() == SlotState::SkippedDecode {
-            tracing::warn!("slot is in the SkippedPrefill or SkippedDecode state; will resume from skipped and return early");
+            tracing::debug!("slot is in the SkippedPrefill or SkippedDecode state; will resume from skipped and return early");
             match slot.state() {
                 SlotState::SkippedPrefill => {
                     slot.mark_as_prefilling(self.iteration_counter)?;

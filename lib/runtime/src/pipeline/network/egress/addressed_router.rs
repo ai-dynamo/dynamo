@@ -80,6 +80,7 @@ where
         let (addressed_request, context) = request.transfer(());
         let (request, address) = addressed_request.into_parts();
         let engine_ctx = context.context();
+        let engine_ctx_ = engine_ctx.clone();
 
         // registration options for the data plane in a singe in / many out configuration
         let options = StreamOptions::builder()
@@ -209,11 +210,18 @@ where
                     }
                 }
             } else if is_complete_final {
+                // end of stream
+                None
+            } else if engine_ctx_.is_stopped() {
+                // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
+                // 'is_killed()' here because it implies the stream ended abnormally which should be
+                // handled by the error branch below.
+                log::debug!("Request cancelled and then trying to read a response");
                 None
             } else {
-                Some(U::from_err(
-                    Error::msg("Stream ended before generation completed").into(),
-                ))
+                // stream ended unexpectedly
+                log::debug!("{STREAM_ERR_MSG}");
+                Some(U::from_err(Error::msg(STREAM_ERR_MSG).into()))
             }
         });
 
