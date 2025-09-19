@@ -30,7 +30,7 @@
 //! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
 //! - ❌ `_some_request_size` → ✅ `_some_request_bytes_avg`
 //! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
-//! - ❌ `client_disconnects_total` → ✅ `disconnected_clients_total`
+//! - ❌ `disconnected_clients_total` → ✅ `disconnected_clients` (gauge, not counter)
 //! - ❌ `inflight_requests_total` → ✅ `inflight_requests` (gauge, not counter)
 //! - ❌ `connections_total` → ✅ `current_connections` (gauge, not counter)
 //!
@@ -92,8 +92,8 @@ pub mod frontend_service {
     /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
-    /// Number of connections dropped by clients
-    pub const DISCONNECTED_CLIENTS_TOTAL: &str = "disconnected_clients_total";
+    /// Number of disconnected clients (gauge that can go up and down)
+    pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
     /// Duration of LLM requests
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
