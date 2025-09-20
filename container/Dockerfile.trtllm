@@ -140,7 +140,7 @@ COPY --from=framework /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from framework image
 COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
-ENV DYNAMO_HOME=/workspace
+ENV DYN_HOME=/workspace
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
@@ -307,7 +307,7 @@ COPY --from=runtime /usr/local/bin /usr/local/bin
 
 # Set workspace directory variable
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
+    DYN_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/workspace/target \

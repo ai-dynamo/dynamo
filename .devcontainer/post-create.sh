@@ -73,19 +73,19 @@ cargo build --locked --profile dev --features mistralrs
 cd $HOME/dynamo && retry env DYN_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
 # Extract the PYTHONPATH line from README.md
-PYTHONPATH_LINE=$(grep "^export PYTHONPATH=" $DYNAMO_HOME/README.md | head -n1)
+PYTHONPATH_LINE=$(grep "^export PYTHONPATH=" ${DYN_HOME:-$DYNAMO_HOME}/README.md | head -n1)
 if [ -n "$PYTHONPATH_LINE" ]; then
     # Remove the ${PYTHONPATH}: prefix if it exists, then replace $(pwd) with the actual path
-    MODIFIED_LINE=$(echo "$PYTHONPATH_LINE" | sed 's/\${PYTHONPATH}://g' | sed "s|\$(pwd)|$DYNAMO_HOME|g")
+    MODIFIED_LINE=$(echo "$PYTHONPATH_LINE" | sed 's/\${PYTHONPATH}://g' | sed "s|\$(pwd)|${DYN_HOME:-$DYNAMO_HOME}|g")
     eval "$MODIFIED_LINE"
     # Also add to .bashrc for persistence (with expanded path)
     if ! grep -q "export PYTHONPATH=" ~/.bashrc; then
-        # MODIFIED_LINE already has $DYNAMO_HOME expanded to /home/ubuntu/dynamo
+        # MODIFIED_LINE already has ${DYN_HOME:-$DYNAMO_HOME} expanded to /home/ubuntu/dynamo
         echo "$MODIFIED_LINE" >> ~/.bashrc
     fi
 else
     # Back-up version if README.md changed. This is the version from 2025-08-19
-    export PYTHONPATH=$DYNAMO_HOME/components/frontend/src:$DYNAMO_HOME/components/planner/src:$DYNAMO_HOME/components/backends/vllm/src:$DYNAMO_HOME/components/backends/sglang/src:$DYNAMO_HOME/components/backends/trtllm/src:$DYNAMO_HOME/components/backends/llama_cpp/src:$DYNAMO_HOME/components/backends/mocker/src
+    export PYTHONPATH=${DYN_HOME:-$DYNAMO_HOME}/components/frontend/src:${DYN_HOME:-$DYNAMO_HOME}/components/planner/src:${DYN_HOME:-$DYNAMO_HOME}/components/backends/vllm/src:${DYN_HOME:-$DYNAMO_HOME}/components/backends/sglang/src:${DYN_HOME:-$DYNAMO_HOME}/components/backends/trtllm/src:${DYN_HOME:-$DYNAMO_HOME}/components/backends/llama_cpp/src:${DYN_HOME:-$DYNAMO_HOME}/components/backends/mocker/src
 fi
 
 if ! grep -q "export GPG_TTY=" ~/.bashrc; then

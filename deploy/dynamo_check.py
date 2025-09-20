@@ -2123,13 +2123,13 @@ class DynamoInfo(NodeInfo):
             # Add helpful information about where we looked
             search_paths = NodeInfo(
                 label="Searched in",
-                desc="current dir, ~/dynamo, DYNAMO_HOME, /workspace",
+                desc="current dir, ~/dynamo, DYN_HOME, /workspace",
                 status=NodeStatus.INFO,
             )
             self.add_child(search_paths)
             hint = NodeInfo(
                 label="Hint",
-                desc="Run from a Dynamo workspace directory or set DYNAMO_HOME",
+                desc="Run from a Dynamo workspace directory or set DYN_HOME",
                 status=NodeStatus.INFO,
             )
             self.add_child(hint)
