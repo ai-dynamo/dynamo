@@ -20,8 +20,8 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID $DECODE_PID $ENCODE_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID $DECODE_PID $ENCODE_PID 2>/dev/null || true
+    kill ${DYN_PID:-$DYNAMO_PID} $PREFILL_PID $DECODE_PID $ENCODE_PID 2>/dev/null || true
+    wait ${DYN_PID:-$DYNAMO_PID} $PREFILL_PID $DECODE_PID $ENCODE_PID 2>/dev/null || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -31,7 +31,7 @@ python3 utils/clear_namespace.py --namespace dynamo
 
 # run frontend
 python3 -m dynamo.frontend --http-port 8000 &
-DYNAMO_PID=$!
+DYN_PID=$!
 
 # run encode worker
 CUDA_VISIBLE_DEVICES=$ENCODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
@@ -66,4 +66,4 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --disaggregation-mode decode &
 DECODE_PID=$!
 
-wait $DYNAMO_PID
+wait ${DYN_PID:-$DYNAMO_PID}
