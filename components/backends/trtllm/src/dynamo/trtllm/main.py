@@ -281,8 +281,28 @@ async def init(runtime: DistributedRuntime, config: Config):
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
 
+        # Set values from config that are available immediately
+        # Note: We populate max_num_seqs and max_num_batched_tokens from config
+        # to ensure Prometheus metrics are available even without engine stats
+
+        # Naming clarification:
+        # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
+        # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
+        # Both parameters control the same thing: how many requests can be processed simultaneously
+        runtime_config.max_num_seqs = config.max_batch_size
+        runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
+
+        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
+        logging.info(
+            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+        )
+
+        # The get_engine_runtime_config function exists but is not called here due to:
+        # 1. get_stats_async requires active requests to work properly
+        # 2. We need runtime config during registration, before any requests are made
+        # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
