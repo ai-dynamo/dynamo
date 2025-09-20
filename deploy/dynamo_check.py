@@ -96,6 +96,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+from dynamo.runtime.env import get_env
+
 
 # ANSI color constants
 class Colors:
@@ -2206,8 +2208,8 @@ class DynamoInfo(NodeInfo):
         """Find dynamo workspace directory."""
         candidates = []
 
-        # Check DYNAMO_HOME environment variable first
-        dynamo_home = os.environ.get("DYNAMO_HOME")
+        # Check DYN_HOME environment variable first (with DYNAMO_HOME fallback)
+        dynamo_home = get_env("DYN_HOME", "DYNAMO_HOME")
         if dynamo_home:
             candidates.append(dynamo_home)
 
@@ -2276,7 +2278,7 @@ def show_pythonpath_recommendation():
     candidates = [
         os.getcwd(),
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        os.environ.get("DYNAMO_HOME", ""),
+        get_env("DYN_HOME", "DYNAMO_HOME", ""),
         os.path.expanduser("~/dynamo"),
     ]
     for candidate in candidates:
