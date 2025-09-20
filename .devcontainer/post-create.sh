@@ -72,6 +72,8 @@ cargo build --locked --profile dev --features mistralrs
 # installs overall python packages, grabs binaries from .build/target/debug
 cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
+{ set +x; } 2>/dev/null
+
 # Extract the PYTHONPATH line from README.md
 PYTHONPATH_LINE=$(grep "^export PYTHONPATH=" $DYNAMO_HOME/README.md | head -n1)
 if [ -n "$PYTHONPATH_LINE" ]; then
@@ -81,15 +83,21 @@ if [ -n "$PYTHONPATH_LINE" ]; then
     # Also add to .bashrc for persistence (with expanded path)
     if ! grep -q "export PYTHONPATH=" ~/.bashrc; then
         # MODIFIED_LINE already has $DYNAMO_HOME expanded to /home/ubuntu/dynamo
+        set -x
         echo "$MODIFIED_LINE" >> ~/.bashrc
+        { set +x; } 2>/dev/null
     fi
 else
     # Back-up version if README.md changed. This is the version from 2025-08-19
+    set -x
     export PYTHONPATH=$DYNAMO_HOME/components/frontend/src:$DYNAMO_HOME/components/planner/src:$DYNAMO_HOME/components/backends/vllm/src:$DYNAMO_HOME/components/backends/sglang/src:$DYNAMO_HOME/components/backends/trtllm/src:$DYNAMO_HOME/components/backends/llama_cpp/src:$DYNAMO_HOME/components/backends/mocker/src
+    { set +x; } 2>/dev/null
 fi
 
 if ! grep -q "export GPG_TTY=" ~/.bashrc; then
+    set -x
     echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+    { set +x; } 2>/dev/null
 fi
 
 # Unset empty tokens/variables to avoid issues with authentication and SSH
@@ -99,10 +107,6 @@ if ! grep -q "# Unset empty tokens" ~/.bashrc; then
     echo '[ -z "$GITHUB_TOKEN" ] && unset GITHUB_TOKEN' >> ~/.bashrc
     echo '[ -z "$SSH_AUTH_SOCK" ] && unset SSH_AUTH_SOCK' >> ~/.bashrc
 fi
-
-$HOME/dynamo/deploy/dynamo_check.py
-
-{ set +x; } 2>/dev/null
 
 # Check SSH agent forwarding status
 if [ -n "$SSH_AUTH_SOCK" ]; then
@@ -115,6 +119,10 @@ if [ -n "$SSH_AUTH_SOCK" ]; then
 else
     echo "⚠️ SSH agent forwarding not configured - SSH_AUTH_SOCK is not set"
 fi
+
+set -x
+$HOME/dynamo/deploy/dynamo_check.py
+{ set +x; } 2>/dev/null
 
 cat <<EOF
 
