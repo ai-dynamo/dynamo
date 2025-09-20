@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional, TextIO, Tuple
 import pytest
 import requests
 
+from dynamo.runtime.env import get_env
+
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
@@ -278,7 +280,7 @@ class DeterminismTester:
     ):
         # Allow environment override for flexibility in CI/local runs
         self.base_url = (
-            base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
+            base_url or get_env(name_new="DYN_API_BASE_URL", name_old="DYNAMO_API_BASE_URL", default="http://localhost:8000")
         )
         self.model_id = (
             model_id
