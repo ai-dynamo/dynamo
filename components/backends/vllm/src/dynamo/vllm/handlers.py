@@ -173,7 +173,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             {"token_ids": request["token_ids"]}, context=context
                         )
                     )
-                    prefill_worker_id = best_worker_response.get("worker_id")
+                    prefill_worker_id = best_worker_response.data().get("worker_id")
 
                 if prefill_worker_id is not None:
                     prefill_response = await anext(
