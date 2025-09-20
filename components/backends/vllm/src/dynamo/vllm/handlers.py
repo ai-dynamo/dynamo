@@ -10,11 +10,11 @@ from copy import deepcopy
 from typing import AsyncGenerator
 
 import msgspec
+
+from dynamo.runtime.logging import configure_dynamo_logging
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
-
-from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
 from .protocol import MyRequestOutput
@@ -94,9 +94,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         prefill_worker_client=None,
+        prefill_router_client=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
         self.prefill_worker_client = prefill_worker_client
+        self.prefill_router_client = prefill_router_client
         self.can_prefill = 0
         self._prefill_check_task = None
 
@@ -163,11 +165,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             }
 
             try:
-                prefill_response = await anext(
-                    await self.prefill_worker_client.round_robin(
-                        prefill_request, context=context
+                prefill_worker_id = None
+                if self.prefill_router_client is not None:
+                    # Use the prefill router to get best worker ID
+                    best_worker_response = await anext(
+                        await self.prefill_router_client.generate(
+                            {"token_ids": request["token_ids"]}, context=context
+                        )
                     )
-                )
+                    prefill_worker_id = best_worker_response.get("worker_id")
+
+                if prefill_worker_id is not None:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.direct(
+                            prefill_request, prefill_worker_id, context=context
+                        )
+                    )
+                else:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.round_robin(
+                            prefill_request, context=context
+                        )
+                    )
+
             except Exception as e:
                 # TODO: Cancellation does not propagate until the first token is received
                 if context.is_stopped() or context.is_killed():

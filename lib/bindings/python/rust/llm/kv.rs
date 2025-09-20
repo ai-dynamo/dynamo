@@ -15,6 +15,7 @@ use llm_rs::kv_router::protocols::KvStats as RsKvStats;
 use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
 use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
 use rs::traits::events::EventSubscriber;
+use rs::pipeline::{AsyncEngine, SingleIn};
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
@@ -837,6 +838,52 @@ pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
 }
 
+// TODO: can this reuse the stream conversion method in Client bindings?
+impl KvPushRouter {
+    /// Helper method to process a request and create a Python async generator
+    fn process_request_to_stream<'p>(
+        py: Python<'p>,
+        inner: Arc<llm_rs::kv_router::KvPushRouter>,
+        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let single_in = SingleIn::new(request);
+            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+            // Spawn a task to process the stream
+            tokio::spawn(async move {
+                let mut stream = stream;
+                while let Some(response) = stream.next().await {
+                    // Convert LLMEngineOutput to PyObject
+                    let py_response = Python::with_gil(|py| {
+                        pythonize(py, &response.data)
+                            .map(|obj| obj.unbind())
+                            .map_err(|e| e.to_string())
+                    });
+
+                    match py_response {
+                        Ok(obj) => {
+                            if tx.send(obj).await.is_err() {
+                                break; // Receiver dropped
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to pythonize response: {}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Return a Python async generator wrapper
+            Ok(KvPushRouterStream {
+                rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            })
+        })
+    }
+}
+
 #[pymethods]
 impl KvPushRouter {
     #[new]
@@ -961,54 +1008,29 @@ impl KvPushRouter {
 
         let request = request_builder.build().map_err(to_pyerr)?;
 
-        let inner = self.inner.clone();
-
-        // Create a Python async generator that wraps the Rust stream
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            use rs::pipeline::{AsyncEngine, SingleIn};
-            use tokio_stream::StreamExt;
-
-            let single_in = SingleIn::new(request);
-            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
-            let (tx, rx) = tokio::sync::mpsc::channel(100);
-
-            // Spawn a task to process the stream
-            tokio::spawn(async move {
-                let mut stream = stream;
-                while let Some(response) = stream.next().await {
-                    // Convert LLMEngineOutput to PyObject
-                    let py_response = Python::with_gil(|py| {
-                        pythonize(py, &response.data)
-                            .map(|obj| obj.unbind())
-                            .map_err(|e| e.to_string())
-                    });
-
-                    match py_response {
-                        Ok(obj) => {
-                            if tx.send(obj).await.is_err() {
-                                break; // Receiver dropped
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to pythonize response: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-
-            // Return a Python async generator wrapper
-            Ok(KvPushRouterStream {
-                rx: Arc::new(tokio::sync::Mutex::new(rx)),
-            })
-        })
+        // Use the helper method to process the request
+        Self::process_request_to_stream(py, self.inner.clone(), request)
     }
 
-    #[pyo3(signature = (context_id, token_ids, router_config_override=None))]
+    fn generate_from_request<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        // Depythonize the request directly into PreprocessedRequest
+        let request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
+            Python::with_gil(|py| {
+                depythonize(request.bind(py)).map_err(to_pyerr)
+            })?;
+
+        // Use the helper method to process the request
+        Self::process_request_to_stream(py, self.inner.clone(), request)
+    }
+
+    #[pyo3(signature = (token_ids, router_config_override=None))]
     fn best_worker_id<'p>(
         &self,
         py: Python<'p>,
-        context_id: String,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -1026,7 +1048,7 @@ impl KvPushRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let (worker_id, overlap_blocks) = inner
-                .find_best_match(&context_id, &token_ids, router_config_override.as_ref())
+                .find_best_match(&token_ids, router_config_override.as_ref())
                 .await
                 .map_err(to_pyerr)?;
 

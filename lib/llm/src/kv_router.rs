@@ -322,10 +322,10 @@ impl KvRouter {
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returned overlap amount is in number of blocks.
-    /// Now also takes context_id for request tracking
+    /// Now also takes optional context_id for request tracking
     async fn find_best_match(
         &self,
-        context_id: &str,
+        context_id: Option<&str>,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
@@ -353,7 +353,7 @@ impl KvRouter {
         let best_worker_id = self
             .scheduler
             .schedule(
-                context_id.to_string(),
+                context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes_2,
                 overlap_scores.clone(),
@@ -451,7 +451,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (worker_id, overlap_blocks) = self
-                    .find_best_match(&context_id, &tokens, None, true)
+                    .find_best_match(Some(&context_id), &tokens, None, true)
                     .await?;
 
                 RouterResponse::New {
@@ -489,12 +489,11 @@ impl KvPushRouter {
     /// Find the best matching worker for the given tokens without updating states
     pub async fn find_best_match(
         &self,
-        context_id: &str,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
     ) -> Result<(i64, u32)> {
         self.chooser
-            .find_best_match(context_id, tokens, router_config_override, false)
+            .find_best_match(None, tokens, router_config_override, false)
             .await
     }
 
@@ -557,7 +556,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     // Otherwise, find the best match
                     self.chooser
                         .find_best_match(
-                            &context_id,
+                            Some(&context_id),
                             &request.token_ids,
                             request.router_config_override.as_ref(),
                             !query_instance_id, // Don't update states if query_instance_id

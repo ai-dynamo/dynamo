@@ -1211,7 +1211,6 @@ class KvPushRouter:
 
     async def best_worker_id(
         self,
-        context_id: str,
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
     ) -> Tuple[int, int]:
@@ -1219,7 +1218,6 @@ class KvPushRouter:
         Find the best matching worker for the given tokens without updating states.
 
         Args:
-            context_id: String identifier for the request
             token_ids: List of token IDs to find matches for
             router_config_override: Optional router configuration override
 
