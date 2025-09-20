@@ -24,7 +24,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
-from .health_check import VllmHealthCheckPayload
+from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -145,8 +145,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
-    # Get health check payload (checks env var and falls back to vLLM default)
-    health_check_payload = VllmHealthCheckPayload().to_dict()
+    health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
@@ -261,8 +260,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             custom_template_path=config.custom_jinja_template,
         )
 
-    # Get health check payload (checks env var and falls back to vLLM default)
-    health_check_payload = VllmHealthCheckPayload().to_dict()
+    health_check_payload = VllmHealthCheckPayload(engine_client).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")
