@@ -42,7 +42,7 @@ docker version           # Running daemon
 
 # Set your inference runtime image
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
-export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
+export DYN_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
 # Also available: sglang-runtime, tensorrtllm-runtime
 ```
 
