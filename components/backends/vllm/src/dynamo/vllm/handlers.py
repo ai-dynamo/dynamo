@@ -166,7 +166,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             try:
                 prefill_worker_id = None
-                if self.prefill_router_client is not None:
+                if (
+                    self.prefill_router_client is not None
+                    and self.prefill_router_client.instance_ids()
+                ):
                     # Use the prefill router to get best worker ID
                     best_worker_response = await anext(
                         await self.prefill_router_client.generate(
