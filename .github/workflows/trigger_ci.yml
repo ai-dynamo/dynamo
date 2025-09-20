@@ -51,28 +51,7 @@ jobs:
       id: src_changes
       uses: dorny/paths-filter@v3
       with:
-        filters: |
-          vllm:
-            - 'container/Dockerfile.vllm'
-            - 'container/deps/requirements.vllm.txt'
-            - 'container/deps/vllm/**'
-            - 'components/backends/vllm/**'
-            - 'tests/serve/test_vllm.py'
-          trtllm:
-            - 'container/Dockerfile.trtllm'
-            - 'components/backends/trtllm/**'
-            - 'container/build.sh'
-            - 'container/build_trtllm_wheel.sh'
-            - 'container/deps/**'
-            - 'tests/serve/test_trtllm.py'
-          sdk:
-            - 'deploy/**'
-          sglang:
-            - 'container/Dockerfile.sglang'
-            - 'container/Dockerfile.sglang-deepep'
-            - 'components/backends/sglang/**'
-            - 'container/build.sh'
-            - 'tests/serve/test_sglang.py'
+        filters: .github/filters.yaml
     - name: Check if Validation Workflow has run
       id: check_workflow
       uses: actions/github-script@v6
