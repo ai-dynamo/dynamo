@@ -3,7 +3,6 @@
 
 import json
 import logging
-import os
 
 from dynamo.runtime.env import get_env
 

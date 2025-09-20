@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from dynamo.runtime.env import get_env
 from tests.serve.common import params_with_model_mark, run_serve_deployment
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload_default, completion_payload_default

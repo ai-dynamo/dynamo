@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-import warnings
 from unittest.mock import patch
 
-from dynamo.runtime.env import get_env, _to_bool
+import pytest
+
+from dynamo.runtime.env import _to_bool, get_env
 
 
 class TestToBool:
@@ -65,7 +65,9 @@ class TestToBool:
     def test_invalid_values_raise_error(self):
         invalid_values = ["invalid", "2", "maybe", "unknown", "true1", "false0"]
         for val in invalid_values:
-            with pytest.raises(ValueError, match=f"Cannot interpret '{val}' as boolean"):
+            with pytest.raises(
+                ValueError, match=f"Cannot interpret '{val}' as boolean"
+            ):
                 _to_bool(val)
 
 
@@ -73,14 +75,14 @@ class TestGetEnv:
     """Test the get_env function."""
 
     def test_new_env_var_exists(self):
-        with patch.dict('os.environ', {'NEW_VAR': 'new_value'}):
-            result = get_env('NEW_VAR', 'OLD_VAR', 'default')
-            assert result == 'new_value'
+        with patch.dict("os.environ", {"NEW_VAR": "new_value"}):
+            result = get_env("NEW_VAR", "OLD_VAR", "default")
+            assert result == "new_value"
 
     def test_old_env_var_exists_with_warning(self, caplog):
-        with patch.dict('os.environ', {'OLD_VAR': 'old_value'}, clear=True):
-            result = get_env('NEW_VAR', 'OLD_VAR', 'default')
-            assert result == 'old_value'
+        with patch.dict("os.environ", {"OLD_VAR": "old_value"}, clear=True):
+            result = get_env("NEW_VAR", "OLD_VAR", "default")
+            assert result == "old_value"
             assert len(caplog.records) == 1
             assert "DeprecationWarning" in caplog.records[0].message
             assert "deprecated" in caplog.records[0].message
@@ -88,47 +90,47 @@ class TestGetEnv:
             assert "OLD_VAR" in caplog.records[0].message
 
     def test_both_env_vars_exist_prefers_new(self, caplog):
-        with patch.dict('os.environ', {'NEW_VAR': 'new_value', 'OLD_VAR': 'old_value'}):
-            result = get_env('NEW_VAR', 'OLD_VAR', 'default')
-            assert result == 'new_value'
+        with patch.dict("os.environ", {"NEW_VAR": "new_value", "OLD_VAR": "old_value"}):
+            result = get_env("NEW_VAR", "OLD_VAR", "default")
+            assert result == "new_value"
             assert len(caplog.records) == 0  # No warning when new var exists
 
     def test_neither_env_var_exists_returns_default(self):
-        with patch.dict('os.environ', {}, clear=True):
-            result = get_env('NEW_VAR', 'OLD_VAR', 'default_value')
-            assert result == 'default_value'
+        with patch.dict("os.environ", {}, clear=True):
+            result = get_env("NEW_VAR", "OLD_VAR", "default_value")
+            assert result == "default_value"
 
     def test_neither_env_var_exists_no_default(self):
-        with patch.dict('os.environ', {}, clear=True):
-            result = get_env('NEW_VAR', 'OLD_VAR')
+        with patch.dict("os.environ", {}, clear=True):
+            result = get_env("NEW_VAR", "OLD_VAR")
             assert result is None
 
     def test_no_old_var_specified(self):
-        with patch.dict('os.environ', {}, clear=True):
-            result = get_env('NEW_VAR', default='default_value')
-            assert result == 'default_value'
+        with patch.dict("os.environ", {}, clear=True):
+            result = get_env("NEW_VAR", default="default_value")
+            assert result == "default_value"
 
     def test_string_mode_returns_string(self):
-        with patch.dict('os.environ', {'NEW_VAR': 'true'}):
-            result = get_env('NEW_VAR', as_bool=False)
-            assert result == 'true'
+        with patch.dict("os.environ", {"NEW_VAR": "true"}):
+            result = get_env("NEW_VAR", as_bool=False)
+            assert result == "true"
             assert isinstance(result, str)
 
     def test_bool_mode_new_var_truthy(self):
-        with patch.dict('os.environ', {'NEW_VAR': 'true'}):
-            result = get_env('NEW_VAR', as_bool=True)
+        with patch.dict("os.environ", {"NEW_VAR": "true"}):
+            result = get_env("NEW_VAR", as_bool=True)
             assert result is True
             assert isinstance(result, bool)
 
     def test_bool_mode_new_var_falsy(self):
-        with patch.dict('os.environ', {'NEW_VAR': 'false'}):
-            result = get_env('NEW_VAR', as_bool=True)
+        with patch.dict("os.environ", {"NEW_VAR": "false"}):
+            result = get_env("NEW_VAR", as_bool=True)
             assert result is False
             assert isinstance(result, bool)
 
     def test_bool_mode_old_var_with_warning(self, caplog):
-        with patch.dict('os.environ', {'OLD_VAR': 'yes'}, clear=True):
-            result = get_env('NEW_VAR', 'OLD_VAR', as_bool=True)
+        with patch.dict("os.environ", {"OLD_VAR": "yes"}, clear=True):
+            result = get_env("NEW_VAR", "OLD_VAR", as_bool=True)
             assert result is True
             assert isinstance(result, bool)
             assert len(caplog.records) == 1
@@ -136,32 +138,34 @@ class TestGetEnv:
             assert "deprecated" in caplog.records[0].message
 
     def test_bool_mode_default_string(self):
-        with patch.dict('os.environ', {}, clear=True):
-            result = get_env('NEW_VAR', default='true', as_bool=True)
+        with patch.dict("os.environ", {}, clear=True):
+            result = get_env("NEW_VAR", default="true", as_bool=True)
             assert result is True
             assert isinstance(result, bool)
 
     def test_bool_mode_default_none(self):
-        with patch.dict('os.environ', {}, clear=True):
-            result = get_env('NEW_VAR', as_bool=True)
+        with patch.dict("os.environ", {}, clear=True):
+            result = get_env("NEW_VAR", as_bool=True)
             assert result is False
             assert isinstance(result, bool)
 
     def test_bool_mode_empty_string(self):
-        with patch.dict('os.environ', {'NEW_VAR': ''}):
-            result = get_env('NEW_VAR', as_bool=True)
+        with patch.dict("os.environ", {"NEW_VAR": ""}):
+            result = get_env("NEW_VAR", as_bool=True)
             assert result is False
             assert isinstance(result, bool)
 
     def test_bool_mode_invalid_value_raises_error(self):
-        with patch.dict('os.environ', {'NEW_VAR': 'invalid'}):
-            with pytest.raises(ValueError, match="Cannot interpret 'invalid' as boolean"):
-                get_env('NEW_VAR', as_bool=True)
+        with patch.dict("os.environ", {"NEW_VAR": "invalid"}):
+            with pytest.raises(
+                ValueError, match="Cannot interpret 'invalid' as boolean"
+            ):
+                get_env("NEW_VAR", as_bool=True)
 
     def test_warning_stacklevel(self, caplog):
         """Test that deprecation warning is logged."""
-        with patch.dict('os.environ', {'OLD_VAR': 'value'}, clear=True):
-            get_env('NEW_VAR', 'OLD_VAR')
+        with patch.dict("os.environ", {"OLD_VAR": "value"}, clear=True):
+            get_env("NEW_VAR", "OLD_VAR")
             assert len(caplog.records) == 1
             # The warning should contain the deprecation message
             assert "DeprecationWarning" in caplog.records[0].message

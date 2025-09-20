@@ -15,10 +15,7 @@
 
 import copy
 import logging
-import os
 from dataclasses import asdict, dataclass
-
-from dynamo.runtime.env import get_env
 from enum import Enum
 from typing import Optional, Union
 
@@ -28,6 +25,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
+from dynamo.runtime.env import get_env
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
@@ -188,7 +186,13 @@ class HandlerBase:
         model_name = request.get("model", "unknown_model")
 
         # Optional test-only logits processing (enable with DYN_ENABLE_TEST_LOGITS_PROCESSOR=1)
-        if get_env("DYN_ENABLE_TEST_LOGITS_PROCESSOR", "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        if (
+            get_env(
+                "DYN_ENABLE_TEST_LOGITS_PROCESSOR",
+                "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR",
+            )
+            == "1"
+        ):
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters

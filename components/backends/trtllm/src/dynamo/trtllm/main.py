@@ -4,13 +4,10 @@
 import asyncio
 import json
 import logging
-import os
 import signal
 import sys
 
 import uvloop
-
-from dynamo.runtime.env import get_env
 from tensorrt_llm.llmapi import (
     BuildConfig,
     CapacitySchedulerPolicy,
@@ -27,6 +24,7 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.env import get_env
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
@@ -243,7 +241,12 @@ async def init(runtime: DistributedRuntime, config: Config):
     model_type = ModelType.Chat | ModelType.Completions
     multimodal_processor = None
 
-    if get_env("DYN_ENABLE_TEST_LOGITS_PROCESSOR", "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+    if (
+        get_env(
+            "DYN_ENABLE_TEST_LOGITS_PROCESSOR", "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
+        )
+        == "1"
+    ):
         # We need to initialize the tokenizer for the test logits processor
         # But detokenizing still happens in the rust engine, so we do _not_ want
         # to set default_sampling_params.detokenize to True.

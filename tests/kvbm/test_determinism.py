@@ -279,8 +279,10 @@ class DeterminismTester:
         server_type: Optional[str] = ServerType.vllm,
     ):
         # Allow environment override for flexibility in CI/local runs
-        self.base_url = (
-            base_url or get_env(name_new="DYN_API_BASE_URL", name_old="DYNAMO_API_BASE_URL", default="http://localhost:8000")
+        self.base_url = base_url or get_env(
+            name_new="DYN_API_BASE_URL",
+            name_old="DYNAMO_API_BASE_URL",
+            default="http://localhost:8000",
         )
         self.model_id = (
             model_id

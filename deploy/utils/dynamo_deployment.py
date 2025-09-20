@@ -24,13 +24,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from dynamo.runtime.env import get_env
-
 import aiofiles
 import httpx  # added for HTTP requests
 import kubernetes_asyncio as kubernetes
 import yaml
 from kubernetes_asyncio import client, config
+
+from dynamo.runtime.env import get_env
 
 
 def find_available_port(start_port: int = 8000) -> int:
@@ -284,7 +284,12 @@ class DynamoDeploymentClient:
         """
         # Allow environment variable to control verbosity
         if verbose is None:
-            verbose = get_env(name_new="DYN_VERBOSE", name_old="DYNAMO_VERBOSE", default=False, as_bool=True)
+            verbose = get_env(
+                name_new="DYN_VERBOSE",
+                name_old="DYNAMO_VERBOSE",
+                default=False,
+                as_bool=True,
+            )
 
         progress = ProgressDisplay(verbose=verbose)
         start_time = time.time()

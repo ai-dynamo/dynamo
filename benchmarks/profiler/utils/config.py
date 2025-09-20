@@ -21,10 +21,7 @@ from typing import Literal, Optional, Protocol
 
 from pydantic import BaseModel
 
-from benchmarks.profiler.utils.defaults import (
-    DEFAULT_MODEL_NAME,
-    DYN_RUN_DEFAULT_PORT,
-)
+from benchmarks.profiler.utils.defaults import DEFAULT_MODEL_NAME, DYN_RUN_DEFAULT_PORT
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
 logger = logging.getLogger(__name__)

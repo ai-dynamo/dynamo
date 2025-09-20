@@ -20,11 +20,19 @@ _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
 _FALSEY = {"0", "false", "f", "no", "n", "off"}
 
 
-def get_env(name_new: str, name_old: str | None = None, default: str | None = None, as_bool: bool = False) -> str | bool | None:
+def get_env(
+    name_new: str,
+    name_old: str | None = None,
+    default: str | None = None,
+    as_bool: bool = False,
+) -> str | bool | None:
     if (val := os.getenv(name_new)) is not None:
         return _to_bool(val) if as_bool else val
     if name_old is not None and (val := os.getenv(name_old)) is not None:
-        logging.warning(f"DeprecationWarning: Environment variable '{name_old}' is deprecated, use '{name_new}' instead.", stacklevel=2)
+        logging.warning(
+            f"DeprecationWarning: Environment variable '{name_old}' is deprecated, use '{name_new}' instead.",
+            stacklevel=2,
+        )
         return _to_bool(val) if as_bool else val
     return _to_bool(default) if as_bool else default
 
