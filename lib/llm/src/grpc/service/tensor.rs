@@ -188,7 +188,7 @@ fn get_or_create_request_id(primary: Option<&str>) -> String {
 impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
     type Error = Status;
 
-    fn try_from(mut request: inference::ModelInferRequest) -> Result<Self, Self::Error> {
+    fn try_from(request: inference::ModelInferRequest) -> Result<Self, Self::Error> {
         // Protocol requires if `raw_input_contents` is used to hold input data,
         // it must be used for all inputs.
         if !request.raw_input_contents.is_empty()
@@ -211,7 +211,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
         };
 
         // iterate through inputs
-        for input in request.inputs {
+        for (idx, input) in request.inputs.into_iter().enumerate() {
             let mut tensor = Tensor {
                 metadata: TensorMetadata {
                     name: input.name.clone(),
@@ -222,231 +222,234 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
                 // Placeholder, will be filled below
                 data: tensor::FlattenTensor::Bool(Vec::new()),
             };
-            tensor.data = match &input.contents {
-                Some(content) => match tensor.metadata.data_type {
-                    tensor::DataType::Bool => {
-                        tensor::FlattenTensor::Bool(content.bool_contents.clone())
-                    }
-                    tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
-                        content.uint_contents.iter().map(|&x| x as u8).collect(),
-                    ),
-                    tensor::DataType::Uint16 => tensor::FlattenTensor::Uint16(
-                        content.uint_contents.iter().map(|&x| x as u16).collect(),
-                    ),
-                    tensor::DataType::Uint32 => {
-                        tensor::FlattenTensor::Uint32(content.uint_contents.clone())
-                    }
-                    tensor::DataType::Uint64 => {
-                        tensor::FlattenTensor::Uint64(content.uint64_contents.clone())
-                    }
-                    tensor::DataType::Int8 => tensor::FlattenTensor::Int8(
-                        content.int_contents.iter().map(|&x| x as i8).collect(),
-                    ),
-                    tensor::DataType::Int16 => tensor::FlattenTensor::Int16(
-                        content.int_contents.iter().map(|&x| x as i16).collect(),
-                    ),
-                    tensor::DataType::Int32 => {
-                        tensor::FlattenTensor::Int32(content.int_contents.clone())
-                    }
-                    tensor::DataType::Int64 => {
-                        tensor::FlattenTensor::Int64(content.int64_contents.clone())
-                    }
-
-                    tensor::DataType::Float32 => {
-                        tensor::FlattenTensor::Float32(content.fp32_contents.clone())
-                    }
-
-                    tensor::DataType::Float64 => {
-                        tensor::FlattenTensor::Float64(content.fp64_contents.clone())
-                    }
-
-                    tensor::DataType::Bytes => {
-                        tensor::FlattenTensor::Bytes(content.bytes_contents.clone())
-                    }
-                },
-                // data is provided in raw_input_contents
-                None => {
-                    // Take ownership of the raw input for later pointer operation
-                    let raw_input = request.raw_input_contents.remove(0);
-                    let data_size = match tensor.metadata.data_type {
-                        tensor::DataType::Bool => 1,
-                        tensor::DataType::Uint8 => 1,
-                        tensor::DataType::Uint16 => 2,
-                        tensor::DataType::Uint32 => 4,
-                        tensor::DataType::Uint64 => 8,
-                        tensor::DataType::Int8 => 1,
-                        tensor::DataType::Int16 => 2,
-                        tensor::DataType::Int32 => 4,
-                        tensor::DataType::Int64 => 8,
-                        tensor::DataType::Float32 => 4,
-                        tensor::DataType::Float64 => 8,
-                        tensor::DataType::Bytes => 0,
-                    };
-                    // Non-bytes type, simply reinterpret cast the raw input bytes
-                    if data_size > 0 {
-                        let element_count =
-                            tensor.metadata.shape.iter().try_fold(1usize, |acc, &d| {
-                                if d < 0 {
-                                    Err(Status::invalid_argument(format!(
-                                        "Shape contains negative dimension: {}",
-                                        d
-                                    )))
-                                } else {
-                                    acc.checked_mul(d as usize).ok_or_else(|| {
-                                        Status::invalid_argument(
-                                            "Overflow occurred while calculating element count",
-                                        )
-                                    })
-                                }
-                            })?;
-                        if raw_input.len() % data_size != 0 {
-                            return Err(Status::invalid_argument(format!(
-                                "Raw input length must be a multiple of {}",
-                                data_size
-                            )));
-                        } else if raw_input.len() / data_size != element_count {
-                            return Err(Status::invalid_argument(format!(
-                                "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
-                                input.name,
-                                element_count,
-                                raw_input.len() / data_size
-                            )));
-                        }
-
-                        // Here we "reinterpret cast" vec<u8> to be vec<T> of the corresponding data type
-                        // To do so we extract the raw pointer to construct new vector<T>,
-                        // and forget the original vector to avoid double-free.
-                        let ptr = raw_input.as_ptr();
-                        std::mem::forget(raw_input); // Prevent deallocation of the vector
-                        unsafe {
-                            match tensor.metadata.data_type {
-                                tensor::DataType::Bool => {
-                                    tensor::FlattenTensor::Bool(Vec::from_raw_parts(
-                                        ptr as *mut bool,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-                                tensor::DataType::Uint8 => {
-                                    tensor::FlattenTensor::Uint8(Vec::from_raw_parts(
-                                        ptr as *mut u8,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Uint16 => {
-                                    tensor::FlattenTensor::Uint16(Vec::from_raw_parts(
-                                        ptr as *mut u16,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Uint32 => {
-                                    tensor::FlattenTensor::Uint32(Vec::from_raw_parts(
-                                        ptr as *mut u32,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Uint64 => {
-                                    tensor::FlattenTensor::Uint64(Vec::from_raw_parts(
-                                        ptr as *mut u64,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Int8 => {
-                                    tensor::FlattenTensor::Int8(Vec::from_raw_parts(
-                                        ptr as *mut i8,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Int16 => {
-                                    tensor::FlattenTensor::Int16(Vec::from_raw_parts(
-                                        ptr as *mut i16,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Int32 => {
-                                    tensor::FlattenTensor::Int32(Vec::from_raw_parts(
-                                        ptr as *mut i32,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Int64 => {
-                                    tensor::FlattenTensor::Int64(Vec::from_raw_parts(
-                                        ptr as *mut i64,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Float32 => {
-                                    tensor::FlattenTensor::Float32(Vec::from_raw_parts(
-                                        ptr as *mut f32,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Float64 => {
-                                    tensor::FlattenTensor::Float64(Vec::from_raw_parts(
-                                        ptr as *mut f64,
-                                        element_count,
-                                        element_count,
-                                    ))
-                                }
-
-                                tensor::DataType::Bytes => {
-                                    return Err(Status::internal(format!(
-                                        "Unexpected BYTES type in non-bytes branch for input '{}'",
-                                        input.name
-                                    )));
-                                }
-                            }
-                        }
-                    } else {
-                        // For BYTES type, we need to parse length-prefixed strings and properly slice them
-                        // into bytes of array.
-                        let mut bytes_contents = vec![];
-                        let mut offset = 0;
-                        while offset + 4 <= raw_input.len() {
-                            let len = u32::from_le_bytes(
-                                raw_input[offset..offset + 4].try_into().unwrap(),
-                            ) as usize;
-                            offset += 4;
-                            if offset + len > raw_input.len() {
-                                return Err(Status::invalid_argument(format!(
-                                    "Invalid length-prefixed BYTES input for '{}', length exceeds raw input size",
-                                    input.name
-                                )));
-                            }
-                            bytes_contents.push(raw_input[offset..offset + len].to_vec());
-                            offset += len;
-                        }
-                        if offset != raw_input.len() {
-                            return Err(Status::invalid_argument(format!(
-                                "Invalid length-prefixed BYTES input for '{}', extra bytes at the end",
-                                input.name
-                            )));
-                        }
-                        tensor::FlattenTensor::Bytes(bytes_contents)
-                    }
+            match &input.contents {
+                // If contents is provided in InferInputTensor
+                Some(contents) => {
+                    tensor.set_data_from_tensor_contents(contents);
                 }
-            };
+                // If not in InferInputTensor, contents is provided in raw_input_contents
+                None => {
+                    tensor.set_data_from_raw_contents(&request.raw_input_contents[idx])?;
+                }
+            }
             tensor_request.tensors.push(tensor);
         }
         Ok(tensor_request)
+    }
+}
+
+impl tensor::Tensor {
+    fn set_data_from_tensor_contents(&mut self, contents: &inference::InferTensorContents) {
+        self.data = match self.metadata.data_type {
+            tensor::DataType::Bool => tensor::FlattenTensor::Bool(contents.bool_contents.clone()),
+            tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
+                contents.uint_contents.iter().map(|&x| x as u8).collect(),
+            ),
+            tensor::DataType::Uint16 => tensor::FlattenTensor::Uint16(
+                contents.uint_contents.iter().map(|&x| x as u16).collect(),
+            ),
+            tensor::DataType::Uint32 => {
+                tensor::FlattenTensor::Uint32(contents.uint_contents.clone())
+            }
+            tensor::DataType::Uint64 => {
+                tensor::FlattenTensor::Uint64(contents.uint64_contents.clone())
+            }
+            tensor::DataType::Int8 => tensor::FlattenTensor::Int8(
+                contents.int_contents.iter().map(|&x| x as i8).collect(),
+            ),
+            tensor::DataType::Int16 => tensor::FlattenTensor::Int16(
+                contents.int_contents.iter().map(|&x| x as i16).collect(),
+            ),
+            tensor::DataType::Int32 => tensor::FlattenTensor::Int32(contents.int_contents.clone()),
+            tensor::DataType::Int64 => {
+                tensor::FlattenTensor::Int64(contents.int64_contents.clone())
+            }
+
+            tensor::DataType::Float32 => {
+                tensor::FlattenTensor::Float32(contents.fp32_contents.clone())
+            }
+
+            tensor::DataType::Float64 => {
+                tensor::FlattenTensor::Float64(contents.fp64_contents.clone())
+            }
+
+            tensor::DataType::Bytes => {
+                tensor::FlattenTensor::Bytes(contents.bytes_contents.clone())
+            }
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn set_data_from_raw_contents(&mut self, raw_input: &[u8]) -> Result<(), Status> {
+        let element_count = self.metadata.shape.iter().try_fold(1usize, |acc, &d| {
+            if d < 0 {
+                Err(Status::invalid_argument(format!(
+                    "Shape contains negative dimension: {}",
+                    d
+                )))
+            } else {
+                acc.checked_mul(d as usize).ok_or_else(|| {
+                    Status::invalid_argument("Overflow occurred while calculating element count")
+                })
+            }
+        })?;
+
+        let data_size = match self.metadata.data_type {
+            tensor::DataType::Bool => 1,
+            tensor::DataType::Uint8 => 1,
+            tensor::DataType::Uint16 => 2,
+            tensor::DataType::Uint32 => 4,
+            tensor::DataType::Uint64 => 8,
+            tensor::DataType::Int8 => 1,
+            tensor::DataType::Int16 => 2,
+            tensor::DataType::Int32 => 4,
+            tensor::DataType::Int64 => 8,
+            tensor::DataType::Float32 => 4,
+            tensor::DataType::Float64 => 8,
+            tensor::DataType::Bytes => 0,
+        };
+
+        // For BYTES type, we need to parse length-prefixed strings and properly slice them
+        // into bytes of array, and early return
+        if data_size == 0 {
+            let mut bytes_contents = vec![];
+            let mut offset = 0;
+            while offset + 4 <= raw_input.len() {
+                let len =
+                    u32::from_le_bytes(raw_input[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+                if offset + len > raw_input.len() {
+                    return Err(Status::invalid_argument(format!(
+                        "Invalid length-prefixed BYTES input for '{}', length exceeds raw input size",
+                        self.metadata.name
+                    )));
+                }
+                bytes_contents.push(raw_input[offset..offset + len].to_vec());
+                offset += len;
+            }
+            if offset != raw_input.len() {
+                return Err(Status::invalid_argument(format!(
+                    "Invalid length-prefixed BYTES input for '{}', extra bytes at the end",
+                    self.metadata.name
+                )));
+            }
+            if element_count != bytes_contents.len() {
+                return Err(Status::invalid_argument(format!(
+                    "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
+                    self.metadata.name,
+                    element_count,
+                    bytes_contents.len()
+                )));
+            }
+            self.data = tensor::FlattenTensor::Bytes(bytes_contents);
+            return Ok(());
+        }
+
+        // Non-bytes type, simply reinterpret cast the raw input bytes
+        if raw_input.len() % data_size != 0 {
+            return Err(Status::invalid_argument(format!(
+                "Raw input length must be a multiple of {}",
+                data_size
+            )));
+        } else if raw_input.len() / data_size != element_count {
+            return Err(Status::invalid_argument(format!(
+                "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
+                self.metadata.name,
+                element_count,
+                raw_input.len() / data_size
+            )));
+        }
+
+        // In Rust, we can not "reinterpret cast" a Vec<u8> to Vec<T> directly
+        // as Vec require the pointer to be aligned with the type T, which can not
+        // be guaranteed from Vec<u8>. We will have to reconstruct the Vec<T> element
+        // by element which results in data copy.
+        // Here we assume little endianess for all types as the KServe protocol doesn't
+        // specify the endianness while it should have.
+        self.data = match self.metadata.data_type {
+            tensor::DataType::Bool => {
+                tensor::FlattenTensor::Bool(raw_input.iter().map(|&b| b != 0).collect())
+            }
+            tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
+                raw_input.chunks_exact(1).map(|chunk| chunk[0]).collect(),
+            ),
+            tensor::DataType::Uint16 => tensor::FlattenTensor::Uint16(
+                raw_input
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect(),
+            ),
+            tensor::DataType::Uint32 => tensor::FlattenTensor::Uint32(
+                raw_input
+                    .chunks_exact(4)
+                    .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect(),
+            ),
+            tensor::DataType::Uint64 => tensor::FlattenTensor::Uint64(
+                raw_input
+                    .chunks_exact(8)
+                    .map(|chunk| {
+                        u64::from_le_bytes([
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
+                        ])
+                    })
+                    .collect(),
+            ),
+            tensor::DataType::Int8 => tensor::FlattenTensor::Int8(
+                raw_input
+                    .chunks_exact(1)
+                    .map(|chunk| chunk[0] as i8)
+                    .collect(),
+            ),
+            tensor::DataType::Int16 => tensor::FlattenTensor::Int16(
+                raw_input
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect(),
+            ),
+            tensor::DataType::Int32 => tensor::FlattenTensor::Int32(
+                raw_input
+                    .chunks_exact(4)
+                    .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect(),
+            ),
+            tensor::DataType::Int64 => tensor::FlattenTensor::Int64(
+                raw_input
+                    .chunks_exact(8)
+                    .map(|chunk| {
+                        i64::from_le_bytes([
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
+                        ])
+                    })
+                    .collect(),
+            ),
+            tensor::DataType::Float32 => tensor::FlattenTensor::Float32(
+                raw_input
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect(),
+            ),
+            tensor::DataType::Float64 => tensor::FlattenTensor::Float64(
+                raw_input
+                    .chunks_exact(8)
+                    .map(|chunk| {
+                        f64::from_le_bytes([
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
+                        ])
+                    })
+                    .collect(),
+            ),
+            tensor::DataType::Bytes => {
+                return Err(Status::internal(format!(
+                    "Unexpected BYTES type in non-bytes branch for input '{}'",
+                    self.metadata.name
+                )));
+            }
+        };
+        Ok(())
     }
 }
 
