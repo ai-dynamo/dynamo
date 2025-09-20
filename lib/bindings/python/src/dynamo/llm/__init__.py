@@ -25,6 +25,7 @@ from dynamo._core import HttpService as HttpService
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
+from dynamo._core import KvPushRouter as KvPushRouter
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStats as KvStats
