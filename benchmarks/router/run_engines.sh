@@ -128,7 +128,6 @@ for i in $(seq 1 $NUM_WORKERS); do
             # Run vLLM engine with PYTHONHASHSEED=0 for deterministic event IDs in KV-aware routing
             exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
                 --model "$MODEL_PATH" \
-                --endpoint dyn://test.vllm.generate \
                 --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
                 "${EXTRA_ARGS[@]}"
         fi
