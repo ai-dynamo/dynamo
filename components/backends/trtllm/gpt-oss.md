@@ -37,9 +37,9 @@ docker compose -f deploy/docker-compose.yml up
 ### 1. Pull the Container
 
 ```bash
-export DYNAMO_CONTAINER_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-gpt-oss:latest"
+export DYN_CONTAINER_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-gpt-oss:latest"
 
-docker pull $DYNAMO_CONTAINER_IMAGE
+docker pull ${DYN_CONTAINER_IMAGE:-$DYNAMO_CONTAINER_IMAGE}
 ```
 
 <details>
@@ -52,7 +52,7 @@ If you'd like to build your own Dynamo container, use the following instructions
 # Navigate to the Dynamo repository root
 cd $DYNAMO_ROOT
 
-export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
+export DYN_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
 
 # Build the container with a specific TensorRT-LLM commit
 docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
@@ -60,7 +60,7 @@ docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   --build-arg ARCH=arm64 \
   --build-arg ARCH_ALT=aarch64 \
-  -t $DYNAMO_CONTAINER_IMAGE
+  -t ${DYN_CONTAINER_IMAGE:-$DYNAMO_CONTAINER_IMAGE}
 ```
 
 **For x86_64:**
@@ -68,12 +68,12 @@ docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
 # Navigate to the Dynamo repository root
 cd $DYNAMO_ROOT
 
-export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
+export DYN_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
 
 docker build -f container/Dockerfile.trtllm_prebuilt . \
   --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
-  -t $DYNAMO_CONTAINER_IMAGE
+  -t ${DYN_CONTAINER_IMAGE:-$DYNAMO_CONTAINER_IMAGE}
 ```
 
 </details>
@@ -110,7 +110,7 @@ docker run \
     -e HF_TOKEN=$HF_TOKEN \
     -e TRTLLM_ENABLE_PDL=1 \
     -e TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL=True \
-    $DYNAMO_CONTAINER_IMAGE
+    ${DYN_CONTAINER_IMAGE:-$DYNAMO_CONTAINER_IMAGE}
 ```
 
 This command:
