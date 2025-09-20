@@ -173,7 +173,7 @@ async def worker(runtime: DistributedRuntime):
     logging.getLogger().setLevel(getattr(logging, args.log_level))
 
     logger.info(f"Starting Prefill Router Service for namespace: {args.namespace}")
-    logger.info(f"Configuration: block_size={args.block_size}")
+    logger.debug(f"Configuration: block_size={args.block_size}")
 
     # Create service component
     component = runtime.namespace(args.namespace).component("prefill_router")
