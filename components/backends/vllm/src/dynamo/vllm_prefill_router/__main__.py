@@ -186,7 +186,7 @@ async def worker(runtime: DistributedRuntime):
     # Expose endpoint
     best_worker_endpoint = component.endpoint("best_worker_id")
 
-    logger.info("Starting to serve best_worker_id endpoint...")
+    logger.debug("Starting to serve best_worker_id endpoint...")
 
     try:
         await best_worker_endpoint.serve_endpoint(
