@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, watch};
 
+// Type alias to reduce complexity of the workers configuration map
+type WorkerConfigMap = Arc<RwLock<HashMap<i64, (Option<ModelRuntimeConfig>, String)>>>;
+
 use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
@@ -84,6 +87,7 @@ impl SchedulingRequest {
     }
 }
 
+#[derive(Clone)]
 pub struct KvScheduler {
     request_tx: tokio::sync::mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker>,
@@ -103,16 +107,38 @@ impl KvScheduler {
         let instances: Vec<Instance> = instances_rx.borrow().clone();
         let runtime_configs: HashMap<i64, ModelRuntimeConfig> = runtime_configs_rx.borrow().clone();
 
-        // Create shared workers_with_configs wrapped in Arc<RwLock>
-        let workers_with_configs: Arc<RwLock<HashMap<i64, Option<ModelRuntimeConfig>>>> = {
+        // CRITICAL DATA STRUCTURE CHANGE: Enhanced worker tracking for component-aware routing
+        //
+        // PREVIOUS: HashMap<worker_id, ModelRuntimeConfig> - only stored worker capabilities
+        // NEW: HashMap<worker_id, (ModelRuntimeConfig, component_type)> - stores capabilities + type
+        //
+        // COMPONENT TYPE SIGNIFICANCE:
+        // - "backend": Decode workers that handle full request lifecycle (prefill + decode)
+        // - "prefill": Prefill-only workers that handle remote prefill requests exclusively
+        //
+        // This distinction enables the scheduler to:
+        // 1. Filter workers by capability (prefill vs decode requests)
+        // 2. Apply different cost functions based on worker specialization
+        // 3. Support disaggregated serving architectures with dedicated worker roles
+        // 4. Maintain backward compatibility with unified worker deployments
+        let workers_with_configs: WorkerConfigMap = {
             let mut initial_map = HashMap::new();
             for instance in &instances {
                 let worker_id = instance.instance_id;
                 let config = runtime_configs.get(&worker_id).cloned();
+                // IMPORTANT: Preserve component type from Instance registration
+                // - "backend": decode workers (can do local prefill + decode)
+                // - "prefill": prefill workers (only do remote prefill)
+                let component = instance.component.clone();
                 if config.is_some() {
                     tracing::info!("Runtime config found for worker_id: {}", worker_id);
                 }
-                initial_map.insert(worker_id, config);
+                tracing::debug!(
+                    "Worker {} registered as component type: {}",
+                    worker_id,
+                    component
+                );
+                initial_map.insert(worker_id, (config, component));
             }
             Arc::new(RwLock::new(initial_map))
         };
@@ -169,16 +195,27 @@ impl KvScheduler {
                     .collect();
                 slots_monitor.update_workers(worker_ids);
 
-                // Update the shared workers_with_configs
+                // Update the shared workers_with_configs when instances change
+                // CHANGE: Now preserves both config AND component type for each worker
                 let mut workers_map = workers_monitor.write().await;
                 workers_map.clear();
                 for instance in &new_instances {
                     let worker_id = instance.instance_id;
                     let config = new_configs.get(&worker_id).cloned();
+                    // CRITICAL: Preserve component type for worker filtering
+                    // This allows us to distinguish between:
+                    // - "backend": decode workers (handle full requests, can do local prefill)
+                    // - "prefill": prefill workers (only handle remote prefill requests)
+                    let component = instance.component.clone();
                     if config.is_some() {
                         tracing::info!("Runtime config found for worker_id: {}", worker_id);
                     }
-                    workers_map.insert(worker_id, config);
+                    tracing::debug!(
+                        "Worker {} registered as component type: {}",
+                        worker_id,
+                        component
+                    );
+                    workers_map.insert(worker_id, (config, component));
                 }
                 tracing::trace!(
                     "Updated workers_with_configs with {} workers",
@@ -224,9 +261,76 @@ impl KvScheduler {
                 request.prefill_tokens = prefill_tokens;
 
                 // Read the current workers configuration
-                let workers = workers_scheduler.read().await.clone();
+                let all_workers = workers_scheduler.read().await.clone();
 
-                match selector.select_worker(&workers, &request, block_size) {
+                // INTELLIGENT WORKER FILTERING: Route requests to appropriate worker types
+                //
+                // ROUTING STRATEGY:
+                // - Prefill requests (request_id starts with "prefill_") → prefill workers only
+                // - Decode requests (all others) → decode workers only
+                //
+                // DESIGN RATIONALE:
+                // 1. Prefill workers are optimized for batch prefill processing
+                // 2. Decode workers handle full request lifecycle (prefill + decode)
+                // 3. Prevents decode requests from being sent to prefill-only workers
+                // 4. Enables optimal resource utilization in disaggregated architectures
+                let filtered_workers: HashMap<i64, Option<ModelRuntimeConfig>> = if request
+                    .request_id
+                    .starts_with("prefill_")
+                {
+                    // PREFILL REQUEST ROUTING: Filter to prefill-capable workers
+                    // Only workers registered with component="prefill" can handle remote prefill requests
+                    all_workers
+                        .iter()
+                        .filter(|(worker_id, (_config, component))| {
+                            let is_prefill = component == "prefill";
+                            if is_prefill {
+                                tracing::trace!(
+                                    "Including prefill worker {} in selection",
+                                    worker_id
+                                );
+                            }
+                            is_prefill
+                        })
+                        .map(|(worker_id, (config, _component))| (*worker_id, config.clone()))
+                        .collect()
+                } else {
+                    // DECODE REQUEST ROUTING: Filter to full-service decode-capable workers
+                    // Treat any component that is NOT explicitly "prefill" as decode-capable.
+                    // This preserves strict separation for prefill-only workers while
+                    // allowing unified components (e.g., "backend", "mocker") to serve decode.
+                    all_workers
+                            .iter()
+                            .filter(|(worker_id, (_config, component))| {
+                                let is_decode_capable = component != "prefill";
+                                if is_decode_capable {
+                                    tracing::trace!(
+                                        "Including decode-capable worker {} (component: {}) in selection",
+                                        worker_id,
+                                        component
+                                    );
+                                }
+                                is_decode_capable
+                            })
+                            .map(|(worker_id, (config, _component))| (*worker_id, config.clone()))
+                            .collect()
+                };
+
+                // Log the filtering results for debugging
+                tracing::debug!(
+                    "Worker filtering for request {}: {} total workers -> {} filtered workers (type: {})",
+                    request.request_id,
+                    all_workers.len(),
+                    filtered_workers.len(),
+                    if request.request_id.starts_with("prefill_") {
+                        "prefill"
+                    } else {
+                        "decode"
+                    }
+                );
+
+                // Apply selection logic to filtered workers
+                match selector.select_worker(&filtered_workers, &request, block_size) {
                     Ok(selection) => {
                         let event = KVHitRateEvent {
                             worker_id: selection.worker_id,
@@ -377,6 +481,88 @@ impl KvScheduler {
 
         loads
     }
+
+    /// Select the optimal prefill worker using intelligent routing with prefill-specific optimization.
+    ///
+    /// CORE FUNCTIONALITY: This method applies the same sophisticated selection algorithm
+    /// used for decode workers, but with optimizations specific to prefill workloads:
+    ///
+    /// SELECTION ALGORITHM:
+    /// 1. Worker Filtering: Only considers workers with component="prefill"
+    /// 2. Cache Overlap Analysis: Computes KV cache overlap scores for prefill workers
+    /// 3. Specialized Cost Function: cost = overlap_weight * remaining_prefill_work
+    ///    (excludes decode costs since prefill workers don't handle decode phase)
+    /// 4. Load Balancing: Considers current worker utilization and capacity
+    /// 5. Softmax Sampling: Uses temperature-controlled selection for exploration
+    ///
+    /// DESIGN DECISION: Reuses existing scheduler infrastructure to ensure consistency
+    /// with decode worker selection while optimizing specifically for prefill workloads.
+    /// This provides the same level of intelligence for prefill routing as decode routing.
+    ///
+    /// # Purpose
+    /// Called by KvRouter.select_prefill_worker() when a decode worker needs to
+    /// route a request to a prefill worker for remote prefill processing.
+    ///
+    /// # Arguments
+    /// * `request_id` - Unique identifier for tracking this selection
+    /// * `isl_tokens` - Input sequence length in tokens
+    /// * `token_seq` - Sequence hashes for KV cache overlap detection
+    /// * `overlaps` - KV cache overlap scores from indexer
+    /// * `router_config_override` - Optional per-request configuration
+    ///
+    /// # Returns
+    /// * `Ok(worker_id)` - ID of the selected prefill worker
+    /// * `Err(KvSchedulerError)` - If no prefill workers available or selection fails
+    pub async fn schedule_prefill_worker(
+        &self,
+        request_id: String,
+        isl_tokens: usize,
+        token_seq: Vec<SequenceHash>,
+        overlaps: OverlapScores,
+        router_config_override: Option<&RouterConfigOverride>,
+    ) -> Result<i64, KvSchedulerError> {
+        // CREATE PREFILL-SPECIFIC SCHEDULING REQUEST
+        //
+        // KEY DESIGN ELEMENTS:
+        // 1. "prefill_" prefix signals the scheduler to filter for prefill workers only
+        // 2. update_states=false prevents state updates since this is selection-only
+        // 3. Empty decode_blocks/prefill_tokens since this is pure selection logic
+        // 4. Preserves all overlap and configuration data for intelligent routing
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let request = SchedulingRequest {
+            request_id: format!("prefill_{}", request_id), // Triggers prefill worker filtering
+            token_seq,
+            isl_tokens,
+            overlaps,
+            decode_blocks: HashMap::new(), // Not needed for prefill selection
+            prefill_tokens: HashMap::new(), // Not needed for prefill selection
+            router_config_override: router_config_override.cloned(),
+            update_states: false, // Selection-only operation (no state tracking)
+            resp_tx: Some(resp_tx),
+        };
+
+        // Send to the existing scheduler background task
+        // The task will recognize the "prefill_" prefix and filter workers accordingly
+        self.request_tx
+            .send(request)
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
+        // Wait for the scheduler to make the selection
+        let response = resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
+        let selected_worker_id = response.best_worker_id;
+
+        tracing::debug!(
+            "Prefill worker selection completed: worker {} selected for request {}",
+            selected_worker_id,
+            request_id
+        );
+
+        Ok(selected_worker_id)
+    }
 }
 
 // Helper function for softmax sampling
@@ -509,17 +695,47 @@ impl WorkerSelector for DefaultWorkerSelector {
                 .and_then(|cfg| cfg.overlap_score_weight)
                 .unwrap_or(self.kv_router_config.overlap_score_weight);
 
-            // Calculate logit (lower is better)
-            let logit = overlap_weight * potential_prefill_block + decode_block;
+            // SPECIALIZED COST FUNCTIONS: Different optimization objectives for different worker types
+            //
+            // COST FUNCTION DESIGN:
+            // - Lower cost = higher priority for selection
+            // - Cost combines cache overlap benefits with load balancing
+            // - Different worker types optimize for different phases of request processing
+            let logit = if request.request_id.starts_with("prefill_") {
+                // PREFILL WORKER COST FUNCTION: cost = overlap_weight * total_prefill_load
+                // where total_prefill_load = (new_tokens_needed + current_active_tokens) / block_size
+                //
+                // LOAD BALANCING MECHANISM:
+                // 1. new_tokens_needed = isl - (cache_overlap * block_size) → rewards cache hits
+                // 2. current_active_tokens = worker's existing load → penalizes busy workers
+                // 3. Total cost increases with both poor cache overlap AND high worker load
+                // 4. This naturally balances between cache efficiency and load distribution
+                // 5. Decode cost is irrelevant (decode happens on different workers)
+                overlap_weight * potential_prefill_block
+            } else {
+                // DECODE WORKER COST FUNCTION: cost = overlap_weight * remaining_prefill_work + decode_load
+                //
+                // RATIONALE: Decode workers handle full request lifecycle, so:
+                // 1. Prefill work affects initial latency and memory usage
+                // 2. Cache overlap reduces prefill computation (same as prefill workers)
+                // 3. Decode load affects ongoing generation performance
+                // 4. Both phases contribute to total request cost
+                overlap_weight * potential_prefill_block + decode_block
+            };
             max_logit = max_logit.max(logit);
 
             worker_logits.insert(*worker_id, logit);
 
-            tracing::info!(
-                "Formula for {worker_id} with {overlap} cached blocks: {logit:.3} \
-                 = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}"
-            );
+            // DETAILED COST LOGGING: Show different cost calculations for transparency
+            if request.request_id.starts_with("prefill_") {
+                tracing::debug!(
+                    "Prefill worker {worker_id} with {overlap} cached blocks: cost={logit:.3} = {overlap_weight:.1} * prefill_blocks = {overlap_weight:.1} * {potential_prefill_block:.3} (decode_cost=0 for prefill workers)"
+                );
+            } else {
+                tracing::debug!(
+                    "Decode worker {worker_id} with {overlap} cached blocks: cost={logit:.3} = {overlap_weight:.1} * prefill_blocks + decode_blocks = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}"
+                );
+            }
         }
 
         // Use softmax sampling to select worker

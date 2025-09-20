@@ -113,22 +113,58 @@ pub async fn prepare_engine(
                 .namespace(&endpoint_id.namespace)?
                 .component(&endpoint_id.component)?;
 
-            let client = component.endpoint(&endpoint_id.name).client().await?;
+            // CRITICAL FIX: Always route HTTP requests to backend workers
+            //
+            // PROBLEM: Frontend was using whatever endpoint was discovered first (could be prefill)
+            // SOLUTION: For KV routing, explicitly connect to backend component for HTTP request routing
+            //
+            // This ensures that HTTP requests always go to decode workers (backend component),
+            // while prefill workers are used only for intelligent internal routing.
+            let (client, kv_chooser) = if router_mode == RouterMode::KV {
+                // ROUTING POLICY (KV mode): Always route external HTTP decode requests to
+                // the "backend" component (decode-capable workers). This prevents sending
+                // decode requests to prefill-only workers. If a dedicated backend component
+                // does not exist (e.g., unified tests/CI with a single component), fall back
+                // to the discovered component.
+                let backend_component = distributed_runtime
+                    .namespace(&endpoint_id.namespace)?
+                    .component("backend")
+                    .unwrap_or_else(|_| {
+                        tracing::warn!(
+                            "Backend component not found, using discovered component as fallback"
+                        );
+                        component.clone()
+                    });
 
-            let kv_chooser = if router_mode == RouterMode::KV {
+                let backend_client = backend_component
+                    .endpoint(&endpoint_id.name)
+                    .client()
+                    .await?;
+
+                tracing::info!(
+                    "HTTP frontend KV routing: Using backend endpoint for request routing"
+                );
+
+                // The KV chooser is used internally by the routed pipeline to perform
+                // intelligent worker selection (overlap/load). External HTTP continues to
+                // target backend workers as per the policy above.
                 let model_manager = Arc::new(ModelManager::new());
-                Some(
+                let chooser = Some(
                     model_manager
                         .kv_chooser_for(
                             local_model.display_name(),
-                            &component,
+                            &backend_component,
                             card.kv_cache_block_size,
                             Some(local_model.router_config().kv_router_config),
                         )
                         .await?,
-                )
+                );
+
+                (backend_client, chooser)
             } else {
-                None
+                // For non-KV routing, use original discovered endpoint
+                let client = component.endpoint(&endpoint_id.name).client().await?;
+                (client, None)
             };
 
             let hf_tokenizer = card.tokenizer_hf()?;

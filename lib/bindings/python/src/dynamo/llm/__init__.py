@@ -19,6 +19,7 @@ from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import ForwardPassMetrics as ForwardPassMetrics
+from dynamo._core import FrontendRouterClient as FrontendRouterClient
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpError as HttpError
 from dynamo._core import HttpService as HttpService

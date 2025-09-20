@@ -260,7 +260,43 @@ impl ModelWatcher {
             .drt
             .namespace(&endpoint_id.namespace)?
             .component(&endpoint_id.component)?;
-        let client = component.endpoint(&endpoint_id.name).client().await?;
+
+        // ROUTING POLICY (KV mode): Always route external HTTP decode requests to the
+        // "backend" component (decode-capable workers). Prefill workers remain
+        // internal-only targets selected by the KvRouter when a decode worker offloads
+        // prefill. In unified setups (tests/CI) where only a single component exists
+        // (e.g., "mocker"), we fall back to that component if "backend" doesn't exist.
+        let chosen_component = if self.router_mode == RouterMode::KV {
+            match self
+                .drt
+                .namespace(&endpoint_id.namespace)?
+                .component("backend")
+            {
+                Ok(backend_comp) => {
+                    tracing::info!(
+                        namespace = %endpoint_id.namespace,
+                        model = %model_entry.name,
+                        "HTTP KV routing: using backend component for request routing"
+                    );
+                    backend_comp
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        component = %endpoint_id.component,
+                        "Backend component not found; falling back to discovered component for HTTP routing"
+                    );
+                    component.clone()
+                }
+            }
+        } else {
+            component.clone()
+        };
+
+        let client = chosen_component
+            .endpoint(&endpoint_id.name)
+            .client()
+            .await?;
         let model_slug = model_entry.slug();
         let card = match ModelDeploymentCard::load_from_store(&model_slug, &self.drt).await {
             Ok(Some(mut card)) => {
@@ -289,12 +325,14 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
+            // Build a KV chooser only in KV routing mode. The chooser encapsulates
+            // intelligent selection (overlap & load) for internal routing decisions.
             let kv_chooser = if self.router_mode == RouterMode::KV {
                 Some(
                     self.manager
                         .kv_chooser_for(
                             &model_entry.name,
-                            &component,
+                            &chosen_component,
                             card.kv_cache_block_size,
                             self.kv_router_config,
                         )

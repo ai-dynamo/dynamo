@@ -14,6 +14,7 @@ use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
 use llm_rs::kv_router::protocols::KvStats as RsKvStats;
 use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
 use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
+use rs::traits::events::EventPublisher;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
@@ -848,9 +849,27 @@ impl KvPushRouter {
     ) -> PyResult<Self> {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
-            let client = endpoint.inner.client().await.map_err(to_pyerr)?;
+            // CRITICAL FIX: Always route regular requests to backend workers
+            //
+            // PROBLEM: Frontend was connecting to whatever endpoint was discovered first
+            // SOLUTION: Explicitly connect to backend component for regular HTTP request routing
+            //
+            // This ensures that regardless of startup order or discovery timing,
+            // regular HTTP requests always go to decode workers (backend component),
+            // while prefill workers are used only for intelligent internal routing.
+            let component = endpoint.inner.component();
+            let backend_component = component.drt()
+                .namespace(component.namespace().name())
+                .and_then(|ns| ns.component("backend"))
+                .unwrap_or_else(|_| {
+                    tracing::warn!("Backend component not found, using provided endpoint component as fallback");
+                    component.clone()
+                });
 
-            // Create PushRouter with KV router mode
+            let backend_endpoint = backend_component.endpoint("generate");
+            let client = backend_endpoint.client().await.map_err(to_pyerr)?;
+
+            // Create PushRouter with KV router mode - now guaranteed to route to backend workers
             let push_router = rs::pipeline::PushRouter::<
                 llm_rs::protocols::common::preprocessor::PreprocessedRequest,
                 rs::protocols::annotated::Annotated<
@@ -863,11 +882,8 @@ impl KvPushRouter {
             .await
             .map_err(to_pyerr)?;
 
-            // Get component from endpoint
-            let component = endpoint.inner.component();
-
             // Get the primary token from the component's primary lease
-            let primary_token = component
+            let primary_token = backend_component
                 .drt()
                 .primary_lease()
                 .ok_or_else(|| {
@@ -880,7 +896,7 @@ impl KvPushRouter {
             // Create KvRouter with a unique consumer UUID
             let consumer_uuid = uuid::Uuid::new_v4().to_string();
             let kv_router = llm_rs::kv_router::KvRouter::new(
-                component.clone(),
+                backend_component.clone(),
                 block_size as u32,
                 None, // default selector
                 Some(kv_router_config.inner()),
@@ -1063,6 +1079,80 @@ impl KvPushRouter {
         })
     }
 
+    /// Select the best prefill worker for the given tokens using intelligent routing.
+    ///
+    /// CORE FUNCTIONALITY: This method extends the existing KV router's intelligent
+    /// selection logic to support prefill workers. It applies the same KV cache overlap
+    /// detection and load balancing algorithms used for decode worker selection, but
+    /// filters to only consider prefill workers (component="prefill").
+    ///
+    /// ROUTING ALGORITHM:
+    /// 1. Compute block hashes from input tokens for cache overlap detection
+    /// 2. Query indexer to find overlapping cached blocks across prefill workers
+    /// 3. Apply cost function: cost = overlap_weight * remaining_prefill_work
+    ///    (Note: excludes decode cost since prefill workers don't handle decode phase)
+    /// 4. Use softmax sampling to select optimal worker with temperature control
+    ///
+    /// DESIGN DECISION: Reuses existing scheduler infrastructure but with prefill-specific
+    /// filtering and cost calculation. This ensures consistency with decode worker selection
+    /// while optimizing for prefill-only workloads.
+    ///
+    /// # Purpose
+    /// Called by decode workers when they decide to use remote prefill (via disagg_router)
+    /// to get an intelligent prefill worker selection instead of random NATS queue selection.
+    ///
+    /// # Arguments
+    /// * `context_id` - Unique identifier for this request (for tracking and debugging)
+    /// * `token_ids` - List of input token IDs that need prefill processing
+    /// * `router_config_override` - Optional dict with routing configuration overrides
+    ///
+    /// # Returns
+    /// * `int` - Worker ID of the selected prefill worker
+    ///
+    /// # Example Usage in Python
+    /// ```python
+    /// # In decode worker handler, when remote prefill is needed:
+    /// if disagg_router.prefill_remote(prefill_length, prefix_hit_length):
+    ///     prefill_worker_id = await kv_router.select_prefill_worker(
+    ///         request_id,
+    ///         request["token_ids"],
+    ///         None  # Use default config
+    ///     )
+    ///     await send_to_prefill_worker(prefill_worker_id, request)
+    /// ```
+    #[pyo3(signature = (context_id, token_ids, router_config_override=None))]
+    fn select_prefill_worker<'p>(
+        &self,
+        py: Python<'p>,
+        context_id: String,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        // Convert Python router config override to Rust type if provided
+        let config_override = if let Some(override_obj) = router_config_override {
+            Some(depythonize(override_obj.bind(py)).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to parse router_config_override: {}",
+                    e
+                ))
+            })?)
+        } else {
+            None
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Call the Rust method we just implemented
+            let prefill_worker_id = inner
+                .select_prefill_worker(&context_id, &token_ids, config_override.as_ref())
+                .await
+                .map_err(to_pyerr)?;
+
+            Ok(prefill_worker_id)
+        })
+    }
+
     /// Dump all events from the KV router's indexer as a JSON string
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
@@ -1107,6 +1197,133 @@ impl KvPushRouterStream {
                 None => Err(pyo3::exceptions::PyStopAsyncIteration::new_err(
                     "Stream exhausted",
                 )),
+            }
+        })
+    }
+}
+
+/// NATS-based client for intelligent prefill worker selection via KV router communication.
+///
+/// ARCHITECTURE: This client enables decode workers to request intelligent prefill worker
+/// selection from the KV router via NATS messaging. It implements a request-response pattern:
+/// 1. Publishes selection request with token IDs to "kv_router.select_prefill_worker"
+/// 2. Subscribes to response on "kv_router.response.{request_id}"
+/// 3. Returns the selected prefill worker ID
+///
+/// DESIGN DECISION: Uses NATS for decoupled communication between decode workers and the
+/// KV router service. This allows the router to run as a separate component while providing
+/// intelligent routing services to decode workers across the distributed system.
+///
+/// COMMUNICATION PROTOCOL:
+/// - Request: {"request_id": "prefill_{id}", "token_ids": [u32], "timestamp": u64}
+/// - Response: {"prefill_worker_id": i64, "request_id": string, "timestamp": u64}
+///
+/// This follows the same component access pattern as KvRecorder for consistency.
+#[pyclass]
+pub(crate) struct FrontendRouterClient {
+    component: rs::component::Component,
+}
+
+#[pymethods]
+impl FrontendRouterClient {
+    #[new]
+    fn new(component: Component) -> PyResult<Self> {
+        Ok(Self {
+            component: component.inner,
+        })
+    }
+
+    /// Request intelligent prefill worker selection from the KV router via NATS.
+    ///
+    /// IMPLEMENTATION: This method implements the client side of the NATS request-response
+    /// pattern for prefill worker selection. It coordinates with the KV router's NATS
+    /// service to get intelligent routing decisions based on KV cache overlap analysis.
+    ///
+    /// FLOW:
+    /// 1. Creates request with "prefill_" prefix (signals router to filter prefill workers)
+    /// 2. Publishes to "kv_router.select_prefill_worker" subject
+    /// 3. Subscribes to unique response subject for this request
+    /// 4. Waits for router's selection decision
+    /// 5. Returns selected prefill worker ID
+    ///
+    /// ERROR HANDLING: If NATS communication fails or router doesn't respond,
+    /// the calling code (DecodeWorkerHandler) falls back to random selection.
+    ///
+    /// # Arguments
+    /// * `request_id` - Unique identifier for tracking this selection request
+    /// * `token_ids` - Input tokens for KV cache overlap analysis
+    ///
+    /// # Returns
+    /// * `i64` - Worker ID of the selected prefill worker
+    fn select_prefill_worker<'p>(
+        &self,
+        py: Python<'p>,
+        request_id: String,
+        token_ids: Vec<u32>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let component = self.component.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Create selection request with prefill_ prefix for worker filtering
+            // The "prefill_" prefix signals the router scheduler to only consider prefill workers
+            let prefill_request_id = format!("prefill_{}", request_id);
+            let selection_request = serde_json::json!({
+                "request_id": prefill_request_id,
+                "token_ids": token_ids,
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            });
+
+            // Subscribe to the unique response subject for this request
+            let response_subject = format!("kv_router.response.{}", prefill_request_id);
+            tracing::debug!("Subscribing to response subject: {}", response_subject);
+            let mut response_sub = component
+                .subscribe(&response_subject)
+                .await
+                .map_err(to_pyerr)?;
+            tracing::debug!("Successfully subscribed to response subject");
+
+            // Publish to the KV router's NATS service for prefill worker selection
+            tracing::debug!("Publishing prefill selection request to kv_router.select_prefill_worker for request_id: {}", prefill_request_id);
+            component
+                .publish("kv_router.select_prefill_worker", &selection_request)
+                .await
+                .map_err(to_pyerr)?;
+            tracing::debug!("Successfully published prefill selection request");
+
+            // Wait for the router's selection decision with a timeout to avoid hangs
+            // Wait for the router's selection decision with a timeout to avoid hangs
+            let response_msg = match tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                response_sub.next(),
+            )
+            .await
+            {
+                Ok(m) => m,
+                Err(_) => {
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "Router prefill selection timed out"
+                    )))
+                }
+            };
+
+            if let Some(msg) = response_msg {
+                // Parse the router's response containing the selected worker ID
+                let response_data: serde_json::Value =
+                    serde_json::from_slice(&msg.payload).map_err(to_pyerr)?;
+
+                let prefill_worker_id =
+                    response_data["prefill_worker_id"].as_i64().ok_or_else(|| {
+                        to_pyerr(anyhow::anyhow!("Invalid prefill_worker_id in response"))
+                    })?;
+
+                Ok(prefill_worker_id)
+            } else {
+                Err(to_pyerr(anyhow::anyhow!(
+                    "No response from frontend router"
+                )))
             }
         })
     }

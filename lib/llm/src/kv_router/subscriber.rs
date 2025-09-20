@@ -79,21 +79,64 @@ pub async fn start_kv_router_background(
     router_snapshot_threshold: Option<u32>,
     router_reset_states: bool,
 ) -> Result<()> {
-    // Set up NATS connections
-    let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
-        .to_string()
-        .replace("_", "-");
+    // DUAL STREAM ARCHITECTURE: Consume KV events from both backend and prefill workers
+    //
+    // ARCHITECTURAL CHANGE: Previously, the router only consumed events from backend workers.
+    // Now it consumes from both backend (decode) and prefill component streams to maintain
+    // a complete view of KV cache states across all worker types.
+    //
+    // STREAM SEPARATION RATIONALE:
+    // 1. Backend workers (decode): Publish events to backend.kv_events stream
+    // 2. Prefill workers: Publish events to prefill.kv_events stream
+    // 3. Router consumes both streams to build unified cache state index
+    // 4. This enables intelligent routing decisions across all worker types
+    let namespace = component.namespace();
+    let backend_component = namespace.component("backend")?;
+    let prefill_component = namespace.component("prefill")?;
+
+    let backend_stream_name = Slug::slugify(&format!(
+        "{}.{}",
+        backend_component.subject(),
+        KV_EVENT_SUBJECT
+    ))
+    .to_string()
+    .replace("_", "-");
+    let prefill_stream_name = Slug::slugify(&format!(
+        "{}.{}",
+        prefill_component.subject(),
+        KV_EVENT_SUBJECT
+    ))
+    .to_string()
+    .replace("_", "-");
     let nats_server =
         std::env::var("NATS_SERVER").unwrap_or_else(|_| "nats://localhost:4222".to_string());
 
-    // Create NatsQueue for event consumption
+    // BACKEND STREAM CONSUMER: Handle KV events from decode workers
+    // This maintains the existing backend event consumption logic
     let mut nats_queue = NatsQueue::new_with_consumer(
-        stream_name.clone(),
+        backend_stream_name.clone(),
         nats_server.clone(),
         std::time::Duration::from_secs(60), // 1 minute timeout
-        consumer_uuid,
+        consumer_uuid.clone(),
     );
     nats_queue.connect_with_reset(router_reset_states).await?;
+
+    // PREFILL STREAM CONSUMER: Handle KV events from prefill workers
+    //
+    // IMPLEMENTATION DETAILS:
+    // - Separate consumer UUID to avoid conflicts with backend consumer
+    // - Same timeout and reset behavior for consistency
+    // - Independent connection lifecycle for resilience
+    // - Events from this stream are processed identically to backend events
+    let mut prefill_nats_queue = NatsQueue::new_with_consumer(
+        prefill_stream_name.clone(),
+        nats_server.clone(),
+        std::time::Duration::from_secs(60),
+        format!("{}_prefill", consumer_uuid), // Unique consumer ID for prefill stream
+    );
+    prefill_nats_queue
+        .connect_with_reset(router_reset_states)
+        .await?;
 
     // Always create NATS client (needed for both reset and snapshots)
     let client_options = dynamo_runtime::transports::nats::Client::builder()
@@ -194,9 +237,14 @@ pub async fn start_kv_router_background(
                     if let Err(e) = nats_queue.shutdown(None).await {
                         tracing::warn!("Failed to shutdown NatsQueue: {e}");
                     }
+                    if let Err(e) = prefill_nats_queue.shutdown(None).await {
+                        tracing::warn!("Failed to shutdown Prefill NatsQueue: {e}");
+                    }
                     break;
                 }
 
+                // BACKEND STREAM PROCESSING: Handle KV events from decode workers
+                // This maintains existing event processing logic for backward compatibility
                 // Handle generate endpoint instance deletion events
                 Some(event) = instance_event_rx.recv() => {
                     let WatchEvent::Delete(kv) = event else {
@@ -246,6 +294,46 @@ pub async fn start_kv_router_background(
                         },
                         Err(e) => {
                             tracing::error!("Failed to dequeue task: {e:?}");
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+
+                // PREFILL STREAM PROCESSING: Handle KV events from prefill workers
+                //
+                // UNIFIED EVENT PROCESSING: Events from prefill workers are processed identically
+                // to backend events. The indexer doesn't distinguish between event sources -
+                // it simply tracks KV cache block allocations/deallocations across all workers.
+                //
+                // This unified approach ensures:
+                // 1. Complete cache state visibility across all worker types
+                // 2. Accurate overlap detection for intelligent routing
+                // 3. Consistent event handling regardless of worker component
+                result_prefill = prefill_nats_queue.dequeue_task(None) => {
+                    match result_prefill {
+                        Ok(Some(bytes)) => {
+                            // Parse prefill worker KV event (same format as backend events)
+                            let event: RouterEvent = match serde_json::from_slice(&bytes) {
+                                Ok(event) => event,
+                                Err(e) => {
+                                    tracing::warn!("Failed to deserialize RouterEvent (prefill): {e:?}");
+                                    continue;
+                                }
+                            };
+
+                            // Forward to indexer for unified cache state tracking
+                            if let Err(e) = kv_events_tx.send(event).await {
+                                tracing::warn!(
+                                    "failed to send kv event (prefill) to indexer; shutting down: {e:?}"
+                                );
+                                break;
+                            }
+                        },
+                        Ok(None) => {
+                            tracing::trace!("Dequeue timeout (prefill), continuing");
+                        },
+                        Err(e) => {
+                            tracing::error!("Failed to dequeue prefill task: {e:?}");
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
@@ -346,8 +434,12 @@ pub async fn start_kv_router_background(
         }
 
         // Clean up the queue and remove the durable consumer
+        // CLEANUP: Ensure both stream consumers are properly shut down
         if let Err(e) = nats_queue.shutdown(None).await {
             tracing::warn!("Failed to shutdown NatsQueue: {e}");
+        }
+        if let Err(e) = prefill_nats_queue.shutdown(None).await {
+            tracing::warn!("Failed to shutdown Prefill NatsQueue: {e}");
         }
     });
 
