@@ -17,6 +17,7 @@ import logging
 import os
 
 from dynamo.planner.kube import get_current_k8s_namespace
+from dynamo.runtime.env import get_env
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -71,7 +72,7 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
 
 class SLAPlannerDefaults(BasePlannerDefaults):
     port = os.environ.get("PROMETHEUS_PORT", "9090")
-    namespace = os.environ.get("DYNAMO_NAMESPACE", "vllm-disagg-planner")
+    namespace = get_env("DYN_NAMESPACE", "DYNAMO_NAMESPACE", "vllm-disagg-planner")
     prometheus_endpoint = _get_default_prometheus_endpoint(port, namespace)
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens

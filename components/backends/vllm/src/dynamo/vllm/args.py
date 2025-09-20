@@ -16,8 +16,8 @@ from dynamo.runtime import DistributedRuntime
 
 from . import __version__
 from .ports import (
-    DEFAULT_DYNAMO_PORT_MAX,
-    DEFAULT_DYNAMO_PORT_MIN,
+    DEFAULT_DYN_PORT_MAX,
+    DEFAULT_DYN_PORT_MIN,
     DynamoPortRange,
     PortAllocationRequest,
     PortMetadata,
@@ -85,14 +85,14 @@ def parse_args() -> Config:
     parser.add_argument(
         "--dynamo-port-min",
         type=int,
-        default=DEFAULT_DYNAMO_PORT_MIN,
-        help=f"Minimum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MIN}). Must be in registered ports range (1024-49151).",
+        default=DEFAULT_DYN_PORT_MIN,
+        help=f"Minimum port number for Dynamo services (default: {DEFAULT_DYN_PORT_MIN}). Must be in registered ports range (1024-49151).",
     )
     parser.add_argument(
         "--dynamo-port-max",
         type=int,
-        default=DEFAULT_DYNAMO_PORT_MAX,
-        help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MAX}). Must be in registered ports range (1024-49151).",
+        default=DEFAULT_DYN_PORT_MAX,
+        help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYN_PORT_MAX}). Must be in registered ports range (1024-49151).",
     )
     parser.add_argument(
         "--connector",

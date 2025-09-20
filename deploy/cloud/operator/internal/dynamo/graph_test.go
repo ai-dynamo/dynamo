@@ -1323,7 +1323,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYNAMO_PORT",
+														Name:  "DYN_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -2112,7 +2112,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYNAMO_PORT",
+														Name:  "DYN_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{
@@ -2896,7 +2896,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "1",
 													},
 													{
-														Name:  "DYNAMO_PORT",
+														Name:  "DYN_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
 													{

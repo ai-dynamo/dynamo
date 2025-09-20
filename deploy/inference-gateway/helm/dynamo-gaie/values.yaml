@@ -81,7 +81,7 @@ eppAware:
     args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
     # Environment variables for the sidecar.
     env:
-      - name: DYNAMO_NAMESPACE
+      - name: DYN_NAMESPACE
         valueFromDynamoNamespace: true
       - name: ETCD_ENDPOINTS
         value: "http://dynamo-platform-etcd:2379"

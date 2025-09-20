@@ -9,9 +9,9 @@ metadata:
     nvidia.com/enable-grove: "false"
 spec:
   envs:
-    - name: DYNAMO_SERVICE_CONFIG
+    - name: DYN_SERVICE_CONFIG
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:8000"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
-    - name: DYNAMO_NAMESPACE
+    - name: DYN_NAMESPACE
       value: "vllm-disagg-planner"
   services:
     Frontend:
