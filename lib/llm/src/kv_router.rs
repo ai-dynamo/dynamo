@@ -216,6 +216,8 @@ pub struct KvRouter {
     block_size: u32,
 
     kv_router_config: KvRouterConfig,
+
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl KvRouter {
@@ -314,6 +316,7 @@ impl KvRouter {
             scheduler,
             block_size,
             kv_router_config,
+            cancellation_token,
         })
     }
 
@@ -608,5 +611,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 Ok(ResponseStream::new(wrapped_stream, stream_context))
             }
         }
+    }
+}
+
+impl Drop for KvRouter {
+    fn drop(&mut self) {
+        tracing::info!("Dropping KvRouter - cancelling background tasks");
+        self.cancellation_token.cancel();
     }
 }

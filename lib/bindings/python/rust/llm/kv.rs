@@ -835,7 +835,6 @@ impl SpecDecodeStats {
 #[pyclass]
 pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
-    primary_token: tokio_util::sync::CancellationToken,
 }
 
 #[pymethods]
@@ -866,16 +865,12 @@ impl KvPushRouter {
             // Get component from endpoint
             let component = endpoint.inner.component();
 
-            // Get the primary token from the component's primary lease
-            let primary_token = component
-                .drt()
-                .primary_lease()
-                .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        "Failed to get primary lease: Cannot KV route static workers",
-                    )
-                })?
-                .primary_token();
+            // Verify we're not in static mode
+            if component.drt().primary_lease().is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Failed to get primary lease: Cannot KV route static workers",
+                ));
+            }
 
             // Create KvRouter with a unique consumer UUID
             let consumer_uuid = uuid::Uuid::new_v4().to_string();
@@ -895,7 +890,6 @@ impl KvPushRouter {
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),
-                primary_token,
             })
         })
     }
@@ -1076,12 +1070,6 @@ impl KvPushRouter {
     }
 }
 
-impl Drop for KvPushRouter {
-    fn drop(&mut self) {
-        // Cancel the primary token to shut down background tasks
-        self.primary_token.cancel();
-    }
-}
 
 // Python async generator wrapper for the stream
 #[pyclass]
