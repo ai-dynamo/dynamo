@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
-    DYNAMO_RUN_DEFAULT_PORT,
+    DYN_RUN_DEFAULT_PORT,
 )
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
@@ -343,16 +343,16 @@ class VllmV1ConfigModifier:
             or not frontend_service.extraPodSpec.mainContainer
         ):
             logger.warning(
-                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"Frontend service or container not found, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
         args = frontend_service.extraPodSpec.mainContainer.args
         if not args:
             logger.warning(
-                f"No args found in Frontend configuration, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"No args found in Frontend configuration, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
         args = break_arguments(args)
         try:
@@ -360,9 +360,9 @@ class VllmV1ConfigModifier:
             return int(args[idx + 1])
         except (ValueError, IndexError):
             logger.warning(
-                f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"Port not found in configuration args, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
@@ -551,16 +551,16 @@ class SGLangConfigModifier:
             or not frontend_service.extraPodSpec.mainContainer
         ):
             logger.warning(
-                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"Frontend service or container not found, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
         args = frontend_service.extraPodSpec.mainContainer.args
         if not args:
             logger.warning(
-                f"No args found in Frontend configuration, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"No args found in Frontend configuration, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
         args = break_arguments(args)
         try:
@@ -568,9 +568,9 @@ class SGLangConfigModifier:
             return int(args[idx + 1])
         except (ValueError, IndexError):
             logger.warning(
-                f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"Port not found in configuration args, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
@@ -802,12 +802,12 @@ class TrtllmConfigModifier:
             or not frontend_service.extraPodSpec.mainContainer
         ):
             logger.warning(
-                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                f"Frontend service or container not found, using default port: {DYN_RUN_DEFAULT_PORT}"
             )
-            return DYNAMO_RUN_DEFAULT_PORT
+            return DYN_RUN_DEFAULT_PORT
 
         # TRT-LLM frontend doesn't have args, it uses the default port
-        return DYNAMO_RUN_DEFAULT_PORT
+        return DYN_RUN_DEFAULT_PORT
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
