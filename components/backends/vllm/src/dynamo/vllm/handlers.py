@@ -35,10 +35,33 @@ class BaseWorkerHandler(ABC):
         self.default_sampling_params = default_sampling_params
         self.kv_publisher = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
+        self._abort_tasks = set()  # Track running abort monitoring tasks
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
         raise NotImplementedError
+
+    async def _monitor_abort(self, context, request_id, is_prefill):
+        """Background task that monitors for context cancellation and aborts the request."""
+        try:
+            await context.async_killed_or_stopped()
+            # If we reach here, the context was stopped or killed
+            await self.engine_client.abort(request_id)
+            logger.debug(
+                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
+        except asyncio.CancelledError:
+            # Task was cancelled, normal cleanup if not aborted
+            pass
+        except Exception as e:
+            logger.error(f"Error in abort monitor for request {request_id}: {e}")
+
+    def _create_abort_task(self, context, request_id, is_prefill=False):
+        """Create and track an abort monitoring task."""
+        task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
+        self._abort_tasks.add(task)
+        task.add_done_callback(self._abort_tasks.discard)
+        return task
 
     async def clear_kv_blocks(self, request=None):
         try:
@@ -169,10 +192,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                 )
             except Exception as e:
-                # TODO: Cancellation does not propagate until the first token is received
                 if context.is_stopped() or context.is_killed():
                     logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
-                    # TODO: Raise asyncio.CancelledError into bindings
                     return
                 raise e
 
@@ -187,21 +208,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "kv_transfer_params"
             ] = prefill_response.kv_transfer_params
 
+        # Abort monitoring background task
+        abort_task = self._create_abort_task(context, request_id)
+
         try:
             async for tok in self.generate_tokens(prompt, sampling_params, request_id):
-                if context.is_stopped() or context.is_killed():
-                    await self.engine_client.abort(request_id)
-                    logger.debug(f"Aborted Request ID: {request_id}")
-                    # TODO: Raise asyncio.CancelledError into bindings
-                    break
-
                 yield tok
-
         except EngineDeadError as e:
             logger.error(f"vLLM EngineDeadError: {e}")
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
+        finally:
+            # Cancel the abort monitoring task when done
+            if not abort_task.done():
+                abort_task.cancel()
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -215,6 +236,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
 
+        # Abort monitoring background task
+        abort_task = self._create_abort_task(context, request_id, is_prefill=True)
+
         try:
             gen = self.engine_client.generate(prompt, sampling_params, request_id)
         except EngineDeadError as e:
@@ -226,12 +250,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Generate only 1 token in prefill
         try:
             async for res in gen:
-                if context.is_stopped() or context.is_killed():
-                    await self.engine_client.abort(request_id)
-                    logger.debug(f"Aborted Prefill Request ID: {request_id}")
-                    # TODO: Raise asyncio.CancelledError into bindings
-                    break
-
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
                 yield MyRequestOutput(
                     request_id=res.request_id,
@@ -248,3 +266,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             raise GeneratorExit(
                 "Prefill engine was shut down during token generation"
             ) from None
+        finally:
+            # Cancel the abort monitoring task when done
+            if not abort_task.done():
+                abort_task.cancel()

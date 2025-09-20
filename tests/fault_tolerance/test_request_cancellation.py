@@ -412,9 +412,7 @@ def test_request_cancellation_vllm(request, runtime_services, predownload_models
                 logger.info(
                     "Checking for cancellation messages in worker and frontend logs..."
                 )
-                # TODO: Need to wait for the next token to generate before seeing the
-                #       cancellation on the logs. DIS-625
-                time.sleep(0.5)
+                time.sleep(0.05)  # time for cancellation to propagate
                 frontend_log_offset, worker_log_offset = verify_request_cancelled(
                     frontend,
                     worker,
@@ -467,9 +465,7 @@ def test_request_cancellation_vllm_decode(
                 logger.info(
                     "Checking for cancellation messages in decode and prefill worker and frontend logs..."
                 )
-                # TODO: Need to wait for the next token to generate before seeing the
-                #       cancellation on the logs. DIS-625
-                time.sleep(0.5)
+                time.sleep(0.05)  # time for cancellation to propagate
                 verify_request_cancelled(frontend, decode_worker, prefill_worker)
 
 
@@ -507,10 +503,6 @@ def test_request_cancellation_vllm_prefill(
             with decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # TODO: Why the model is not immediately available at the frontend after
-                #       health check returns success.
-                time.sleep(2)
-
                 # Step 4: Test request cancellation for completion scenario only
                 logger.info(
                     "Testing completion request cancellation in prefill worker..."
@@ -520,9 +512,7 @@ def test_request_cancellation_vllm_prefill(
                 logger.info(
                     "Checking for cancellation messages in decode and prefill worker and frontend logs..."
                 )
-                # TODO: Need to wait for prefill to generate first token before seeing
-                #       the cancellation on the logs. DIS-625
-                time.sleep(3)
+                time.sleep(0.05)  # time for cancellation to propagate
                 verify_request_cancelled(
                     frontend,
                     decode_worker,
