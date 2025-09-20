@@ -33,6 +33,7 @@ use crate::{
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         },
+        tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
 };
 
@@ -59,6 +60,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Chat,
     ModelType::Completions,
     ModelType::Embedding,
+    ModelType::TensorBased,
 ];
 
 impl ModelWatcher {
@@ -213,10 +215,12 @@ impl ModelWatcher {
         let chat_model_remove_err = self.manager.remove_chat_completions_model(&model_name);
         let completions_model_remove_err = self.manager.remove_completions_model(&model_name);
         let embeddings_model_remove_err = self.manager.remove_embeddings_model(&model_name);
+        let tensor_model_remove_err = self.manager.remove_tensor_model(&model_name);
 
         let mut chat_model_removed = false;
         let mut completions_model_removed = false;
         let mut embeddings_model_removed = false;
+        let mut tensor_model_removed = false;
 
         if chat_model_remove_err.is_ok() && self.manager.list_chat_completions_models().is_empty() {
             chat_model_removed = true;
@@ -228,20 +232,29 @@ impl ModelWatcher {
         if embeddings_model_remove_err.is_ok() && self.manager.list_embeddings_models().is_empty() {
             embeddings_model_removed = true;
         }
+        if tensor_model_remove_err.is_ok() && self.manager.list_tensor_models().is_empty() {
+            tensor_model_removed = true;
+        }
 
-        if !chat_model_removed && !completions_model_removed && !embeddings_model_removed {
+        if !chat_model_removed
+            && !completions_model_removed
+            && !embeddings_model_removed
+            && !tensor_model_removed
+        {
             tracing::debug!(
-                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}",
+                "No updates to send for model {}: chat_model_removed: {}, completions_model_removed: {}, embeddings_model_removed: {}, tensor_model_removed: {}",
                 model_name,
                 chat_model_removed,
                 completions_model_removed,
-                embeddings_model_removed
+                embeddings_model_removed,
+                tensor_model_removed
             );
         } else {
             for model_type in ALL_MODEL_TYPES {
                 if ((chat_model_removed && *model_type == ModelType::Chat)
                     || (completions_model_removed && *model_type == ModelType::Completions)
-                    || (embeddings_model_removed && *model_type == ModelType::Embedding))
+                    || (embeddings_model_removed && *model_type == ModelType::Embedding)
+                    || (tensor_model_removed && *model_type == ModelType::TensorBased))
                     && let Some(tx) = &self.model_update_tx
                 {
                     tx.send(ModelUpdate::Removed(*model_type)).await.ok();
@@ -421,11 +434,24 @@ impl ModelWatcher {
 
             self.manager
                 .add_embeddings_model(&model_entry.name, embedding_engine)?;
+        } else if model_entry.model_input == ModelInput::Tensor
+            && model_entry.model_type.supports_tensor()
+        {
+            // Case 5: Tensor + Tensor (non-LLM)
+            let push_router = PushRouter::<
+                NvCreateTensorRequest,
+                Annotated<NvCreateTensorResponse>,
+            >::from_client_with_threshold(
+                client, self.router_mode, self.busy_threshold
+            )
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager.add_tensor_model(&model_entry.name, engine)?;
         } else {
             // Reject unsupported combinations
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings",
+                Tokens+(Chat|Completions), Text+Chat, Text+Completions, Tokens+Embeddings, Tensor+TensorBased",
                 model_entry.model_type,
                 model_entry.model_input.as_str()
             );

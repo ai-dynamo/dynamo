@@ -60,3 +60,21 @@ pub mod openai {
             ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
     }
 }
+
+pub mod generic {
+    use super::*;
+    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
+
+    pub mod tensor {
+        use super::*;
+
+        pub use protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
+
+        /// A [`UnaryEngine`] implementation for the generic Tensor API
+        pub type TensorUnaryEngine = UnaryEngine<NvCreateTensorRequest, NvCreateTensorResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the generic Tensor API
+        pub type TensorStreamingEngine =
+            ServerStreamingEngine<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>;
+    }
+}
