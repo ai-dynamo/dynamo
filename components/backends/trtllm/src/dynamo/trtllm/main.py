@@ -318,7 +318,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload().to_dict()
+        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
 
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
