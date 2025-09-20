@@ -36,7 +36,7 @@ spec:
           - ${NAMESPACE}
           - --backend
           - sglang
-          - --is_moe_model
+          - --is-moe-model
           - --min-num-gpus-per-engine
           - "8"
           - --max-num-gpus-per-engine
