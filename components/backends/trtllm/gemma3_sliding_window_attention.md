@@ -26,7 +26,7 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 
 ### Aggregated Serving
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
 export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
@@ -35,7 +35,7 @@ export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
 
 ### Aggregated Serving with KV Routing
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
 export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
@@ -44,7 +44,7 @@ export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
 
 #### Disaggregated Serving
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
 export PREFILL_ENGINE_ARGS=engine_configs/gemma3/vswa_prefill.yaml
@@ -54,7 +54,7 @@ export DECODE_ENGINE_ARGS=engine_configs/gemma3/vswa_decode.yaml
 
 #### Disaggregated Serving with KV Routing
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/trtllm
 export MODEL_PATH=google/gemma-3-1b-it
 export SERVED_MODEL_NAME=$MODEL_PATH
 export PREFILL_ENGINE_ARGS=engine_configs/gemma3/vswa_prefill.yaml

@@ -23,7 +23,7 @@ configure_dynamo_logging()
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 
-DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
+DYN_ARGS: Dict[str, Dict[str, Any]] = {
     "endpoint": {
         "flags": ["--endpoint"],
         "type": str,
@@ -126,7 +126,7 @@ def parse_args(args: list[str]) -> Config:
     )
 
     # Dynamo args
-    for info in DYNAMO_ARGS.values():
+    for info in DYN_ARGS.values():
         parser.add_argument(
             *info["flags"],
             type=info["type"],

@@ -70,7 +70,7 @@ cargo build --locked --profile dev --features mistralrs
 (cd $HOME/dynamo/lib/bindings/python && retry maturin develop)
 
 # installs overall python packages, grabs binaries from .build/target/debug
-cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
+cd $HOME/dynamo && retry env DYN_BIN_PATH=$CARGO_TARGET_DIR/debug uv pip install -e .
 
 # Extract the PYTHONPATH line from README.md
 PYTHONPATH_LINE=$(grep "^export PYTHONPATH=" $DYNAMO_HOME/README.md | head -n1)
