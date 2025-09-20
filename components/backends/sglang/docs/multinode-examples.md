@@ -12,7 +12,7 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 **Prerequisite**: Building the Dynamo container.
 
 ```bash
-cd $DYNAMO_ROOT
+cd ${DYN_ROOT:-$DYNAMO_ROOT}
 docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
 ```
 

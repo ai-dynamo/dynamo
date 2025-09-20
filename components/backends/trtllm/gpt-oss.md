@@ -50,7 +50,7 @@ If you'd like to build your own Dynamo container, use the following instructions
 **For ARM64 (GB200):**
 ```bash
 # Navigate to the Dynamo repository root
-cd $DYNAMO_ROOT
+cd ${DYN_ROOT:-$DYNAMO_ROOT}
 
 export DYN_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
 
@@ -66,7 +66,7 @@ docker build --platform linux/arm64 -f container/Dockerfile.trtllm_prebuilt . \
 **For x86_64:**
 ```bash
 # Navigate to the Dynamo repository root
-cd $DYNAMO_ROOT
+cd ${DYN_ROOT:-$DYNAMO_ROOT}
 
 export DYN_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
 
