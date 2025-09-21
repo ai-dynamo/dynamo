@@ -14,8 +14,8 @@ use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
 use llm_rs::kv_router::protocols::KvStats as RsKvStats;
 use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
 use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
-use rs::traits::events::EventSubscriber;
 use rs::pipeline::{AsyncEngine, SingleIn};
+use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
@@ -1019,9 +1019,7 @@ impl KvPushRouter {
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the request directly into PreprocessedRequest
         let request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
-            Python::with_gil(|py| {
-                depythonize(request.bind(py)).map_err(to_pyerr)
-            })?;
+            Python::with_gil(|py| depythonize(request.bind(py)).map_err(to_pyerr))?;
 
         // Use the helper method to process the request
         Self::process_request_to_stream(py, self.inner.clone(), request)
@@ -1091,7 +1089,6 @@ impl KvPushRouter {
         })
     }
 }
-
 
 // Python async generator wrapper for the stream
 #[pyclass]
