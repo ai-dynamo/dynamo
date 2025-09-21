@@ -10,7 +10,6 @@ from copy import deepcopy
 from typing import AsyncGenerator
 
 import msgspec
-
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError

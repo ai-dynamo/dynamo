@@ -8,6 +8,9 @@ import signal
 from typing import Optional
 
 import uvloop
+from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
     ModelInput,
@@ -17,10 +20,6 @@ from dynamo.llm import (
     ZmqKvEventPublisherConfig,
     register_llm,
 )
-from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_llm import AsyncLLM
-
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
