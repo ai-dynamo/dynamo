@@ -276,8 +276,8 @@ class ScalingE2ETest:
         Run the complete scaling test.
 
         Hardcoded scenario:
-        - Phase 1 (12 req/s): Should maintain 1P1D
-        - Phase 2 (24 req/s): Should scale to 2P1D
+        - Phase 1 (8 req/s): Should maintain 1P1D
+        - Phase 2 (18 req/s): Should scale to 2P1D
         """
         logger.info("Starting scaling integration test")
 
@@ -289,8 +289,8 @@ class ScalingE2ETest:
 
         # Start background monitoring
         # Calculate based on actual phases from load generator
-        # Phase durations: baseline(90s) + transition(30s) + moderate(120s) + transition(30s) + trigger(180s) + buffer
-        total_test_duration = 90 + 30 + 120 + 30 + 180 + BUFFER_DURATION
+        # Phase durations: baseline(90s) + transition(30s) + trigger(120s) + buffer
+        total_test_duration = 90 + 30 + 120 + BUFFER_DURATION
         monitoring_task = asyncio.create_task(
             self.k8s_monitor.monitor_scaling(
                 total_test_duration, interval=MONITORING_INTERVAL
@@ -299,19 +299,17 @@ class ScalingE2ETest:
 
         # Initialize results in case of exception
         baseline_results = {}
-        moderate_results = {}
         trigger_results = {}
 
         try:
             # Use the load generator's built-in scaling test
-            logger.info("Running scaling scenario (8 req/s -> 15 req/s -> 25 req/s)")
+            logger.info("Running scaling scenario (8 req/s -> 18 req/s)")
             load_results = await self.load_generator.run_scaling_test()
 
-            # Extract load results for analysis (3-phase structure)
+            # Extract load results for analysis (2-phase structure)
             phase_results = load_results.get("phase_results", {})
             baseline_results = phase_results.get("phase1_baseline", {})
-            moderate_results = phase_results.get("phase2_moderate", {})
-            trigger_results = phase_results.get("phase3_prefill_scaling_trigger", {})
+            trigger_results = phase_results.get("phase2_prefill_scaling_trigger", {})
 
             # Check final pod counts
             final_counts = self.k8s_monitor.get_pod_counts()
@@ -342,14 +340,12 @@ class ScalingE2ETest:
             "config": {
                 # Document actual test configuration
                 "baseline_rps": 8.0,
-                "moderate_rps": 15.0,
-                "trigger_rps": 25.0,
-                "phase_durations": {"baseline": 90, "moderate": 120, "trigger": 180},
+                "trigger_rps": 18.0,
+                "phase_durations": {"baseline": 90, "trigger": 120},
                 "transition_delay": 30,
             },
             "initial_pod_counts": initial_counts.__dict__ if initial_counts else None,
             "baseline_results": baseline_results,
-            "moderate_results": moderate_results,
             "trigger_results": trigger_results,
             "final_pod_counts": final_counts.__dict__ if final_counts else None,
             "final_final_pod_counts": final_final_counts.__dict__
@@ -453,13 +449,10 @@ class ScalingE2ETest:
 
         # Add performance validation across all phases
         baseline = results.get("baseline_results", {})
-        moderate = results.get("moderate_results", {})
         trigger = results.get("trigger_results", {})
 
         if baseline.get("throughput", 0) > 0:
             validation["baseline_throughput"] = f"{baseline['throughput']:.2f} req/s"
-        if moderate.get("throughput", 0) > 0:
-            validation["moderate_throughput"] = f"{moderate['throughput']:.2f} req/s"
         if trigger.get("throughput", 0) > 0:
             validation["trigger_throughput"] = f"{trigger['throughput']:.2f} req/s"
 

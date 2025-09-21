@@ -3,21 +3,24 @@
 
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::types::PyBytes;
 use pyo3::types::{PyDict, PyList, PyString};
-use pyo3::IntoPyObjectExt;
 use pyo3::{exceptions::PyException, prelude::*};
+use rand::seq::IteratorRandom as _;
 use rs::pipeline::network::Ingress;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        context::Context as RsContext, network::egress::push_router::RouterMode as RsRouterMode,
-        EngineStream, ManyOut, SingleIn,
+        EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -102,7 +105,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
-    m.add_class::<llm::nats::NatsQueue>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
@@ -359,6 +361,15 @@ impl DistributedRuntime {
         })
     }
 
+    /// Remove everything in an etcd namespace.
+    /// Will be removed once we can clear the MDC automatically.
+    fn temp_clear_namespace<'p>(&self, py: Python<'p>, name: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.temp_clear_namespace(&name).await.map_err(to_pyerr)
+        })
+    }
+
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
             inner: self.inner.namespace(name).map_err(to_pyerr)?,
@@ -366,7 +377,139 @@ impl DistributedRuntime {
         })
     }
 
-    fn etcd_client(&self) -> PyResult<Option<EtcdClient>> {
+    /// Allocate a contiguous block of ports from the specified range and atomically reserve them.
+    /// Returns a list of all allocated ports in order.
+    #[pyo3(signature = (namespace, port_min, port_max, block_size, context=None))]
+    fn allocate_port_block<'p>(
+        &self,
+        py: Python<'p>,
+        namespace: &str,
+        port_min: u16,
+        port_max: u16,
+        block_size: u16,
+        context: Option<String>, // Optional info to store alongside the reservation
+    ) -> PyResult<Bound<'p, PyAny>> {
+        const MAX_ALLOCATE_ATTEMPTS: usize = 100;
+        if block_size == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Block size must be at least 1",
+            ));
+        }
+
+        let Some(etcd_client) = self.inner.etcd_client() else {
+            return Err(PyErr::new::<PyException, _>(
+                "Static workers should not need to reserve ports",
+            ));
+        };
+
+        let min = port_min;
+        let max = port_max;
+
+        // Compute maximum valid starting port (inclusive)
+        let max_start_port = max.saturating_sub(block_size.saturating_sub(1));
+        if max_start_port < min {
+            return Err(PyErr::new::<PyException, _>(format!(
+                "Port range {min}-{max} is too small for block size {block_size}",
+            )));
+        }
+
+        // Randomize candidate starting ports to reduce contention/races
+        let candidate_count =
+            (max_start_port - port_min + 1).min(MAX_ALLOCATE_ATTEMPTS as u16) as usize;
+        let mut rng = rand::rng();
+        let candidate_ports: Vec<u16> =
+            (port_min..=max_start_port).choose_multiple(&mut rng, candidate_count);
+
+        let local_ip = match local_ip() {
+            Ok(ip) => ip,
+            Err(err) => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "Failed fetching local IP address: {err}"
+                )));
+            }
+        };
+
+        let context_bytes = context.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+        let namespace = namespace.to_owned();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            for (attempt_idx, start_port) in candidate_ports.into_iter().enumerate() {
+                let end_port_exclusive = start_port + block_size;
+                let ports_to_reserve: Vec<u16> = (start_port..end_port_exclusive).collect();
+
+                // Hold/bind all ports in the block
+                let mut sockets = Vec::with_capacity(ports_to_reserve.len());
+                let mut bind_failed = false;
+
+                for &port in &ports_to_reserve {
+                    match bind_tcp_port(port) {
+                        Ok(sock) => sockets.push(sock),
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to bind to port block starting at {start_port} (attempt {}): {e}",
+                                attempt_idx + 1,
+                            );
+                            bind_failed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if bind_failed {
+                    // Let previously bound sockets drop here
+                    if attempt_idx < candidate_count - 1 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    continue;
+                }
+
+                // With sockets held, reserve in ETCD
+                let mut reserved_keys = Vec::with_capacity(ports_to_reserve.len());
+                let mut reservation_failed = false;
+                for port in &ports_to_reserve {
+                    let key = make_port_key(&namespace, local_ip, *port).map_err(to_pyerr)?;
+
+                    if let Err(e) = etcd_client
+                        .kv_create(&key, context_bytes.clone(), None)
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to reserve port block starting at {start_port} (attempt {}): {e}",
+                            attempt_idx + 1,
+                        );
+                        reservation_failed = true;
+                        break;
+                    }
+                    reserved_keys.push(key);
+                }
+
+                if reservation_failed {
+                    // Cleanup partial reservations
+                    for key in reserved_keys {
+                        if let Err(e) = etcd_client.kv_delete(key.as_str(), None).await {
+                            tracing::warn!("Failed to cleanup reserved port {key}: {e}");
+                        }
+                    }
+
+                    // Sockets automatically released via RAII
+                    if attempt_idx < candidate_count - 1 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    continue;
+                }
+
+                // Success - sockets will be released automatically
+                tracing::debug!("Reserved port block {ports_to_reserve:?}");
+                return Ok(ports_to_reserve);
+            }
+
+            Err(PyErr::new::<PyException, _>(format!(
+                "Failed to allocate and reserve a port block of size {block_size} from range {min}-{max} after {candidate_count} attempts"
+            )))
+        })
+    }
+
+    fn do_not_use_etcd_client(&self) -> PyResult<Option<EtcdClient>> {
         match self.inner.etcd_client().clone() {
             Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
             None => Ok(None),
@@ -380,6 +523,33 @@ impl DistributedRuntime {
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }
+}
+
+// Bind a TCP port and return a socket held until dropped.
+fn bind_tcp_port(port: u16) -> std::io::Result<socket2::Socket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    sock.set_reuse_address(true)?;
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+    sock.bind(&addr.into())?;
+    Ok(sock)
+}
+
+fn make_port_key(namespace: &str, node_ip: IpAddr, port: u16) -> anyhow::Result<String> {
+    Ok(format!("dyn://{namespace}/ports/{node_ip}/{port}"))
+}
+
+fn local_ip() -> Result<IpAddr, local_ip_address::Error> {
+    local_ip_address::local_ip().or_else(|err| match err {
+        local_ip_address::Error::LocalIpAddressNotFound => {
+            // Fall back to IPv6 if no IPv4 addresses are found
+            local_ip_address::local_ipv6()
+        }
+        _ => Err(err),
+    })
 }
 
 #[pymethods]
@@ -501,32 +671,6 @@ impl EtcdKvCache {
             Ok(())
         })
     }
-
-    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get all keys with the prefix
-            let all_keys = inner
-                .get_all()
-                .await
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
-
-            // Delete each key
-            for key in all_keys {
-                // Strip the prefix from the key before deleting
-                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
-                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
-                } else {
-                    inner.delete(&key).await.map_err(to_pyerr)?;
-                }
-            }
-
-            Ok(())
-        })
-    }
 }
 
 #[pymethods]
@@ -565,24 +709,51 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self
+
+        // Convert Python dict to serde_json::Value if provided and validate it's an object
+        let health_payload_json = health_check_payload
+            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .transpose()
+            .map_err(|err| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Failed to convert health_check_payload: {}",
+                    err
+                ))
+            })?;
+
+        // Require an object/dict
+        if let Some(ref payload) = health_payload_json
+            && !payload.is_object()
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "health_check_payload must be a JSON object (dict)",
+            ));
+        }
+
+        let mut builder = self
             .inner
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
+
+        if let Some(payload) = health_payload_json {
+            builder = builder.health_check_payload(payload);
+        }
+
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder
@@ -917,11 +1088,10 @@ async fn process_stream(
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            let result = Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
-            });
-            result
+            })
         });
 
         let is_error = annotated.is_error();

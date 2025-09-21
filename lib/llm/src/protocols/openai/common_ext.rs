@@ -28,6 +28,12 @@ pub struct CommonExt {
     #[validate(custom(function = "validate_top_k"))]
     pub top_k: Option<i32>,
 
+    /// Relative probability floor
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub min_p: Option<f32>,
+
     /// How much to penalize tokens based on how frequently they occur in the text.
     /// A value of 1 means no penalty, while values larger than 1 discourage and values smaller encourage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +93,7 @@ pub trait CommonExtProvider {
 
     /// Other sampling Options
     fn get_top_k(&self) -> Option<i32>;
+    fn get_min_p(&self) -> Option<f32>;
     fn get_repetition_penalty(&self) -> Option<f32>;
     fn get_include_stop_str_in_output(&self) -> Option<bool>;
 }
@@ -200,6 +207,7 @@ mod tests {
             ignore_eos: None,
             min_tokens: Some(0), // Should be valid (min = 0)
             top_k: None,
+            min_p: None,
             repetition_penalty: None,
             include_stop_str_in_output: None,
             guided_json: None,

@@ -94,7 +94,7 @@ xxhash-rust = { workspace = true }
 
 akin = "0.4.0"
 bitflags = { version = "2.4", features = ["serde"] }
-blake3 = "1"
+blake3 = { version = "1.8", features=["mmap", "rayon"] }
 bytemuck = "1.22"
 candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
@@ -147,6 +147,7 @@ erased-serde = { version = "0.4" }
 itertools = { version = "0.14.0" }
 minijinja = { version = "2.10.2", features = ["loader"] }
 minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+json-five = { version = "0.3" }
 
 # GGUF
 ggus = "0.4.0"

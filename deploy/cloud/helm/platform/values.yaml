@@ -528,7 +528,7 @@ nats:
   ############################################################
   natsBox:
     # Whether to deploy NATS Box for CLI access and debugging
-    enabled: true
+    enabled: false
 
     ############################################################
     # NATS client contexts for authentication and connection

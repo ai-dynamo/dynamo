@@ -22,14 +22,9 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import (
-    ENABLE_LMCACHE,
-    Config,
-    configure_ports_with_etcd,
-    overwrite_args,
-    parse_args,
-)
+from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .health_check import VllmHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -68,8 +63,7 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
-    etcd_client = runtime.etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    await configure_ports(runtime, config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
@@ -151,6 +145,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         runtime, component, engine_client, default_sampling_params
     )
 
+    # Get health check payload (checks env var and falls back to vLLM default)
+    health_check_payload = VllmHealthCheckPayload().to_dict()
+
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
         await asyncio.gather(
@@ -162,6 +159,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=[("model", config.model)],
+                health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
@@ -203,7 +201,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config, factory
     )
 
-    # TODO Hack to get data, move this to registering in ETCD
+    # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
@@ -263,6 +261,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             custom_template_path=config.custom_jinja_template,
         )
 
+    # Get health check payload (checks env var and falls back to vLLM default)
+    health_check_payload = VllmHealthCheckPayload().to_dict()
+
     try:
         logger.debug("Starting serve_endpoint for decode worker")
         await asyncio.gather(
@@ -272,6 +273,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
                 metrics_labels=[("model", config.model)],
+                health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]

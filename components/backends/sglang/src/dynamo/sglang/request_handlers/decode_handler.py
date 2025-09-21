@@ -53,7 +53,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_params["ignore_eos"] = request["stop_conditions"]["ignore_eos"]
         return sampling_params
 
-    async def generate(self, request: str):
+    async def generate(self, request: dict):
         sampling_params = self._build_sampling_params(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -62,7 +62,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 DisaggPreprocessedRequest(
                     request=request,
                     sampling_params=sampling_params,
-                ).model_dump_json()
+                ).model_dump()
             )
 
             bootstrap_info = None
@@ -97,20 +97,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         num_output_tokens_so_far = 0
 
         async for res in stream_source:
+            try:
+                next_total_toks = len(res["output_ids"])
+            except KeyError:
+                raise ValueError(
+                    f"Missing 'output_ids' in response. This often happens when using skip_tokenizer_init=False. "
+                    f"If you're using ModelType.CHAT or custom model configurations, you may need to modify "
+                    f"the tokenization/detokenization logic in your handler. Response keys: {list(res.keys())}"
+                )
+            out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
+            num_output_tokens_so_far = next_total_toks
             finish_reason = res["meta_info"]["finish_reason"]
-
             if finish_reason:
                 out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-            else:
-                try:
-                    next_total_toks = len(res["output_ids"])
-                except KeyError:
-                    raise ValueError(
-                        f"Missing 'output_ids' in response. This often happens when using skip_tokenizer_init=True. "
-                        f"If you're using ModelType.CHAT or custom model configurations, you may need to modify "
-                        f"the tokenization/detokenization logic in your handler. Response keys: {list(res.keys())}"
-                    )
-                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
-                num_output_tokens_so_far = next_total_toks
 
             yield out

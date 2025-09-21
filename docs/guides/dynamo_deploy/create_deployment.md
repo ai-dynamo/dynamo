@@ -131,3 +131,37 @@ If you are a Dynamo contributor the [dynamo run guide](../dynamo_run.md) for det
    args:
      - --is-prefill-worker  # For disaggregated prefill workers
 ```
+
+### Image Pull Secret Configuration
+
+#### Automatic Discovery and Injection
+
+By default, the Dynamo operator automatically discovers and injects image pull secrets based on container registry host matching. The operator scans Docker config secrets within the same namespace and matches their registry hostnames to the container image URLs, automatically injecting the appropriate secrets into the pod's `imagePullSecrets`.
+
+**Disabling Automatic Discovery:**
+To disable this behavior for a component and manually control image pull secrets:
+
+```yaml
+    YourWorker:
+      dynamoNamespace: your-namespace
+      componentType: worker
+      annotations:
+        nvidia.com/disable-image-pull-secret-discovery: "true"
+```
+
+When disabled, you can manually specify secrets as you would for a normal pod spec via:
+```yaml
+    YourWorker:
+      dynamoNamespace: your-namespace
+      componentType: worker
+      annotations:
+        nvidia.com/disable-image-pull-secret-discovery: "true"
+      extraPodSpec:
+        imagePullSecrets:
+          - name: my-registry-secret
+          - name: another-secret
+        mainContainer:
+          image: your-image
+```
+
+This automatic discovery eliminates the need to manually configure image pull secrets for each deployment.

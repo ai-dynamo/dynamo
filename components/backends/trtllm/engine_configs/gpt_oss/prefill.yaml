@@ -21,7 +21,7 @@ cuda_graph_config:
     max_batch_size: 32
     enable_padding: true
 cache_transceiver_config:
-  backend: ucx
+  backend: UCX
   max_tokens_in_buffer: 65536
 print_iter_log: false
 stream_interval: 10

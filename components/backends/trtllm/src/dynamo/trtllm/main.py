@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
 
 import uvloop
-from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import (
     BuildConfig,
     CapacitySchedulerPolicy,
@@ -16,6 +16,7 @@ from tensorrt_llm.llmapi import (
     KvCacheConfig,
     SchedulerConfig,
 )
+from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from torch.cuda import device_count
@@ -26,6 +27,7 @@ from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
+from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -35,6 +37,7 @@ from dynamo.trtllm.request_handlers.handlers import (
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
+    deep_update,
     is_first_worker,
     parse_endpoint,
 )
@@ -192,6 +195,17 @@ async def init(runtime: DistributedRuntime, config: Config):
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
+
+    # Apply override_engine_args if provided
+    if config.override_engine_args != "":
+        try:
+            overrides = json.loads(config.override_engine_args)
+            logging.info(f"Applying engine arg overrides: {overrides}")
+
+            deep_update(arg_map, overrides)
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse override_engine_args as JSON: {e}")
+            sys.exit(1)
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         kv_cache_config = None
@@ -303,6 +317,9 @@ async def init(runtime: DistributedRuntime, config: Config):
                 runtime_config=runtime_config,
             )
 
+        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
+        health_check_payload = TrtllmHealthCheckPayload().to_dict()
+
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
@@ -321,11 +338,15 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 await endpoint.serve_endpoint(
-                    handler.generate, metrics_labels=metrics_labels
+                    handler.generate,
+                    metrics_labels=metrics_labels,
+                    health_check_payload=health_check_payload,
                 )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-            await endpoint.serve_endpoint(handler.generate)
+            await endpoint.serve_endpoint(
+                handler.generate, health_check_payload=health_check_payload
+            )
 
 
 def main():
