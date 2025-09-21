@@ -8,6 +8,11 @@ ARG ENABLE_KVBM=false
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 
+# TensorRT-LLM specific configuration
+ARG HAS_TRTLLM_CONTEXT=0
+ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
+ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
 #   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
@@ -22,341 +27,119 @@ ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 # without adding if statements everywhere, so just define both as ARGs for now.
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
+# Python configuration
+ARG PYTHON_VERSION=3.12
 
-##################################
-########## Build Image ###########
-##################################
+ARG DYNAMO_BASE_IMAGE="dynamo:latest-none"
+FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
+# Copy artifacts from NGC PyTorch image
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
-# Redeclare ARCH and ARCH_ALT so they're available in this build stage
-ARG ARCH
-ARG ARCH_ALT
 
-ARG NIXL_UCX_REF=v1.19.0
-ARG NIXL_REF=0.4.1
 
-ENV NIXL_SRC_DIR=/opt/nixl
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
-
-USER root
-
-# Install utilities
-RUN apt update -y && \
-    apt install -y \
-    git \
-    wget \
-    curl \
-    nvtop \
-    tmux \
-    vim \
-    ## NIXL dependencies
-    cmake \
-    meson \
-    ninja-build \
-    pybind11-dev \
-    ## support UCX to establish connections with zmq
-    libzmq3-dev \
-    # These headers are missing with the hpcx installer, required
-    # by UCX to find RDMA devices
-    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
-    libnuma-dev librdmacm-dev ibverbs-providers
-
-### UCX EFA Setup ###
-RUN rm -rf /opt/hpcx/ucx && \
-    rm -rf /usr/local/ucx && \
-    echo "Building UCX with reference $NIXL_UCX_REF" && \
-    cd /usr/local/src &&                            \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                                       \
-    git checkout $NIXL_UCX_REF &&                   \
-    ./autogen.sh && ./configure                     \
-    --prefix=/usr/local/ucx                         \
-    --enable-shared                                 \
-    --disable-static                                \
-    --disable-doxygen-doc                           \
-    --enable-optimizations                          \
-    --enable-cma                                    \
-    --enable-devel-headers                          \
-    --with-cuda=/usr/local/cuda                     \
-    --with-verbs                                    \
-    --with-efa                                      \
-    --with-dm                                       \
-    --with-gdrcopy=/usr/local                       \
-    --enable-mt &&                                  \
-    make -j &&                                      \
-    make -j install-strip &&                        \
-    ldconfig
-
-ENV LD_LIBRARY_PATH=\
-/usr/lib:/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
-ENV CPATH=/usr/include:$CPATH
-ENV PATH=/usr/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
-SHELL ["/bin/bash", "-c"]
-
-### NIXL SETUP ###
-# Clone nixl source
-# TEMP: disable gds backend for arm64
-RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
-    cd ${NIXL_SRC_DIR} && \
-    git checkout ${NIXL_REF} && \
-    if [ "$ARCH" = "arm64" ]; then \
-        nixl_build_args="-Ddisable_gds_backend=true"; \
-    else \
-        nixl_build_args=""; \
-    fi && \
-    mkdir build && \
-    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
-    cd build/ && \
-    ninja && \
-    ninja install;
-
-# nats
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
-
-# etcd
-ENV ETCD_VERSION="v3.5.21"
-RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
-ENV PATH=/usr/local/bin/etcd/:$PATH
-
-ARG HAS_TRTLLM_CONTEXT=0
-ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
-ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-
-COPY --from=trtllm_wheel . /trtllm_wheel/
-
-# TODO: Currently, ABI compatibility issues with TRTLLM wheel and NGC PyTorch prevent us
-# from using the TRTLLM wheel in a uv venv. Once the issues are resolved, we can
-# use uv to install TensorRT-LLM wheel within the uv venv.
-# Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
-# because there might be mismatched versions of TensorRT between the NGC PyTorch
-# and the TRTLLM wheel.
-RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
-    pip uninstall -y tensorrt && \
-    if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
-        # Install from local wheel directory in build context
-        WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
-        if [ -n "$WHEEL_FILE" ]; then \
-            pip install "$WHEEL_FILE"; \
-        else \
-            echo "No wheel file found in /trtllm_wheel directory."; \
-            exit 1; \
-        fi; \
-    else \
-        # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
-    fi
-
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    pip install --requirement /tmp/requirements.txt
-
-### MISC UTILITY SETUP ###
-
-# Finish pyright install
-RUN pyright --help > /dev/null 2>&1
-
-# Enable Git operations in the /workspace directory
-RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
-
-# Rust build/dev dependencies
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y \
-    gdb \
-    protobuf-compiler \
-    cmake \
-    libssl-dev \
-    pkg-config \
-    libclang-dev
-
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.89.0
-
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust using RUSTARCH derived from ARCH_ALT
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    # TODO: Add SHA check back based on RUSTARCH
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile default --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-ARG CARGO_BUILD_JOBS
-# Set CARGO_BUILD_JOBS to 16 if not provided
-# This is to prevent cargo from building $(nproc) jobs in parallel,
-# which might exceed the number of opened files limit.
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-
-ENV CARGO_TARGET_DIR=/workspace/target
-
-# Install uv, create virtualenv for general use, and build dynamo wheel
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-### VIRTUAL ENVIRONMENT SETUP ###
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-
-# Install NIXL Python module
-# TODO: Move gds_path selection based on arch into NIXL build
-# TEMP: disable gds backend for arm64
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
-    else \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
-    fi && \
-    # Install the wheel
-    # TODO: Move NIXL wheel install to the wheel_builder stage
-    uv pip install /workspace/wheels/nixl/*.whl && \
-    pip install /workspace/wheels/nixl/*.whl
-
-###################################
-####### WHEEL BUILD STAGE #########
-###################################
-
-# Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
-ARG ARCH_ALT
-
-FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
-ARG RELEASE_BUILD
-ARG CARGO_BUILD_JOBS
-ARG ENABLE_KVBM
-# Set CARGO_BUILD_JOBS to 16 if not provided
-# This is to prevent cargo from building $(nproc) jobs in parallel,
-# which might exceed the number of opened files limit.
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-
-# Keep in sync with the base image.
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-
-WORKDIR /workspace
-
-RUN yum update -y \
-    && yum install -y llvm-toolset python3.12-devel \
-    && yum install -y protobuf-compiler \
-    && yum clean all \
-    && rm -rf /var/cache/yum
-
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv
-
-COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
-COPY --from=build $CARGO_HOME $CARGO_HOME
-COPY --from=build $NIXL_PREFIX $NIXL_PREFIX
-COPY --from=build /workspace /workspace
-COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
-ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
-
-# Copy configuration files
-COPY pyproject.toml /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
-COPY Cargo.toml /workspace/
-COPY Cargo.lock /workspace/
-COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
-
-# Copy source code
-COPY lib/ /workspace/lib/
-COPY components /workspace/components
-COPY launch /workspace/launch
-
-RUN cargo build \
-	--release \
-	--locked \
-	--features block-manager \
-	--workspace
-
-# Build dynamo wheels
-RUN uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace/lib/bindings/python && \
-    uv pip install maturin[patchelf] && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        maturin build --release --features block-manager --out /workspace/dist; \
-    else \
-        maturin build --release --out /workspace/dist; \
-    fi && \
-    if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv run --python 3.11 maturin build --release --out /workspace/dist && \
-        uv run --python 3.10 maturin build --release --out /workspace/dist; \
-    fi
-
-########################################
-########## Development Image ###########
-########################################
-
-FROM build AS dev
-
-WORKDIR /workspace
-
-COPY --from=wheel_builder /workspace /workspace
-# Copy Cargo cache to avoid re-downloading dependencies
-COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
-
-# Copy rest of the code
-COPY . /workspace
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/metrics /usr/local/bin
-
-# Install wheels
-RUN . /opt/dynamo/venv/bin/activate && \
-    uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
-
-# Install dynamo.runtime and dynamo.llm wheels globally in container for tests
-# TODO: In future, we may use a virtualenv for everything and remove this.
-RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
-    pip install dist/ai_dynamo*any.whl
-
-# Install common dependencies including aiofiles
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    pip install --requirement /tmp/requirements.txt
-
-ENV DYNAMO_HOME=/workspace
-# Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
-
-# FIXME: May want a modification with dynamo banner on entry
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-####################################
-########## Runtime Image ###########
-####################################
+##################################################
+########## Runtime Image ########################
+##################################################
+#
+# PURPOSE: Production runtime environment
+#
+# This stage creates a lightweight production-ready image containing:
+# - Pre-compiled TensorRT-LLM and framework dependencies
+# - Dynamo runtime libraries and Python packages
+# - Essential runtime dependencies and configurations
+# - Optimized for inference workloads and deployment
+#
+# Use this stage when you need:
+# - Production deployment of Dynamo with TensorRT-LLM
+# - Minimal runtime footprint without build tools
+# - Ready-to-run inference server environment
+# - Base for custom application containers
+#
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 WORKDIR /workspace
+ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 ARG ARCH_ALT
-
-ENV DYNAMO_HOME=/workspace
+ARG PYTHON_VERSION
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+# Install Python, build-essential and python3-dev as apt dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # Build tools (required for JIT kernel compilation)
+        build-essential \
+        g++ \
+        ninja-build \
+        # Python runtime - CRITICAL for virtual environment to work
+        python${PYTHON_VERSION}-dev \
+        python3-pip \
+        # CUDA/ML libraries
+        libcudnn9-cuda-12 \
+        # Network and communication libraries
+        libzmq3-dev \
+        # RDMA/UCX libraries required to find RDMA devices
+        ibverbs-providers \
+        ibverbs-utils \
+        libibumad3 \
+        libibverbs1 \
+        libnuma1 \
+        librdmacm1 \
+        rdma-core \
+        # OpenMPI dependencies
+        openssh-client \
+        openssh-server \
+        # System utilities
+        ca-certificates \
+        curl \
+        jq && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL --retry 5 --retry-delay 5 "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz" \
+    | tar -xz -C /tmp && \
+    mv "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus" /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf "/tmp/prometheus-${PROM_VERSION}.${PLATFORM}"
+
+# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from framework devel image
+COPY --from=framework /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=framework /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=framework /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=framework /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=framework /usr/local/cuda/include/ /usr/local/cuda/include/
+COPY --from=framework /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+COPY --from=framework /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=framework /usr/local/cuda/lib64/libcupti* /usr/local/cuda/lib64/
+COPY --from=framework /usr/local/lib/lib* /usr/local/lib/
+
+### COPY NATS & ETCD ###
+# Copy nats and etcd from dynamo_base image
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+
+# Copy UCX from framework image as plugin for NIXL
+# Copy NIXL source from framework image
+# Copy dynamo wheels for gitlab artifacts
+COPY --from=dynamo_base /usr/local/ucx /usr/local/ucx
+COPY --from=dynamo_base $NIXL_PREFIX $NIXL_PREFIX
+# Copy OpenMPI from framework image
+COPY --from=framework /opt/hpcx/ompi /opt/hpcx/ompi
+# Copy NUMA library from framework image
+COPY --from=framework /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
+
+ENV DYNAMO_HOME=/workspace
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
@@ -364,70 +147,19 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
 $LD_LIBRARY_PATH
-ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+ENV PATH="${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
-# Install apt dependencies
-# openssh-client, openssh-server are needed for OpenMPI
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential \
-        python3-dev \
-        python3-pip \
-        # jq and curl for polling various endpoints and health checks
-        jq \
-        curl \
-        # For debugging
-        vim \
-        # support UCX to establish connections with zmq
-        libzmq3-dev \
-        # install cudnn libs
-        libcudnn9-cuda-12 \
-        # Libraries required by UCX to find RDMA devices
-        libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
-        openssh-client \
-        openssh-server && \
-    ln -s /usr/bin/python3 /usr/bin/python && \
-    rm -rf /var/lib/apt/lists/*
+### VIRTUAL ENVIRONMENT SETUP ###
 
-# Copy all bindings (wheels, lib, include) from dev image
-COPY --from=dev /opt/dynamo/bindings /opt/dynamo/bindings
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin
+# Create virtual environment
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
 
-# Copy nats and etcd from build image
-COPY --from=build /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=build /usr/local/bin/etcd/ /usr/local/bin/etcd/
-
-# Copy UCX from build image as plugin for NIXL
-# Copy NIXL source from wheel_builder image
-COPY --from=build /usr/local/ucx /usr/local/ucx
-COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-# Copy OpenMPI from build image
-COPY --from=build /opt/hpcx/ompi /opt/hpcx/ompi
-# Copy NUMA library from build image
-COPY --from=build /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
-
-
-# Common dependencies
-# TODO: Remove extra install and use pyproject.toml to define all dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    python3 -m pip install --no-cache-dir --break-system-packages --requirement /tmp/requirements.txt && \
-    echo "uninstall (networkx packaging torch triton) as we will use NVIDIA's versions later" && \
-    python3 -m pip uninstall --yes --break-system-packages networkx packaging torch triton
-
-# Install test dependencies
-# TODO: Remove this once we have a functional CI image built on top of the runtime image
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    python3 -m pip install --no-cache-dir --break-system-packages --requirement /tmp/requirements.txt
-
-# Copy CUDA toolkit components needed for nvcc, cudafe, cicc etc.
-COPY --from=build /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=build /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=build /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=build /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=build /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=build /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=build /usr/local/cuda/nvvm /usr/local/cuda/nvvm
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytorch installation from NGC PyTorch
 ARG TORCH_VER=2.8.0a0+5228986c39.nv25.6
@@ -441,72 +173,156 @@ ARG PACKAGING_VER=23.2
 ARG FLASH_ATTN_VER=2.7.4.post1
 ARG MPMATH_VER=1.3.0
 
-COPY --from=build /usr/local/lib/lib* /usr/local/lib/
-COPY --from=build /usr/local/cuda-12.9/targets/x86_64-linux/lib/libcupti* /usr/local/cuda/targets/x86_64-linux/lib/
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchgen ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchgen
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision-${TORCHVISION_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision-${TORCHVISION_VER}.dist-info
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchvision.libs ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchvision.libs
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/functorch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/functorch
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2 ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/jinja2-${JINJA2_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/jinja2-${JINJA2_VER}.dist-info
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/sympy-${SYMPY_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/sympy-${SYMPY_VER}.dist-info
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flash_attn_2_cuda.cpython-*-*-linux-gnu.so ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/triton
+COPY --from=framework /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
+
+# Install TensorRT-LLM and related dependencies
+ARG HAS_TRTLLM_CONTEXT
+ARG TENSORRTLLM_PIP_WHEEL
+ARG TENSORRTLLM_INDEX_URL
+
+# Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
+# because there might be mismatched versions of TensorRT between the NGC PyTorch
+# and the TRTLLM wheel.
+RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
+    if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+        # Install from local wheel directory in build context
+        WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
+        if [ -n "$WHEEL_FILE" ]; then \
+            uv pip install "$WHEEL_FILE"; \
+        else \
+            echo "No wheel file found in /trtllm_wheel directory."; \
+            exit 1; \
+        fi; \
+    else \
+        # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
+        uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
+    fi
+
+# Install dynamo, NIXL, and dynamo-specific dependencies
+COPY benchmarks/ /opt/dynamo/benchmarks/
+COPY --from=dynamo_base /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    /opt/dynamo/benchmarks && \
+    rm -rf /opt/dynamo/benchmarks
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
+
 # Copy UCX libraries, libucc.so is needed by pytorch. May not need to copy whole hpcx dir but only /opt/hpcx/ucc/
-COPY --from=build /opt/hpcx /opt/hpcx
+COPY --from=framework /opt/hpcx /opt/hpcx
 # This is needed to make libucc.so visible so pytorch can use it.
 ENV LD_LIBRARY_PATH="/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
 # Might not need to copy cusparseLt in the future once it's included in DLFW cuda container
 # networkx, packaging, setuptools get overridden by trtllm installation, so not copying them
 # pytorch-triton is copied after trtllm installation.
-COPY --from=build /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchgen /usr/local/lib/python3.12/dist-packages/torchgen
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision /usr/local/lib/python3.12/dist-packages/torchvision
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision-${TORCHVISION_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torchvision-${TORCHVISION_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision.libs /usr/local/lib/python3.12/dist-packages/torchvision.libs
-COPY --from=build /usr/local/lib/python3.12/dist-packages/functorch /usr/local/lib/python3.12/dist-packages/functorch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2 /usr/local/lib/python3.12/dist-packages/jinja2
-COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy /usr/local/lib/python3.12/dist-packages/sympy
-COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dist-info /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
+COPY --from=framework /usr/local/cuda/lib64/libcusparseLt* /usr/local/cuda/lib64/
 
-
-# Install TensorRT-LLM (same as in build stage)
-ARG HAS_TRTLLM_CONTEXT=0
-ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
-ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-
-# Copy Dynamo wheels into wheelhouse
-# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
-COPY --from=dev /workspace/wheels/nixl/*.whl /workspace/wheelhouse/
-COPY --from=wheel_builder /workspace/dist/*.whl /workspace/wheelhouse/
-COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
-
-# NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
-# uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
-# is also specified. So set the configurable index as a --extra-index-url for prioritization.
-RUN python3 -m pip install --no-cache-dir --break-system-packages --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
-    python3 -m pip install --no-cache-dir --break-system-packages \
-        /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl \
-        /workspace/wheelhouse/ai_dynamo*any.whl \
-        /workspace/wheelhouse/nixl*.whl && \
-    python3 -m pip uninstall -y --break-system-packages triton
-    # triton is copied from pytorch container below
-
-COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
-COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
-
-# Copy benchmarks, backends and tests for CI
-# TODO: Remove this once we have a functional CI image built on top of the runtime image
+# Copy tests, benchmarks, deploy and components for CI
 COPY tests /workspace/tests
+COPY examples /workspace/examples
 COPY benchmarks /workspace/benchmarks
 COPY deploy /workspace/deploy
-COPY components/backends/trtllm /workspace/components/backends/trtllm
-RUN python3 -m pip install --no-cache-dir --break-system-packages /workspace/benchmarks
+COPY components/ /workspace/components/
 
-# Copy files for legal compliance
+# Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
-
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+###########################################################
+########## Development (run.sh, runs as root user) ########
+###########################################################
+#
+# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
+#
+# This stage runs as root and provides:
+# - Development tools and utilities for local debugging
+# - Support for vscode/cursor development outside the Dev Container plug-in
+#
+# Use this stage if you need a full-featured development environment with extra tools,
+# but do not use it with the Dev Container plug-in.
+
+FROM runtime AS dev
+
+# Don't want ubuntu to be editable, just change uid and gid.
+ARG WORKSPACE_DIR=/workspace
+
+# Install utilities as root
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends  \
+    # Install utilities
+    nvtop \
+    wget \
+    tmux \
+    vim \
+    git \
+    iproute2 \
+    rsync \
+    zip \
+    unzip \
+    htop \
+    # Build Dependencies
+    autoconf \
+    automake \
+    cmake \
+    libtool \
+    meson \
+    net-tools \
+    pybind11-dev \
+    # Rust build dependencies
+    clang \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=runtime /usr/local/bin /usr/local/bin
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/usr/local/cargo/bin:$PATH
+
+COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+
+COPY --from=runtime ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+
+# so we can use maturin develop
+RUN uv pip install maturin[patchelf]
+
+# Make sure to sync this with the one specified on README.md.
+# This is a generic PYTHONPATH which works for all the frameworks, so some paths may not be relevant for this particular framework.
+ENV PYTHONPATH=${WORKSPACE_DIR}:${WORKSPACE_DIR}/components/metrics/src:${WORKSPACE_DIR}/components/frontend/src:${WORKSPACE_DIR}/components/planner/src:${WORKSPACE_DIR}/components/backends/mocker/src:${WORKSPACE_DIR}/components/backends/trtllm/src:${WORKSPACE_DIR}/components/backends/vllm/src:${WORKSPACE_DIR}/components/backends/sglang/src:${WORKSPACE_DIR}/components/backends/llama_cpp/src
+
 CMD []

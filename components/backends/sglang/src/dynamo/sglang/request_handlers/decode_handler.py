@@ -66,7 +66,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    async def generate(self, request: str):
+    async def generate(self, request: dict):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
@@ -76,7 +76,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 DisaggPreprocessedRequest(
                     request=request,
                     sampling_params=sampling_params,
-                ).model_dump_json()
+                ).model_dump()
             )
 
             bootstrap_info = None

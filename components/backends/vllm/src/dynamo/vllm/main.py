@@ -22,13 +22,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import (
-    ENABLE_LMCACHE,
-    Config,
-    configure_ports_with_etcd,
-    overwrite_args,
-    parse_args,
-)
+from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .health_check import VllmHealthCheckPayload
 from .publisher import StatLoggerFactory
@@ -69,8 +63,7 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
-    etcd_client = runtime.do_not_use_etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    await configure_ports(runtime, config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
@@ -208,7 +201,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config, factory
     )
 
-    # TODO Hack to get data, move this to registering in ETCD
+    # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
