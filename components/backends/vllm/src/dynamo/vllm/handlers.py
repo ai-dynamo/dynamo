@@ -11,10 +11,11 @@ from typing import AsyncGenerator
 
 import msgspec
 
-from dynamo.runtime.logging import configure_dynamo_logging
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.exceptions import EngineDeadError
+
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
 from .protocol import MyRequestOutput
