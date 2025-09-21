@@ -5,10 +5,10 @@ use std::{any::Any, sync::Arc};
 
 use dynamo_llm::{
     block_manager::{
-        block::{locality::LocalityProvider, BlockMetadata},
+        Storage,
+        block::{BlockMetadata, locality::LocalityProvider},
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
-        Storage,
     },
     tokens::TokenBlock,
 };
@@ -398,7 +398,11 @@ impl VllmConnectorSlot {
             SlotState::SkippedPrefill => Ok(()), // already skipped
             SlotState::SkippedDecode => Ok(()),  // already skipped
             _ => {
-                tracing::debug!("slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}", self.state, self.request_id);
+                tracing::debug!(
+                    "slot is in the {:?} state; will not explicitly mark as skipped, request_id: {}",
+                    self.state,
+                    self.request_id
+                );
                 Ok(())
             }
         }
@@ -594,7 +598,8 @@ impl Slot for VllmConnectorSlot {
         if computed_position < self.current_position {
             tracing::debug!(
                 "computed_position={} < current_position={}, so we are onboarding during prefilling phase",
-                computed_position, self.current_position
+                computed_position,
+                self.current_position
             );
             return Ok(());
         }
@@ -916,7 +921,8 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
         if self.current_position + num_tokens > self.sequence().total_tokens() {
             return Err(SlotError::InvalidOperation(format!(
                 "cannot advance computed position from {} by {num_tokens} tokens, total tokens is {}",
-                self.current_position, self.sequence().total_tokens()
+                self.current_position,
+                self.sequence().total_tokens()
             )));
         }
 

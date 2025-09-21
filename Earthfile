@@ -91,13 +91,13 @@ rust-base:
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
     ENV PATH=/usr/local/cargo/bin:$PATH
-    ENV RUST_VERSION=1.89.0
+    ENV RUST_VERSION=1.90.0
     ENV RUSTARCH=x86_64-unknown-linux-gnu
 
     RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init" && \
         echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
         chmod +x rustup-init && \
-        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.89.0 --default-host x86_64-unknown-linux-gnu && \
+        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.90.0 --default-host x86_64-unknown-linux-gnu && \
         rm rustup-init && \
         chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
