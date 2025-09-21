@@ -24,13 +24,13 @@ fn is_prime(n: u64) -> bool {
     if n <= 3 {
         return true;
     }
-    if n % 2 == 0 || n % 3 == 0 {
+    if n.is_multiple_of(2) || n.is_multiple_of(3) {
         return false;
     }
 
     let sqrt_n = (n as f64).sqrt() as u64;
     for i in (5..=sqrt_n).step_by(6) {
-        if n % i == 0 || n % (i + 2) == 0 {
+        if n.is_multiple_of(i) || n.is_multiple_of(i + 2) {
             return false;
         }
     }
