@@ -104,10 +104,6 @@ pub struct KvRouterConfig {
     /// Whether to track active blocks in the router (default: true)
     pub router_track_active_blocks: bool,
 
-    // TODO: this is not actually used for now
-    // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
-    pub max_num_batched_tokens: u32,
-
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     pub router_snapshot_threshold: Option<u32>,
 
@@ -123,7 +119,6 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             router_track_active_blocks: true,
-            max_num_batched_tokens: 8192,
             router_snapshot_threshold: Some(10000),
             router_reset_states: false,
         }
@@ -140,7 +135,6 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         track_active_blocks: Option<bool>,
-        max_num_batched_tokens: Option<u32>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
     ) -> Self {
@@ -152,8 +146,6 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             router_track_active_blocks: track_active_blocks
                 .unwrap_or(default.router_track_active_blocks),
-            max_num_batched_tokens: max_num_batched_tokens
-                .unwrap_or(default.max_num_batched_tokens),
             router_snapshot_threshold: router_snapshot_threshold
                 .unwrap_or(default.router_snapshot_threshold),
             router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
