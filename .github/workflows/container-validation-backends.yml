@@ -86,7 +86,7 @@ jobs:
         platform: ["linux/arm64"]
         target: ["runtime"]
 
-    name: Build and Test - ${{ matrix.framework }}
+    name: Build and Test - ${{ matrix.framework }} - ARM
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
