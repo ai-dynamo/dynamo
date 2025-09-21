@@ -147,7 +147,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
-        # TODO Change to prefill queue
+        # TODO: Change to prefill queue
+        # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
+        # This is least intrusive for now, but quite error prone. Should consider (major) refactoring
         if self.can_prefill:
             # Create a copy for prefill with specific modifications
             prefill_sampling_params = deepcopy(sampling_params)
