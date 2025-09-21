@@ -61,19 +61,21 @@ impl ComputeConfig {
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         if let Some(num_threads) = self.num_threads
-            && num_threads == 0 {
-                return Err(anyhow::anyhow!(
-                    "Number of compute threads cannot be 0. Use None to disable compute pool entirely."
-                ));
-            }
+            && num_threads == 0
+        {
+            return Err(anyhow::anyhow!(
+                "Number of compute threads cannot be 0. Use None to disable compute pool entirely."
+            ));
+        }
 
         if let Some(stack_size) = self.stack_size
-            && stack_size < 128 * 1024 {
-                return Err(anyhow::anyhow!(
-                    "Stack size too small: {}KB. Minimum recommended: 128KB",
-                    stack_size / 1024
-                ));
-            }
+            && stack_size < 128 * 1024
+        {
+            return Err(anyhow::anyhow!(
+                "Stack size too small: {}KB. Minimum recommended: 128KB",
+                stack_size / 1024
+            ));
+        }
 
         Ok(())
     }
