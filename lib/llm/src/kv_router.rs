@@ -315,13 +315,18 @@ impl KvRouter {
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returned overlap amount is in number of blocks.
     /// Now also takes optional context_id for request tracking
-    async fn find_best_match(
+    pub async fn find_best_match(
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
     ) -> anyhow::Result<(i64, u32)> {
+        // Validate that context_id is provided when update_states is true
+        if update_states && context_id.is_none() {
+            panic!("context_id must be provided if update_states is true");
+        }
+
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);

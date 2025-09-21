@@ -834,6 +834,136 @@ impl SpecDecodeStats {
 }
 
 #[pyclass]
+pub(crate) struct KvRouter {
+    inner: Arc<llm_rs::kv_router::KvRouter>,
+}
+
+#[pymethods]
+impl KvRouter {
+    #[new]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config=None, consumer_uuid=None))]
+    fn new(
+        endpoint: &Endpoint,
+        block_size: usize,
+        kv_router_config: Option<&super::entrypoint::KvRouterConfig>,
+        consumer_uuid: Option<String>,
+    ) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async move {
+            // Get component from endpoint
+            let component = endpoint.inner.component();
+
+            // Verify we're not in static mode
+            if component.drt().primary_lease().is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Failed to get primary lease: Cannot KV route static workers",
+                ));
+            }
+
+            // Create KvRouter with provided or generated consumer UUID
+            let consumer_uuid = consumer_uuid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let kv_router = llm_rs::kv_router::KvRouter::new(
+                component.clone(),
+                block_size as u32,
+                None, // default selector
+                kv_router_config.map(|c| c.inner()),
+                consumer_uuid,
+            )
+            .await
+            .map_err(to_pyerr)?;
+
+            Ok(Self {
+                inner: Arc::new(kv_router),
+            })
+        })
+    }
+
+    #[pyo3(signature = (request_id, tokens, update_states=false, router_config_override=None))]
+    fn find_best_match<'p>(
+        &self,
+        py: Python<'p>,
+        request_id: String,
+        tokens: Vec<u32>,
+        update_states: bool,
+        router_config_override: Option<PyObject>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            Python::with_gil(|py| {
+                let override_config: llm_rs::kv_router::RouterConfigOverride =
+                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
+                Ok::<_, PyErr>(Some(override_config))
+            })?
+        } else {
+            None
+        };
+
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (worker_id, overlap_blocks) = inner
+                .find_best_match(
+                    Some(&request_id),
+                    &tokens,
+                    router_config_override.as_ref(),
+                    update_states,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Ok((worker_id, overlap_blocks))
+        })
+    }
+
+    fn add_request<'p>(
+        &self,
+        py: Python<'p>,
+        request_id: String,
+        tokens: Vec<u32>,
+        overlap_blocks: u32,
+        worker_id: i64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner
+                .add_request(request_id, &tokens, overlap_blocks, worker_id)
+                .await;
+            Ok(())
+        })
+    }
+
+    fn mark_prefill_completed<'p>(
+        &self,
+        py: Python<'p>,
+        request_id: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner
+                .mark_prefill_completed(&request_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    fn free<'p>(&self, py: Python<'p>, request_id: String) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.free(&request_id).await.map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn block_size(&self) -> PyResult<u32> {
+        Ok(self.inner.block_size())
+    }
+}
+
+#[pyclass]
 pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
 }

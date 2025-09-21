@@ -61,7 +61,6 @@ impl KvRouterConfig {
                 router_track_active_blocks,
                 router_snapshot_threshold,
                 router_reset_states,
-                ..Default::default()
             },
         }
     }
