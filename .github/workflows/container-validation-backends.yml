@@ -78,7 +78,7 @@ jobs:
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
 
   build-test-arm:
-    runs-on: cpu-arm-c8g-8xlarge
+    runs-on: cpu-arm-r8g-4xlarge
     strategy:
       fail-fast: false
       matrix:
