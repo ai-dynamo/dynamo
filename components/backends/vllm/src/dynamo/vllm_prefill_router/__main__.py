@@ -53,6 +53,7 @@ class PrefillRouterHandler:
             kv_router_config = KvRouterConfig(
                 router_track_active_blocks=False,  # this won't matter for prefill workers
                 router_reset_states=True,  # reset for now
+                use_kv_events=False,  # disable for now and use approx
             )
 
             self.kv_push_router = KvPushRouter(
