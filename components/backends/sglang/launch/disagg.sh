@@ -28,8 +28,7 @@ python3 -m dynamo.sglang \
   --disaggregation-mode prefill \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
-  --disaggregation-transfer-backend nixl \
-  --skip-tokenizer-init &
+  --disaggregation-transfer-backend nixl &
 PREFILL_PID=$!
 
 # run decode worker
@@ -42,5 +41,4 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port 12345 \
   --host 0.0.0.0 \
-  --disaggregation-transfer-backend nixl \
-  --skip-tokenizer-init
+  --disaggregation-transfer-backend nixl

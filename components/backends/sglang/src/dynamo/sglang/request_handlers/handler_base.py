@@ -38,7 +38,6 @@ class BaseWorkerHandler(ABC):
 
     def _get_input_param(self, request: dict) -> dict:
         """Get the appropriate input parameter for SGLang"""
-        print(request)
         if self.skip_tokenizer_init:
             return {"input_ids": request["token_ids"]}
         else:

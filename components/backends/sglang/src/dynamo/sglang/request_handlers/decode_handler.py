@@ -139,7 +139,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         count = 0
 
         async for res in stream_source:
-            print(res)
             index = res.get("index", 0)
             text = res.get("text", "")
 
