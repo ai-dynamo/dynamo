@@ -8,18 +8,19 @@ Usage: python -m dynamo.vllm_prefill_router [args]
 
 This service provides a single KV-aware router for all prefill workers in a
 disaggregated vLLM deployment. Instead of each decode worker maintaining its own
-round-robin client to prefill workers, this service uses KvPushRouter to make
+round-robin client to prefill workers, this service uses KvRouter to make
 intelligent routing decisions based on KV cache state.
 """
 
 import argparse
+import asyncio
 import logging
 import os
 from typing import Optional
 
 import uvloop
 
-from dynamo.llm import KvPushRouter, KvRouterConfig
+from dynamo.llm import KvRouter, KvRouterConfig
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -34,7 +35,7 @@ class PrefillRouterHandler:
         self.runtime = runtime
         self.namespace = namespace
         self.block_size = block_size
-        self.kv_push_router: Optional[KvPushRouter] = None
+        self.kv_router: Optional[KvRouter] = None
         self.prefill_client: Optional[Client] = None
 
     async def initialize(self):
@@ -49,37 +50,37 @@ class PrefillRouterHandler:
 
             self.prefill_client = await prefill_endpoint.client()
 
-            # Create KvPushRouter with specified configuration
+            # Create KvRouter with specified configuration
             kv_router_config = KvRouterConfig(
                 router_track_active_blocks=False,  # this won't matter for prefill workers
                 router_reset_states=True,  # reset for now
                 use_kv_events=False,  # disable for now and use approx
             )
 
-            self.kv_push_router = KvPushRouter(
-                prefill_endpoint,
+            self.kv_router = KvRouter(
+                endpoint=prefill_endpoint,
                 block_size=self.block_size,
                 kv_router_config=kv_router_config,
             )
 
             logger.info(
-                f"KvPushRouter initialized for prefill workers with block_size={self.block_size}"
+                f"KvRouter initialized for prefill workers with block_size={self.block_size}"
             )
 
         except Exception as e:
-            logger.error(f"Failed to initialize KvPushRouter: {e}")
+            logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
-    async def best_worker_id(self, request, context):
+    async def find_best_worker(self, request):
         """
-        Return the best prefill worker ID based on KV cache state.
+        Find the best prefill worker based on KV cache state.
 
         This endpoint is called by decode workers to determine which prefill
         worker should handle a request.
         """
-        if self.kv_push_router is None:
+        if self.kv_router is None:
             # Fallback to round-robin if router not initialized
-            logger.warning("KvPushRouter not initialized, falling back to round-robin")
+            logger.warning("KvRouter not initialized, falling back to round-robin")
             yield {
                 "status": "fallback",
                 "message": "Router not initialized",
@@ -105,19 +106,24 @@ class PrefillRouterHandler:
 
             logger.debug(f"Routing request with {len(instance_ids)} available workers")
 
-            # Use KvPushRouter to find the best worker
-            # Get token_ids from request (required field)
+            # Validate required fields
             if "token_ids" not in request:
                 raise ValueError("Missing required field 'token_ids' in request")
-            token_ids = request["token_ids"]
+            if "request_id" not in request:
+                raise ValueError("Missing required field 'request_id' in request")
 
-            # Get the best worker ID and overlap blocks
-            best_worker_id, overlap_blocks = await self.kv_push_router.best_worker_id(
-                token_ids=token_ids
+            token_ids = request["token_ids"]
+            request_id = request["request_id"]
+
+            # Use KvRouter to find the best worker with state updates
+            best_worker_id, overlap_blocks = await self.kv_router.find_best_match(
+                request_id=request_id,
+                tokens=token_ids,
+                update_states=True,  # Always update states for prefill routing
             )
 
             logger.debug(
-                f"Selected worker {best_worker_id} with {overlap_blocks} overlap blocks"
+                f"Selected worker {best_worker_id} with {overlap_blocks} overlap blocks for request {request_id}"
             )
 
             yield {
@@ -127,6 +133,44 @@ class PrefillRouterHandler:
 
         except Exception as e:
             logger.error(f"Error finding best worker: {e}")
+            yield {
+                "status": "error",
+                "message": str(e),
+            }
+
+    async def free(self, request):
+        """
+        Free resources associated with a request.
+
+        This endpoint is called when a request is completed to clean up
+        router state.
+        """
+        if self.kv_router is None:
+            logger.warning("KvRouter not initialized")
+            yield {
+                "status": "error",
+                "message": "Router not initialized",
+            }
+            return
+
+        try:
+            if "request_id" not in request:
+                raise ValueError("Missing required field 'request_id' in request")
+
+            request_id = request["request_id"]
+
+            # Free the request from the router
+            await self.kv_router.free(request_id=request_id)
+
+            logger.debug(f"Freed resources for request {request_id}")
+
+            yield {
+                "status": "success",
+                "message": f"Request {request_id} freed successfully",
+            }
+
+        except Exception as e:
+            logger.error(f"Error freeing request: {e}")
             yield {
                 "status": "error",
                 "message": str(e),
@@ -184,16 +228,24 @@ async def worker(runtime: DistributedRuntime):
     handler = PrefillRouterHandler(runtime, args.namespace, args.block_size)
     await handler.initialize()
 
-    # Expose endpoint
-    best_worker_endpoint = component.endpoint("best_worker_id")
+    # Expose endpoints
+    find_best_worker_endpoint = component.endpoint("find_best_worker")
+    free_endpoint = component.endpoint("free")
 
-    logger.debug("Starting to serve best_worker_id endpoint...")
+    logger.debug("Starting to serve find_best_worker and free endpoints...")
 
     try:
-        await best_worker_endpoint.serve_endpoint(
-            handler.best_worker_id,
-            graceful_shutdown=True,
-            metrics_labels=[("service", "prefill_router")],
+        await asyncio.gather(
+            find_best_worker_endpoint.serve_endpoint(
+                handler.find_best_worker,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "prefill_router")],
+            ),
+            free_endpoint.serve_endpoint(
+                handler.free,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "prefill_router")],
+            ),
         )
     except Exception as e:
         logger.error(f"Failed to serve endpoint: {e}")
