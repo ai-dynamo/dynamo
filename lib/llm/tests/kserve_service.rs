@@ -570,8 +570,8 @@ pub mod kserve_test {
                     );
                     assert_eq!(
                         output.shape,
-                        vec![0],
-                        "Expected 'finish_reason' to have shape [0]"
+                        vec![1],
+                        "Expected 'finish_reason' to have shape [1]"
                     );
                 }
                 _ => panic!("Unexpected output name: {}", output.name),
@@ -728,8 +728,8 @@ pub mod kserve_test {
                                 );
                                 assert_eq!(
                                     output.shape,
-                                    vec![0],
-                                    "Expected 'finish_reason' to have shape [0]"
+                                    vec![1],
+                                    "Expected 'finish_reason' to have shape [1]"
                                 );
                             }
                             _ => panic!("Unexpected output name: {}", output.name),
@@ -820,8 +820,8 @@ pub mod kserve_test {
                                 );
                                 assert_eq!(
                                     output.shape,
-                                    vec![0],
-                                    "Expected 'finish_reason' to have shape [0]"
+                                    vec![1],
+                                    "Expected 'finish_reason' to have shape [1]"
                                 );
                             }
                             _ => panic!("Unexpected output name: {}", output.name),
