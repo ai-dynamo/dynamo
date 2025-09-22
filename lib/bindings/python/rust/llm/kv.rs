@@ -8,8 +8,8 @@ use tokio_stream::StreamExt;
 
 use super::*;
 use crate::Component;
-use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
+use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
 use llm_rs::kv_router::protocols::KvStats as RsKvStats;
 use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
@@ -18,7 +18,7 @@ use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
+use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
 #[pyfunction]

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    logging, pipeline::PushRouter, protocols::annotated::Annotated, stream::StreamExt,
-    DistributedRuntime, Result, Runtime, Worker,
+    DistributedRuntime, Result, Runtime, Worker, logging, pipeline::PushRouter,
+    protocols::annotated::Annotated, stream::StreamExt,
 };
 use hello_world::DEFAULT_NAMESPACE;
 
