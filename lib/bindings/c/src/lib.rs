@@ -59,7 +59,8 @@ fn ffi_guard<F: FnOnce() -> DynamoLlmResult>(f: F) -> DynamoLlmResult {
 }
 
 /// Run async work on a fresh single-threaded Tokio runtime on a plain OS thread.
-/// This avoids Tokio's "cannot drop a runtime from within an async context" panic.
+/// Uses `shutdown_background()` to avoid the "Cannot drop a runtime where blocking
+/// is not allowed" panic during runtime drop.
 fn run_on_local_runtime<T, Fut>(op: impl FnOnce() -> Fut + Send + 'static) -> Result<T, String>
 where
     Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
@@ -70,7 +71,14 @@ where
             .enable_all()
             .build()
             .map_err(|e| format!("build local runtime: {e:?}"))?;
-        rt.block_on(op())
+
+        // run the future
+        let out = rt.block_on(op());
+
+        // IMPORTANT: avoid blocking shutdown on this thread
+        rt.shutdown_background();
+
+        out
     })
     .join()
     .map_err(|_| "panic in local runtime thread".to_string())?
