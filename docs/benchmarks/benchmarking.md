@@ -23,6 +23,10 @@ This benchmarking framework lets you compare performance across any combination 
 
 Dynamo provides two benchmarking approaches to suit different use cases: **client-side** and **server-side**. Client-side refers to running benchmarks on your local machine and connecting to Kubernetes deployments via port-forwarding, while server-side refers to running benchmarks directly within the Kubernetes cluster using internal service URLs. Which method to use depends on your use case.
 
+**TLDR:**
+Need high performance/load testing? Server-side.
+Just quick testing/comparison? Client-side.
+
 ### Use Client-Side Benchmarking When:
 - You already have an HTTP endpoint ready to go
 - You want to quickly test deployments
