@@ -32,6 +32,20 @@ Set up Minikube first → [Minikube Setup](minikube.md) → Then follow Path A
 **Path C: Custom Development**
 Build from source for customization → [Jump to Path C](#path-c-custom-development)
 
+All helm install commands could be overridden by either setting the values.yaml file or by passing in your own values.yaml:
+
+```bash
+helm install ...
+  -f your-values.yaml
+```
+
+and/or setting values as flags to the helm install command, as follows:
+
+```bash
+helm install ...
+  --set "your-value=your-value"
+```
+
 ## Prerequisites
 
 ```bash
@@ -68,7 +82,9 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 ```
 
 > [!TIP]
-> By default, Grove and Kai Scheduler are NOT installed. You can enable them by setting the following flags in the helm install command:
+> For multinode deployments, you need to enable Grove and Kai Scheduler.
+> You might chose to install them manually or through the dynamo-platform helm install command.
+> Using the dynamo-platform helm install command, by default, Grove and Kai Scheduler are NOT installed. You can enable their installation by setting the following flags in the helm install command:
 
 ```bash
 --set "grove.enabled=true"
@@ -125,7 +141,7 @@ helm upgrade --install dynamo-crds ./crds/ --namespace default
 # 5. Install Platform
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm dep build ./platform/
-helm upgrade --install dynamo-platform ./platform/ \
+helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --set dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator \
   --set dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG} \
