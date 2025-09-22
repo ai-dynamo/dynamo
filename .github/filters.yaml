@@ -3,11 +3,11 @@ docs: &docs
   - '**/*.md'
   - '**/*.rst'
 
-ci_files: &ci_files
+ci: &ci
   - '.github/**'
 
 has_code_changes:
-  - *ci_files
+  - *ci
   - 'benchmarks/**'
   - 'components/**'
   - 'container/**'
