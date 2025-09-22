@@ -17,7 +17,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      skip_ci: ${{ steps.filter.outputs.skip_ci }}
+      has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
   vllm:
     runs-on: gpu-l40-amd64
     needs: changed-files
-    if: needs.changed-files.outputs.skip_ci == 'false'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,7 +64,7 @@ jobs:
   sglang:
     runs-on: gpu-l40-amd64
     needs: changed-files
-    if: needs.changed-files.outputs.skip_ci == 'false'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
   trtllm:
     runs-on: gpu-l40-amd64
     needs: changed-files
-    if: needs.changed-files.outputs.skip_ci == 'false'
+    if: needs.changed-files.outputs.has_code_changes == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

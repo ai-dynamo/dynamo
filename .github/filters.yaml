@@ -3,30 +3,24 @@ docs: &docs
   - '**/*.md'
   - '**/*.rst'
 
-project_meta: &project_meta
-  - 'ATTRIBUTIONS*.md'
-  - 'ATTRIBUTIONS*.txt'
-  - '**/ATTRIBUTIONS*'
-  - '.gitignore'
-  - '.gitattributes'
-  - 'CODEOWNERS'
-  - 'CONTRIBUTING.md'
-  - 'CODE_OF_CONDUCT.md'
-  - 'SECURITY.md'
+ci_files: &ci_files
+  - '.github/**'
 
-config_files: &config_files
-  - '**/*.code-workspace'
-  - '**/.devcontainer/**'
-  - '**/.cargo/**'
-  - '.coderabbit.yaml'
-  - '.clang-format'
-  - '.lycheeignore'
-  - 'codespell.txt'
-
-skip_ci:
-  - *docs
-  - *project_meta
-  - *config_files
+has_code_changes:
+  - *ci_files
+  - 'benchmarks/**'
+  - 'components/**'
+  - 'container/**'
+  - 'deploy/**'
+  - 'examples/**'
+  - 'launch/**'
+  - 'lib/**'
+  - 'recipes/**'
+  - 'tests/**'
+  - '*.toml'
+  - '*.lock'
+  - '*.py'
+  - '*.rs'
 
 vllm: &vllm
   - 'container/Dockerfile.vllm'
@@ -52,8 +46,3 @@ trtllm: &trtllm
 
 sdk:
   - 'deploy/**'
-
-backends:
-  - *vllm
-  - *sglang
-  - *trtllm
