@@ -150,6 +150,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # TODO: Change to prefill queue
         # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
         # This is least intrusive for now, but quite error prone. Should consider (major) refactoring
+        # TODO: (PeaBrane) longer term, decode workers should not handle prefill routing at all.
+        # Prefill routing logic should be integrated directly into the frontend service potentially.
         if self.can_prefill:
             # Create a copy for prefill with specific modifications
             prefill_sampling_params = deepcopy(sampling_params)
