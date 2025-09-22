@@ -49,6 +49,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "choices": get_reasoning_parser_names(),
         "help": "Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     },
+    "custom-jinja-template": {
+        "flags": ["--custom-jinja-template"],
+        "type": str,
+        "default": None,
+        "help": "Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
+    },
 }
 
 
@@ -62,6 +68,7 @@ class DynamoArgs:
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+    custom_jinja_template: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -191,6 +198,7 @@ def parse_args(args: list[str]) -> Config:
         migration_limit=parsed_args.migration_limit,
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
+        custom_jinja_template=parsed_args.custom_jinja_template,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
