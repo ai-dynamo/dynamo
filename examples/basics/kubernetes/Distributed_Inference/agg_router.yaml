@@ -8,78 +8,24 @@ metadata:
 spec:
   services:
     Frontend:
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       dynamoNamespace: vllm-agg-router
-      componentType: main
+      componentType: frontend
       replicas: 1
-      resources:
-        requests:
-          cpu: "1"
-          memory: "2Gi"
-        limits:
-          cpu: "1"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:
-        httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
-          path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
       dynamoNamespace: vllm-agg-router
       componentType: worker
-      replicas: 4
+      replicas: 1
       resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
-        - name: DYN_SYSTEM_PORT
-          value: "9090"
         - name: DYN_LOG
           value: "debug"
       extraPodSpec:
@@ -89,12 +35,6 @@ spec:
             path: /YOUR/LOCAL/CACHE/FOLDER
             type: DirectoryOrCreate
         mainContainer:
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           volumeMounts:
           - name: local-model-cache
@@ -104,4 +44,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen2.5-1.5B-Instruct

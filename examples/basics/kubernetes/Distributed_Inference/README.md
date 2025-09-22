@@ -25,6 +25,7 @@ This `agg_router.yaml` is adpated from vLLM deployment [example](https://github.
 - Mounted a local cache folder `/YOUR/LOCAL/CACHE/FOLDER` for model artifacts reuse
 - Created 4 replicas for this model deployment by setting `replicas: 4`
 - Added `debug` flag environment variable for observability
+
 Create a K8S secret with your Huggingface token and then deploy the models
 ```sh
 export HF_TOKEN=YOUR_HF_TOKEN
@@ -43,7 +44,7 @@ and use following request to test the deployed model
 curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-0.6B",
+    "model": "Qwen/Qwen2.5-1.5B-Instruct",
     "messages": [
     {
         "role": "user",
