@@ -104,18 +104,22 @@ pub unsafe extern "C" fn dynamo_llm_init(
     }
 }
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
-    let wk = match WK.get() {
-        Some(wk) => wk,
-        None => {
-            eprintln!("Runtime not initialized");
-            return DynamoLlmResult::ERR;
-        }
+    let Some(wk) = WK.get().cloned() else {
+        eprintln!("Runtime not initialized");
+        return DynamoLlmResult::ERR;
     };
-
-    wk.runtime().shutdown();
-
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        // bounce to a plain thread to avoid Tokio’s guard
+        let _ = std::thread::spawn(move || wk.runtime().shutdown()).join();
+    }));
+    if res.is_err() {
+        eprintln!("Runtime shutdown panicked; ignoring");
+        return DynamoLlmResult::ERR;
+    }
     DynamoLlmResult::OK
 }
 
