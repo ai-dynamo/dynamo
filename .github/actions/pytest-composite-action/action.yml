@@ -1,5 +1,5 @@
-name: 'Dynamo Tests'
-description: 'Run tests on Dynamo container images'
+name: 'Pytest'
+description: 'Run pytest on pre-built container images'
 inputs:
   pytest_marks:
     description: 'Pytest marks'

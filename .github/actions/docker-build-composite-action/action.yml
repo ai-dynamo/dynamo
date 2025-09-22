@@ -1,4 +1,4 @@
-name: 'Dynamo Container Build'
+name: 'Docker Build'
 description: 'Build Dynamo container images'
 inputs:
   framework:
@@ -9,6 +9,9 @@ inputs:
     description: 'Target to build'
     required: false
     default: 'runtime'
+  image_tag:
+    description: 'Custom image tag (optional, defaults to framework:latest)'
+    required: false
   ngc_ci_access_token:
     description: 'NGC CI Access Token'
     required: false
@@ -31,7 +34,7 @@ inputs:
 outputs:
   image_tag:
     description: 'Image Tag'
-    value: ${{ inputs.framework }}:latest
+    value: ${{ steps.build.outputs.image_tag }}
 
 runs:
   using: "composite"
@@ -49,6 +52,7 @@ runs:
       run: |
         docker system prune -af
     - name: Build image
+      id: build
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.ci_token }}
@@ -57,7 +61,15 @@ runs:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
       run: |
-        ./container/build.sh --tag ${{ inputs.framework }}:latest \
+        # Determine image tag
+        if [ -n "${{ inputs.image_tag }}" ]; then
+          IMAGE_TAG="${{ inputs.image_tag }}"
+        else
+          IMAGE_TAG="${{ inputs.framework }}:latest"
+        fi
+        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+        ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
           --framework ${{ inputs.framework }} \
           --use-sccache \
