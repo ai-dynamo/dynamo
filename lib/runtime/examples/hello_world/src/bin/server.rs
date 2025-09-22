@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
-    logging,
+    DistributedRuntime, Result, Runtime, Worker, logging,
     pipeline::{
-        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
     },
     protocols::annotated::Annotated,
-    stream, DistributedRuntime, Result, Runtime, Worker,
+    stream,
 };
 use hello_world::DEFAULT_NAMESPACE;
 use std::sync::Arc;

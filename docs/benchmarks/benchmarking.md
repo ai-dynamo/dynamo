@@ -56,7 +56,7 @@ The framework is a Python-based wrapper around `genai-perf` that:
 Follow these steps to benchmark Dynamo deployments:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](../../guides/dynamo_deploy/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](/docs/guides/dynamo_deploy/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
 Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../components/backends/). Each deployment should have a frontend service exposed.
