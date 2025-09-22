@@ -59,10 +59,23 @@ The **Developer Certificate of Origin (DCO)** check ensures all commits are sign
 - Alternatively, ask a maintainer to Squash and Merge with a sign-off on merge.
 
 ## ✨ Pro Tips
+This ensures you’ll never fail DCO again.
 
-- Turn on Always sign-off commits in your client (GitHub Desktop or Git CLI).
 - Use the -s flag when committing from CLI:
    ```
      git commit -s -m "Your commit message"
    ```
-    This ensures you’ll never fail DCO again.
+- Turn on Always sign-off commits in your client (GitHub Desktop or Git CLI).
+    1. GitHub Desktop
+       Turn on Always sign-off commits in your client.
+
+    2. Git CLI
+       You can always sign-off commits automatically using a commit template:
+       1. Create ~/.git-commit-template.txt with:
+        ```text 
+          Signed-off-by: Your Name <your.email@example.com>
+         ```
+    2. Tell Git to use it:
+       ```
+        git config --global commit.template ~/.git-commit-template.txt
+       ```
