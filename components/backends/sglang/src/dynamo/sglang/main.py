@@ -15,6 +15,10 @@ from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
+from dynamo.sglang.health_check import (
+    SglangHealthCheckPayload,
+    SglangPrefillHealthCheckPayload,
+)
 from dynamo.sglang.publisher import setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_runtime_config
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -112,6 +116,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         ready_event.set()
         logging.info("Model registration succeeded; processing queued requests")
 
+    health_check_payload = SglangHealthCheckPayload().to_dict()
+
     try:
         # Start endpoint immediately and register model concurrently
         # Requests queue until ready_event is set
@@ -120,6 +126,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
             ),
             register_model(),
         )
@@ -150,11 +157,14 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     handler = PrefillWorkerHandler(component, engine, config)
 
+    health_check_payload = SglangPrefillHealthCheckPayload().to_dict()
+
     tasks = [
         generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
             metrics_labels=[("model", server_args.served_model_name)],
+            health_check_payload=health_check_payload,
         )
     ]
 

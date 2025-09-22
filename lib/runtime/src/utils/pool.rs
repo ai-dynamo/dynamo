@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use tokio::sync::Notify;
 
 /// Trait for items that can be returned to a pool
@@ -268,9 +268,126 @@ impl<T: Returnable> Clone for Pool<T> {
         }
     }
 }
+
+pub struct SyncPool<T: Returnable> {
+    state: Arc<SyncPoolState<T>>,
+    capacity: usize,
+}
+
+struct SyncPoolState<T: Returnable> {
+    pool: Mutex<VecDeque<PoolValue<T>>>,
+    available: Condvar,
+}
+
+impl<T: Returnable> SyncPool<T> {
+    pub fn new(initial_elements: Vec<PoolValue<T>>) -> Self {
+        let capacity = initial_elements.len();
+        let pool = initial_elements
+            .into_iter()
+            .collect::<VecDeque<PoolValue<T>>>();
+
+        let state = Arc::new(SyncPoolState {
+            pool: Mutex::new(pool),
+            available: Condvar::new(),
+        });
+
+        Self { state, capacity }
+    }
+
+    pub fn new_direct(initial_elements: Vec<T>) -> Self {
+        let initial_values = initial_elements
+            .into_iter()
+            .map(PoolValue::from_direct)
+            .collect();
+        Self::new(initial_values)
+    }
+
+    pub fn try_acquire(&self) -> Option<SyncPoolItem<T>> {
+        let mut pool = self.state.pool.lock().unwrap();
+        pool.pop_front()
+            .map(|value| SyncPoolItem::new(value, self.state.clone()))
+    }
+
+    pub fn acquire_blocking(&self) -> SyncPoolItem<T> {
+        let mut pool = self.state.pool.lock().unwrap();
+
+        while pool.is_empty() {
+            tracing::debug!("SyncPool: waiting for available resource (pool empty)");
+            pool = self.state.available.wait(pool).unwrap();
+            tracing::debug!(
+                "SyncPool: woke up, checking pool again (size: {})",
+                pool.len()
+            );
+        }
+
+        let value = pool.pop_front().unwrap();
+        tracing::debug!("SyncPool: acquired resource, pool size now: {}", pool.len());
+        SyncPoolItem::new(value, self.state.clone())
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+impl<T: Returnable> Clone for SyncPool<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            capacity: self.capacity,
+        }
+    }
+}
+
+pub struct SyncPoolItem<T: Returnable> {
+    value: Option<PoolValue<T>>,
+    state: Arc<SyncPoolState<T>>,
+}
+
+impl<T: Returnable> SyncPoolItem<T> {
+    fn new(value: PoolValue<T>, state: Arc<SyncPoolState<T>>) -> Self {
+        Self {
+            value: Some(value),
+            state,
+        }
+    }
+}
+
+impl<T: Returnable> Deref for SyncPoolItem<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().unwrap().get()
+    }
+}
+
+impl<T: Returnable> DerefMut for SyncPoolItem<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value.as_mut().unwrap().get_mut()
+    }
+}
+
+impl<T: Returnable> Drop for SyncPoolItem<T> {
+    fn drop(&mut self) {
+        if let Some(mut value) = self.value.take() {
+            value.on_return();
+
+            let mut pool = self.state.pool.lock().unwrap();
+            pool.push_back(value);
+            tracing::debug!(
+                "SyncPool: returned resource, pool size now: {}, notifying waiters",
+                pool.len()
+            );
+
+            self.state.available.notify_one();
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
     use tokio::time::{Duration, timeout};
 
     // Implement Returnable for u32 just for testing
@@ -411,5 +528,146 @@ mod tests {
         //     pool: pool.clone(),
         //     _token: /* can't create this */
         // };
+    }
+
+    #[test]
+    fn test_sync_pool_basic_acquire_release() {
+        let initial_elements = vec![1u32, 2, 3];
+        let pool = SyncPool::new_direct(initial_elements);
+
+        // Try acquire (non-blocking)
+        let item1 = pool.try_acquire().unwrap();
+        assert_eq!(*item1, 1);
+
+        let item2 = pool.try_acquire().unwrap();
+        assert_eq!(*item2, 2);
+
+        // Pool should have one item left
+        let item3 = pool.try_acquire().unwrap();
+        assert_eq!(*item3, 3);
+
+        // Pool should be empty now
+        assert!(pool.try_acquire().is_none());
+
+        // Drop items to return to pool
+        drop(item1); // Returns 0 (after on_return)
+        drop(item2); // Returns 0 (after on_return)
+        drop(item3); // Returns 0 (after on_return)
+
+        // Should be able to acquire again
+        let item = pool.try_acquire().unwrap();
+        assert_eq!(*item, 0); // Value was reset by on_return
+    }
+
+    #[test]
+    fn test_sync_pool_blocking_acquire() {
+        let pool = SyncPool::new_direct(vec![42u32]);
+
+        // Acquire the only item
+        let item = pool.acquire_blocking();
+        assert_eq!(*item, 42);
+
+        let pool_clone = pool.clone();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        // Spawn a thread that will wait for the item
+        let handle = thread::spawn(move || {
+            counter_clone.store(1, Ordering::SeqCst); // Mark that we're waiting
+            let waiting_item = pool_clone.acquire_blocking(); // This will block
+            counter_clone.store(2, Ordering::SeqCst); // Mark that we got it
+            assert_eq!(*waiting_item, 0); // Should be reset value
+        });
+
+        // Give the thread time to start waiting
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(counter.load(Ordering::SeqCst), 1); // Should be waiting
+
+        // Drop the item to trigger condvar notification
+        drop(item);
+
+        // Wait for the other thread to complete
+        handle.join().unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 2); // Should have completed
+    }
+
+    #[test]
+    fn test_sync_pool_multiple_waiters() {
+        let pool = SyncPool::new_direct(vec![1u32]);
+
+        // Acquire the only item
+        let item = pool.acquire_blocking();
+
+        let pool_clone1 = pool.clone();
+        let pool_clone2 = pool.clone();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed1 = completed.clone();
+        let completed2 = completed.clone();
+
+        // Spawn two threads that will wait
+        let handle1 = thread::spawn(move || {
+            let _item = pool_clone1.acquire_blocking(); // Will block
+            completed1.fetch_add(1, Ordering::SeqCst); // Mark completion
+            // Item drops here, potentially waking thread 2
+        });
+
+        let handle2 = thread::spawn(move || {
+            let _item = pool_clone2.acquire_blocking(); // Will block
+            completed2.fetch_add(1, Ordering::SeqCst); // Mark completion
+            // Item drops here
+        });
+
+        // Give threads time to start waiting
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(completed.load(Ordering::SeqCst), 0); // Both should be waiting
+
+        // Drop the item - should wake exactly one thread
+        drop(item);
+
+        // Wait for both threads to complete
+        handle1.join().unwrap();
+        handle2.join().unwrap();
+
+        // Both threads should have completed eventually
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_sync_vs_async_pool_compatibility() {
+        // Test that both pool types work with the same Returnable type
+        let async_pool = Pool::new_direct(vec![1u32, 2u32]);
+        let sync_pool = SyncPool::new_direct(vec![3u32, 4u32]);
+
+        // Both should work
+        let async_rt = tokio::runtime::Runtime::new().unwrap();
+        let async_item = async_rt.block_on(async { async_pool.acquire().await });
+        assert_eq!(*async_item, 1);
+
+        let sync_item = sync_pool.acquire_blocking();
+        assert_eq!(*sync_item, 3);
+
+        // Both use the same Returnable trait
+        drop(async_item); // Should reset to 0
+        drop(sync_item); // Should reset to 0
+    }
+
+    #[test]
+    fn test_sync_pool_condvar_performance() {
+        let pool = SyncPool::new_direct((0..10).collect::<Vec<u32>>());
+        let start = std::time::Instant::now();
+
+        // Rapid acquire/release cycles
+        for _ in 0..1000 {
+            let item = pool.acquire_blocking();
+            // Simulate minimal work
+            let _ = *item + 1;
+            drop(item); // Return to pool
+        }
+
+        let duration = start.elapsed();
+        println!("1000 sync pool operations took {:?}", duration);
+
+        // Should be fast (< 10ms on most systems)
+        assert!(duration < Duration::from_millis(50));
     }
 }

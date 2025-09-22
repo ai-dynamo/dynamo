@@ -769,6 +769,7 @@ async fn test_nv_custom_client() {
         inner: inner_request,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -808,6 +809,7 @@ async fn test_nv_custom_client() {
         inner: inner_request,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -848,6 +850,7 @@ async fn test_nv_custom_client() {
         inner: inner_request,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
 
     let result = nv_custom_client

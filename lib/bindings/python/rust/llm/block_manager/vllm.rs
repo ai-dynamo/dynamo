@@ -11,13 +11,13 @@ use pyo3::{prelude::*, wrap_pymodule};
 
 use dynamo_llm::{
     block_manager::{
+        BasicMetadata, DeviceStorage, Storage,
         block::{
+            BlockId, ImmutableBlock, MutableBlock,
             data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
             locality::{LocalityProvider, Logical},
-            BlockId, ImmutableBlock, MutableBlock,
         },
         pool::{BlockPool, BlockPoolError},
-        BasicMetadata, DeviceStorage, Storage,
     },
     tokens::{SaltHash, SequenceHash, TokenBlockSequence, Tokens},
 };
@@ -314,7 +314,19 @@ impl std::fmt::Debug for GenericSlotUpdate<String> {
             format!("{:?}", self.tokens_to_append)
         };
 
-        write!(f, "GenericSlotUpdate(request_id: {}, request_num_tokens: {}, request_num_computed_tokens: {}, tokens_to_append: {}, num_new_tokens: {}, num_new_computed_tokens: {:?}, new_computed_blocks: {:?}, num_lookahead_blocks: {:?}, delay_cache_blocks: {:?})", self.request_id, self.request_num_tokens, self.request_num_computed_tokens, tokens_display, self.num_new_tokens, self.num_new_computed_tokens, self.new_computed_blocks, self.num_lookahead_blocks, self.delay_cache_blocks)
+        write!(
+            f,
+            "GenericSlotUpdate(request_id: {}, request_num_tokens: {}, request_num_computed_tokens: {}, tokens_to_append: {}, num_new_tokens: {}, num_new_computed_tokens: {:?}, new_computed_blocks: {:?}, num_lookahead_blocks: {:?}, delay_cache_blocks: {:?})",
+            self.request_id,
+            self.request_num_tokens,
+            self.request_num_computed_tokens,
+            tokens_display,
+            self.num_new_tokens,
+            self.num_new_computed_tokens,
+            self.new_computed_blocks,
+            self.num_lookahead_blocks,
+            self.delay_cache_blocks
+        )
     }
 }
 
@@ -558,7 +570,8 @@ impl<R: RequestKey> SlotManager<R> {
                 let isl_host = slot.num_blocks_cached_from_host() * self.block_size;
                 let isl_disk = slot.num_blocks_cached_from_disk() * self.block_size;
                 tracing::info!(
-                    request_id, "request complete isl: {} - cache hits: device: {}, host: {}, disk: {} - prefilled: {}",
+                    request_id,
+                    "request complete isl: {} - cache hits: device: {}, host: {}, disk: {} - prefilled: {}",
                     isl,
                     isl_device,
                     isl_host,
