@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 pub mod approx;
 pub mod indexer;
 pub mod metrics_aggregator;
-pub mod prefill_counter;
 pub mod protocols;
 pub mod publisher;
 pub mod recorder;
@@ -102,6 +101,9 @@ pub struct KvRouterConfig {
 
     pub router_replica_sync: bool,
 
+    /// Whether to track active blocks in the router (default: true)
+    pub router_track_active_blocks: bool,
+
     // TODO: this is not actually used for now
     // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
@@ -120,6 +122,7 @@ impl Default for KvRouterConfig {
             router_temperature: 0.0,
             use_kv_events: true,
             router_replica_sync: false,
+            router_track_active_blocks: true,
             max_num_batched_tokens: 8192,
             router_snapshot_threshold: Some(10000),
             router_reset_states: false,
@@ -130,11 +133,13 @@ impl Default for KvRouterConfig {
 impl KvRouterConfig {
     /// Create a new KvRouterConfig with optional weight values.
     /// If a weight is None, the default value will be used.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         overlap_score_weight: Option<f64>,
         temperature: Option<f64>,
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
+        track_active_blocks: Option<bool>,
         max_num_batched_tokens: Option<u32>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
@@ -145,6 +150,8 @@ impl KvRouterConfig {
             router_temperature: temperature.unwrap_or(default.router_temperature),
             use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
+            router_track_active_blocks: track_active_blocks
+                .unwrap_or(default.router_track_active_blocks),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
             router_snapshot_threshold: router_snapshot_threshold
@@ -157,8 +164,17 @@ impl KvRouterConfig {
 // TODO: is there a way (macro) to auto-derive the KvIndexerInterface trait for this
 // since both variants implement it
 pub enum Indexer {
+    /// Updates itself based on KV events emitted by backend workers.
+    /// Has the ability to persist and snapshot states.
     KvIndexer(KvIndexer),
+
+    /// Predicts the cached blocks based on requests on a TTL basis.
+    /// Currently does not persist or snapshot states (WIP to enable that).
     ApproxKvIndexer(ApproxKvIndexer),
+
+    /// Used when we do not wish to use the indexer at all (e.g., when overlap_score_weight is 0).
+    /// Note: This will cause KV events to accumulate in JetStream as we do not regularly purge them.
+    None,
 }
 
 impl Indexer {
@@ -169,6 +185,10 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Indexer::ApproxKvIndexer(indexer) => indexer.find_matches(sequence).await,
+            Indexer::None => Ok(OverlapScores {
+                scores: HashMap::new(),
+                frequencies: Vec::new(),
+            }),
         }
     }
 
@@ -176,6 +196,11 @@ impl Indexer {
         match self {
             Indexer::KvIndexer(indexer) => indexer.dump_events().await,
             Indexer::ApproxKvIndexer(indexer) => indexer.dump_events().await,
+            Indexer::None => {
+                panic!(
+                    "Cannot dump events: indexer does not exist (is overlap_score_weight set to 0?)"
+                );
+            }
         }
     }
 }
@@ -189,6 +214,8 @@ pub struct KvRouter {
     scheduler: KvScheduler,
 
     block_size: u32,
+
+    kv_router_config: KvRouterConfig,
 }
 
 impl KvRouter {
@@ -234,7 +261,10 @@ impl KvRouter {
         .await?;
         let runtime_configs_rx = runtime_configs_watcher.receiver();
 
-        let indexer = if kv_router_config.use_kv_events {
+        let indexer = if kv_router_config.overlap_score_weight == 0.0 {
+            // When overlap_score_weight is zero, we don't need to track prefixes
+            Indexer::None
+        } else if kv_router_config.use_kv_events {
             let kv_indexer_metrics = indexer::KvIndexerMetrics::from_component(&component);
             Indexer::KvIndexer(KvIndexer::new(
                 cancellation_token.clone(),
@@ -257,6 +287,7 @@ impl KvRouter {
             runtime_configs_rx,
             selector,
             kv_router_config.router_replica_sync,
+            consumer_uuid.clone(),
         )
         .await?;
 
@@ -282,6 +313,7 @@ impl KvRouter {
             indexer,
             scheduler,
             block_size,
+            kv_router_config,
         })
     }
 
@@ -302,12 +334,25 @@ impl KvRouter {
 
         let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
+        // Determine who needs seq_hashes
+        let approx_indexer_needs_it = matches!(self.indexer, Indexer::ApproxKvIndexer(_));
+        let scheduler_needs_it = self.kv_router_config.router_track_active_blocks;
+
+        // Optimize cloning: only clone if both need it, otherwise move
+        let (maybe_seq_hashes_1, maybe_seq_hashes_2) =
+            match (approx_indexer_needs_it, scheduler_needs_it) {
+                (true, true) => (Some(seq_hashes.clone()), Some(seq_hashes)),
+                (true, false) => (Some(seq_hashes), None),
+                (false, true) => (None, Some(seq_hashes)),
+                (false, false) => (None, None),
+            };
+
         let best_worker_id = self
             .scheduler
             .schedule(
                 context_id.to_string(),
                 isl_tokens,
-                seq_hashes.clone(),
+                maybe_seq_hashes_2,
                 overlap_scores.clone(),
                 router_config_override,
                 update_states,
@@ -316,7 +361,7 @@ impl KvRouter {
 
         if let Indexer::ApproxKvIndexer(ref indexer) = self.indexer {
             indexer
-                .process_routing_decision(best_worker_id, block_hashes, seq_hashes)
+                .process_routing_decision(best_worker_id, block_hashes, maybe_seq_hashes_1.unwrap())
                 .await
                 .unwrap();
         };
@@ -337,13 +382,16 @@ impl KvRouter {
         worker_id: i64,
     ) {
         let isl_tokens = tokens.len();
-        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
-        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
+            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            compute_seq_hash_for_block(&block_hashes)
+        });
 
         self.scheduler
             .add_request(
                 request_id,
-                seq_hashes,
+                maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
                 worker_id,
@@ -351,11 +399,11 @@ impl KvRouter {
             .await;
     }
 
-    pub async fn mark_prefill_completed(&self, request_id: &str) {
+    pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<()> {
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    pub async fn free(&self, request_id: &str) {
+    pub async fn free(&self, request_id: &str) -> Result<()> {
         self.scheduler.free(request_id).await
     }
 
@@ -367,12 +415,16 @@ impl KvRouter {
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
-        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+
+        let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
+            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+            compute_seq_hash_for_block(&block_hashes)
+        });
 
         Ok(self
             .scheduler
-            .get_potential_loads(seq_hashes, isl_tokens, overlap_scores)
+            .get_potential_loads(maybe_seq_hashes, isl_tokens, overlap_scores)
             .await)
     }
 
@@ -404,14 +456,12 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                     overlap_blocks,
                 }
             }
-            RouterRequest::MarkPrefill => {
-                self.mark_prefill_completed(&context_id).await;
-                RouterResponse::PrefillMarked { success: true }
-            }
-            RouterRequest::MarkFree => {
-                self.free(&context_id).await;
-                RouterResponse::FreeMarked { success: true }
-            }
+            RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {
+                success: self.mark_prefill_completed(&context_id).await.is_ok(),
+            },
+            RouterRequest::MarkFree => RouterResponse::FreeMarked {
+                success: self.free(&context_id).await.is_ok(),
+            },
         };
 
         let response = Annotated::from_data(response);
@@ -541,7 +591,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                 let wrapped_stream = Box::pin(async_stream::stream! {
                     if let Some(first_item) = response_stream.next().await {
-                        chooser.mark_prefill_completed(&context_id).await;
+                        if let Err(e) = chooser.mark_prefill_completed(&context_id).await {
+                            tracing::warn!("Failed to mark prefill completed for request {context_id}: {e:?}");
+                        }
                         yield first_item;
                     }
 
@@ -549,7 +601,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         yield item;
                     }
 
-                    chooser.free(&context_id).await;
+                    if let Err(e) = chooser.free(&context_id).await {
+                        tracing::warn!("Failed to free request {context_id}: {e:?}");
+                    }
                 });
                 Ok(ResponseStream::new(wrapped_stream, stream_context))
             }

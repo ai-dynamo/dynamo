@@ -9,21 +9,21 @@ use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
+use crate::DistributedRuntime as PyDistributedRuntime;
 use crate::llm::block_manager::BlockManagerBuilder;
 use crate::llm::block_manager::{
-    distributed::KvbmLeader as PyKvbmLeader, vllm::connector::leader::slot::VllmConnectorSlot,
-    vllm::KvbmRequest, VllmBlockManager,
+    VllmBlockManager, distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest,
+    vllm::connector::leader::slot::VllmConnectorSlot,
 };
-use crate::DistributedRuntime as PyDistributedRuntime;
 use dynamo_runtime::metrics::prometheus_names::kvbm_connector;
 
 use dynamo_llm::block_manager::{
+    BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
     block::{
         data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
         locality::Logical,
     },
     connector::*,
-    BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 use std::sync::{Arc, OnceLock};
@@ -218,7 +218,9 @@ impl Leader for KvConnectorLeader {
         );
 
         if slot.state() == SlotState::SkippedPrefill || slot.state() == SlotState::SkippedDecode {
-            tracing::debug!("slot is in the SkippedPrefill or SkippedDecode state; will resume from skipped and return early");
+            tracing::debug!(
+                "slot is in the SkippedPrefill or SkippedDecode state; will resume from skipped and return early"
+            );
             match slot.state() {
                 SlotState::SkippedPrefill => {
                     slot.mark_as_prefilling(self.iteration_counter)?;

@@ -48,7 +48,7 @@ spec:
       pvc:
         create: false
         name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data/profiling_results
+        mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1

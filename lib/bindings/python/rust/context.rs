@@ -3,8 +3,8 @@
 
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 
-use dynamo_runtime::pipeline::context::Controller;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
+use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
