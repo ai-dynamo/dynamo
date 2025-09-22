@@ -411,7 +411,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    // Convert C strings up-front to owned Strings we can move across threads.
+    // Convert incoming C strings up front.
     let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -426,6 +426,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             return DynamoLlmResult::ERR;
         }
     };
+
     let model_name = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -434,7 +435,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    // Capture flags
+    // Flags to move into closures.
     let use_kv_routing_c = use_kv_routing;
     let busy_threshold_c = busy_threshold;
     let overlap_score_weight_c = overlap_score_weight;
@@ -442,30 +443,26 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     let use_kv_events_c = use_kv_events;
     let router_replica_sync_c = router_replica_sync;
 
-    // We’ll use the global worker’s runtime just to host a spawn_blocking.
-    // Inside that blocking thread we build a tiny Tokio runtime to run the async work.
-    let host_rt = wk.runtime().clone();
-    let secondary = host_rt.secondary().clone();
+    // Use the worker’s runtime to host the operation.
+    let rt = wk.runtime();
+    let secondary = rt.secondary().clone();
 
-    // Do the heavy work on a blocking thread to allow blocking drops.
+    // Run on the runtime, but mark the region as “blocking allowed”.
     let res: Result<usize, String> = secondary.block_on(async move {
-        tokio::task::spawn_blocking(move || -> Result<usize, String> {
-            // Tiny throwaway runtime dedicated to the async creation
+        tokio::task::block_in_place(|| -> Result<usize, String> {
+            // Tiny throwaway runtime to drive the async builder.
             let rt2 = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| format!("build inner runtime: {e:?}"))?;
 
-            // Run the async creation inside rt2
-            let out: Result<usize, String> = rt2.block_on(async move {
-                // Ensure DRT exists (idempotent)
-                DRT.get_or_try_init(async {
-                    DistributedRuntime::from_settings(host_rt.clone()).await
-                })
-                .await
-                .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))?;
+            // Run async pipeline creation inside rt2.
+            let out = rt2.block_on(async {
+                // Ensure global DRT (so builder won’t spin its own transient one).
+                DRT.get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
+                    .await
+                    .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))?;
 
-                // Router mode / thresholds
                 let router_mode = if use_kv_routing_c {
                     RouterMode::KV
                 } else {
@@ -477,7 +474,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                     Some(busy_threshold_c)
                 };
 
-                // Optional KV router config
                 let kv_router_config = if use_kv_routing_c {
                     use dynamo_llm::kv_router::KvRouterConfig;
                     Some(KvRouterConfig::new(
@@ -501,7 +497,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                     None
                 };
 
-                // Build the pipeline
                 let pipeline = create_worker_selection_pipeline_chat(
                     &namespace,
                     &component_name,
@@ -513,23 +508,19 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 .await
                 .map_err(|e| format!("Failed to create worker selection pipeline: {e:?}"))?;
 
-                // Wrap and return pointer as usize (Send)
                 let handle = WorkerSelectionPipeline { pipeline };
                 let raw: *mut WorkerSelectionPipeline = Box::into_raw(Box::new(handle));
                 Ok(raw as usize)
             });
 
-            // Make sure *this* runtime’s blocking shutdown happens off the async path
+            // Drop the inner runtime in a context where blocking is allowed.
             rt2.shutdown_background();
 
             out
         })
-        .await
-        .map_err(|e| format!("spawn_blocking join error: {e:?}"))?
     });
 
-    // Unpack result
-    let pipeline_ptr = match res {
+    let pipeline_ptr: *mut WorkerSelectionPipeline = match res {
         Ok(raw) => raw as *mut WorkerSelectionPipeline,
         Err(msg) => {
             eprintln!("{msg}");
