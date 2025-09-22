@@ -72,7 +72,7 @@ This ensures you’ll never fail DCO again.
     2. Git CLI
        You can always sign-off commits automatically using a commit template:
        1. Create ~/.git-commit-template.txt with:
-        ```text 
+        ```
           Signed-off-by: Your Name <your.email@example.com>
          ```
     2. Tell Git to use it:
