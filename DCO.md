@@ -1,15 +1,15 @@
 # ✅ Fixing DCO Check Failures
 
-The **Developer Certificate of Origin (DCO)** check ensures all commits are signed off.  
-If your PR fails the DCO check, here’s how to fix it.
+The **Developer Certificate of Origin (DCO)** check ensures all commits are signed off.
+ If your PR fails the DCO check, here’s how to fix it.
 
 ---
 
 ## 🖥️ Option 1: Fix via GitHub Web Editor
  ⚠️ Works only if your PR has 1 commit.
 
-1. Go to your **Pull Request** → **Commits** tab.  
-2. Click the **⋯ menu** → **Edit commit message**.  
+1. Go to your **Pull Request** → **Commits** tab.
+2. Click the **⋯ menu** → **Edit commit message**.
 3. Add this line at the end of the commit message:
 
    ```text
