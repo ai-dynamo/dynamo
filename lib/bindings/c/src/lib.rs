@@ -441,6 +441,11 @@ fn ensure_host_started() -> Result<&'static Host, String> {
                             router_replica_sync,
                             resp,
                         } => {
+                            tracing::info!(
+                                target: "capi",
+                                "CreatePipeline ns={:?} component={:?} model={:?} use_kv_routing={:?} busy_threshold={:?} overlap_score_weight={:?} router_temperature={:?} use_kv_events={:?} router_replica_sync={:?}",
+                                namespace, component, model, use_kv_routing, busy_threshold, overlap_score_weight, router_temperature, use_kv_events, router_replica_sync
+                            );
                             let fut = async {
                                 let router_mode = if use_kv_routing {
                                     RouterMode::KV
