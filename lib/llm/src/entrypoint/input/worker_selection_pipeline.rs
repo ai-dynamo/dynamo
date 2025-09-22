@@ -420,7 +420,7 @@ pub async fn create_worker_selection_pipeline_chat(
     // if it's called multiple times, you'll leak once per call. If that's a concern,
     // switch to a global OnceCell/OnceLock to cache one instance instead.
     let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings(true);
+    let dst_config = DistributedConfig::from_settings(false);
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
     let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
@@ -542,7 +542,7 @@ where
 
     // Create DistributedRuntime
     let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings(true);
+    let dst_config = DistributedConfig::from_settings(false);
     let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
 
     // Create Component and Client
