@@ -28,7 +28,6 @@ Need high performance/load testing? Server-side.
 Just quick testing/comparison? Client-side.
 
 ### Use Client-Side Benchmarking When:
-- You already have an HTTP endpoint ready to go
 - You want to quickly test deployments
 - You want immediate access to results on your local machine
 - You're comparing external services or deployments (not necessarily just Dynamo deployments)
@@ -305,7 +304,7 @@ The server-side benchmarking solution:
 
 ## Prerequisites
 
-1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](../../guides/dynamo_deploy/README.md))
+1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](../guides/dynamo_deploy/README.md))
 2. **Storage and service account** PersistentVolumeClaim and service account configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
@@ -327,7 +326,7 @@ kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
 
 # Check job status
-kubectl get jobs -n $NAMESPACE
+kubectl get job dynamo-benchmark -n $NAMESPACE
 ```
 
 #### Customize the job configuration
@@ -365,7 +364,7 @@ SERVICE_URL=vllm-agg-frontend:8000
 SERVICE_URL=vllm-agg-frontend.production.svc.cluster.local:8000
 ```
 
-**DNS Format**: `service-name.namespace.svc.cluster.local:port`
+**DNS Format**: `<service-name>.<namespace>.svc.cluster.local:port`
 
 This allows you to:
 - Benchmark multiple services across different namespaces in a single job
