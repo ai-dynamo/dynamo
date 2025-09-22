@@ -63,6 +63,8 @@ OSL=$7
 CONCURRENCIES=$8
 REQUEST_RATE=$9
 
+RETRIES=2 # defaults to retry the job 2 times to avoid transient errors
+
 # Should not need retries
 
 profiler_args="type=vllm; isl=${ISL}; osl=${OSL}; concurrencies=${CONCURRENCIES}; req-rate=${REQUEST_RATE}"
@@ -86,6 +88,8 @@ command=(
     --enable-multiple-frontends --num-additional-frontends $N_ADDITIONAL_FRONTENDS ${USE_INIT_LOCATIONS[@]}
 
     --profiler "${profiler_args}"
+
+    --retries $RETRIES
 )
 
 "${command[@]}"

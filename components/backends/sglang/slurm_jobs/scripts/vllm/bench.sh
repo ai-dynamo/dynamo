@@ -25,7 +25,11 @@ chosen_req_rate=$7
 
 echo "Config ${chosen_isl}; ${chosen_osl}; ${chosen_concurrencies[@]}; ${chosen_req_rate}"
 
-wait_for_model $head_node $head_port $n_prefill $n_decode 5 900 60
+wait_for_model_timeout=1500 # 25 minutes
+wait_for_model_check_interval=5 # check interval -> 5s
+wait_for_model_report_interval=60 # wait_for_model report interval -> 60s
+
+wait_for_model $head_node $head_port $n_prefill $n_decode $wait_for_model_check_interval $wait_for_model_timeout $wait_for_model_report_interval
 
 set -e
 # Warmup the model
