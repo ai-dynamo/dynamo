@@ -55,6 +55,7 @@ jobs:
           docker system prune -af
       - name: Build image
         env:
+          MAX_JOBS: 6
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -62,6 +63,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           ./container/build.sh --tag ${{ matrix.framework }}:latest \
+            --build-arg MAX_JOBS=${MAX_JOBS} \
             --target ${{ matrix.target }} \
             --framework ${{ matrix.framework }} \
             --use-sccache \
