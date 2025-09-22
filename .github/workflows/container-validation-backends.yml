@@ -17,7 +17,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      docs: ${{ steps.filter.outputs.skip_ci }}
+      skip_ci: ${{ steps.filter.outputs.skip_ci }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
