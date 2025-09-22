@@ -327,19 +327,13 @@ impl TryFrom<NvCreateCompletionResponse> for inference::ModelInferResponse {
         let mut finish_reason = vec![];
         for choice in &response.inner.choices {
             text_output.push(choice.text.clone());
-            if let Some(reason) = choice.finish_reason.as_ref() {
-                match reason {
-                    CompletionFinishReason::Stop => {
-                        finish_reason.push("stop".to_string());
-                    }
-                    CompletionFinishReason::Length => {
-                        finish_reason.push("length".to_string());
-                    }
-                    CompletionFinishReason::ContentFilter => {
-                        finish_reason.push("content_filter".to_string());
-                    }
-                }
-            }
+            let reason_str = match choice.finish_reason.as_ref() {
+                Some(CompletionFinishReason::Stop) => "stop",
+                Some(CompletionFinishReason::Length) => "length",
+                Some(CompletionFinishReason::ContentFilter) => "content_filter",
+                None => "",
+            };
+            finish_reason.push(reason_str.to_string());
         }
         outputs.push(inference::model_infer_response::InferOutputTensor {
             name: "text_output".to_string(),
