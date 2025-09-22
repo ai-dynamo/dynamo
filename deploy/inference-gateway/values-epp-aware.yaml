@@ -28,3 +28,7 @@ epp:
       value: "backend"
     - name: DYNAMO_KV_BLOCK_SIZE
       value: 512
+    - name: RUST_BACKTRACE
+      value: 1
+    - name: RUST_LOG
+      value: tokio=trace

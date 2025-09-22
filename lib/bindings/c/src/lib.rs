@@ -19,6 +19,9 @@ use dynamo_runtime::{
     DistributedRuntime, Worker,
     pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn},
 };
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
@@ -42,6 +45,39 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+/* ---------- small helpers: panic guard + local runtime ---------- */
+
+#[inline]
+fn ffi_guard<F: FnOnce() -> DynamoLlmResult>(f: F) -> DynamoLlmResult {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Rust panic crossed FFI; returning ERR");
+            DynamoLlmResult::ERR
+        }
+    }
+}
+
+/// Run async work on a fresh single-threaded Tokio runtime on a plain OS thread.
+/// This avoids Tokio's "cannot drop a runtime from within an async context" panic.
+fn run_on_local_runtime<T, Fut>(op: impl FnOnce() -> Fut + Send + 'static) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::spawn(move || -> Result<T, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build local runtime: {e:?}"))?;
+        rt.block_on(op())
+    })
+    .join()
+    .map_err(|_| "panic in local runtime thread".to_string())?
+}
+
+/* ------------------------------ init ------------------------------ */
+
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
@@ -51,76 +87,79 @@ pub unsafe extern "C" fn dynamo_llm_init(
     worker_id: i64,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
-    initialize_tracing();
-    let wk = match WK.get_or_try_init(Worker::from_settings) {
-        Ok(wk) => wk.clone(),
-        Err(e) => {
-            eprintln!("Failed to initialize runtime: {:?}", e);
-            return DynamoLlmResult::ERR;
-        }
-    };
-    let rt = wk.runtime();
-    let secondary = rt.secondary().clone();
-    let result = secondary.block_on(async {
-        // Initialize the distributed runtime
-        match DRT
-            .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
-            .await
-        {
-            Ok(_) => Ok(()),
+    ffi_guard(|| {
+        initialize_tracing();
+
+        let wk = match WK.get_or_try_init(Worker::from_settings) {
+            Ok(wk) => wk.clone(),
             Err(e) => {
-                eprintln!("Failed to initialize distributed runtime: {:?}", e);
-                Err(DynamoLlmResult::ERR)
+                eprintln!("Failed to initialize runtime: {:?}", e);
+                return DynamoLlmResult::ERR;
             }
-        }
-    });
-    let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(e) => {
-            eprintln!("Failed to convert C string to Rust string: {:?}", e);
+        };
+
+        // Convert C strings to owned Rust Strings before we jump threads.
+        let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                eprintln!("Failed to convert C string to Rust string: {:?}", e);
+                return DynamoLlmResult::ERR;
+            }
+        };
+        let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                eprintln!("Failed to convert C string to Rust string: {:?}", e);
+                return DynamoLlmResult::ERR;
+            }
+        };
+
+        // Initialize DistributedRuntime on an isolated runtime/thread.
+        let rt = wk.runtime().clone();
+        let drt_init_res = run_on_local_runtime(move || async move {
+            DRT.get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))
+        });
+
+        if let Err(msg) = drt_init_res {
+            eprintln!("{msg}");
             return DynamoLlmResult::ERR;
         }
-    };
 
-    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(e) => {
-            eprintln!("Failed to convert C string to Rust string: {:?}", e);
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    match result {
-        Ok(_) => match KV_PUB.get_or_try_init(move || {
+        // Initialize the KV publisher once.
+        match KV_PUB.get_or_try_init(move || {
             dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
-                eprintln!("Failed to initialize distributed runtime: {:?}", e);
+                eprintln!("Failed to create KV publisher: {:?}", e);
                 DynamoLlmResult::ERR
             }
-        },
-        Err(e) => e,
-    }
+        }
+    })
 }
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+/* ---------------------------- shutdown ---------------------------- */
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
-    let Some(wk) = WK.get().cloned() else {
-        eprintln!("Runtime not initialized");
-        return DynamoLlmResult::ERR;
-    };
-    let res = catch_unwind(AssertUnwindSafe(|| {
-        // bounce to a plain thread to avoid Tokio’s guard
-        let _ = std::thread::spawn(move || wk.runtime().shutdown()).join();
-    }));
-    if res.is_err() {
-        eprintln!("Runtime shutdown panicked; ignoring");
-        return DynamoLlmResult::ERR;
-    }
-    DynamoLlmResult::OK
+    ffi_guard(|| {
+        let Some(wk) = WK.get().cloned() else {
+            eprintln!("Runtime not initialized");
+            return DynamoLlmResult::ERR;
+        };
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            // bounce to a plain thread to avoid Tokio’s guard
+            let _ = std::thread::spawn(move || wk.runtime().shutdown()).join();
+        }));
+        if res.is_err() {
+            eprintln!("Runtime shutdown panicked; ignoring");
+            return DynamoLlmResult::ERR;
+        }
+        DynamoLlmResult::OK
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -128,12 +167,7 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
     DynamoLlmResult::OK
 }
 
-// instantiate a kv publisher
-// this will bring up the task to publish and the channels to await publishing events
-// the [`dynamo_kv_publish_store_event`] call will use a handle to the publisher to send events
-// store and the [`dynamo_kv_event_create_removed`] will create remove events
-// these call mus be driving by external c++ threads that are consuming the kv events from the
-// c++ executor api
+/* ---------------------- KV publisher helpers ---------------------- */
 
 fn dynamo_create_kv_publisher(
     namespace: String,
@@ -249,6 +283,8 @@ pub struct DynamoKvStoredEventParams {
     pub lora_id: u64,
 }
 
+/* --------------------------- KV FFI --------------------------- */
+
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
 /// has a parent hash or not. nullptr is used to represent no parent hash
@@ -262,31 +298,39 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     parent_hash: *const u64,
     lora_id: u64,
 ) -> DynamoLlmResult {
-    let parent_hash = {
-        if parent_hash.is_null() {
-            None
-        } else {
-            Some(unsafe { *parent_hash })
+    ffi_guard(|| {
+        let parent_hash = {
+            if parent_hash.is_null() {
+                None
+            } else {
+                Some(unsafe { *parent_hash })
+            }
+        };
+        let kv_params = DynamoKvStoredEventParams {
+            event_id,
+            token_ids,
+            num_block_tokens,
+            block_ids,
+            num_blocks,
+            parent_hash,
+            lora_id,
+        };
+        let publisher = match KV_PUB.get() {
+            Some(p) => p,
+            None => {
+                eprintln!("KV publisher not initialized");
+                return DynamoLlmResult::ERR;
+            }
+        };
+        let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
+        match publisher.publish(event) {
+            Ok(_) => DynamoLlmResult::OK,
+            Err(e) => {
+                eprintln!("Error publishing stored kv event {:?}", e);
+                DynamoLlmResult::ERR
+            }
         }
-    };
-    let kv_params = DynamoKvStoredEventParams {
-        event_id,
-        token_ids,
-        num_block_tokens,
-        block_ids,
-        num_blocks,
-        parent_hash,
-        lora_id,
-    };
-    let publisher = KV_PUB.get().unwrap();
-    let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
-    match publisher.publish(event) {
-        Ok(_) => DynamoLlmResult::OK,
-        Err(e) => {
-            eprintln!("Error publishing stored kv event {:?}", e);
-            DynamoLlmResult::ERR
-        }
-    }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -295,49 +339,27 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
     block_ids: *const u64,
     num_blocks: usize,
 ) -> DynamoLlmResult {
-    let publisher = KV_PUB.get().unwrap();
-    let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
-    match publisher.publish(event) {
-        Ok(_) => DynamoLlmResult::OK,
-        Err(e) => {
-            eprintln!("Error publishing removed kv event {:?}", e);
-            DynamoLlmResult::ERR
+    ffi_guard(|| {
+        let publisher = match KV_PUB.get() {
+            Some(p) => p,
+            None => {
+                eprintln!("KV publisher not initialized");
+                return DynamoLlmResult::ERR;
+            }
+        };
+        let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
+        match publisher.publish(event) {
+            Ok(_) => DynamoLlmResult::OK,
+            Err(e) => {
+                eprintln!("Error publishing removed kv event {:?}", e);
+                DynamoLlmResult::ERR
+            }
         }
-    }
+    })
 }
-// Need to setup etcd and nats to run these tests
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use std::ffi::CString;
 
-//     #[test]
-//     fn test_dynamo_llm_init() {
-//         // Create C-compatible strings
-//         let namespace = CString::new("test_namespace").unwrap();
-//         let component = CString::new("test_component").unwrap();
+/* ----------------- worker selection pipeline ----------------- */
 
-//         // Call the init function
-//         let result = unsafe {
-//             dynamo_llm_init(
-//                 namespace.as_ptr(),
-//                 component.as_ptr(),
-//                 1,  // worker_id
-//                 32, // kv_block_size
-//             )
-//         };
-
-//         assert_eq!(result as u32, DynamoLlmResult::OK as u32);
-
-//         assert!(WK.get().is_some());
-
-//         let shutdown_result = dynamo_llm_shutdown();
-//         assert_eq!(shutdown_result as u32, DynamoLlmResult::OK as u32);
-//     }
-// }
-
-//
-// Apis related to the best worker selection.
 // Worker selection pipeline handle containing the actual pipeline
 pub struct WorkerSelectionPipeline {
     pipeline:
@@ -372,6 +394,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     router_replica_sync: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
+    // Ensure runtime initialized
     let wk = match WK.get() {
         Some(wk) => wk,
         None => {
@@ -380,104 +403,126 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    let rt = wk.runtime();
-    let secondary = rt.secondary().clone();
+    let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("Failed to convert namespace C string: {:?}", e);
+            return DynamoLlmResult::ERR;
+        }
+    };
 
-    let result = secondary.block_on(async {
-        // Convert C strings to Rust strings
-        let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to convert namespace C string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
+    let component_name = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("Failed to convert component C string: {:?}", e);
+            return DynamoLlmResult::ERR;
+        }
+    };
 
-        let component_name = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to convert component C string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
+    let model_name = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("Failed to convert model_name C string: {:?}", e);
+            return DynamoLlmResult::ERR;
+        }
+    };
 
-        let model_name = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to convert model_name C string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
+    // Capture values we need inside the async closure
+    let use_kv_routing_c = use_kv_routing;
+    let busy_threshold_c = busy_threshold;
+    let overlap_score_weight_c = overlap_score_weight;
+    let router_temperature_c = router_temperature;
+    let use_kv_events_c = use_kv_events;
+    let router_replica_sync_c = router_replica_sync;
 
-        // Determine router mode and busy threshold
-        let router_mode = if use_kv_routing {
+    // Clone the runtime handle so we can ensure DRT inside the closure
+    let rt = wk.runtime().clone();
+
+    // Run the async creation on a local runtime thread, returning a usize (Send) instead of a raw ptr
+    let join_res: Result<usize, String> = run_on_local_runtime(move || async move {
+        // Ensure DRT exists (idempotent)
+        DRT.get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
+            .await
+            .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))?;
+
+        // Router mode / thresholds
+        let router_mode = if use_kv_routing_c {
             RouterMode::KV
         } else {
             RouterMode::RoundRobin
         };
 
-        let busy_threshold_opt = if busy_threshold < 0.0 {
+        let busy_threshold_opt = if busy_threshold_c < 0.0 {
             None
         } else {
-            Some(busy_threshold)
+            Some(busy_threshold_c)
         };
 
-        // Create KV router config if using KV routing
-        let kv_router_config = if use_kv_routing {
+        // Optional KV router config
+        let kv_router_config = if use_kv_routing_c {
             use dynamo_llm::kv_router::KvRouterConfig;
-
             Some(KvRouterConfig::new(
-                if overlap_score_weight < 0.0 {
+                if overlap_score_weight_c < 0.0 {
                     None
                 } else {
-                    Some(overlap_score_weight)
+                    Some(overlap_score_weight_c)
                 },
-                if router_temperature < 0.0 {
+                if router_temperature_c < 0.0 {
                     None
                 } else {
-                    Some(router_temperature)
+                    Some(router_temperature_c)
                 },
-                Some(use_kv_events),
-                Some(router_replica_sync),
-                None, // max_num_batched_tokens - use default
-                None, // router_snapshot_threshold - use default
-                None, // router_reset_states - use default
+                Some(use_kv_events_c),
+                Some(router_replica_sync_c),
+                None, // max_num_batched_tokens (default)
+                None, // router_snapshot_threshold (default)
+                None, // router_reset_states (default)
             ))
         } else {
             None
         };
 
-        // Create the worker selection pipeline
-        let pipeline = match create_worker_selection_pipeline_chat(
-            namespace,
-            component_name,
-            model_name,
+        // Build the pipeline
+        let pipeline = create_worker_selection_pipeline_chat(
+            &namespace,
+            &component_name,
+            &model_name,
             router_mode,
             busy_threshold_opt,
             kv_router_config,
         )
         .await
-        {
-            Ok(pipeline) => pipeline,
-            Err(e) => {
-                eprintln!("Failed to create worker selection pipeline: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
+        .map_err(|e| format!("Failed to create worker selection pipeline: {e:?}"))?;
 
-        // Wrap pipeline in handle struct and box it
-        let pipeline_handle = WorkerSelectionPipeline { pipeline };
-        let boxed_pipeline = Box::new(pipeline_handle);
-        let pipeline_ptr = Box::into_raw(boxed_pipeline);
-
-        unsafe {
-            *pipeline_out = pipeline_ptr;
-        }
-
-        DynamoLlmResult::OK
+        // Wrap and leak to raw pointer; return as usize (Send)
+        let handle = WorkerSelectionPipeline { pipeline };
+        let raw: *mut WorkerSelectionPipeline = Box::into_raw(Box::new(handle));
+        Ok(raw as usize)
     });
 
-    result
+    // Cast usize back to the pointer type and return it
+    let pipeline_ptr: *mut WorkerSelectionPipeline = match join_res {
+        Ok(raw) => raw as *mut WorkerSelectionPipeline,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    if pipeline_out.is_null() {
+        eprintln!("pipeline_out pointer is null");
+        // Avoid leaking the just-created handle if caller gave us a null out-param
+        unsafe {
+            drop(Box::from_raw(pipeline_ptr));
+        }
+        return DynamoLlmResult::ERR;
+    }
+
+    unsafe {
+        *pipeline_out = pipeline_ptr;
+    }
+
+    DynamoLlmResult::OK
 }
 
 /// Destroy a worker selection pipeline and free its memory
@@ -488,15 +533,15 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
     pipeline: *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
-    if pipeline.is_null() {
-        eprintln!("Pipeline pointer is null");
-        return DynamoLlmResult::ERR;
-    }
-
-    // Convert back to Box with correct type and let it drop to free memory
-    let _boxed_pipeline: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
-
-    DynamoLlmResult::OK
+    ffi_guard(|| {
+        if pipeline.is_null() {
+            eprintln!("Pipeline pointer is null");
+            return DynamoLlmResult::ERR;
+        }
+        // Convert back to Box with correct type and let it drop to free memory
+        let _boxed_pipeline: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
+        DynamoLlmResult::OK
+    })
 }
 
 /// Query worker selection and return annotated request
@@ -518,107 +563,109 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     token_count_out: *mut usize,
     annotated_request_json_out: *mut *mut c_char,
 ) -> DynamoLlmResult {
-    if pipeline.is_null() {
-        eprintln!("Pipeline pointer is null");
-        return DynamoLlmResult::ERR;
-    }
-
-    let wk = match WK.get() {
-        Some(wk) => wk,
-        None => {
-            eprintln!("Runtime not initialized - call dynamo_llm_init first");
+    ffi_guard(|| {
+        if pipeline.is_null() {
+            eprintln!("Pipeline pointer is null");
             return DynamoLlmResult::ERR;
         }
-    };
 
-    let rt = wk.runtime();
-    let secondary = rt.secondary().clone();
-
-    let result = secondary.block_on(async {
-        // Convert C string to Rust string
-        let request_json = match unsafe { CStr::from_ptr(request_json_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to convert request JSON C string: {:?}", e);
+        let wk = match WK.get() {
+            Some(wk) => wk,
+            None => {
+                eprintln!("Runtime not initialized - call dynamo_llm_init first");
                 return DynamoLlmResult::ERR;
             }
         };
 
-        // Parse JSON into NvCreateChatCompletionRequest
-        let original_request: NvCreateChatCompletionRequest =
-            match serde_json::from_str(request_json) {
-                Ok(req) => req,
+        let rt = wk.runtime();
+        let secondary = rt.secondary().clone();
+
+        let result = secondary.block_on(async {
+            // Convert C string to Rust string
+            let request_json = match unsafe { CStr::from_ptr(request_json_c_str) }.to_str() {
+                Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Failed to parse request JSON: {:?}", e);
+                    eprintln!("Failed to convert request JSON C string: {:?}", e);
                     return DynamoLlmResult::ERR;
                 }
             };
 
-        // Get pipeline reference
-        let pipeline_ref = unsafe { &*pipeline };
+            // Parse JSON into NvCreateChatCompletionRequest
+            let original_request: NvCreateChatCompletionRequest =
+                match serde_json::from_str(request_json) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        eprintln!("Failed to parse request JSON: {:?}", e);
+                        return DynamoLlmResult::ERR;
+                    }
+                };
 
-        // Call the wrapper function
-        let (worker_id, tokens, annotated_request) =
-            match query_worker_selection_and_annotate(&pipeline_ref.pipeline, original_request)
-                .await
-            {
-                Ok(result) => result,
+            // Get pipeline reference
+            let pipeline_ref = unsafe { &*pipeline };
+
+            // Call the wrapper function
+            let (worker_id, tokens, annotated_request) =
+                match query_worker_selection_and_annotate(&pipeline_ref.pipeline, original_request)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("Failed to query worker selection: {:?}", e);
+                        return DynamoLlmResult::ERR;
+                    }
+                };
+
+            // Convert annotated request back to JSON
+            let annotated_json = match serde_json::to_string(&annotated_request) {
+                Ok(json) => json,
                 Err(e) => {
-                    eprintln!("Failed to query worker selection: {:?}", e);
+                    eprintln!("Failed to serialize annotated request: {:?}", e);
                     return DynamoLlmResult::ERR;
                 }
             };
 
-        // Convert annotated request back to JSON
-        let annotated_json = match serde_json::to_string(&annotated_request) {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("Failed to serialize annotated request: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        // Allocate memory for tokens array
-        let tokens_ptr = if tokens.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            let tokens_len = tokens.len();
-            let layout = std::alloc::Layout::array::<u32>(tokens_len).unwrap();
-            let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
-            if ptr.is_null() {
-                eprintln!("Failed to allocate memory for tokens");
-                return DynamoLlmResult::ERR;
-            }
-            // Copy tokens to allocated memory
-            unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, tokens_len) };
-            ptr
-        };
-
-        // Allocate memory for annotated request JSON string
-        let json_cstring = match std::ffi::CString::new(annotated_json) {
-            Ok(cstr) => cstr,
-            Err(e) => {
-                eprintln!("Failed to create C string for annotated JSON: {:?}", e);
-                if !tokens_ptr.is_null() {
-                    let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-                    unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
+            // Allocate memory for tokens array
+            let tokens_ptr = if tokens.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                let tokens_len = tokens.len();
+                let layout = std::alloc::Layout::array::<u32>(tokens_len).unwrap();
+                let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
+                if ptr.is_null() {
+                    eprintln!("Failed to allocate memory for tokens");
+                    return DynamoLlmResult::ERR;
                 }
-                return DynamoLlmResult::ERR;
+                // Copy tokens to allocated memory
+                unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, tokens_len) };
+                ptr
+            };
+
+            // Allocate memory for annotated request JSON string
+            let json_cstring = match std::ffi::CString::new(annotated_json) {
+                Ok(cstr) => cstr,
+                Err(e) => {
+                    eprintln!("Failed to create C string for annotated JSON: {:?}", e);
+                    if !tokens_ptr.is_null() {
+                        let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                        unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
+                    }
+                    return DynamoLlmResult::ERR;
+                }
+            };
+
+            // Set output parameters
+            unsafe {
+                *worker_instance_id_out = worker_id;
+                *token_ids_out = tokens_ptr;
+                *token_count_out = tokens.len();
+                *annotated_request_json_out = json_cstring.into_raw();
             }
-        };
 
-        // Set output parameters
-        unsafe {
-            *worker_instance_id_out = worker_id;
-            *token_ids_out = tokens_ptr;
-            *token_count_out = tokens.len();
-            *annotated_request_json_out = json_cstring.into_raw();
-        }
+            DynamoLlmResult::OK
+        });
 
-        DynamoLlmResult::OK
-    });
-
-    result
+        result
+    })
 }
 
 /// Free memory allocated by dynamo_query_worker_selection_and_annotate
@@ -632,23 +679,25 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     token_count: usize,
     annotated_request_json: *mut c_char,
 ) -> DynamoLlmResult {
-    // Free tokens array if not null
-    if !token_ids.is_null() && token_count > 0 {
-        let layout = match std::alloc::Layout::array::<u32>(token_count) {
-            Ok(layout) => layout,
-            Err(_) => {
-                eprintln!("Invalid layout for tokens array");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        unsafe { std::alloc::dealloc(token_ids as *mut u8, layout) };
-    }
+    ffi_guard(|| {
+        // Free tokens array if not null
+        if !token_ids.is_null() && token_count > 0 {
+            let layout = match std::alloc::Layout::array::<u32>(token_count) {
+                Ok(layout) => layout,
+                Err(_) => {
+                    eprintln!("Invalid layout for tokens array");
+                    return DynamoLlmResult::ERR;
+                }
+            };
+            unsafe { std::alloc::dealloc(token_ids as *mut u8, layout) };
+        }
 
-    // Free JSON string if not null
-    if !annotated_request_json.is_null() {
-        let _cstring = unsafe { std::ffi::CString::from_raw(annotated_request_json) };
-        // CString will be automatically freed when it goes out of scope
-    }
+        // Free JSON string if not null
+        if !annotated_request_json.is_null() {
+            let _cstring = unsafe { std::ffi::CString::from_raw(annotated_request_json) };
+            // CString will be automatically freed when it goes out of scope
+        }
 
-    DynamoLlmResult::OK
+        DynamoLlmResult::OK
+    })
 }
