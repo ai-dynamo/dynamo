@@ -31,7 +31,7 @@ RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
 # Run linting
 RUN golangci-lint run --timeout=5m
 
-# Test stage  
+# Test stage
 FROM base AS tester
 
 # Install make if not present
