@@ -222,7 +222,11 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
                     }
                     match &input.contents {
                         Some(content) => {
-                            let bytes = &content.bytes_contents[0];
+                            let bytes = content.bytes_contents.first().ok_or_else(|| {
+                                Status::invalid_argument(
+                                    "'text_input' must contain exactly one element",
+                                )
+                            })?;
                             text_input = Some(String::from_utf8_lossy(bytes).to_string());
                         }
                         None => {
@@ -257,7 +261,11 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateCompletionRequest {
                     }
                     match &input.contents {
                         Some(content) => {
-                            stream = content.bool_contents[0];
+                            stream = *content.bool_contents.first().ok_or_else(|| {
+                                Status::invalid_argument(
+                                    "'stream' must contain exactly one element",
+                                )
+                            })?;
                         }
                         None => {
                             let raw_input =
