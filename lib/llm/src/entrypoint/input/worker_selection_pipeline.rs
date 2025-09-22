@@ -412,10 +412,17 @@ pub async fn create_worker_selection_pipeline_chat(
         traits::DistributedRuntimeProvider,
     };
 
-    // Create DistributedRuntime
+    // --- IMPORTANT CHANGE ---
+    // Create a fresh Runtime + DistributedRuntime, then *leak* the DistributedRuntime
+    // so it won't be dropped inside an async context (which triggers Tokio's panic).
+    //
+    // This is acceptable here because this function is typically called once at startup;
+    // if it's called multiple times, you'll leak once per call. If that's a concern,
+    // switch to a global OnceCell/OnceLock to cache one instance instead.
     let runtime = Runtime::from_settings()?;
     let dst_config = DistributedConfig::from_settings(true);
-    let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
+    let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
+    let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
     // Create Component and Client
     let ns = distributed_runtime.namespace(namespace)?;
