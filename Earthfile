@@ -13,6 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#######################################################################
+# 🚨 DEPRECATION NOTICE 🚨
+#
+# This Earthfile is being replaced by docker
+# This file is kept temporarily for backward compatibility but will
+# be removed in a future release. Please migrate to the new system.
+#######################################################################
+
 VERSION 0.8
 
 ############### ARTIFACTS TARGETS ##############################
