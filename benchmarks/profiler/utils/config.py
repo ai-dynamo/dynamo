@@ -618,11 +618,11 @@ class SGLangConfigModifier:
         if worker_service.resources.requests is None:
             worker_service.resources.requests = {}
 
-        worker_service.resources.requests["gpu"] = str(tep_size)
+        worker_service.resources.requests["gpu"] = str(min(tep_size, num_gpus_per_node))
 
         # Update limits if they exist
         if worker_service.resources.limits is not None:
-            worker_service.resources.limits["gpu"] = str(tep_size)
+            worker_service.resources.limits["gpu"] = str(min(tep_size, num_gpus_per_node))
 
         if (
             not worker_service.extraPodSpec
@@ -679,11 +679,11 @@ class SGLangConfigModifier:
         if worker_service.resources.requests is None:
             worker_service.resources.requests = {}
 
-        worker_service.resources.requests["gpu"] = str(dep_size)
+        worker_service.resources.requests["gpu"] = str(min(dep_size, num_gpus_per_node))
 
         # Update limits if they exist
         if worker_service.resources.limits is not None:
-            worker_service.resources.limits["gpu"] = str(dep_size)
+            worker_service.resources.limits["gpu"] = str(min(dep_size, num_gpus_per_node))
 
         if (
             not worker_service.extraPodSpec

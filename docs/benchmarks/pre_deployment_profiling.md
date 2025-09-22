@@ -148,8 +148,6 @@ This approach allows you to:
 - Test different model configurations easily
 - Version control your DGD configs alongside your code
 
-> **Important**: For profiling, disagg configs should be run with Grove disabled by adding the annotation `nvidia.com/enable-grove: "false"` to avoid alpha Grove status issues.
-
 **Step 2: Set SLA target**
 
 Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
