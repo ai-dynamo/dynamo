@@ -25,7 +25,7 @@ Dynamo provides two benchmarking approaches to suit different use cases: **clien
 
 ### Use Client-Side Benchmarking When:
 - You already have an HTTP endpoint ready to go
-- You want to quickly test deployments across multiple namespaces
+- You want to quickly test deployments
 - You want immediate access to results on your local machine
 - You're comparing external services or deployments (not necessarily just Dynamo deployments)
 - You need to run benchmarks from your laptop/workstation
@@ -33,7 +33,7 @@ Dynamo provides two benchmarking approaches to suit different use cases: **clien
 → **[Go to Client-Side Benchmarking (Local)](#client-side-benchmarking-local)**
 
 ### Use Server-Side Benchmarking When:
-- You have a local development environment with kubectl access
+- You have a development environment with kubectl access
 - You're doing performance validation with high load/speed requirements
 - You're experiencing timeouts or performance issues with client-side benchmarking
 - You want optimal network performance (no port-forwarding overhead)
@@ -41,7 +41,6 @@ Dynamo provides two benchmarking approaches to suit different use cases: **clien
 - You need isolated execution environments
 - You're doing resource-intensive benchmarking
 - You want persistent result storage in the cluster
-- You're testing deployments within a single Kubernetes namespace
 
 → **[Go to Server-Side Benchmarking (In-Cluster)](#server-side-benchmarking-in-cluster)**
 
@@ -53,10 +52,9 @@ Dynamo provides two benchmarking approaches to suit different use cases: **clien
 | **Network** | Port-forwarding required | Direct service DNS |
 | **Setup** | Quick and simple | Requires cluster resources |
 | **Performance** | Limited by local resources, may timeout under high load | Optimal cluster performance, handles high load |
-| **Namespace Support** | Multiple namespaces | Single namespace per job |
 | **Isolation** | Shared environment | Isolated job execution |
 | **Results** | Local filesystem | Persistent volumes |
-| **Best for** | Cross-namespace testing, light load | High load, single namespace |
+| **Best for** | Light load | High load |
 
 ## What This Tool Does
 
@@ -299,7 +297,7 @@ The server-side benchmarking solution:
 - Stores results persistently using `dynamo-pvc`
 - Provides isolated execution environment with configurable resources
 - Handles high load/speed requirements without timeout issues
-- **Note**: Each benchmark job runs within a single Kubernetes namespace; modify the job configuration to test multiple deployments within that namespace
+- **Note**: Each benchmark job runs within a single Kubernetes namespace, but can benchmark services across multiple namespaces using the full DNS format `svc_name.namespace.svc.cluster.local`
 
 ## Prerequisites
 
@@ -350,6 +348,26 @@ python3 -m deploy.utils.download_pvc_results \
   --no-config
 ```
 
+## Cross-Namespace Service Access
+
+Server-side benchmarking can benchmark services across multiple namespaces from a single job using Kubernetes DNS. When referencing services in other namespaces, use the full DNS format:
+
+```bash
+# Access service in same namespace
+SERVICE_URL=vllm-agg-frontend:8000
+
+# Access service in different namespace
+SERVICE_URL=vllm-agg-frontend.production.svc.cluster.local:8000
+```
+
+**DNS Format**: `service-name.namespace.svc.cluster.local:port`
+
+This allows you to:
+- Benchmark multiple services across different namespaces in a single job
+- Compare services running in different environments (dev, staging, production)
+- Test cross-namespace integrations without port-forwarding
+- Run comprehensive cross-namespace performance comparisons
+
 ## Configuration
 
 The benchmark job is fully configurable through environment variables:
@@ -359,7 +377,7 @@ The benchmark job is fully configurable through environment variables:
 - **NAMESPACE**: Kubernetes namespace where the benchmark will run
 - **MODEL_NAME**: Hugging Face model identifier (e.g., `Qwen/Qwen3-0.6B`)
 - **INPUT_NAME**: Name identifier for the benchmark input (e.g., `qwen-agg`)
-- **SERVICE_URL**: Internal service URL for the DynamoGraphDeployment frontend
+- **SERVICE_URL**: Internal service URL for the DynamoGraphDeployment frontend (use `svc_name.namespace.svc.cluster.local:port` for cross-namespace access)
 - **DOCKER_IMAGE**: Docker image containing the Dynamo benchmarking tools
 
 ## Understanding Your Results
@@ -407,25 +425,6 @@ kubectl get pods -n $NAMESPACE -l job-name=dynamo-benchmark
 # Describe failed pod
 kubectl describe pod <pod-name> -n $NAMESPACE
 ```
-
-## Comparison with Client-Side Benchmarking
-
-| Feature | Client-Side Benchmarking | Server-Side Benchmarking |
-|---------|------------------------|------------------------|
-| Port Forwarding | Required | Not needed |
-| Resource Usage | Local machine | Cluster resources |
-| Network Latency | Higher (port-forward) | Lower (direct service) |
-| Scalability | Limited, may timeout under high load | High, handles high load without timeouts |
-| Namespace Support | Multiple namespaces | Single namespace per job |
-| Isolation | Shared environment | Isolated job |
-| Results Storage | Local filesystem | Persistent PVC |
-
-The server-side approach is recommended for:
-- High load/speed benchmarking (avoids timeout issues)
-- Production benchmarking
-- Single namespace deployment comparisons
-- Resource-constrained environments
-- Automated CI/CD pipelines
 
 ## Troubleshooting
 
