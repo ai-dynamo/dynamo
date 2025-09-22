@@ -41,7 +41,7 @@ ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.89.0
+    RUST_VERSION=1.90.0
 
 # Install Rust using RUSTARCH derived from ARCH_ALT
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
