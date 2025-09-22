@@ -341,7 +341,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
 FROM base AS dev
 
 # Application environment variables
-ENV DYNAMO_HOME=/opt/dynamo \
+ENV DYN_HOME=/opt/dynamo \
     CARGO_TARGET_DIR=/opt/dynamo/target \
     PYTHONPATH=/opt/dynamo:$PYTHONPATH
 

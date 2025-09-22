@@ -62,7 +62,7 @@ flowchart LR
 ***Note*** Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct today. Phi3V support will be added in the future. Disaggregated serving is currently only confirmed for LLaVA (see note below).
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 # Serve a LLaVA 1.5 7B model:
 bash launch/agg.sh --model llava-hf/llava-1.5-7b-hf
 # Serve a Qwen2.5-VL model:
@@ -138,7 +138,7 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 bash launch/disagg.sh --model llava-hf/llava-1.5-7b-hf
 ```
 
@@ -215,7 +215,7 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 bash launch/agg_llama.sh
 ```
 
@@ -281,13 +281,13 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 bash launch/disagg_llama.sh --head-node
 
 # On a separate node that has finished standard dynamo setup, i.e.
 # the worker node needs NATS_SERVER and ETCD_ENDPOINTS environment variables
 # pointing to the head node's external IP address for distributed coordination
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 bash launch/disagg_llama.sh
 ```
 
@@ -358,7 +358,7 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 bash launch/video_agg.sh
 ```
 
@@ -447,7 +447,7 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd ${DYN_HOME:-$DYNAMO_HOME}/examples/multimodal
 bash launch/video_disagg.sh
 ```
 

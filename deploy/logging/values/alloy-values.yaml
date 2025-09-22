@@ -35,7 +35,7 @@ podLogs:
   structuredMetadata:
     pod: pod  # Set structured metadata "pod" from label "pod"
   namespaces:
-    - $DYNAMO_NAMESPACE
+    - $DYN_NAMESPACE
 
 # Collectors
 alloy-singleton:

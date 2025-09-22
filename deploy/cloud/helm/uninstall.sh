@@ -24,15 +24,15 @@ if [[ "$confirm" != "y" ]]; then
 fi
 
 # Step 1: Get all CRDs with the prefix
-DYNAMO_CRDS="$(kubectl get crds -o name | grep 'nvidia.com' | grep 'dynamo' | cut -d'/' -f2)"
+DYN_CRDS="$(kubectl get crds -o name | grep 'nvidia.com' | grep 'dynamo' | cut -d'/' -f2)"
 
-if [ -z "${DYNAMO_CRDS}" ]; then
+if [ -z "${DYN_CRDS}" ]; then
   echo "Dynamo CRDs not found"
   exit 1
 fi
 
 # Step 2: Delete all custom resource instances for each CRD
-for CRD in ${DYNAMO_CRDS}; do
+for CRD in ${DYN_CRDS}; do
   SCOPE=$(kubectl get crd "${CRD}" -o jsonpath='{.spec.scope}')
 
   if [ "$SCOPE" == "Namespaced" ]; then
@@ -49,7 +49,7 @@ echo "Waiting for Dynamo Operator to handle the finalizer removal (30 seconds)..
 sleep 30
 
 # Step 4: Verify all Custom Resources have been removed
-for CRD in ${DYNAMO_CRDS}; do
+for CRD in ${DYN_CRDS}; do
   # Check CRs
 
   echo "Checking instances of ${CRD}"
@@ -59,7 +59,7 @@ done
 # Step 5: Delete the CRDs themselves
 echo "Deleting CRDs..."
 
-for CRD in ${DYNAMO_CRDS}; do
+for CRD in ${DYN_CRDS}; do
   # Delete all CRD's
 
   echo "Deleting CRD: ${CRD}..."

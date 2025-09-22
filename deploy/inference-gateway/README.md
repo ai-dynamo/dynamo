@@ -85,7 +85,7 @@ Sample commands to deploy model:
 cd <dynamo-source-root>/components/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
-Take a note of or change the DYNAMO_IMAGE in the model deployment file.
+Take a note of or change the DYN_IMAGE in the model deployment file.
 
 ### 4. Install Dynamo GAIE helm chart ###
 
@@ -144,7 +144,7 @@ make image-local-push \
 cd deploy/inference-gateway
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
-export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
+export DYN_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
 export EPP_IMAGE=<the-epp-image-you-built>  # i.e. docker.io/lambda108/epp-inference-extension-dynamo:v0.5.1-1
 
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie \
@@ -153,7 +153,7 @@ helm upgrade --install dynamo-gaie ./helm/dynamo-gaie \
   -f ./values-epp-aware.yaml \
   --set eppAware.enabled=true \
   --set-string eppAware.eppImage=$EPP_IMAGE \
-  --set-string eppAware.sidecar.image=$DYNAMO_IMAGE
+  --set-string eppAware.sidecar.image=${DYN_IMAGE:-$DYNAMO_IMAGE}
 ```
 
 

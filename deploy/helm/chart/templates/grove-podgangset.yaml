@@ -100,7 +100,7 @@ spec:
               value: "{{ $.Values.natsAddr }}"
             {{- end }}
             {{- if $serviceSpec.componentType | eq "frontend" }}
-            - name: DYNAMO_PORT
+            - name: DYN_PORT
               value: "{{ $.Values.dynamoPort | default 8000 }}"
             - name: DYN_HTTP_PORT
               value: "{{ $.Values.dynamoPort | default 8000 }}"
@@ -167,7 +167,7 @@ spec:
                 command:
                   - /bin/sh
                   - -c
-                  - curl -s http://localhost:${DYNAMO_PORT}/health | jq -e ".status == \"healthy\""
+                  - curl -s http://localhost:${DYN_PORT}/health | jq -e ".status == \"healthy\""
               {{- else if $serviceSpec.componentType | eq "worker" }}
               httpGet:
                 path: /health

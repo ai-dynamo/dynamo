@@ -53,7 +53,7 @@
                     "-m",
                     "dynamo.vllm",
                     "--model",
-                    "${env:DYNAMO_MODEL_NAME}",
+                    "${env:DYN_MODEL_NAME:${env:DYNAMO_MODEL_NAME}}",
                     "--enforce-eager",
                     "--no-enable-prefix-caching",
                 ],

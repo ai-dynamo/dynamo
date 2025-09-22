@@ -80,9 +80,9 @@ You can create a service or directly run the task from the task definition
 ## 5. Testing
 Find the public IP of the dynamo frontend task from the task page. Run following commands to query the endpoint.
 ```sh
-export DYNAMO_IP_ADDRESS=TASK_PUBLIC_IP_ADDRESS
-curl http://$DYNAMO_IP_ADDRESS:8000/v1/models
-curl http://$DYNAMO_IP_ADDRESS:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+export DYN_IP_ADDRESS=TASK_PUBLIC_IP_ADDRESS
+curl http://${DYN_IP_ADDRESS:-$DYNAMO_IP_ADDRESS}:8000/v1/models
+curl http://${DYN_IP_ADDRESS:-$DYNAMO_IP_ADDRESS}:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {

@@ -30,6 +30,8 @@ import kubernetes_asyncio as kubernetes
 import yaml
 from kubernetes_asyncio import client, config
 
+from dynamo.runtime.env import get_env
+
 
 def find_available_port(start_port: int = 8000) -> int:
     """Find the first available TCP port on 127.0.0.1 starting at start_port (inclusive), scanning up to start_port+99."""
@@ -278,11 +280,16 @@ class DynamoDeploymentClient:
 
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
-            verbose: If True, show detailed status updates. If None, uses DYNAMO_VERBOSE env var.
+            verbose: If True, show detailed status updates. If None, uses DYN_VERBOSE env var.
         """
         # Allow environment variable to control verbosity
         if verbose is None:
-            verbose = os.environ.get("DYNAMO_VERBOSE", "false").lower() == "true"
+            verbose = get_env(
+                name_new="DYN_VERBOSE",
+                name_old="DYNAMO_VERBOSE",
+                default=False,
+                as_bool=True,
+            )
 
         progress = ProgressDisplay(verbose=verbose)
         start_time = time.time()

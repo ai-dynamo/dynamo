@@ -86,9 +86,9 @@ This requires having rust installed. We also recommend having a proper installat
 uv venv --python 3.12 --seed
 # build dynamo runtime bindings
 uv pip install maturin
-cd $DYNAMO_HOME/lib/bindings/python
+cd ${DYN_HOME:-$DYNAMO_HOME}/lib/bindings/python
 maturin develop --uv
-cd $DYNAMO_HOME
+cd ${DYN_HOME:-$DYNAMO_HOME}
 uv pip install .
 export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/backends/sglang/src"
 # install target sglang version (you can choose any version)
@@ -135,7 +135,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 ### Aggregated Serving
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/sglang
 ./launch/agg.sh
 ```
 
@@ -145,7 +145,7 @@ cd $DYNAMO_HOME/components/backends/sglang
 > Until sglang releases a version > v0.5.0rc0, you will have to install from source to use kv_routing. You can do this by running `git clone https://github.com/sgl-project/sglang.git && cd sglang && uv pip install -e "python[all]"`. We will update this section once sglang releases a newer version.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/sglang
 ./launch/agg_router.sh
 ```
 
@@ -169,7 +169,7 @@ Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
 
 ```bash
-cd $DYNAMO_HOME/components/backends/sglang
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/sglang
 ./launch/disagg.sh
 ```
 
@@ -179,7 +179,7 @@ You can use this configuration to test out disaggregated serving with dp attenti
 
 ```bash
 # note this will require 4 GPUs
-cd $DYNAMO_HOME/components/backends/sglang
+cd ${DYN_HOME:-$DYNAMO_HOME}/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 

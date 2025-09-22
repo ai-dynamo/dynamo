@@ -15,8 +15,8 @@ from dynamo.runtime import DistributedRuntime
 logger = logging.getLogger(__name__)
 
 # Default port range in the registered ports section
-DEFAULT_DYNAMO_PORT_MIN = 20000
-DEFAULT_DYNAMO_PORT_MAX = 30000
+DEFAULT_DYN_PORT_MIN = 20000
+DEFAULT_DYN_PORT_MAX = 30000
 
 
 @dataclass

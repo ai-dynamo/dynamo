@@ -113,7 +113,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
     """
 
     # Enable HelloWorld logits processor only for this test
-    monkeypatch.setenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR", "1")
+    monkeypatch.setenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR", "1")
 
     base = trtllm_configs["aggregated"]
     config = TRTLLMConfig(
