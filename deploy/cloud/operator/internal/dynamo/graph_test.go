@@ -3141,6 +3141,20 @@ func (m *mockSecretsRetriever) GetSecrets(namespace, registry string) ([]string,
 	return []string{}, nil
 }
 
+// Mock SecretsRetriever that returns secrets for testing docker secrets functionality
+type mockSecretsRetrieverWithSecrets struct{}
+
+func (m *mockSecretsRetrieverWithSecrets) RetrieveImagePullSecrets(ctx context.Context, deployment *v1alpha1.DynamoGraphDeployment) ([]corev1.LocalObjectReference, error) {
+	return []corev1.LocalObjectReference{
+		{Name: "test-docker-secret"},
+	}, nil
+}
+
+func (m *mockSecretsRetrieverWithSecrets) GetSecrets(namespace, registry string) ([]string, error) {
+	// Return some mock secrets when called
+	return []string{"test-docker-secret"}, nil
+}
+
 func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
@@ -4479,6 +4493,138 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 			if podSpec.ServiceAccountName != tt.expectedServiceAcc {
 				t.Errorf("GenerateBasePodSpec() serviceAccountName = %v, want %v",
 					podSpec.ServiceAccountName, tt.expectedServiceAcc)
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
+	tests := []struct {
+		name                     string
+		component                *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		secretsRetriever         SecretsRetriever
+		expectedImagePullSecrets []corev1.LocalObjectReference
+	}{
+		{
+			name: "disable docker secrets annotation set to true",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueTrue,
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever:         &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: nil, // Should be nil when disabled
+		},
+		{
+			name: "disable docker secrets annotation set to false",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueFalse,
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "test-docker-secret"},
+			}, // Should be present when enabled
+		},
+		{
+			name: "disable docker secrets annotation not set (default behavior)",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "test-docker-secret"},
+			}, // Should be present by default
+		},
+		{
+			name: "disable docker secrets annotation set to invalid value",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: "invalid",
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "test-docker-secret"},
+			}, // Should be present when annotation is not "true"
+		},
+		{
+			name: "disable docker secrets but no secrets retriever",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueFalse,
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever:         nil,
+			expectedImagePullSecrets: nil, // Should be nil when no retriever
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controllerConfig := controller_common.Config{}
+
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkNoop,
+				tt.secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() error = %v", err)
+				return
+			}
+
+			if !reflect.DeepEqual(podSpec.ImagePullSecrets, tt.expectedImagePullSecrets) {
+				t.Errorf("GenerateBasePodSpec() ImagePullSecrets = %v, want %v",
+					podSpec.ImagePullSecrets, tt.expectedImagePullSecrets)
 			}
 		})
 	}

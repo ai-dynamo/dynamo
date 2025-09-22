@@ -1,9 +1,7 @@
 # CODEOWNERS file for Dynamo
 #
-# For more information about CODEOWNERS files, see:
-# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# DO NOT ADD ANY INDIVIDUALS. The groups here are all teams: https://github.com/orgs/ai-dynamo/teams
 
-# Rust - Keep these two the same. Or better make an alias like devops have.
 *.rs @ai-dynamo/dynamo-rust-codeowners
 Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
@@ -11,29 +9,29 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 *.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Container/Environments
-/container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
-
-# Dynamo deploy
-/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab @atchernych
+/container/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
 
 # Examples
-/examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ishandhanani @ai-dynamo/dynamo-rust-codeowners
-/examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
-/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16 @biswapanda
+/examples/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners
+/examples/multimodal/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+
+# Dynamo deploy
+/deploy/ @ai-dynamo/dynamo-deploy-codeowners
+/examples/*/deploy/ @ai-dynamo/dynamo-deploy-codeowners
 
 # CI/CD
-/.github/ @ai-dynamo/Devops @nnshah1
-/.github/workflows/*.ps1 @ai-dynamo/Devops @whoisj
-CODEOWNERS @ai-dynamo/Devops @nnshah1
+/.github/ @ai-dynamo/Devops
+/.github/workflows/*.ps1 @ai-dynamo/Devops
+CODEOWNERS @ai-dynamo/Devops
 
 # Planner
-/components/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
-/benchmarks/profiler/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
-/tests/planner/ @tedzhouhk @hhzhang16 @jasonqinzhou @PeaBrane @Aphoh @alec-flowers @michaelshin
+/components/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/benchmarks/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # recipes
 
-/recipes/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/recipes/ @ai-dynamo/python-codeowners @ai-dynamo/Devops @ai-dynamo/dynamo-deploy-codeowners
 
 # Legal
 /ATTRIBUTIONS-Rust.md @ai-dynamo/Devops
