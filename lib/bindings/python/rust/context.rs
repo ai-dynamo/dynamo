@@ -28,6 +28,7 @@ impl Context {
     }
 
     // Create context with trace information
+    #[must_use]
     pub fn with_trace_context(
         inner: Arc<dyn AsyncEngineContext>,
         trace_context: Option<DistributedTraceContext>

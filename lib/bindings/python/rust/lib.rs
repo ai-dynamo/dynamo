@@ -60,15 +60,15 @@ static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 
-// Helper to create child span with trace context if available
+// Helper to create client span - always emit spans for consistency
 fn create_client_span(operation: &str, request_id: &str, trace_context: Option<&dynamo_runtime::logging::DistributedTraceContext>) -> tracing::Span {
     if let Some(ctx) = trace_context {
         info_span!(
             "client_request",
             operation = operation,
             request_id = request_id,
-            trace_id = ctx.trace_id.as_str(),           // Pass existing trace_id
-            parent_id = ctx.span_id.as_str(),           // Use current span as parent
+            trace_id = ctx.trace_id.as_str(),
+            parent_id = ctx.span_id.as_str(),
             x_request_id = ctx.x_request_id.as_deref().unwrap_or(""),
             x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
             tracestate = ctx.tracestate.as_deref().unwrap_or("")
@@ -82,12 +82,32 @@ fn create_client_span(operation: &str, request_id: &str, trace_context: Option<&
     }
 }
 
-// Helper to get appropriate span for instrumentation
+// Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
+    create_client_span(operation, context.inner().id(), context.trace_context())
+}
+
+// Helper to create span for direct method with instance_id
+fn get_span_for_direct_context(context: &context::Context, operation: &str, instance_id: &str) -> tracing::Span {
     if let Some(trace_ctx) = context.trace_context() {
-        create_client_span(operation, context.inner().id(), Some(trace_ctx))
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = context.inner().id(),
+            instance_id = instance_id,
+            trace_id = trace_ctx.trace_id.as_str(),
+            parent_id = trace_ctx.span_id.as_str(),
+            x_request_id = trace_ctx.x_request_id.as_deref().unwrap_or(""),
+            x_dynamo_request_id = trace_ctx.x_dynamo_request_id.as_deref().unwrap_or(""),
+            tracestate = trace_ctx.tracestate.as_deref().unwrap_or("")
+        )
     } else {
-        tracing::Span::none()
+        info_span!(
+            "client_request",
+            operation = operation,
+            request_id = context.inner().id(),
+            instance_id = instance_id,
+        )
     }
 }
 
@@ -892,7 +912,7 @@ impl Client {
                 Some(context) => {
                     let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
 
-                    let span = get_span_for_context(&context, "direct");
+                    let span = get_span_for_direct_context(&context, "direct", &instance_id);
                     let stream_future = client.direct(request_ctx, instance_id).instrument(span);
 
                     let stream = stream_future.await.map_err(to_pyerr)?;
