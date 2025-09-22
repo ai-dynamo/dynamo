@@ -94,9 +94,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         prefill_worker_client=None,
+        prefill_router_client=None,
+        prefill_router_free_client=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
         self.prefill_worker_client = prefill_worker_client
+        self.prefill_router_client = prefill_router_client
+        self.prefill_router_free_client = prefill_router_free_client
         self.can_prefill = 0
         self._prefill_check_task = None
 
@@ -143,7 +147,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
-        # TODO Change to prefill queue
+        # TODO: Change to prefill queue
+        # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
+        # This is least intrusive for now, but quite error prone. Should consider (major) refactoring
+        # TODO: (PeaBrane) longer term, decode workers should not handle prefill routing at all.
+        # Prefill routing logic should be integrated directly into the frontend service potentially.
         if self.can_prefill:
             # Create a copy for prefill with specific modifications
             prefill_sampling_params = deepcopy(sampling_params)
@@ -162,12 +170,37 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "request_id": request_id,
             }
 
+            used_prefill_router = False
             try:
-                prefill_response = await anext(
-                    await self.prefill_worker_client.round_robin(
-                        prefill_request, context=context
+                prefill_worker_id = None
+                if (
+                    self.prefill_router_client is not None
+                    and self.prefill_router_client.instance_ids()
+                ):
+                    used_prefill_router = True
+                    best_worker_response = await anext(
+                        await self.prefill_router_client.generate(
+                            {
+                                "token_ids": request["token_ids"],
+                                "request_id": request_id,
+                            }
+                        )
                     )
-                )
+                    prefill_worker_id = best_worker_response.data().get("worker_id")
+
+                if prefill_worker_id is not None:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.direct(
+                            prefill_request, prefill_worker_id, context=context
+                        )
+                    )
+                else:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.round_robin(
+                            prefill_request, context=context
+                        )
+                    )
+
             except Exception as e:
                 # TODO: Cancellation does not propagate until the first token is received
                 if context.is_stopped() or context.is_killed():
@@ -175,6 +208,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # TODO: Raise asyncio.CancelledError into bindings
                     return
                 raise e
+
+            finally:
+                if used_prefill_router:
+                    await anext(
+                        await self.prefill_router_free_client.generate(
+                            {"request_id": request_id}
+                        )
+                    )
+                    logger.debug(f"Freed router state for request {request_id}")
 
             prefill_response = MyRequestOutput.model_validate_json(
                 prefill_response.data()

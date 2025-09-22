@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+from typing import Optional
 
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -87,6 +88,40 @@ async def worker(runtime: DistributedRuntime):
     logger.debug("Worker function completed, exiting...")
 
 
+def setup_kv_event_publisher(
+    config: Config,
+    component,
+    generate_endpoint,
+    vllm_config,
+) -> Optional[ZmqKvEventPublisher]:
+    """
+    Set up KV event publisher for prefix caching if enabled.
+
+    Returns:
+        ZmqKvEventPublisher if prefix caching is enabled, None otherwise.
+    """
+    if not config.engine_args.enable_prefix_caching:
+        return None
+
+    # TODO: We start off with a valid endpoint, then we increment it by dp_rank
+    # May no longer be valid. Lets remove the increment behavior from vLLM and here
+    zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+        config.engine_args.kv_events_config.endpoint,
+        data_parallel_rank=config.engine_args.data_parallel_rank or 0,
+    ).replace("*", "127.0.0.1")
+
+    zmq_config = ZmqKvEventPublisherConfig(
+        worker_id=generate_endpoint.lease_id(),
+        kv_block_size=vllm_config.cache_config.block_size,
+        zmq_endpoint=zmq_endpoint,
+    )
+    kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+
+    logger.info(f"Worker reading KV events from {zmq_endpoint}")
+
+    return kv_publisher
+
+
 def setup_vllm_engine(config, stat_logger=None):
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -137,9 +172,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, _, default_sampling_params = setup_vllm_engine(config)
-
-    # TODO register_prefill in similar vein to register_llm
+    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
         runtime, component, engine_client, default_sampling_params
@@ -184,6 +217,20 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
+    prefill_router_client = (
+        await runtime.namespace(config.namespace)
+        .component("prefill_router")  # TODO don't hardcode
+        .endpoint("find_best_worker")
+        .client()
+    )
+
+    prefill_router_free_client = (
+        await runtime.namespace(config.namespace)
+        .component("prefill_router")  # TODO don't hardcode
+        .endpoint("free")
+        .client()
+    )
+
     prefill_worker_client = (
         await runtime.namespace(config.namespace)
         .component("prefill")  # TODO don't hardcode
@@ -213,25 +260,15 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         prefill_worker_client,
+        prefill_router_client,
+        prefill_router_free_client,
     )
 
-    if config.engine_args.enable_prefix_caching:
-        # TODO: We start off with a valid endpoint, then we increment it by dp_rank
-        # May no longer be valid. Lets remove the increment behavior from vLLM and here
-        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-            config.engine_args.kv_events_config.endpoint,
-            data_parallel_rank=config.engine_args.data_parallel_rank or 0,
-        ).replace("*", "127.0.0.1")
-
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
-            kv_block_size=vllm_config.cache_config.block_size,
-            zmq_endpoint=zmq_endpoint,
-        )
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
-
-        logger.info(f"Reading Events from {zmq_endpoint}")
-
+    # Set up KV event publisher for prefix caching if enabled
+    kv_publisher = setup_kv_event_publisher(
+        config, component, generate_endpoint, vllm_config
+    )
+    if kv_publisher:
         handler.kv_publisher = kv_publisher
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register

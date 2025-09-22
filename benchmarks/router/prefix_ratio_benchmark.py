@@ -309,7 +309,7 @@ def main():
         "--url",
         type=str,
         nargs="+",  # Accept multiple URLs
-        default=["http://localhost:8080"],
+        default=["http://localhost:8000"],
         # default=["http://localhost:8090", "http://localhost:8090"],
         help="Server URL(s). Can specify multiple URLs for parallel benchmarking",
     )

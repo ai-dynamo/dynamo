@@ -8,6 +8,8 @@ NUM_WORKERS=8
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 TENSOR_PARALLEL_SIZE=1
 USE_MOCKERS=false
+USE_PREFILLS=false
+BASE_GPU_OFFSET=0
 EXTRA_ARGS=()
 
 # Parse arguments
@@ -28,6 +30,14 @@ while [[ $# -gt 0 ]]; do
         --mockers)
             USE_MOCKERS=true
             shift
+            ;;
+        --prefills)
+            USE_PREFILLS=true
+            shift
+            ;;
+        --base-gpu-offset)
+            BASE_GPU_OFFSET="$2"
+            shift 2
             ;;
         --)
             shift
@@ -71,14 +81,22 @@ if ! [[ "$TENSOR_PARALLEL_SIZE" =~ ^[0-9]+$ ]] || [ "$TENSOR_PARALLEL_SIZE" -lt 
     exit 1
 fi
 
+if ! [[ "$BASE_GPU_OFFSET" =~ ^[0-9]+$ ]]; then
+    echo "Error: BASE_GPU_OFFSET must be a non-negative integer"
+    exit 1
+fi
+
 # Calculate total GPUs needed
 TOTAL_GPUS_NEEDED=$((NUM_WORKERS * TENSOR_PARALLEL_SIZE))
+LAST_GPU=$((BASE_GPU_OFFSET + TOTAL_GPUS_NEEDED - 1))
 echo "Configuration:"
 echo "  Engine Type: $([ "$USE_MOCKERS" = true ] && echo "Mocker" || echo "vLLM")"
+echo "  Worker Type: $([ "$USE_PREFILLS" = true ] && echo "Prefill" || echo "Decode")"
 echo "  Workers: $NUM_WORKERS"
 echo "  Model: $MODEL_PATH"
 echo "  Tensor Parallel Size: $TENSOR_PARALLEL_SIZE"
 echo "  Total GPUs needed: $TOTAL_GPUS_NEEDED"
+echo "  GPU Range: $BASE_GPU_OFFSET-$LAST_GPU"
 echo "  Engine args: ${EXTRA_ARGS[*]}"
 echo ""
 
@@ -93,14 +111,15 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-echo "Starting $NUM_WORKERS workers..."
+WORKER_TYPE=$([ "$USE_PREFILLS" = true ] && echo "prefill" || echo "decode")
+echo "Starting $NUM_WORKERS $WORKER_TYPE workers..."
 
 for i in $(seq 1 $NUM_WORKERS); do
     {
-        echo "[Worker-$i] Starting..."
+        echo "[${WORKER_TYPE^} Worker-$i] Starting..."
 
-        # Calculate GPU indices for this worker
-        START_GPU=$(( (i - 1) * TENSOR_PARALLEL_SIZE ))
+        # Calculate GPU indices for this worker (with base offset)
+        START_GPU=$(( BASE_GPU_OFFSET + (i - 1) * TENSOR_PARALLEL_SIZE ))
         END_GPU=$(( START_GPU + TENSOR_PARALLEL_SIZE - 1 ))
 
         # Build CUDA_VISIBLE_DEVICES string
@@ -124,17 +143,22 @@ for i in $(seq 1 $NUM_WORKERS); do
                 --endpoint dyn://test.mocker.generate \
                 "${EXTRA_ARGS[@]}"
         else
-            echo "[Worker-$i] Using GPUs: $GPU_DEVICES"
+            echo "[${WORKER_TYPE^} Worker-$i] Using GPUs: $GPU_DEVICES"
             # Run vLLM engine with PYTHONHASHSEED=0 for deterministic event IDs in KV-aware routing
+            VLLM_ARGS=()
+            VLLM_ARGS+=("--model" "$MODEL_PATH")
+            VLLM_ARGS+=("--tensor-parallel-size" "$TENSOR_PARALLEL_SIZE")
+            if [ "$USE_PREFILLS" = true ]; then
+                VLLM_ARGS+=("--is-prefill-worker")
+            fi
+            VLLM_ARGS+=("${EXTRA_ARGS[@]}")
+
             exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python -m dynamo.vllm \
-                --model "$MODEL_PATH" \
-                --endpoint dyn://test.vllm.generate \
-                --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
-                "${EXTRA_ARGS[@]}"
+                "${VLLM_ARGS[@]}"
         fi
     } &
     PIDS+=($!)
-    echo "Started worker $i (PID: $!)"
+    echo "Started $WORKER_TYPE worker $i (PID: $!)"
 done
 
 echo "All workers started. Press Ctrl+C to stop."
