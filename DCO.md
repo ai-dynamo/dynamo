@@ -35,7 +35,6 @@ The **Developer Certificate of Origin (DCO)** check ensures all commits are sign
 
 1. Enable sign-off in your config:
    ```
-    git config --global commit.gpgsign false
     git config --global user.name "Your Name"
     git config --global user.email "your.email@example.com"
    ```
