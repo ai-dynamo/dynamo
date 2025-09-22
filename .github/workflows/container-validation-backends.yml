@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Dynamo Backend Validation
+name: Docker Build and Test
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      docs: ${{ steps.filter.outputs.docs }}
+      docs: ${{ steps.filter.outputs.skip_ci }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
   vllm:
     runs-on: gpu-l40-amd64
     needs: changed-files
-    if: needs.changed-files.outputs.docs == 'false'
+    if: needs.changed-files.outputs.skip_ci == 'false'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,7 +64,7 @@ jobs:
   sglang:
     runs-on: gpu-l40-amd64
     needs: changed-files
-    if: needs.changed-files.outputs.docs == 'false'
+    if: needs.changed-files.outputs.skip_ci == 'false'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
   trtllm:
     runs-on: gpu-l40-amd64
     needs: changed-files
-    if: needs.changed-files.outputs.docs == 'false'
+    if: needs.changed-files.outputs.skip_ci == 'false'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
