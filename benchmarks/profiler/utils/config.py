@@ -696,12 +696,12 @@ class SGLangConfigModifier:
 
         args = break_arguments(args)
 
-        # 1. Set --tp=1 (single GPU per expert)
+        # 1. Set --tp=dep size
         try:
             idx = args.index("--tp")
-            args[idx + 1] = "1"
+            args[idx + 1] = str(dep_size)
         except ValueError:
-            args = append_argument(args, ["--tp", "1"])
+            args = append_argument(args, ["--tp", str(dep_size)])
 
         # 2. Set --dp=dep_size (data parallelism across experts)
         try:
