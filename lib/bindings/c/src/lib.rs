@@ -395,9 +395,9 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     component_c_str: *const c_char,
     model_name_c_str: *const c_char,
     use_kv_routing: bool,
-    busy_threshold: f64,       // Use negative value to indicate None
-    overlap_score_weight: f64, // Use negative value for default
-    router_temperature: f64,   // Use negative value for default
+    busy_threshold: f64,       // negative => None
+    overlap_score_weight: f64, // negative => default
+    router_temperature: f64,   // negative => default
     use_kv_events: bool,
     router_replica_sync: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
@@ -411,6 +411,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
+    // Convert C strings up-front to owned Strings we can move across threads.
     let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -418,7 +419,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             return DynamoLlmResult::ERR;
         }
     };
-
     let component_name = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -426,7 +426,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             return DynamoLlmResult::ERR;
         }
     };
-
     let model_name = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(e) => {
@@ -435,7 +434,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    // Capture values we need inside the async closure
+    // Capture flags
     let use_kv_routing_c = use_kv_routing;
     let busy_threshold_c = busy_threshold;
     let overlap_score_weight_c = overlap_score_weight;
@@ -443,73 +442,94 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     let use_kv_events_c = use_kv_events;
     let router_replica_sync_c = router_replica_sync;
 
-    // Clone the runtime handle so we can ensure DRT inside the closure
-    let rt = wk.runtime().clone();
+    // We’ll use the global worker’s runtime just to host a spawn_blocking.
+    // Inside that blocking thread we build a tiny Tokio runtime to run the async work.
+    let host_rt = wk.runtime().clone();
+    let secondary = host_rt.secondary().clone();
 
-    // Run the async creation on a local runtime thread, returning a usize (Send) instead of a raw ptr
-    let join_res: Result<usize, String> = run_on_local_runtime(move || async move {
-        // Ensure DRT exists (idempotent)
-        DRT.get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
-            .await
-            .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))?;
+    // Do the heavy work on a blocking thread to allow blocking drops.
+    let res: Result<usize, String> = secondary.block_on(async move {
+        tokio::task::spawn_blocking(move || -> Result<usize, String> {
+            // Tiny throwaway runtime dedicated to the async creation
+            let rt2 = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("build inner runtime: {e:?}"))?;
 
-        // Router mode / thresholds
-        let router_mode = if use_kv_routing_c {
-            RouterMode::KV
-        } else {
-            RouterMode::RoundRobin
-        };
+            // Run the async creation inside rt2
+            let out: Result<usize, String> = rt2.block_on(async move {
+                // Ensure DRT exists (idempotent)
+                DRT.get_or_try_init(async {
+                    DistributedRuntime::from_settings(host_rt.clone()).await
+                })
+                .await
+                .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))?;
 
-        let busy_threshold_opt = if busy_threshold_c < 0.0 {
-            None
-        } else {
-            Some(busy_threshold_c)
-        };
-
-        // Optional KV router config
-        let kv_router_config = if use_kv_routing_c {
-            use dynamo_llm::kv_router::KvRouterConfig;
-            Some(KvRouterConfig::new(
-                if overlap_score_weight_c < 0.0 {
+                // Router mode / thresholds
+                let router_mode = if use_kv_routing_c {
+                    RouterMode::KV
+                } else {
+                    RouterMode::RoundRobin
+                };
+                let busy_threshold_opt = if busy_threshold_c < 0.0 {
                     None
                 } else {
-                    Some(overlap_score_weight_c)
-                },
-                if router_temperature_c < 0.0 {
-                    None
-                } else {
-                    Some(router_temperature_c)
-                },
-                Some(use_kv_events_c),
-                Some(router_replica_sync_c),
-                None, // max_num_batched_tokens (default)
-                None, // router_snapshot_threshold (default)
-                None, // router_reset_states (default)
-            ))
-        } else {
-            None
-        };
+                    Some(busy_threshold_c)
+                };
 
-        // Build the pipeline
-        let pipeline = create_worker_selection_pipeline_chat(
-            &namespace,
-            &component_name,
-            &model_name,
-            router_mode,
-            busy_threshold_opt,
-            kv_router_config,
-        )
+                // Optional KV router config
+                let kv_router_config = if use_kv_routing_c {
+                    use dynamo_llm::kv_router::KvRouterConfig;
+                    Some(KvRouterConfig::new(
+                        if overlap_score_weight_c < 0.0 {
+                            None
+                        } else {
+                            Some(overlap_score_weight_c)
+                        },
+                        if router_temperature_c < 0.0 {
+                            None
+                        } else {
+                            Some(router_temperature_c)
+                        },
+                        Some(use_kv_events_c),
+                        Some(router_replica_sync_c),
+                        None, // max_num_batched_tokens
+                        None, // router_snapshot_threshold
+                        None, // router_reset_states
+                    ))
+                } else {
+                    None
+                };
+
+                // Build the pipeline
+                let pipeline = create_worker_selection_pipeline_chat(
+                    &namespace,
+                    &component_name,
+                    &model_name,
+                    router_mode,
+                    busy_threshold_opt,
+                    kv_router_config,
+                )
+                .await
+                .map_err(|e| format!("Failed to create worker selection pipeline: {e:?}"))?;
+
+                // Wrap and return pointer as usize (Send)
+                let handle = WorkerSelectionPipeline { pipeline };
+                let raw: *mut WorkerSelectionPipeline = Box::into_raw(Box::new(handle));
+                Ok(raw as usize)
+            });
+
+            // Make sure *this* runtime’s blocking shutdown happens off the async path
+            rt2.shutdown_background();
+
+            out
+        })
         .await
-        .map_err(|e| format!("Failed to create worker selection pipeline: {e:?}"))?;
-
-        // Wrap and leak to raw pointer; return as usize (Send)
-        let handle = WorkerSelectionPipeline { pipeline };
-        let raw: *mut WorkerSelectionPipeline = Box::into_raw(Box::new(handle));
-        Ok(raw as usize)
+        .map_err(|e| format!("spawn_blocking join error: {e:?}"))?
     });
 
-    // Cast usize back to the pointer type and return it
-    let pipeline_ptr: *mut WorkerSelectionPipeline = match join_res {
+    // Unpack result
+    let pipeline_ptr = match res {
         Ok(raw) => raw as *mut WorkerSelectionPipeline,
         Err(msg) => {
             eprintln!("{msg}");
@@ -519,19 +539,146 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 
     if pipeline_out.is_null() {
         eprintln!("pipeline_out pointer is null");
-        // Avoid leaking the just-created handle if caller gave us a null out-param
         unsafe {
             drop(Box::from_raw(pipeline_ptr));
         }
         return DynamoLlmResult::ERR;
     }
-
     unsafe {
         *pipeline_out = pipeline_ptr;
     }
 
     DynamoLlmResult::OK
 }
+
+// Below is the simplest fix
+// pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
+//     namespace_c_str: *const c_char,
+//     component_c_str: *const c_char,
+//     model_name_c_str: *const c_char,
+//     use_kv_routing: bool,
+//     busy_threshold: f64,       // < 0 => None
+//     overlap_score_weight: f64, // < 0 => default
+//     router_temperature: f64,   // < 0 => default
+//     use_kv_events: bool,
+//     router_replica_sync: bool,
+//     pipeline_out: *mut *mut WorkerSelectionPipeline,
+// ) -> DynamoLlmResult {
+//     // Ensure runtime initialized
+//     let wk = match WK.get() {
+//         Some(wk) => wk,
+//         None => {
+//             eprintln!("Runtime not initialized - call dynamo_llm_init first");
+//             return DynamoLlmResult::ERR;
+//         }
+//     };
+
+//     // Convert inputs to owned Strings up front (we're crossing FFI)
+//     let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
+//         Ok(s) => s.to_owned(),
+//         Err(e) => {
+//             eprintln!("Failed to convert namespace C string: {:?}", e);
+//             return DynamoLlmResult::ERR;
+//         }
+//     };
+//     let component_name = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
+//         Ok(s) => s.to_owned(),
+//         Err(e) => {
+//             eprintln!("Failed to convert component C string: {:?}", e);
+//             return DynamoLlmResult::ERR;
+//         }
+//     };
+//     let model_name = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
+//         Ok(s) => s.to_owned(),
+//         Err(e) => {
+//             eprintln!("Failed to convert model_name C string: {:?}", e);
+//             return DynamoLlmResult::ERR;
+//         }
+//     };
+
+//     // Use the long-lived runtime (no ad-hoc runtime here).
+//     let rt = wk.runtime();
+//     let secondary = rt.secondary().clone();
+
+//     let result = secondary.block_on(async {
+//         // Make sure DistributedRuntime is initialized (idempotent).
+//         if let Err(e) = DRT
+//             .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
+//             .await
+//         {
+//             eprintln!("Failed to initialize distributed runtime: {:?}", e);
+//             return DynamoLlmResult::ERR;
+//         }
+
+//         // Router mode / thresholds
+//         let router_mode = if use_kv_routing {
+//             RouterMode::KV
+//         } else {
+//             RouterMode::RoundRobin
+//         };
+//         let busy_threshold_opt = if busy_threshold < 0.0 {
+//             None
+//         } else {
+//             Some(busy_threshold)
+//         };
+
+//         // Optional KV router config
+//         let kv_router_config = if use_kv_routing {
+//             use dynamo_llm::kv_router::KvRouterConfig;
+//             Some(KvRouterConfig::new(
+//                 if overlap_score_weight < 0.0 {
+//                     None
+//                 } else {
+//                     Some(overlap_score_weight)
+//                 },
+//                 if router_temperature < 0.0 {
+//                     None
+//                 } else {
+//                     Some(router_temperature)
+//                 },
+//                 Some(use_kv_events),
+//                 Some(router_replica_sync),
+//                 None, // max_num_batched_tokens
+//                 None, // router_snapshot_threshold
+//                 None, // router_reset_states
+//             ))
+//         } else {
+//             None
+//         };
+
+//         // Build the pipeline on the persistent runtime.
+//         let pipeline = match create_worker_selection_pipeline_chat(
+//             &namespace,
+//             &component_name,
+//             &model_name,
+//             router_mode,
+//             busy_threshold_opt,
+//             kv_router_config,
+//         )
+//         .await
+//         {
+//             Ok(p) => p,
+//             Err(e) => {
+//                 eprintln!("Failed to create worker selection pipeline: {:?}", e);
+//                 return DynamoLlmResult::ERR;
+//             }
+//         };
+
+//         // Hand back an opaque pointer
+//         let handle = WorkerSelectionPipeline { pipeline };
+//         let raw = Box::into_raw(Box::new(handle));
+//         if pipeline_out.is_null() {
+//             // avoid leaking if caller passed null out-arg
+//             unsafe { drop(Box::from_raw(raw)) };
+//             eprintln!("pipeline_out pointer is null");
+//             return DynamoLlmResult::ERR;
+//         }
+//         unsafe { *pipeline_out = raw };
+//         DynamoLlmResult::OK
+//     });
+
+//     result
+// }
 
 /// Destroy a worker selection pipeline and free its memory
 ///
