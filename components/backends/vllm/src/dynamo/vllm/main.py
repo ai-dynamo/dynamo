@@ -127,6 +127,45 @@ def setup_vllm_engine(config, stat_logger=None):
     return engine_client, vllm_config, default_sampling_params
 
 
+def _maybe_setup_kv_publisher(component, endpoint, vllm_config, engine_args):
+    """Create and return a ZMQ KV events publisher if prefix caching is enabled.
+
+    DESIGN DECISION: Unified KV publisher setup for both decode and prefill workers.
+    This shared helper ensures consistent KV cache event publishing across all worker types,
+    enabling the router to track cache states from both prefill-only and decode workers.
+
+    The KV publisher sends cache block allocation/deallocation events to the router's
+    indexer, which maintains a global view of cache states across all workers for
+    intelligent routing decisions.
+
+    Args:
+        component: Dynamo component for NATS communication
+        endpoint: Worker endpoint with lease_id for unique worker identification
+        vllm_config: vLLM configuration containing cache settings
+        engine_args: Engine arguments including prefix caching settings
+
+    Returns:
+        ZmqKvEventPublisher instance if prefix caching enabled, None otherwise
+    """
+    if not engine_args.enable_prefix_caching:
+        logger.debug("Prefix caching disabled; KV publisher not started")
+        return None
+
+    zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+        engine_args.kv_events_config.endpoint,
+        data_parallel_rank=engine_args.data_parallel_rank or 0,
+    ).replace("*", "127.0.0.1")
+
+    zmq_config = ZmqKvEventPublisherConfig(
+        worker_id=endpoint.lease_id(),
+        kv_block_size=vllm_config.cache_config.block_size,
+        zmq_endpoint=zmq_endpoint,
+    )
+    kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+    logger.info(f"Reading Events from {zmq_endpoint}")
+    return kv_publisher
+
+
 async def init_prefill(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
@@ -137,13 +176,61 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, _, default_sampling_params = setup_vllm_engine(config)
+    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
     # TODO register_prefill in similar vein to register_llm
 
     handler = PrefillWorkerHandler(
         runtime, component, engine_client, default_sampling_params
     )
+
+    # Setup KV publisher for prefill worker (consistent with decode workers)
+    # This enables the router to track KV cache states from prefill workers
+    kv_publisher = _maybe_setup_kv_publisher(
+        component, generate_endpoint, vllm_config, config.engine_args
+    )
+    if kv_publisher:
+        handler.kv_publisher = kv_publisher
+
+    # CRITICAL CHANGE: Register prefill workers with the router discovery system
+    # Previously, only decode workers were registered, making them invisible to the router.
+    # This registration enables the router to:
+    # 1. Discover prefill workers as available instances
+    # 2. Track their runtime capabilities (memory, slots, batching limits)
+    # 3. Include them in intelligent routing decisions
+    # 4. Monitor their load and availability
+    try:
+        from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
+
+        # Create runtime configuration matching the actual vLLM worker capabilities
+        # This provides the router with essential information for load balancing:
+        runtime_config = ModelRuntimeConfig()
+        runtime_config.total_kv_blocks = (
+            vllm_config.cache_config.num_gpu_blocks
+        )  # GPU memory capacity
+        runtime_config.max_num_seqs = (
+            vllm_config.scheduler_config.max_num_seqs
+        )  # Concurrent request limit
+        runtime_config.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )  # Batch size limit
+
+        # Register with the same parameters as decode workers to ensure compatibility
+        # The router will distinguish prefill vs decode workers by component name ("prefill" vs "backend")
+        await register_llm(
+            ModelInput.Tokens,
+            ModelType.Chat | ModelType.Completions,
+            generate_endpoint,
+            config.model,
+            config.served_model_name,
+            kv_cache_block_size=config.engine_args.block_size,
+            migration_limit=0,  # Prefill workers don't support migration
+            runtime_config=runtime_config,
+            custom_template_path=config.custom_jinja_template,
+        )
+    except Exception:
+        # Non-fatal: prefill workers can still operate without router awareness
+        logger.exception("Prefill registration failed (continuing)")
 
     # Get health check payload (checks env var and falls back to vLLM default)
     health_check_payload = VllmHealthCheckPayload().to_dict()
@@ -192,6 +279,42 @@ async def init(runtime: DistributedRuntime, config: Config):
         .client()
     )
 
+    # NEW: Create NATS client for intelligent prefill worker selection in background
+    # This prevents startup blocking if NATS is slow/unavailable while enabling
+    # graceful upgrade from random to intelligent selection when router becomes available
+    import asyncio
+
+    from dynamo.llm import FrontendRouterClient
+
+    # Shared container that handler can check dynamically
+    class RouterClientContainer:
+        def __init__(self):
+            self.client = None
+            self.ready = False
+
+    router_container = RouterClientContainer()
+
+    async def setup_router_client():
+        """Background task to create router client without blocking startup."""
+        try:
+            # FrontendRouterClient provides NATS-based communication with the KV router
+            # It sends prefill selection requests and receives intelligent worker recommendations
+            # based on KV cache overlap analysis and load balancing
+            client = FrontendRouterClient(component)
+            router_container.client = client
+            router_container.ready = True
+            logger.info(
+                "Frontend router NATS client created for intelligent prefill selection"
+            )
+        except Exception as e:
+            # Non-fatal: system continues with random prefill selection
+            logger.warning(
+                f"Failed to create frontend router client: {e}. Continuing with random prefill selection."
+            )
+
+    # Start router client creation in background - doesn't block startup
+    asyncio.create_task(setup_router_client())
+
     factory = StatLoggerFactory(
         component,
         config.engine_args.data_parallel_rank or 0,
@@ -208,31 +331,23 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     logger.info(f"VllmWorker for {config.model} has been initialized")
 
+    # Create decode worker handler with intelligent prefill routing capability
+    # The router_container enables KV cache-aware prefill worker selection when ready
     handler = DecodeWorkerHandler(
         runtime,
         component,
         engine_client,
         default_sampling_params,
         prefill_worker_client,
+        router_container,  # NEW: Container that will be populated by background task
     )
 
-    if config.engine_args.enable_prefix_caching:
-        # TODO: We start off with a valid endpoint, then we increment it by dp_rank
-        # May no longer be valid. Lets remove the increment behavior from vLLM and here
-        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-            config.engine_args.kv_events_config.endpoint,
-            data_parallel_rank=config.engine_args.data_parallel_rank or 0,
-        ).replace("*", "127.0.0.1")
-
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
-            kv_block_size=vllm_config.cache_config.block_size,
-            zmq_endpoint=zmq_endpoint,
-        )
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
-
-        logger.info(f"Reading Events from {zmq_endpoint}")
-
+    # Setup KV publisher for decode worker (consistent with prefill workers)
+    # This enables the router to track KV cache states from decode workers
+    kv_publisher = _maybe_setup_kv_publisher(
+        component, generate_endpoint, vllm_config, config.engine_args
+    )
+    if kv_publisher:
         handler.kv_publisher = kv_publisher
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register

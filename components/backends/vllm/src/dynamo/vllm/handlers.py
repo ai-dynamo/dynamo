@@ -94,14 +94,38 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         prefill_worker_client=None,
+        router_client_container=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
         self.prefill_worker_client = prefill_worker_client
         self.can_prefill = 0
         self._prefill_check_task = None
 
+        # NEW: Router client container enables intelligent prefill worker selection
+        # This container holds the FrontendRouterClient which communicates with the KV router
+        # to select optimal prefill workers based on KV cache overlap and load balancing.
+        # The client is created in background to avoid blocking startup if NATS is slow.
+        self.router_client_container = router_client_container
+
+        if router_client_container and router_client_container.ready:
+            logger.info(
+                "Decode worker initialized with frontend router NATS client for intelligent prefill selection"
+            )
+        else:
+            logger.info(
+                "Decode worker initialized - frontend router client will be created in background"
+            )
+
         if self.prefill_worker_client is not None:
             self._prefill_check_task = asyncio.create_task(self._prefill_check_loop())
+
+    def _has_intelligent_routing(self):
+        """Check if intelligent prefill routing is available."""
+        return (
+            self.router_client_container
+            and self.router_client_container.ready
+            and self.router_client_container.client is not None
+        )
 
     async def _prefill_check_loop(self):
         """Background task that checks prefill worker availability every 5 seconds."""
@@ -163,11 +187,83 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             }
 
             try:
-                prefill_response = await anext(
-                    await self.prefill_worker_client.round_robin(
-                        prefill_request, context=context
+                # INTELLIGENT PREFILL WORKER SELECTION:
+                # This implementation replaces random round-robin selection with KV cache-aware routing.
+                # The system now considers:
+                # 1. KV cache overlap: Workers with cached blocks from similar requests are preferred
+                # 2. Load balancing: Current worker utilization affects selection
+                # 3. Graceful fallback: If intelligent routing fails, falls back to random selection
+                # 4. Dynamic availability: Router client may become available after startup
+                if self._has_intelligent_routing():
+                    try:
+                        # Use FrontendRouterClient for NATS-based communication with KV router
+                        # Input: request_id (for tracking) + token_ids (for cache overlap analysis)
+                        # Output: worker_id of the optimal prefill worker
+                        prefill_worker_id = await self.router_client_container.client.select_prefill_worker(
+                            request_id, request["token_ids"]
+                        )
+
+                        logger.debug(
+                            f"Frontend KV router selected prefill worker {prefill_worker_id} for request {request_id}"
+                        )
+
+                        # SAFETY CHECK: Ensure the selected worker ID belongs to the prefill component
+                        try:
+                            prefill_ids = (
+                                set(self.prefill_worker_client.instance_ids())
+                                if self.prefill_worker_client is not None
+                                else set()
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch prefill instance IDs: {e}")
+                            prefill_ids = set()
+
+                        if prefill_ids and prefill_worker_id not in prefill_ids:
+                            logger.warning(
+                                f"Router returned non-prefill worker ID {prefill_worker_id}; falling back to round-robin for request {request_id}"
+                            )
+                            prefill_response = await anext(
+                                await self.prefill_worker_client.round_robin(
+                                    prefill_request, context=context
+                                )
+                            )
+                        else:
+                            # Send request directly to the selected prefill worker (bypassing round-robin)
+                            # This ensures the intelligently selected worker processes the request
+                            prefill_response = await anext(
+                                await self.prefill_worker_client.direct(
+                                    prefill_request,
+                                    instance_id=prefill_worker_id,
+                                    context=context,
+                                )
+                            )
+
+                    except Exception as router_error:
+                        # FALLBACK STRATEGY: If intelligent routing fails for any reason
+                        # (network issues, router unavailable, etc.), gracefully degrade to
+                        # the original random round-robin selection to maintain system availability
+                        logger.warning(
+                            f"Frontend router selection failed: {router_error}"
+                        )
+                        logger.debug(
+                            f"Using fallback random prefill worker selection for request {request_id}"
+                        )
+                        prefill_response = await anext(
+                            await self.prefill_worker_client.round_robin(
+                                prefill_request, context=context
+                            )
+                        )
+                else:
+                    # FALLBACK: No intelligent routing available yet - use original random selection
+                    # This handles cases where router client is still being created in background
+                    logger.debug(
+                        f"Frontend router client not ready, using random prefill worker selection for request {request_id}"
                     )
-                )
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.round_robin(
+                            prefill_request, context=context
+                        )
+                    )
             except Exception as e:
                 # TODO: Cancellation does not propagate until the first token is received
                 if context.is_stopped() or context.is_killed():
