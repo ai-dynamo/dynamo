@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import Callable, Optional
 
 import numpy as np
 
+from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_prefill
 from benchmarks.profiler.utils.plot import plot_prefill_interpolation
 
@@ -19,14 +21,12 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def profile_prefill(
+def _profile_prefill_helper(
     work_dir,
-    model_name,
-    tokenizer,
-    url,
     num_gpus,
     max_context_length,
     interpolation_granularity,
+    get_ttft: Callable[[int], Optional[float]],
 ):
     prefill_isl = []
     prefill_ttft = []
@@ -36,17 +36,8 @@ def profile_prefill(
         max_context_length,
         (max_context_length - 100) // interpolation_granularity,
     ):
-        # run genai-perf
-        genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
-        gap_result = benchmark_prefill(
-            isl,
-            genai_perf_artifact_dir,
-            model_name,
-            tokenizer,
-            base_url=url,
-        )
-        if gap_result is not None:
-            ttft = gap_result["time_to_first_token"]["avg"]
+        ttft = get_ttft(isl)
+        if ttft is not None:
             prefill_isl.append(isl)
             prefill_ttft.append(ttft)
             prefill_thpt_per_gpu.append(isl / ttft / num_gpus * 1000)
@@ -78,3 +69,61 @@ def profile_prefill(
         )
 
     return
+
+
+def profile_prefill(
+    work_dir,
+    model_name,
+    tokenizer,
+    url,
+    num_gpus,
+    max_context_length,
+    interpolation_granularity,
+):
+    def get_ttft(isl):
+        genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
+        gap_result = benchmark_prefill(
+            isl,
+            genai_perf_artifact_dir,
+            model_name,
+            tokenizer,
+            base_url=url,
+        )
+        if gap_result is not None:
+            return gap_result["time_to_first_token"]["avg"]
+        return None
+
+    return _profile_prefill_helper(
+        work_dir,
+        num_gpus,
+        max_context_length,
+        interpolation_granularity,
+        get_ttft,
+    )
+
+
+def profile_prefill_aiconfigurator(
+    work_dir,
+    num_gpus,
+    max_context_length,
+    interpolation_granularity,
+    ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
+    **model_config_kwargs,
+):
+    def get_ttft(isl):
+        perf_dict = ai_configurator_perf_estimator.estimate_prefill_perf(
+            isl,
+            **model_config_kwargs,
+        )
+
+        ttft = perf_dict["context_latency"]
+        logger.info(f"Estimated prefill TTFT: {ttft:.2f}ms")
+        return ttft
+
+    return _profile_prefill_helper(
+        work_dir,
+        num_gpus,
+        max_context_length,
+        interpolation_granularity,
+        get_ttft,
+    )

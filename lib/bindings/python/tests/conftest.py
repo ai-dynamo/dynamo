@@ -40,9 +40,11 @@ def nats_and_etcd():
     etcd.wait()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function", autouse=False)
 async def runtime():
-    """Create a DistributedRuntime for testing. static runtime."""
+"""    Create a DistributedRuntime for testing.
+    DistributedRuntime has singleton requirements, so tests using this fixture should be
+    marked with `@pytest.mark.forked` to run in a separate process for isolation."""
     loop = asyncio.get_running_loop()
     try:
         # try get a detached runtime from the running one
@@ -51,3 +53,4 @@ async def runtime():
         runtime = DistributedRuntime(loop, True)
         yield runtime
         runtime.shutdown()
+
