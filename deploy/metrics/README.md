@@ -98,9 +98,11 @@ These metrics come from the Model Deployment Card information provided by worker
 - `dynamo_frontend_model_migration_limit`: Request migration limit for a worker serving the model (gauge)
 
 **Worker Management Metrics:**
-- `dynamo_frontend_model_workers_total`: Number of worker instances currently serving the model (gauge)
+- `dynamo_frontend_model_workers`: Number of worker instances currently serving the model (gauge)
 
-**Note**: The `dynamo_frontend_inflight_requests_total` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests_total` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
+**Important Notes:**
+- The `dynamo_frontend_inflight_requests_total` metric tracks requests from HTTP handler start until the complete response is finished, while `dynamo_frontend_queued_requests_total` tracks requests from HTTP handler start until first token generation begins (including prefill time). HTTP queue time is a subset of inflight time.
+- **Model Name Deduplication**: When multiple worker instances register with the same model name, only the first instance's configuration metrics (runtime config and MDC metrics) will be populated. Subsequent instances with duplicate model names will be skipped for configuration metric updates, though the worker count metric will reflect all instances.
 
 #### Request Processing Flow
 

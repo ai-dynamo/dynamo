@@ -40,14 +40,16 @@ pub struct Metrics {
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
 
-    // Runtime configuration metrics
+    // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
+    // source systems, but are implemented as gauges because they are copied/synchronized from upstream
+    // counter values rather than being directly incremented.
     model_total_kv_blocks: IntGaugeVec,
     model_max_num_seqs: IntGaugeVec,
     model_max_num_batched_tokens: IntGaugeVec,
     model_context_length: IntGaugeVec,
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
-    model_workers_total: IntGaugeVec,
+    model_workers: IntGaugeVec,  // this is an actual gauge, not a counter
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -154,7 +156,7 @@ impl Metrics {
     /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
     /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
     /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
-    /// - `{prefix}_model_workers_total` - IntGaugeVec for number of worker instances serving each model
+    /// - `{prefix}_model_workers` - IntGaugeVec for number of worker instances serving each model
     ///
     /// ## Runtime Config Polling Configuration
     ///
@@ -273,6 +275,9 @@ impl Metrics {
         .unwrap();
 
         // Runtime configuration metrics
+        // Note: Some of these metrics represent counter-like values from source systems,
+        // but are implemented as gauges because they are copied/synchronized from upstream
+        // counter values rather than being directly incremented.
         let model_total_kv_blocks = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
@@ -327,9 +332,9 @@ impl Metrics {
         )
         .unwrap();
 
-        let model_workers_total = IntGaugeVec::new(
+        let model_workers = IntGaugeVec::new(
             Opts::new(
-                frontend_metric_name(frontend_service::MODEL_WORKERS_TOTAL),
+                frontend_metric_name(frontend_service::MODEL_WORKERS),
                 "Number of worker instances currently serving the model",
             ),
             &["model"],
@@ -352,7 +357,7 @@ impl Metrics {
             model_context_length,
             model_kv_cache_block_size,
             model_migration_limit,
-            model_workers_total,
+            model_workers,
         }
     }
 
@@ -449,7 +454,7 @@ impl Metrics {
         registry.register(Box::new(self.model_context_length.clone()))?;
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
-        registry.register(Box::new(self.model_workers_total.clone()))?;
+        registry.register(Box::new(self.model_workers.clone()))?;
 
         Ok(())
     }
@@ -607,7 +612,7 @@ impl Metrics {
 
                 // Update worker count metrics for all models
                 for (model_name, count) in &model_worker_counts {
-                    metrics.model_workers_total
+                    metrics.model_workers
                         .with_label_values(&[model_name])
                         .set(*count);
                 }
@@ -616,7 +621,7 @@ impl Metrics {
                 let current_models_with_workers: std::collections::HashSet<String> =
                     model_worker_counts.keys().cloned().collect();
                 for model_name in known_models.difference(&current_models_with_workers) {
-                    metrics.model_workers_total
+                    metrics.model_workers
                         .with_label_values(&[model_name])
                         .set(0);
                 }
