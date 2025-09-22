@@ -453,6 +453,11 @@ class Planner:
             ):
                 self.last_adjustment_time = time.time()
                 logger.info("New adjustment interval started!")
+
+                if isinstance(self.connector, KubernetesConnector):
+                    deployment = await self.connector.kube_api.get_graph_deployment()
+                    logger.info(f"k8s DGD: {deployment}")
+
                 await self.observe_metrics()
                 await self.make_adjustments()
 

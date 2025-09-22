@@ -56,6 +56,9 @@ class LoadPlannerDefaults(BasePlannerDefaults):
 
 def _get_default_prometheus_endpoint(port: str, namespace: str):
     """Compute default prometheus endpoint using environment variables and Kubernetes service discovery"""
+    prometheus_endpoint = os.environ.get("PROMETHEUS_ENDPOINT")
+    if prometheus_endpoint != "":
+        return prometheus_endpoint
 
     k8s_namespace = get_current_k8s_namespace()
     if k8s_namespace and k8s_namespace != "default":
