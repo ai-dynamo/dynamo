@@ -27,7 +27,7 @@ impl Context {
         }
     }
 
-    // NEW METHOD: Create context with trace information
+    // Create context with trace information
     pub fn with_trace_context(
         inner: Arc<dyn AsyncEngineContext>,
         trace_context: Option<DistributedTraceContext>
@@ -35,7 +35,7 @@ impl Context {
         Self { inner, trace_context }
     }
 
-    // NEW METHOD: Get trace context for Rust-side usage
+    // Get trace context for Rust-side usage
     pub fn trace_context(&self) -> Option<&DistributedTraceContext> {
         self.trace_context.as_ref()
     }
@@ -94,7 +94,7 @@ impl Context {
         })
     }
 
-    // NEW: Expose trace information to Python for debugging
+    // Expose trace information to Python for debugging
     #[getter]
     fn trace_id(&self) -> Option<String> {
         self.trace_context.as_ref().map(|ctx| ctx.trace_id.clone())

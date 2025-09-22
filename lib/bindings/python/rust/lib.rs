@@ -816,7 +816,7 @@ impl Client {
                 Some(context) => {
                     let request_ctx = RsContext::with_id(request, context.inner().id().to_string());
 
-                    // NEW: Always instrument with appropriate span (none if no trace context)
+                    // Always instrument with appropriate span (none if no trace context)
                     let span = get_span_for_context(&context, "round_robin");
                     let stream_future = client.round_robin(request_ctx).instrument(span);
 

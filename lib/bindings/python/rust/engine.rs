@@ -168,7 +168,7 @@ where
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
 
-        // NEW: Capture current trace context
+        // Capture current trace context
         let current_trace_context = get_distributed_tracing_context();
 
         // Clone the PyObject to move into the thread
@@ -195,10 +195,10 @@ where
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
 
-                // NEW: Create context with trace information
+                // Create context with trace information
                 let py_ctx = Py::new(py, Context::with_trace_context(
                     ctx_python.clone(),
-                    current_trace_context  // Pass the trace context
+                    current_trace_context
                 ))?;
 
                 let gen = if has_context {
