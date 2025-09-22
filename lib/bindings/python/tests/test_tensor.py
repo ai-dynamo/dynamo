@@ -57,22 +57,25 @@ async def generate(request, context):
     streaming = False
     for tensor in request["tensors"]:
         if tensor["metadata"]["name"] == "input_text":
-            input_text_str = "".join(map(chr, tensor["data"][0]))
+            input_text_str = "".join(map(chr, tensor["data"]["values"][0]))
             print(f"Input text: {input_text_str}")
             output_text = tensor
             output_text["metadata"]["name"] = "output_text"
         if tensor["metadata"]["name"] == "streaming":
-            streaming = tensor["data"][0]
+            streaming = tensor["data"]["values"][0]
     if output_text is None:
         raise ValueError("input_text tensor not found in request")
     if streaming:
-        for i in range(len(output_text["data"][0])):
+        for i in range(len(output_text["data"]["values"][0])):
             chunk = {
                 "model": request["model"],
                 "tensors": [
                     {
                         "metadata": output_text["metadata"],
-                        "data": [[output_text["data"][0][i]]],
+                        "data": {
+                            "data_type": output_text["data"]["data_type"],
+                            "values": [[output_text["data"]["values"][0][i]]],
+                        },
                     }
                 ],
             }

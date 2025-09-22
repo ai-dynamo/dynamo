@@ -36,7 +36,8 @@ pub enum DataType {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
+// Self-describing encoding removes ambiguity between signed/unsigned and width variants.
+#[serde(tag = "data_type", content = "values")]
 pub enum FlattenTensor {
     Bool(Vec<bool>),
     // [gluo NOTE] f16, and bf16 is not stably supported
@@ -55,6 +56,43 @@ pub enum FlattenTensor {
     Bytes(Vec<Vec<u8>>),
 }
 
+#[allow(clippy::len_without_is_empty)]
+impl FlattenTensor {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Bool(v) => v.len(),
+            Self::Uint8(v) => v.len(),
+            Self::Uint16(v) => v.len(),
+            Self::Uint32(v) => v.len(),
+            Self::Uint64(v) => v.len(),
+            Self::Int8(v) => v.len(),
+            Self::Int16(v) => v.len(),
+            Self::Int32(v) => v.len(),
+            Self::Int64(v) => v.len(),
+            Self::Float32(v) => v.len(),
+            Self::Float64(v) => v.len(),
+            Self::Bytes(v) => v.len(),
+        }
+    }
+
+    pub fn data_type(&self) -> DataType {
+        match self {
+            Self::Bool(_) => DataType::Bool,
+            Self::Uint8(_) => DataType::Uint8,
+            Self::Uint16(_) => DataType::Uint16,
+            Self::Uint32(_) => DataType::Uint32,
+            Self::Uint64(_) => DataType::Uint64,
+            Self::Int8(_) => DataType::Int8,
+            Self::Int16(_) => DataType::Int16,
+            Self::Int32(_) => DataType::Int32,
+            Self::Int64(_) => DataType::Int64,
+            Self::Float32(_) => DataType::Float32,
+            Self::Float64(_) => DataType::Float64,
+            Self::Bytes(_) => DataType::Bytes,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Validate, Debug, Clone, Eq, PartialEq)]
 pub struct TensorMetadata {
     pub name: String,
@@ -69,10 +107,50 @@ pub struct TensorModelConfig {
     pub outputs: Vec<TensorMetadata>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Tensor {
     pub metadata: TensorMetadata,
     pub data: FlattenTensor,
+}
+
+impl validator::Validate for Tensor {
+    fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        use validator::{ValidationError, ValidationErrors};
+        let mut errs = ValidationErrors::new();
+
+        // dtype must match
+        if self.metadata.data_type != self.data.data_type() {
+            let mut e = ValidationError::new("dtype_mismatch");
+            e.message = Some("metadata.data_type does not match data variant".into());
+            errs.add("data_type", e);
+        }
+
+        let mut product: usize = 1;
+        for &d in &self.metadata.shape {
+            if d < 0 {
+                let mut e = ValidationError::new("negative_dim");
+                e.message = Some("only -1 is allowed as a wildcard dimension".into());
+                errs.add("shape", e);
+                break;
+            }
+            product = product.saturating_mul(d as usize);
+        }
+        // bytes payloads may be variable-length per item; enforce outer count only
+        let expect_count = self.data.len();
+        if product != expect_count {
+            let mut e = ValidationError::new("element_count_mismatch");
+            e.message = Some(
+                format!(
+                    "shape implies {} elements but data has {}",
+                    product, expect_count
+                )
+                .into(),
+            );
+            errs.add("shape", e);
+        }
+
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
+    }
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
@@ -162,20 +240,24 @@ impl NvCreateTensorResponse {
                     let delta = match delta.ok() {
                         Ok(delta) => delta,
                         Err(error) => {
-                            aggregator.error = Some(error);
+                            if aggregator.error.is_none() {
+                                aggregator.error = Some(error);
+                            }
                             return aggregator;
                         }
                     };
-
-                    if aggregator.response.is_none() {
-                        if delta.data.is_some() {
-                            aggregator.response = Some(delta.data.unwrap());
-                        } else {
-                            aggregator.error = Some("No data in response".to_string());
+                    match delta.data {
+                        Some(resp) => {
+                            if aggregator.response.is_none() {
+                                aggregator.response = Some(resp);
+                            } else if aggregator.error.is_none() {
+                                aggregator.error =
+                                    Some("Multiple responses in non-streaming mode".to_string());
+                            }
                         }
-                    } else {
-                        aggregator.error =
-                            Some("Multiple responses in non-streaming mode".to_string());
+                        None => {
+                            // Ignore metadata-only deltas in non-streaming mode.
+                        }
                     }
                     aggregator
                 },

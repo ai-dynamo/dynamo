@@ -297,7 +297,7 @@ impl ModelType {
         inner: llm_rs::model_type::ModelType::Embedding,
     };
     #[classattr]
-    const Tensor: Self = ModelType {
+    const TensorBased: Self = ModelType {
         inner: llm_rs::model_type::ModelType::TensorBased,
     };
 

@@ -346,7 +346,7 @@ impl tensor::Tensor {
         }
 
         // Non-bytes type, simply reinterpret cast the raw input bytes
-        if raw_input.len() % data_size != 0 {
+        if !raw_input.len().is_multiple_of(data_size) {
             return Err(Status::invalid_argument(format!(
                 "Raw input length must be a multiple of {}",
                 data_size
