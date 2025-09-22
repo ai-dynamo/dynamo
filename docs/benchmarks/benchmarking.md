@@ -312,18 +312,12 @@ Deploy your DynamoGraphDeployment using the [deployment documentation](../../com
 
 ### Step 2: Deploy and Run Benchmark Job
 
-#### Option A: Set environment variables (recommended for multiple commands)
 
 ```bash
-# Set environment variables for your deployment
 export NAMESPACE=benchmarking
-export MODEL_NAME=Qwen/Qwen3-0.6B
-export INPUT_NAME=qwen-vllm-agg
-export SERVICE_URL=vllm-agg-frontend:8000
-export DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0
 
-# Deploy the benchmark job
-envsubst < benchmarks/incluster/benchmark_job.yaml | kubectl apply -f -
+# Deploy the benchmark job with default settings
+kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 
 # Monitor the job
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
@@ -332,10 +326,17 @@ kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
 kubectl get jobs -n $NAMESPACE
 ```
 
-#### Option B: One-liner deployment
+#### Customize the job configuration
 
+To customize the benchmark parameters, edit the `benchmarks/incluster/benchmark_job.yaml` file and modify:
+
+- **Model name**: Change `"Qwen/Qwen3-0.6B"` in the args section
+- **Experiment name and service URL**: Change `"qwen-vllm-agg=vllm-agg-frontend:8000"` so the service URL matches your deployed service
+- **Docker image**: Change the image field if needed
+
+Then deploy:
 ```bash
-NAMESPACE=benchmarking MODEL_NAME=Qwen/Qwen3-0.6B INPUT_NAME=qwen-vllm-agg SERVICE_URL=vllm-agg-frontend:8000 DOCKER_IMAGE=nvcr.io/nvidian/dynamo-dev/vllm-runtime:dyn-973.0 envsubst < benchmarks/incluster/benchmark_job.yaml | kubectl apply -f -
+kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 ```
 
 ### Step 3: Retrieve Results
@@ -370,15 +371,46 @@ This allows you to:
 
 ## Configuration
 
-The benchmark job is fully configurable through environment variables:
+The benchmark job is configured directly in the YAML file.
 
-### Required Environment Variables
+### Default Configuration
 
-- **NAMESPACE**: Kubernetes namespace where the benchmark will run
-- **MODEL_NAME**: Hugging Face model identifier (e.g., `Qwen/Qwen3-0.6B`)
-- **INPUT_NAME**: Name identifier for the benchmark input (e.g., `qwen-agg`)
-- **SERVICE_URL**: Internal service URL for the DynamoGraphDeployment frontend (use `svc_name.namespace.svc.cluster.local:port` for cross-namespace access)
-- **DOCKER_IMAGE**: Docker image containing the Dynamo benchmarking tools
+- **Model**: `Qwen/Qwen3-0.6B`
+- **Service**: `qwen-vllm-agg=vllm-agg-frontend:8000`
+- **Docker Image**: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0`
+
+### Customizing the Job
+
+To customize the benchmark, edit `benchmarks/incluster/benchmark_job.yaml`:
+
+1. **Change the model**: Update the `--model` argument
+2. **Change the experiment name and/or service URL**: Update the `--input` argument (use `svc_name.namespace.svc.cluster.local:port` for cross-namespace access)
+3. **Add multiple services**: Uncomment and add more `--input` lines
+4. **Change Docker image**: Update the image field if needed
+
+### Example: Multi-Namespace Benchmarking
+
+To benchmark services across multiple namespaces, modify the `--input` arguments:
+
+```yaml
+args:
+  - --model
+  - "Qwen/Qwen3-0.6B"
+  - --isl
+  - "2000"
+  - --std
+  - "10"
+  - --osl
+  - "256"
+  - --output-dir
+  - /data/results
+  - --input
+  - "prod-vllm=vllm-agg-frontend.production.svc.cluster.local:8000"
+  - --input
+  - "staging-vllm=vllm-agg-frontend.staging.svc.cluster.local:8000"
+  - --input
+  - "dev-vllm=vllm-agg-frontend.development.svc.cluster.local:8000"
+```
 
 ## Understanding Your Results
 

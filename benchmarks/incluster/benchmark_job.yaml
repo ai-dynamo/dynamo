@@ -5,7 +5,6 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: dynamo-benchmark
-  namespace: ${NAMESPACE}
 spec:
   template:
     spec:
@@ -18,7 +17,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: benchmark-runner
-        image: ${DOCKER_IMAGE}
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -39,14 +38,10 @@ spec:
               secretKeyRef:
                 name: hf-token-secret
                 key: HF_TOKEN
-          - name: NATS_SERVER
-            value: nats://${NAMESPACE}-nats:4222
-          - name: ETCD_ENDPOINTS
-            value: ${NAMESPACE}-etcd:2379
         command: ["python3", "-m", "benchmarks.utils.benchmark"]
         args:
           - --model
-          - ${MODEL_NAME}
+          - "Qwen/Qwen3-0.6B"
           - --isl
           - "2000"
           - --std
@@ -56,7 +51,10 @@ spec:
           - --output-dir
           - /data/results
           - --input
-          - ${INPUT_NAME}=${SERVICE_URL}
+          - "qwen-vllm-agg=vllm-agg-frontend:8000"
+          # add more copies of lines 58-59 for each additional service if you want to benchmark multiple services
+          # - --input
+          # - "name=service-url:port"
         volumeMounts:
           - name: data-volume
             mountPath: /data
