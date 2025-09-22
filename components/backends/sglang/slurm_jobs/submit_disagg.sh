@@ -63,7 +63,7 @@ OSL=$7
 CONCURRENCIES=$8
 REQUEST_RATE=$9
 
-RETRIES=2 # defaults to retry the job 2 times to avoid transient errors
+RETRIES=1 # defaults to retry the job 1 time to avoid transient errors
 
 # Should not need retries
 
