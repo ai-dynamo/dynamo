@@ -554,7 +554,7 @@ class SGLangConfigModifier:
         ]
         decode_worker_config["replicas"] = 1
 
-        return config
+        return cfg.model_dump()
 
     @classmethod
     def set_config_tp_size(cls, config: dict, tp_size: int):

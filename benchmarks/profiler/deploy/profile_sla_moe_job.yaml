@@ -26,10 +26,11 @@ spec:
             value: nats://${NAMESPACE}-nats:4222
           - name: ETCD_ENDPOINTS
             value: ${NAMESPACE}-etcd:2379
+        workingDir: /sgl-workspace/dynamo
         command: ["python", "-m", "benchmarks.profiler.profile_sla"]
         args:
           - --config
-          - /workspace/recipes/deepseek-r1/sglang-wideep/tep16p-dep16d-disagg.yaml
+          - /sgl-workspace/dynamo/recipes/deepseek-r1/sglang-wideep/tep16p-dep16d-disagg.yaml
           - --output-dir
           - /data/profiling_results
           - --namespace
