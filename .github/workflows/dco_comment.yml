@@ -35,5 +35,5 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
             ⚠️ Your pull request failed the DCO check.
-            Don’t worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.
+            Don’t worry! Check out our [DCO Troubleshooting Guide](https://github.com/ai-dynamo/dynamo/blob/main/DCO.md) for step-by-step instructions to fix it quickly.
           edit-mode: replace
