@@ -234,8 +234,6 @@ ARG ARCH_ALT
 
 FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG RELEASE_BUILD
-# Use arg ENABLE_KVBM = true to turn on the block-manager feature
-ARG ENABLE_KVBM
 ARG CARGO_BUILD_JOBS
 ARG ENABLE_KVBM
 # Set CARGO_BUILD_JOBS to 16 if not provided
