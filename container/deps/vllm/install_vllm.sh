@@ -20,6 +20,7 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
+# REMOVE nvshmem cherry-pick when moving to next version of vllm
 VLLM_REF="1da94e673c257373280026f75ceb4effac80e892"  # from v0.10.1.1
 # When updating above VLLM_REF make sure precompiled wheel file URL is correct. Run this command:
 # aws s3 ls s3://vllm-wheels/${VLLM_REF}/ --region us-west-2 --no-sign-request
@@ -128,6 +129,11 @@ cd $INSTALLATION_DIR
 git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
+# nvshmem fix - cherry-pick commit pinning pplx version
+# https://github.com/ai-dynamo/dynamo/actions/runs/17907241473/job/50910654042?pr=2969#step:8:280
+# remove when moving to next version of vllm
+# Configure git user for cherry-pick operation
+GIT_COMMITTER_NAME="Container Build" GIT_COMMITTER_EMAIL="container@buildkitsandbox.local" git cherry-pick 906e461ed6ddccd3cc7b68fa72048d2d3fcbd72c
 
 if [ "$ARCH" = "arm64" ]; then
     echo "Installing vllm for ARM64 architecture"
