@@ -56,7 +56,6 @@ pub struct SchedulingResponse {
 }
 
 pub struct SchedulingRequest {
-    pub request_id: String,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub overlaps: OverlapScores,
@@ -248,7 +247,6 @@ impl KvScheduler {
                             continue;
                         }
 
-                        let request_id = request.request_id;
                         if let Err(e) = slots_clone
                             .add_request(
                                 request_id.clone(),
@@ -290,7 +288,7 @@ impl KvScheduler {
 
     pub async fn schedule(
         &self,
-        request_id: String,
+        maybe_request_id: Option<String>,
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
         overlaps: OverlapScores,
@@ -299,7 +297,7 @@ impl KvScheduler {
     ) -> Result<i64, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            request_id,
+            maybe_request_id,
             token_seq,
             isl_tokens,
             overlaps,

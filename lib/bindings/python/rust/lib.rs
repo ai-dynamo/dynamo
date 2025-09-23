@@ -115,6 +115,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerStats>()?;
     m.add_class::<llm::kv::KvStats>()?;
     m.add_class::<llm::kv::SpecDecodeStats>()?;
+    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
@@ -528,6 +529,33 @@ impl DistributedRuntime {
         let inner = self.inner.runtime().child_token();
         CancellationToken { inner }
     }
+}
+
+// Bind a TCP port and return a socket held until dropped.
+fn bind_tcp_port(port: u16) -> std::io::Result<socket2::Socket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    sock.set_reuse_address(true)?;
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+    sock.bind(&addr.into())?;
+    Ok(sock)
+}
+
+fn make_port_key(namespace: &str, node_ip: IpAddr, port: u16) -> anyhow::Result<String> {
+    Ok(format!("dyn://{namespace}/ports/{node_ip}/{port}"))
+}
+
+fn local_ip() -> Result<IpAddr, local_ip_address::Error> {
+    local_ip_address::local_ip().or_else(|err| match err {
+        local_ip_address::Error::LocalIpAddressNotFound => {
+            // Fall back to IPv6 if no IPv4 addresses are found
+            local_ip_address::local_ipv6()
+        }
+        _ => Err(err),
+    })
 }
 
 // Bind a TCP port and return a socket held until dropped.

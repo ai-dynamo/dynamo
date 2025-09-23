@@ -133,7 +133,6 @@ def namespace():
 @pytest.fixture
 async def server(runtime, namespace):
     """Start a test server in the background"""
-    # TODO(michaelfeil): spawn using threading.Thread(target=asyncio.run, args=(server(),shutdown_signal: threading.Event()))
 
     handler = MockServer()
 
@@ -162,16 +161,6 @@ async def server(runtime, namespace):
             await server_task
         except asyncio.CancelledError:
             pass
-
-
-@pytest.fixture
-async def runtime():
-    """Create a DistributedRuntime for testing"""
-    # TODO(michaelfeil): consider re-using runtime across tests to not have to launch tests via subprocess.
-    loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, True)
-    yield runtime
-    runtime.shutdown()
 
 
 @pytest.fixture
