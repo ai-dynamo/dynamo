@@ -104,10 +104,6 @@ pub struct KvRouterConfig {
     /// Whether to track active blocks in the router (default: true)
     pub router_track_active_blocks: bool,
 
-    // TODO: this is not actually used for now
-    // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
-    pub max_num_batched_tokens: u32,
-
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     pub router_snapshot_threshold: Option<u32>,
 
@@ -123,7 +119,6 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             router_track_active_blocks: true,
-            max_num_batched_tokens: 8192,
             router_snapshot_threshold: Some(10000),
             router_reset_states: false,
         }
@@ -140,7 +135,6 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         track_active_blocks: Option<bool>,
-        max_num_batched_tokens: Option<u32>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
     ) -> Self {
@@ -152,8 +146,6 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             router_track_active_blocks: track_active_blocks
                 .unwrap_or(default.router_track_active_blocks),
-            max_num_batched_tokens: max_num_batched_tokens
-                .unwrap_or(default.max_num_batched_tokens),
             router_snapshot_threshold: router_snapshot_threshold
                 .unwrap_or(default.router_snapshot_threshold),
             router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
@@ -216,6 +208,8 @@ pub struct KvRouter {
     block_size: u32,
 
     kv_router_config: KvRouterConfig,
+
+    cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl KvRouter {
@@ -314,19 +308,25 @@ impl KvRouter {
             scheduler,
             block_size,
             kv_router_config,
+            cancellation_token,
         })
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returned overlap amount is in number of blocks.
-    /// Now also takes context_id for request tracking
-    async fn find_best_match(
+    /// Now also takes optional context_id for request tracking
+    pub async fn find_best_match(
         &self,
-        context_id: &str,
+        context_id: Option<&str>,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
     ) -> anyhow::Result<(i64, u32)> {
+        // Validate that context_id is provided when update_states is true
+        if update_states && context_id.is_none() {
+            panic!("context_id must be provided if update_states is true");
+        }
+
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
@@ -350,7 +350,7 @@ impl KvRouter {
         let best_worker_id = self
             .scheduler
             .schedule(
-                context_id.to_string(),
+                context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes_2,
                 overlap_scores.clone(),
@@ -448,7 +448,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         let response = match request {
             RouterRequest::New { tokens } => {
                 let (worker_id, overlap_blocks) = self
-                    .find_best_match(&context_id, &tokens, None, true)
+                    .find_best_match(Some(&context_id), &tokens, None, true)
                     .await?;
 
                 RouterResponse::New {
@@ -486,12 +486,11 @@ impl KvPushRouter {
     /// Find the best matching worker for the given tokens without updating states
     pub async fn find_best_match(
         &self,
-        context_id: &str,
         tokens: &[u32],
         router_config_override: Option<&RouterConfigOverride>,
     ) -> Result<(i64, u32)> {
         self.chooser
-            .find_best_match(context_id, tokens, router_config_override, false)
+            .find_best_match(None, tokens, router_config_override, false)
             .await
     }
 
@@ -554,7 +553,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     // Otherwise, find the best match
                     self.chooser
                         .find_best_match(
-                            &context_id,
+                            Some(&context_id),
                             &request.token_ids,
                             request.router_config_override.as_ref(),
                             !query_instance_id, // Don't update states if query_instance_id
@@ -608,5 +607,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 Ok(ResponseStream::new(wrapped_stream, stream_context))
             }
         }
+    }
+}
+
+impl Drop for KvRouter {
+    fn drop(&mut self) {
+        tracing::info!("Dropping KvRouter - cancelling background tasks");
+        self.cancellation_token.cancel();
     }
 }
