@@ -62,6 +62,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 | dynamo-operator.namespaceRestriction.enabled | bool | `true` | Whether to restrict operator to specific namespaces |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | Target namespace for operator deployment (leave empty for current namespace) |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
+| dynamo-operator.controllerManager.affinity | list | `[]` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
 | dynamo-operator.controllerManager.manager.image.tag | string | `""` | Image tag (leave empty to use chart default) |
 | dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
