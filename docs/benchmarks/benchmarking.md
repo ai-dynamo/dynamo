@@ -110,7 +110,8 @@ kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev
 
 # Benchmark deployment A using Python scripts
 python3 -m benchmarks.utils.benchmark \
-   --input deployment-a=http://localhost:8000 \
+   --benchmark_name deployment-a \
+   --endpoint_url http://localhost:8000 \
    --model "your-model-name" \
    --output-dir ./benchmarks/results
 ```
@@ -125,7 +126,8 @@ kubectl port-forward -n <namespace> svc/<frontend-service-name> 8001:8000 > /dev
 
 # Benchmark deployment B using Python scripts
 python3 -m benchmarks.utils.benchmark \
-   --input deployment-b=http://localhost:8001 \
+   --benchmark_name deployment-b \
+   --endpoint_url http://localhost:8001 \
    --model "your-model-name" \
    --output-dir ./benchmarks/results
 ```
@@ -152,13 +154,11 @@ The benchmarking framework supports various comparative analysis scenarios:
 ### Command Line Options
 
 ```bash
-python3 -m benchmarks.utils.benchmark --input <label>=<endpoint_url> [--input <label>=<endpoint_url>]... [OPTIONS]
+python3 -m benchmarks.utils.benchmark --benchmark_name <name> --endpoint_url <endpoint_url> [OPTIONS]
 
 REQUIRED:
-  --input <label>=<endpoint_url>     Benchmark input with custom label
-                                        - <label>: becomes the name/label in plots (see Important Notes for restrictions)
-                                        - <endpoint_url>: HTTP endpoint URL (e.g., http://localhost:8000)
-                                        Can be specified multiple times for comparisons
+  --benchmark_name NAME           Name/label for this benchmark (used in plots and results)
+  --endpoint_url URL              HTTP endpoint URL to benchmark (e.g., http://localhost:8000)
 
 OPTIONS:
   -h, --help                    Show help message and examples
@@ -173,8 +173,8 @@ OPTIONS:
 
 ### Important Notes
 
-- **Custom Labels**: Each input must have a unique label that becomes the name in plots and results
-- **Label Restrictions**: Labels can only contain letters, numbers, hyphens, and underscores. The label `plots` is reserved.
+- **Benchmark Name**: The benchmark name becomes the label in plots and results
+- **Name Restrictions**: Names can only contain letters, numbers, hyphens, and underscores. The name `plots` is reserved.
 - **Port-Forwarding**: You must have an exposed endpoint before benchmarking
 - **Model Parameter**: The `--model` parameter configures GenAI-Perf for testing and logging, and must match the model deployed at the endpoint
 - **Sequential Benchmarking**: For comparative benchmarks, deploy and benchmark each configuration separately
@@ -185,10 +185,10 @@ The Python benchmarking module:
 1. **Connects** to your port-forwarded endpoint
 2. **Benchmarks** using GenAI-Perf at various concurrency levels (default: 1, 2, 5, 10, 50, 100, 250)
 3. **Measures** key metrics: latency, throughput, time-to-first-token
-4. **Saves** results to an output directory organized by input labels
+4. **Saves** results to an output directory organized by benchmark name
 
 The Python plotting module:
-1. **Generates** comparison plots using your custom labels in `<OUTPUT_DIR>/plots/`
+1. **Generates** comparison plots using your benchmark name in `<OUTPUT_DIR>/plots/`
 2. **Creates** summary statistics and visualizations
 
 ### Using Your Own Models and Configuration
@@ -199,7 +199,7 @@ The benchmarking framework is built around Python modules that provide direct co
 
 ### Comparison Limitations
 
-The plotting system supports up to 12 different inputs in a single comparison. If you need to compare more than 12 different deployments/endpoints, consider running separate benchmark sessions or grouping related comparisons together.
+The plotting system supports up to 12 different benchmarks in a single comparison.
 
 ### Concurrency Configuration
 
@@ -208,12 +208,14 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 ```bash
 # Custom concurrency levels
 CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark \
-    --input my-test=http://localhost:8000
+    --benchmark_name my-test \
+    --endpoint_url http://localhost:8000
 
 # Or set permanently
 export CONCURRENCIES="1,2,5,10,25,50,100"
 python3 -m benchmarks.utils.benchmark \
-    --input test=http://localhost:8000
+    --benchmark_name test \
+    --endpoint_url http://localhost:8000
 ```
 
 ## Understanding Your Results
@@ -222,9 +224,9 @@ After benchmarking completes, check `./benchmarks/results/` (or your custom outp
 
 ### Plot Labels and Organization
 
-The plotting script uses the `--input` labels (the keys before the `=` sign) as the experiment names in all generated plots. For example:
-- `--input aggregated=http://localhost:8000` → plots will show "aggregated" as the label
-- `--input vllm-disagg=http://localhost:8001` → plots will show "vllm-disagg" as the label
+The plotting script uses the `--benchmark_name` as the experiment name in all generated plots. For example:
+- `--benchmark_name aggregated` → plots will show "aggregated" as the label
+- `--benchmark_name vllm-disagg` → plots will show "vllm-disagg" as the label
 
 This allows you to easily identify and compare different configurations in the visualization plots.
 
@@ -245,7 +247,7 @@ benchmarks/results/
 
 Raw data is organized by deployment/benchmark type and concurrency level:
 
-**For Any Benchmarking (uses your custom labels):**
+**For Any Benchmarking (uses your custom benchmark name):**
 ```text
 results/                          # Client-side: ./benchmarks/results/ or custom dir
 ├── plots/                        # Server-side: /data/results/
@@ -255,25 +257,23 @@ results/                          # Client-side: ./benchmarks/results/ or custom
 │   ├── request_throughput_vs_concurrency.png
 │   ├── efficiency_tok_s_gpu_vs_user.png
 │   └── avg_time_to_first_token_vs_concurrency.png
-├── <your-label-1>/              # Results for first input (uses your custom label)
+├── <your-benchmark-name>/       # Results for your benchmark (uses your custom name)
 │   ├── c1/                      # Concurrency level 1
 │   │   └── profile_export_genai_perf.json
 │   ├── c2/                      # Concurrency level 2
 │   ├── c5/                      # Concurrency level 5
 │   └── ...                      # Other concurrency levels (10, 50, 100, 250)
-├── <your-label-2>/              # Results for second input (if provided)
-│   └── c*/                      # Same structure as above
-└── <your-label-N>/              # Results for additional inputs
+└── <your-benchmark-name-N>/     # Results for additional benchmarking runs
     └── c*/                      # Same structure as above
 ```
 
-**Example with actual labels:**
+**Example with actual benchmark names:**
 ```text
 results/
 ├── plots/
-├── experiment-a/                  # --input experiment-a=http://localhost:8000
-├── experiment-b/                  # --input experiment-b=http://localhost:8001
-└── experiment-c/                  # --input experiment-c=http://localhost:8002
+├── experiment-a/                  # --benchmark_name experiment-a
+├── experiment-b/                  # --benchmark_name experiment-b
+└── experiment-c/                  # --benchmark_name experiment-c
 ```
 
 Each concurrency directory contains:
@@ -327,7 +327,8 @@ kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
 To customize the benchmark parameters, edit the `benchmarks/incluster/benchmark_job.yaml` file and modify:
 
 - **Model name**: Change `"Qwen/Qwen3-0.6B"` in the args section
-- **Experiment name and service URL**: Change `"qwen-vllm-agg=vllm-agg-frontend:8000"` so the service URL matches your deployed service
+- **Benchmark name**: Change `"qwen3-0.6b-vllm-agg"` to your desired benchmark name
+- **Service URL**: Change `"vllm-agg-frontend:8000"` so the service URL matches your deployed service
 - **Docker image**: Change the image field if needed
 
 Then deploy:
@@ -372,7 +373,8 @@ The benchmark job is configured directly in the YAML file.
 ### Default Configuration
 
 - **Model**: `Qwen/Qwen3-0.6B`
-- **Service**: `qwen-vllm-agg=vllm-agg-frontend:8000`
+- **Benchmark Name**: `qwen3-0.6b-vllm-agg`
+- **Service**: `vllm-agg-frontend:8000`
 - **Docker Image**: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0`
 
 ### Customizing the Job
@@ -380,32 +382,36 @@ The benchmark job is configured directly in the YAML file.
 To customize the benchmark, edit `benchmarks/incluster/benchmark_job.yaml`:
 
 1. **Change the model**: Update the `--model` argument
-2. **Change the experiment name and/or service URL**: Update the `--input` argument (use `svc_name.namespace.svc.cluster.local:port` for cross-namespace access)
-3. **Add multiple services**: Uncomment and add more `--input` lines
+2. **Change the benchmark name**: Update the `--benchmark_name` argument
+3. **Change the service URL**: Update the `--endpoint_url` argument (use `<svc_name>.<namespace>.svc.cluster.local:port` for cross-namespace access)
 4. **Change Docker image**: Update the image field if needed
 
 ### Example: Multi-Namespace Benchmarking
 
-To benchmark services across multiple namespaces, modify the `--input` arguments:
+To benchmark services across multiple namespaces, you would need to run separate benchmark jobs for each service since the format supports one benchmark per job. However, the results are stored in the same PVC and may be accessed together.
 
 ```yaml
+# Job 1: Production service
 args:
   - --model
   - "Qwen/Qwen3-0.6B"
-  - --isl
-  - "2000"
-  - --std
-  - "10"
-  - --osl
-  - "256"
+  - --benchmark_name
+  - "prod-vllm"
+  - --endpoint_url
+  - "vllm-agg-frontend.production.svc.cluster.local:8000"
   - --output-dir
   - /data/results
-  - --input
-  - "prod-vllm=vllm-agg-frontend.production.svc.cluster.local:8000"
-  - --input
-  - "staging-vllm=vllm-agg-frontend.staging.svc.cluster.local:8000"
-  - --input
-  - "dev-vllm=vllm-agg-frontend.development.svc.cluster.local:8000"
+
+# Job 2: Staging service
+args:
+  - --model
+  - "Qwen/Qwen3-0.6B"
+  - --benchmark_name
+  - "staging-vllm"
+  - --endpoint_url
+  - "vllm-agg-frontend.staging.svc.cluster.local:8000"
+  - --output-dir
+  - /data/results
 ```
 
 ## Understanding Your Results
@@ -421,7 +427,7 @@ Results are stored in `/data/results` and follow the same structure as client-si
 │   ├── request_throughput_vs_concurrency.png
 │   ├── efficiency_tok_s_gpu_vs_user.png
 │   └── avg_time_to_first_token_vs_concurrency.png
-└── dsr1/                           # Results for dsr1 input
+└── <benchmark-name>/                # Results for your benchmark name
     ├── c1/                          # Concurrency level 1
     │   └── profile_export_genai_perf.json
     ├── c2/                          # Concurrency level 2
