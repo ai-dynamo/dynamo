@@ -102,7 +102,7 @@ Set up your Kubernetes namespace for profiling (one-time per namespace). First e
 pip install -r deploy/utils/requirements.txt
 ```
 
-### Step 1: Inject your DGD configuration
+**Step 1: Inject your DGD configuration**
 
 Use the injector utility to place your DGD manifest into the PVC. The profiling job will read the path you specify.
 

@@ -22,6 +22,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="profile a given endpoint's performance for prefill or decode"
     )
+    # TODO: use kebab case 
     parser.add_argument(
         "--mode",
         type=str,
