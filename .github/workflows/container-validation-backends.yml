@@ -27,7 +27,6 @@ jobs:
           - { arch: "linux/arm64", runner: cpu-arm-r8g-4xlarge }
 
     runs-on: ${{ matrix.platform.runner }}
-    name: build-test-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework.name }}
       PYTEST_XML_FILE: pytest_test_report.xml
@@ -56,7 +55,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          ./container/build.sh --tag ${{ matrix.framework.name }}:latest \
+          ./container/build.sh --tag ${{ matrix.framework.name }}:${{ matrix.platform.arch }} \
             --platform ${{ matrix.platform.arch }} \
             --target ${{ matrix.framework.target }} \
             --framework ${{ matrix.framework.name }} \
@@ -65,7 +64,7 @@ jobs:
             --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
         # No infra available for ARM + GPU in CI
-        if: ${{ matrix.platform != 'linux/arm64' }}
+        if: ${{ matrix.platform.arch != 'linux/arm64' }}
         env:
           HF_HOME: /runner/_work/_temp
         run: |
@@ -74,3 +73,7 @@ jobs:
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ matrix.framework.name }}:latest \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+      - name: Docker Tag and Push
+        if: ${{ github.ref_name == 'main' }}
+        run: |
+          docker tag ${{ matrix.framework.name }}:${{ matrix.platform.arch }} ${{ matrix.framework.name }}:${{ github.sha }}-${{ matrix.platform.arch }}
