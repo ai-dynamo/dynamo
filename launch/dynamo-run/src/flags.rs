@@ -69,12 +69,6 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
-    /// Maximum number of batched tokens for KV routing
-    /// Needed for informing the KV router
-    /// NOTE: this is not actually used for now
-    #[arg(long, default_value = "8192")]
-    pub max_num_batched_tokens: Option<u32>,
-
     /// KV Router: Weight for overlap score in worker selection.
     /// Higher values prioritize KV cache reuse. Default: 1.0
     #[arg(long)]
@@ -236,7 +230,6 @@ impl Flags {
                 self.use_kv_events,
                 self.router_replica_sync,
                 self.router_track_active_blocks,
-                self.max_num_batched_tokens,
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
                 None,
                 None,
