@@ -294,20 +294,7 @@ impl tensor::Tensor {
             }
         })?;
 
-        let data_size = match self.metadata.data_type {
-            tensor::DataType::Bool => 1,
-            tensor::DataType::Uint8 => 1,
-            tensor::DataType::Uint16 => 2,
-            tensor::DataType::Uint32 => 4,
-            tensor::DataType::Uint64 => 8,
-            tensor::DataType::Int8 => 1,
-            tensor::DataType::Int16 => 2,
-            tensor::DataType::Int32 => 4,
-            tensor::DataType::Int64 => 8,
-            tensor::DataType::Float32 => 4,
-            tensor::DataType::Float64 => 8,
-            tensor::DataType::Bytes => 0,
-        };
+        let data_size = self.metadata.data_type.size();
 
         // For BYTES type, we need to parse length-prefixed strings and properly slice them
         // into bytes of array, and early return
@@ -345,7 +332,8 @@ impl tensor::Tensor {
             return Ok(());
         }
 
-        // Non-bytes type, simply reinterpret cast the raw input bytes
+        // Control reaches here on non-bytes types
+        // validate raw input length before conversion
         if !raw_input.len().is_multiple_of(data_size) {
             return Err(Status::invalid_argument(format!(
                 "Raw input length must be a multiple of {}",
@@ -359,33 +347,39 @@ impl tensor::Tensor {
                 raw_input.len() / data_size
             )));
         }
+        self.data = self.raw_input_to_typed_tensor(raw_input)?;
 
+        Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn raw_input_to_typed_tensor(&self, raw_input: &[u8]) -> Result<tensor::FlattenTensor, Status> {
         // In Rust, we can not "reinterpret cast" a Vec<u8> to Vec<T> directly
         // as Vec require the pointer to be aligned with the type T, which can not
         // be guaranteed from Vec<u8>. We will have to reconstruct the Vec<T> element
         // by element which results in data copy.
         // Here we assume little endianess for all types as the KServe protocol doesn't
         // specify the endianness while it should have.
-        self.data = match self.metadata.data_type {
-            tensor::DataType::Bool => {
-                tensor::FlattenTensor::Bool(raw_input.iter().map(|&b| b != 0).collect())
-            }
-            tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
+        match self.metadata.data_type {
+            tensor::DataType::Bool => Ok(tensor::FlattenTensor::Bool(
+                raw_input.iter().map(|&b| b != 0).collect(),
+            )),
+            tensor::DataType::Uint8 => Ok(tensor::FlattenTensor::Uint8(
                 raw_input.chunks_exact(1).map(|chunk| chunk[0]).collect(),
-            ),
-            tensor::DataType::Uint16 => tensor::FlattenTensor::Uint16(
+            )),
+            tensor::DataType::Uint16 => Ok(tensor::FlattenTensor::Uint16(
                 raw_input
                     .chunks_exact(2)
                     .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
-            ),
-            tensor::DataType::Uint32 => tensor::FlattenTensor::Uint32(
+            )),
+            tensor::DataType::Uint32 => Ok(tensor::FlattenTensor::Uint32(
                 raw_input
                     .chunks_exact(4)
                     .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect(),
-            ),
-            tensor::DataType::Uint64 => tensor::FlattenTensor::Uint64(
+            )),
+            tensor::DataType::Uint64 => Ok(tensor::FlattenTensor::Uint64(
                 raw_input
                     .chunks_exact(8)
                     .map(|chunk| {
@@ -395,26 +389,26 @@ impl tensor::Tensor {
                         ])
                     })
                     .collect(),
-            ),
-            tensor::DataType::Int8 => tensor::FlattenTensor::Int8(
+            )),
+            tensor::DataType::Int8 => Ok(tensor::FlattenTensor::Int8(
                 raw_input
                     .chunks_exact(1)
                     .map(|chunk| chunk[0] as i8)
                     .collect(),
-            ),
-            tensor::DataType::Int16 => tensor::FlattenTensor::Int16(
+            )),
+            tensor::DataType::Int16 => Ok(tensor::FlattenTensor::Int16(
                 raw_input
                     .chunks_exact(2)
                     .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                     .collect(),
-            ),
-            tensor::DataType::Int32 => tensor::FlattenTensor::Int32(
+            )),
+            tensor::DataType::Int32 => Ok(tensor::FlattenTensor::Int32(
                 raw_input
                     .chunks_exact(4)
                     .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect(),
-            ),
-            tensor::DataType::Int64 => tensor::FlattenTensor::Int64(
+            )),
+            tensor::DataType::Int64 => Ok(tensor::FlattenTensor::Int64(
                 raw_input
                     .chunks_exact(8)
                     .map(|chunk| {
@@ -424,14 +418,14 @@ impl tensor::Tensor {
                         ])
                     })
                     .collect(),
-            ),
-            tensor::DataType::Float32 => tensor::FlattenTensor::Float32(
+            )),
+            tensor::DataType::Float32 => Ok(tensor::FlattenTensor::Float32(
                 raw_input
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect(),
-            ),
-            tensor::DataType::Float64 => tensor::FlattenTensor::Float64(
+            )),
+            tensor::DataType::Float64 => Ok(tensor::FlattenTensor::Float64(
                 raw_input
                     .chunks_exact(8)
                     .map(|chunk| {
@@ -441,15 +435,12 @@ impl tensor::Tensor {
                         ])
                     })
                     .collect(),
-            ),
-            tensor::DataType::Bytes => {
-                return Err(Status::internal(format!(
-                    "Unexpected BYTES type in non-bytes branch for input '{}'",
-                    self.metadata.name
-                )));
-            }
-        };
-        Ok(())
+            )),
+            tensor::DataType::Bytes => Err(Status::internal(format!(
+                "Unexpected BYTES type in non-bytes branch for input '{}'",
+                self.metadata.name
+            ))),
+        }
     }
 }
 

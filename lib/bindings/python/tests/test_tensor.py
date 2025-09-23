@@ -50,7 +50,7 @@ async def test_register(runtime: DistributedRuntime):
         await endpoint.serve_endpoint(generate)
 
 
-async def generate(request, _context):
+async def generate(request, context):
     print(f"Received request: {request}")
     # Echo input_text in output_text
     output_text = None

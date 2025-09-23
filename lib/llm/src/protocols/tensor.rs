@@ -35,6 +35,25 @@ pub enum DataType {
     Bytes,
 }
 
+impl DataType {
+    pub fn size(&self) -> usize {
+        match self {
+            DataType::Bool => size_of::<bool>(),
+            DataType::Uint8 => size_of::<u8>(),
+            DataType::Uint16 => size_of::<u16>(),
+            DataType::Uint32 => size_of::<u32>(),
+            DataType::Uint64 => size_of::<u64>(),
+            DataType::Int8 => size_of::<i8>(),
+            DataType::Int16 => size_of::<i16>(),
+            DataType::Int32 => size_of::<i32>(),
+            DataType::Int64 => size_of::<i64>(),
+            DataType::Float32 => size_of::<f32>(),
+            DataType::Float64 => size_of::<f64>(),
+            DataType::Bytes => 0, // variable length, return 0 as indicator
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, PartialEq, Deserialize)]
 // Self-describing encoding removes ambiguity between signed/unsigned and width variants.
 #[serde(tag = "data_type", content = "values")]
