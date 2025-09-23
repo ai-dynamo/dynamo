@@ -5,6 +5,12 @@
 ### Install gcloud CLI
 https://cloud.google.com/sdk/docs/install 
 
+```bash
+# Authorize to GCP platform
+gcloud auth login
+gcloud auth application-default login
+```
+
 ### Create GKE cluster
 
 ```bash
@@ -12,10 +18,12 @@ export PROJECT_ID=<>
 export REGION=<>
 export ZONE=<>
 export CLUSTER_NAME=<>
-export NODE_POOL_MACHINE_TYPE=g2-standard-24
 export CLUSTER_MACHINE_TYPE=n2-standard-4
+export NODE_POOL_MACHINE_TYPE=g2-standard-24
 export GPU_TYPE=nvidia-l4
-export GPU_COUNT=6
+export GPU_COUNT=2
+export CPU_NODE=2
+export GPU_NODE=2
 export DISK_SIZE=200
 
 gcloud container clusters create ${CLUSTER_NAME} \
@@ -24,7 +32,7 @@ gcloud container clusters create ${CLUSTER_NAME} \
 	--subnetwork=default \
     --disk-size=${DISK_SIZE} \
 	--machine-type=${CLUSTER_MACHINE_TYPE} \
- 	--num-nodes=1
+ 	--num-nodes=${CPU_NODE}
 ```
 
 #### Create GPU pool
@@ -37,21 +45,10 @@ gcloud container node-pools create gpu-pool \
  	--cluster=${CLUSTER_NAME} \
 	--machine-type=${NODE_POOL_MACHINE_TYPE} \
     --disk-size=${DISK_SIZE} \
-    --service-account=${SA} \
-    --num-nodes=1 \
+    --num-nodes=${GPU_NODE} \
     --enable-autoscaling \
     --min-nodes=1 \
     --max-nodes=3
-```
-
-###  Install helm
-
-```bash
-curl https://baltocdn.com/helm/signing.asc | sudo tee /etc/apt/trusted.gpg.d/helm.asc > /dev/null
-echo "deb https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
-
-sudo apt-get update
-sudo apt-get install -y helm
 ```
 
 ###  Clone Dynamo GitHub repository
@@ -85,7 +82,7 @@ kubectl create secret generic hf-token-secret \
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-cloud
-export RELEASE_VERSION=0.4.0 # any version of Dynamo 0.3.2+
+export RELEASE_VERSION=0.4.0
 
 # 2. Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
@@ -140,9 +137,9 @@ We will deploy a LLM model to the Dynamo platform. Here we use `google/gemma-3-1
 In the deployment yaml file, some adjustments have to/ could be made:
 
 - **(Required)** Add args to change `LD_LIBRARY_PATH` and `PATH` of decoder container, to enable GKE find the correct GPU driver
-- Change VLLM  image to the desired one on NGC
+- Change VLLM image to the desired version on NGC
 - Add namespace to metadata
-- Adjust GPU/CPU request and limits
+- Adjust GPU/CPU requests and limits
 - Change model to deploy
 
 More configurations please refer to https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/GKE/vllm
@@ -170,9 +167,16 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
     VllmDecodeWorker:
 ​​      resources:
-        limits:
-          gpu: "3"
+        requests:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            initialDelaySeconds: 180
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
+          command:
+            - /bin/sh
+            - -c
           args:
             - |
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
@@ -194,13 +198,13 @@ kubectl apply -f disagg_gke.yaml
 ```bash
 kubectl get pods
 NAME                                                              READY   STATUS    RESTARTS   AGE
-dynamo-platform-dynamo-operator-controller-manager-c665684ssqkx   2/2     Running   0          65m
-dynamo-platform-etcd-0                                            1/1     Running   0          65m
-dynamo-platform-nats-0                                            2/2     Running   0          65m
-dynamo-platform-nats-box-5dbf45c748-rbwjr                         1/1     Running   0          65m
-vllm-disagg-frontend-5954ddc4dd-4w2cb                             1/1     Running   0          11m
-vllm-disagg-vllmdecodeworker-77844cfcff-ddn4v                     1/1     Running   0          11m
-vllm-disagg-vllmprefillworker-55d5b74b4f-zrskh                    1/1     Running   0          11m
+dynamo-platform-dynamo-operator-controller-manager-c665684ssqkx   2/2     Running   0          5m
+dynamo-platform-etcd-0                                            1/1     Running   0          5m
+dynamo-platform-nats-0                                            2/2     Running   0          5m
+dynamo-platform-nats-box-5dbf45c748-rbwjr                         1/1     Running   0          5m
+vllm-disagg-frontend-5954ddc4dd-4w2cb                             1/1     Running   0          16m
+vllm-disagg-vllmdecodeworker-77844cfcff-ddn4v                     1/1     Running   0          16m
+vllm-disagg-vllmprefillworker-55d5b74b4f-zrskh                    1/1     Running   0          16m
 ```
 
 ## Test the Deployment

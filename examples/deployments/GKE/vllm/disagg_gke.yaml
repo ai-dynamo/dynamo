@@ -67,12 +67,12 @@ spec:
         failureThreshold: 60
       resources:
         requests:
-          cpu: "1"
-          memory: "20Gi"
+          cpu: "10"
+          memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "1"
-          memory: "20Gi"
+          cpu: "10"
+          memory: "40Gi"
           gpu: "1"
       envs:
         - name: DYN_SYSTEM_ENABLED
@@ -87,6 +87,7 @@ spec:
             httpGet:
               path: /health
               port: 9090
+            initialDelaySeconds: 180
             periodSeconds: 10
             failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
@@ -121,12 +122,12 @@ spec:
         failureThreshold: 60
       resources:
         requests:
-          cpu: "1"
-          memory: "20Gi"
+          cpu: "10"
+          memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "1"
-          memory: "20Gi"
+          cpu: "10"
+          memory: "40Gi"
           gpu: "1"
       envs:
         - name: DYN_SYSTEM_ENABLED
@@ -141,6 +142,7 @@ spec:
             httpGet:
               path: /health
               port: 9090
+            initialDelaySeconds: 180
             periodSeconds: 10
             failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0
