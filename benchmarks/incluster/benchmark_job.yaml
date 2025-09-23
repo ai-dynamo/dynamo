@@ -51,7 +51,7 @@ spec:
           - --output-dir
           - /data/results
           - --benchmark_name
-          - "qwen3-0.6b-vllm-agg"
+          - "qwen3-0p6b-vllm-agg"
           - --endpoint_url
           - "vllm-agg-frontend:8000"
         volumeMounts:

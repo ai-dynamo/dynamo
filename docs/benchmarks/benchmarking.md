@@ -327,7 +327,7 @@ kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
 To customize the benchmark parameters, edit the `benchmarks/incluster/benchmark_job.yaml` file and modify:
 
 - **Model name**: Change `"Qwen/Qwen3-0.6B"` in the args section
-- **Benchmark name**: Change `"qwen3-0.6b-vllm-agg"` to your desired benchmark name
+- **Benchmark name**: Change `"qwen3-0p6b-vllm-agg"` to your desired benchmark name
 - **Service URL**: Change `"vllm-agg-frontend:8000"` so the service URL matches your deployed service
 - **Docker image**: Change the image field if needed
 
@@ -373,7 +373,7 @@ The benchmark job is configured directly in the YAML file.
 ### Default Configuration
 
 - **Model**: `Qwen/Qwen3-0.6B`
-- **Benchmark Name**: `qwen3-0.6b-vllm-agg`
+- **Benchmark Name**: `qwen3-0p6b-vllm-agg`
 - **Service**: `vllm-agg-frontend:8000`
 - **Docker Image**: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0`
 
