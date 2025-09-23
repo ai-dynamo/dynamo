@@ -170,55 +170,26 @@ impl From<HttpError> for ErrorMessage {
 
 // Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
 // But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Added a middleware at axum router level to catch read the raw request and catch any json syntax errors and return a 400.
+// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
-    // Only process POST requests with JSON content
-    if request.method() != axum::http::Method::POST {
-        return next.run(request).await;
-    }
+    let response = next.run(request).await;
 
-    // Check if content-type is JSON
-    let content_type = request
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|ct| ct.to_str().ok())
-        .unwrap_or("");
-
-    if !content_type.contains("application/json") {
-        return next.run(request).await;
-    }
-
-    // Extract the request body
-    let (parts, body) = request.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            // If we can't read the body, return a 400
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorMessage {
-                    error: "Failed to read request body".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    // Try to parse as JSON first to catch pure JSON syntax errors
-    match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-        Err(json_err) => (
+    if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
+        let (_parts, body) = response.into_parts();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .unwrap_or_default();
+        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
+        (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
-                error: format!("Invalid JSON syntax: {}", json_err),
+                error: error_message,
             }),
         )
-            .into_response(),
-        // Pass through for any other errors as it is
-        Ok(_) => {
-            let new_body = Body::from(body_bytes);
-            let new_request = Request::from_parts(parts, new_body);
-            next.run(new_request).await
-        }
+            .into_response()
+    } else {
+        // Pass through if it is not a 422
+        response
     }
 }
 
