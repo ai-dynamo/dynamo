@@ -31,9 +31,8 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${REL
 helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 
 # 3. Install Platform
-kubectl create namespace ${NAMESPACE}
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
-helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
 For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](/docs/kubernetes/installation_guide.md)**.

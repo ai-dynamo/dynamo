@@ -127,7 +127,7 @@ docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG . && docker push $DOCK
 
 cd -
 
-# 3. Create namespace and secrets to be able to pull the operator image
+# 3. Create namespace and secrets to be able to pull the operator image (only needed if you pushed the operator image to a private registry)
 kubectl create namespace ${NAMESPACE}
 kubectl create secret docker-registry docker-imagepullsecret \
   --docker-server=${DOCKER_SERVER} \
@@ -139,7 +139,6 @@ kubectl create secret docker-registry docker-imagepullsecret \
 helm upgrade --install dynamo-crds ./crds/ --namespace default
 
 # 5. Install Platform
-helm repo add bitnami https://charts.bitnami.com/bitnami
 helm dep build ./platform/
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
