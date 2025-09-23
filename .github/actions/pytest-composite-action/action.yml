@@ -16,7 +16,7 @@ runs:
     - name: Run tests
       shell: bash
       env:
-        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ inputs.framework }}
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
       run: |

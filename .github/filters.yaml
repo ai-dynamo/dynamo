@@ -33,7 +33,7 @@ vllm: &vllm
 
 sglang: &sglang
   - 'container/Dockerfile.sglang'
-  - 'container/Dockerfile.sglang-deepep'
+  - 'container/Dockerfile.sglang-wideep'
   - 'components/backends/sglang/**'
   - 'container/build.sh'
   - 'tests/serve/test_sglang.py'
