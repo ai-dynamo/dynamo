@@ -116,6 +116,15 @@ dynamo-operator:
       # -- Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables
       prometheusEndpoint: ""
 
+    # MPI Run configuration
+    mpiRun:
+      # -- Name of the secret containing the SSH key for MPI Run
+      secretName: "mpi-run-ssh-secret"
+      # SSH key generation configuration
+      sshKeygen:
+        # -- Whether to enable SSH key generation for MPI Run
+        enabled: true
+
 
 # Grove component - distributed inference orchestration
 grove:

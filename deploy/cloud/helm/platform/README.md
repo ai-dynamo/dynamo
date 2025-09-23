@@ -47,8 +47,8 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 | file://components/operator | dynamo-operator | 0.5.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.0.0-6e30275 |
-| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.8.4 |
+| oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.1.0-alpha.1 |
+| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.9.2 |
 
 ## Values
 
@@ -85,6 +85,8 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 | dynamo-operator.dynamo.ingressHostSuffix | string | `""` | Host suffix for generated ingress hostnames |
 | dynamo-operator.dynamo.virtualServiceSupportsHTTPS | bool | `false` | Whether VirtualServices should support HTTPS routing |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
+| dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
+| dynamo-operator.dynamo.mpiRun.sshKeygen.enabled | bool | `true` | Whether to enable SSH key generation for MPI Run |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
 | etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance |
