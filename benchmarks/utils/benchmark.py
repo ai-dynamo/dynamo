@@ -58,7 +58,7 @@ def main() -> int:
     parser.add_argument(
         "--endpoint_url",
         required=True,
-        help="HTTP endpoint URL to benchmark (e.g., http://localhost:8000)",
+        help="Endpoint to benchmark: HTTP(S) URL (e.g., http://localhost:8000) or in-cluster service URL host[:port]",
     )
     parser.add_argument("--isl", type=int, default=2000, help="Input sequence length")
     parser.add_argument(
