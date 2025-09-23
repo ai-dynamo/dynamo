@@ -694,7 +694,7 @@ if [  ! -z ${RELEASE_BUILD} ]; then
 fi
 
 if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
-    echo "Forcing enable_kvbm to true in vLLM image build"
+    echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
 fi
 
