@@ -436,58 +436,63 @@ fn ensure_host_started() -> Result<&'static Host, String> {
                             use_kv_routing: _, // TODO rm
                             busy_threshold,
                             overlap_score_weight,
-                            router_temperature,
-                            use_kv_events,
-                            router_replica_sync,
+                            router_temperature: _,      // we’ll force 0.0 TODO
+                            use_kv_events: _,           // we’ll force false TODO
+                            router_replica_sync: _,     // pick false for now TODO
                             resp,
                         } => {
-                            let use_kv_routing = false; // TODO rm
+                            // TODO rm
+                            // Force KV mode + deterministic routing
+                            let use_kv_routing = true;
+                            let router_temperature = Some(0.0);
+                            let use_kv_events = false;
+                            let router_replica_sync = false;
+
                             tracing::info!(
                                 target: "capi",
-                                "CreatePipeline ns={:?} component={:?} model={:?} use_kv_routing={:?} busy_threshold={:?} overlap_score_weight={:?} router_temperature={:?} use_kv_events={:?} router_replica_sync={:?}",
+                                "CreatePipeline ns={:?} component={:?} model={:?} KV_ROUTING={:?} busy_threshold={:?} overlap_score_weight={:?} router_temperature={:?} use_kv_events={:?} router_replica_sync={:?}",
                                 namespace, component, model, use_kv_routing, busy_threshold, overlap_score_weight, router_temperature, use_kv_events, router_replica_sync
                             );
-                            let fut = async {
-                                let router_mode = if use_kv_routing {
-                                    RouterMode::KV
-                                } else {
-                                    RouterMode::RoundRobin
-                                };
 
-                                let kv_router_config = if use_kv_routing {
+                            // 1) Build the pipeline inside a future that does NOT capture `pipelines`
+                            let build = async move {
+                                let router_mode = RouterMode::KV;
+
+                                let kv_router_config = {
                                     use dynamo_llm::kv_router::KvRouterConfig;
                                     Some(KvRouterConfig::new(
-                                        overlap_score_weight,
-                                        router_temperature,
-                                        Some(use_kv_events),
-                                        Some(router_replica_sync),
-                                        None, // max_num_batched_tokens
-                                        None, // router_snapshot_threshold
-                                        None, // router_reset_states
+                                        overlap_score_weight,      // keep caller/defaults
+                                        router_temperature,        // Some(0.0) => deterministic
+                                        Some(use_kv_events),       // false
+                                        Some(router_replica_sync), // false
+                                        None, None, None,
                                     ))
-                                } else {
-                                    None
                                 };
-                                tracing::info!("Host creating pipeline: ns={namespace} component={component} mode={:?}",
-                                                if use_kv_routing { RouterMode::KV } else { RouterMode::RoundRobin });
 
-                                let pipeline = create_worker_selection_pipeline_chat(
+                                create_worker_selection_pipeline_chat(
                                     &namespace,
-                                    &component,
+                                    &component, // "backend"
                                     &model,
                                     router_mode,
                                     busy_threshold,
                                     kv_router_config,
                                 )
                                 .await
-                                .map_err(|e| format!("{e:?}"))?;
-
-                                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                                pipelines.insert(id, HeldPipeline { pipeline });
-                                Ok::<u64, String>(id)
+                                .map_err(|e| format!("{e:?}"))
                             };
 
-                            let _ = resp.send(fut.await);
+                            // 2) Await the build, THEN insert into `pipelines` synchronously
+                            let out = match build.await {
+                                Ok(pipeline) => {
+                                    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                                    pipelines.insert(id, HeldPipeline { pipeline });
+                                    Ok(id)
+                                }
+                                Err(err) => Err(err),
+                            };
+
+                            // 3) Reply
+                            let _ = resp.send(out);
                         }
 
                         Cmd::Query {
