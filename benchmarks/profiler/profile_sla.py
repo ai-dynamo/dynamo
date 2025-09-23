@@ -639,6 +639,8 @@ async def run_profile(args):
         if args.dry_run:
             logger.info("Skipping deployment creation in dry run mode")
         elif args.use_ai_configurator:
+            # For MoE models, attention_dp_size = DEP size (best_decode_gpus), for dense models = 1
+            attention_dp_size = best_decode_gpus if args.is_moe_model else 1
             max_kv_tokens = ai_configurator_perf_estimator.get_max_kv_tokens(
                 args.isl, args.osl, tp_size=best_decode_gpus
             )
@@ -649,6 +651,7 @@ async def run_profile(args):
                 args.max_context_length,
                 args.decode_interpolation_granularity,
                 ai_configurator_perf_estimator,
+                attention_dp_size,
                 tp_size=best_decode_gpus,
             )
         else:

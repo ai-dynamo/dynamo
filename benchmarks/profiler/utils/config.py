@@ -180,7 +180,11 @@ def set_multinode_config(worker_service, gpu_count: int, num_gpus_per_node: int)
             # Create multinode configuration if it doesn't exist
             worker_service.multinode = MultinodeConfig(nodeCount=node_count)
         else:
-            worker_service.multinode.nodeCount = node_count
+            # Handle both dict (from YAML) and MultinodeConfig object cases
+            if isinstance(worker_service.multinode, dict):
+                worker_service.multinode["nodeCount"] = node_count
+            else:
+                worker_service.multinode.nodeCount = node_count
 
 
 class ConfigModifierProtocol(Protocol):

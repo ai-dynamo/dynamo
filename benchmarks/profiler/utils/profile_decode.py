@@ -147,6 +147,7 @@ def profile_decode_aiconfigurator(
     max_context_length,
     interpolation_granularity,
     ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
+    attention_dp_size,
     **model_config_kwargs,
 ):
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
@@ -166,4 +167,5 @@ def profile_decode_aiconfigurator(
         max_context_length,
         interpolation_granularity,
         get_itl_and_thpt_per_gpu,
+        attention_dp_size,
     )
