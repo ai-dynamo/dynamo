@@ -151,6 +151,7 @@ pub fn grpc_monitor_for_disconnects<T>(
                         }
                     }
                 }
+                // todo - test request cancellation with kserve frontend and tensor-based models
                 _ = context.stopped() => {
                     tracing::trace!("Context stopped; breaking stream");
                     break;
