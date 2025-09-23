@@ -76,3 +76,147 @@ jobs:
             --exclude-all-private --exclude 0.0.0.0 \
             $OFFLINE_FLAG \
             .
+
+  broken-links-check:
+    name: Check for broken markdown links
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # For pull_request events, use the PR head (commit from the contributor's branch/repo)
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # No additional dependencies needed for the basic script
+
+      - name: Run broken links check
+        id: check-links
+        run: |
+          echo "Running broken links check on documentation files..."
+
+          # Run the broken links detection script and capture exit code
+          set +e  # Don't exit immediately on error
+          python3 .github/workflows/detect_broken_links.py \
+            --verbose \
+            --format json \
+            --output broken-links-report.json \
+            .
+          exit_code=$?
+          set -e  # Re-enable exit on error
+
+          # Check if the script found any broken links (exit code 1 means broken links found)
+          if [ $exit_code -eq 1 ]; then
+            echo "::error::Broken links found in documentation files"
+            echo "broken_links_found=true" >> $GITHUB_OUTPUT
+          elif [ $exit_code -eq 0 ]; then
+            echo "::notice::No broken links found"
+            echo "broken_links_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Script failed with exit code $exit_code"
+            echo "broken_links_found=error" >> $GITHUB_OUTPUT
+            exit $exit_code
+          fi
+
+
+      - name: Display broken links and create annotations
+        if: steps.check-links.outputs.broken_links_found == 'true'
+        run: |
+          echo "::group::🔗 Broken Links Found"
+
+          # Parse and display the JSON report in a readable format, plus create GitHub annotations
+          python3 -c "
+          import json
+          import sys
+          import os
+
+          try:
+              with open('broken-links-report.json', 'r') as f:
+                  report = json.load(f)
+
+              summary = report['summary']
+              broken_links = report['broken_links']
+
+              print('❌ BROKEN LINKS DETECTED')
+              print('=' * 50)
+              print(f'📊 Summary:')
+              print(f'  • Total files processed: {summary[\"total_files_processed\"]}')
+              print(f'  • Files with broken links: {summary[\"files_with_broken_links\"]}')
+              print(f'  • Total broken links: {summary[\"total_broken_links\"]}')
+              print()
+
+              if broken_links:
+                  print('🔍 Detailed Broken Links Report:')
+                  print('-' * 40)
+
+                  for file_path, links in broken_links.items():
+                      print(f'\\n📄 File: {file_path}')
+                      print(f'   {len(links)} broken link(s) found')
+                      print()
+
+                      for i, link in enumerate(links, 1):
+                          line = link['line']
+                          link_text = link['link_text']
+                          link_url = link['link_url']
+                          github_url = link.get('github_url', '')
+
+                          # Create GitHub annotation for each broken link
+                          annotation_msg = f'Broken link: [{link_text}]({link_url})'
+                          if github_url:
+                              annotation_msg += f' - View: {github_url}'
+                          print(f'::error file={file_path},line={line}::{annotation_msg}')
+
+                          # Display in workflow output
+                          print(f'   {i}. Line {line}: [{link_text}]({link_url})')
+                          if github_url:
+                              print(f'      🔗 View on GitHub: {github_url}')
+                          else:
+                              print(f'      📍 Target: {link_url}')
+                          print()
+
+                  print('=' * 50)
+                  print('✅ Next Steps:')
+                  print('1. Check the annotations above in the Files Changed tab (for PRs)')
+                  print('2. Click the GitHub links to jump directly to each broken link')
+                  print('3. Fix all broken links before merging')
+                  print('4. Re-run this workflow to verify fixes')
+
+          except Exception as e:
+              print(f'❌ Error reading broken links report: {e}')
+              sys.exit(1)
+          "
+
+          echo "::endgroup::"
+
+      - name: Alert for broken links
+        if: steps.check-links.outputs.broken_links_found == 'true' || steps.check-links.outputs.broken_links_found == 'error'
+        run: |
+          if [ "${{ steps.check-links.outputs.broken_links_found }}" = "error" ]; then
+            echo "::error::Workflow failed due to script error"
+            echo "Please check the workflow logs for details."
+            exit 1
+          else
+            echo "::error::❌ WORKFLOW FAILED: Broken links found in documentation files"
+            echo ""
+            echo "🔍 What to do next:"
+            echo "1. Check the 'Display broken links and create annotations' step above for details"
+            echo "2. Look for ::error annotations in the Files Changed tab (for PRs)"
+            echo "3. Click the GitHub URLs in the workflow output to jump directly to each broken link"
+            echo "4. Fix all broken links before merging"
+            echo ""
+            echo "💡 Each broken link shows:"
+            echo "   - File name and line number where the broken link is located"
+            echo "   - The broken link text and target URL"
+            echo "   - A clickable GitHub URL to jump directly to the problem line"
+            exit 1
+          fi

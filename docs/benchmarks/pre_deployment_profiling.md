@@ -95,7 +95,7 @@ SLA planner can work with any interpolation data that follows the above format. 
 
 ## Running the Profiling Script in Kubernetes
 
-Set up your Kubernetes namespace for profiling (one-time per namespace). First ensure Dynamo Cloud platform is installed by following the [main installation guide](../../deploy/README.md), then set up profiling resources using [deploy/utils/README](../../deploy/utils/README.md). If your namespace is already set up, skip this step.
+Set up your Kubernetes namespace for profiling (one-time per namespace). First ensure Dynamo Cloud platform is installed by following the [main installation guide](/docs/kubernetes/installation_guide.md), then set up profiling resources using [deploy/utils/README](/deploy/utils/README.md). If your namespace is already set up, skip this step.
 
 **Prerequisites**: Ensure all dependencies are installed. If you ran the setup script above, dependencies are already installed. Otherwise, install them manually:
 ```bash
@@ -106,31 +106,6 @@ pip install -r deploy/utils/requirements.txt
 
 Use the injector utility to place your DGD manifest into the PVC. The profiling job will read the path you specify.
 
-```bash
-# Inject your disagg manifest
-python3 -m deploy.utils.inject_manifest \
-  --namespace $NAMESPACE \
-  --src components/backends/vllm/deploy/disagg.yaml \
-  --dest /data/configs/disagg.yaml
-
-# Set the docker image for the profiling job; any docker image that contains your script.
-export DOCKER_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
-```
-
-### Configure container image (optional)
-
-You have two options for configuring your profiling setup:
-
-**Option A: Use pre-built image with custom config injection (recommended)**
-
-Use the default pre-built image and inject custom configurations via PVC:
-
-1. **Set the container image:**
-   ```bash
-   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag
-   ```
-
-2. **Inject your custom disagg configuration:**
    ```bash
    # Use default disagg.yaml config
    python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
@@ -144,19 +119,14 @@ Use the default pre-built image and inject custom configurations via PVC:
 
    > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
 
-3. **Set the config path for the profiling job:**
-   ```bash
-   export DGD_CONFIG_FILE=/workspace/profiling_results/disagg.yaml # or your custom path
-   ```
-
-This approach allows you to:
-- Customize DGD configurations without rebuilding container images
-- Test different model configurations easily
-- Version control your DGD configs alongside your code
-
-**Step 2: Set SLA target and prepare model cache**
+**Step 2: Set SLA target**
 
 For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
+
+For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
+
+> [!NOTE]
+>If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
 
 ```yaml
 spec:
@@ -177,11 +147,19 @@ spec:
             - <vllm/sglang>
 ```
 
-For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
+**Step 3: Define the container image and config path**
 
-If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
+1. **Set the container image:**
+   ```bash
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag (TODO: update to 0.5.0 upon release as profiling with 0.4.1 is broken)
+   ```
 
-**Step 3: Run profiling (required)**
+2. **Set the config path for the profiling job:**
+   ```bash
+   export DGD_CONFIG_FILE=/data/configs/disagg.yaml # should be the same path you set for --dest in Step 1
+   ```
+
+**Step 4: Run profiling (required)**
 
 ```bash
 # for dense models
@@ -191,7 +169,7 @@ envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
 envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
 ```
 
-**Step 4: Wait for profiling to complete**
+**Step 5: Wait for profiling to complete**
 ```bash
 kubectl get jobs -n $NAMESPACE
 kubectl logs job/profile-sla -n $NAMESPACE

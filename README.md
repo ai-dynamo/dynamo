@@ -91,6 +91,7 @@ To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynam
 To quickly setup etcd & NATS, you can also run:
 ```
 # At the root of the repository:
+# Edit deploy/docker-compose.yml to comment out "runtime: nvidia" of the dcgm-exporter service if the nvidia container runtime isn't deployed or to be used.
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
@@ -147,7 +148,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 
 ### Deploying Dynamo
 
-- Follow the [Quickstart Guide](docs/guides/dynamo_deploy/README.md) to deploy on Kubernetes.
+- Follow the [Quickstart Guide](docs/kubernetes/README.md) to deploy on Kubernetes.
 - Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
