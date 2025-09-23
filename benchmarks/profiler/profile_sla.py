@@ -171,7 +171,7 @@ async def run_profile(args):
                 and not args.force_rerun
                 and check_prefill_results_exist(args.output_dir, num_gpus, args.isl)
             ):
-                logger.info(f"Skipping prefill {num_gpus}GPUs - results already exist")
+                logger.info(f"Skipping prefill {num_gpus} GPU(s) - results already exist")
                 ttft, thpt_per_gpu = load_existing_prefill_results(
                     args.output_dir, num_gpus, args.isl
                 )
@@ -180,7 +180,7 @@ async def run_profile(args):
                     prefill_ttft.append(ttft)
                     prefill_thpt_per_gpu.append(thpt_per_gpu)
                     logger.info(
-                        f"Loaded existing prefill results: {num_gpus}GPUs TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
+                        f"Loaded existing prefill results: {num_gpus} GPU TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
                     )
                 continue
 
@@ -289,7 +289,7 @@ async def run_profile(args):
                     args.output_dir, num_gpus, args.isl, args.osl
                 )
             ):
-                logger.info(f"Skipping decode {num_gpus}GPUs - results already exist")
+                logger.info(f"Skipping decode {num_gpus} GPU(s) - results already exist")
                 existing_results = load_existing_decode_results(
                     args.output_dir, num_gpus, args.isl, args.osl
                 )
@@ -315,7 +315,7 @@ async def run_profile(args):
                         (num_gpus, engine_decode_itl, engine_decode_thpt_per_gpu)
                     )
                     logger.info(
-                        f"Loaded {len(existing_results)} existing decode results for {num_gpus}GPUs"
+                        f"Loaded {len(existing_results)} existing decode results for {num_gpus} GPU(s)"
                     )
                 continue
 
@@ -474,7 +474,7 @@ async def run_profile(args):
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_prefill_idx = max_thpt_idx
             logger.info(
-                f"Suggested prefill {prefill_num_gpus[selected_prefill_idx]}GPUs (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
+                f"Suggested number of GPUs for prefill: {prefill_num_gpus[selected_prefill_idx]} (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
             )
 
             # scale up if estimated TTFT is 120% of target TTFT
@@ -513,7 +513,7 @@ async def run_profile(args):
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_decode_idx = max_thpt_idx
             logger.info(
-                f"Suggested decode {decode_num_gpus[selected_decode_idx]}GPUs (ITL {decode_itl[selected_decode_idx]:.2f} ms, throughput {decode_thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
+                f"Suggested number of GPUs for decode: {decode_num_gpus[selected_decode_idx]} (ITL {decode_itl[selected_decode_idx]:.2f} ms, throughput {decode_thpt_per_gpu[selected_decode_idx]:.2f} tokens/s/GPU)"
             )
 
             # calculate kv cache utlization for the selected TP and concurrency

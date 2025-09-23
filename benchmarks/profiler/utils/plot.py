@@ -48,7 +48,7 @@ def plot_prefill_performance(
     plt.scatter(prefill_ttft, prefill_thpt_per_gpu, s=100)
     for i, num_gpu in enumerate(prefill_num_gpu):
         plt.annotate(
-            f"{num_gpu}GPU",
+            f"{num_gpu} GPU(s)",
             (prefill_ttft[i], prefill_thpt_per_gpu[i]),
             xytext=(10, 0),
             textcoords="offset points",
