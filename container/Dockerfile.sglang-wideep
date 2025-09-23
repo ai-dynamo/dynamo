@@ -89,7 +89,7 @@ RUN pip install --break-system-packages sglang-router==0.1.9
 
 # Install dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    pip install --break-system-packages --requirement /tmp/requirements.txt 
+    pip install --break-system-packages --requirement /tmp/requirements.txt
 
 RUN wget --tries=3 --waitretry=5 \
       https://github.com/nats-io/nats-server/releases/download/v2.10.28/\

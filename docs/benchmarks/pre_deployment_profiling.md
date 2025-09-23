@@ -70,7 +70,7 @@ For MoE models, the script only profiles different TEP sizes, since DEP is gener
 In decode engine, decode requests are added inflight and iteration time (or ITL) depends on both the context length and the real-time load of the engine. We capture the real-time load of the engine with active kv usage and average context length. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
 
 For dense models, the script profiles different TP sizes.
-For MoE models, the script profiles different DEP sizes. TEP decode engines for low latency will be supported in the future. 
+For MoE models, the script profiles different DEP sizes. TEP decode engines for low latency will be supported in the future.
 
 ![images](../../docs/images/itl_interpolation.png)
 
