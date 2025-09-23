@@ -4,7 +4,9 @@ docs: &docs
   - '**/*.rst'
 
 ci: &ci
-  - '.github/**'
+  - '.github/workflows/**'
+  - '.github/filters.yaml'
+  - '.github/actions/**'
 
 has_code_changes:
   - *ci
