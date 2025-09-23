@@ -13,13 +13,13 @@ Select the architecture pattern as your template that best fits your use case.
 For example, when using the `VLLM` inference backend:
 
 - **Development / Testing**
-  Use [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml) as the base configuration.
+  Use [`agg.yaml`](/components/backends/vllm/deploy/agg.yaml) as the base configuration.
 
 - **Production with Load Balancing**
-  Use [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
+  Use [`agg_router.yaml`](/components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
 - **High Performance / Disaggregated Deployment**
-  Use [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+  Use [`disagg_router.yaml`](/components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
 
 
 ## Step 2: Customize the Template

@@ -173,9 +173,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../../components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](../../../components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](../../../components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](/components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](/components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](/components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](metrics.md)
@@ -215,7 +215,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../../deploy/cloud/helm/platform/README.md)
+- [Helm Chart Configuration](/deploy/cloud/helm/platform/README.md)
 - [GKE-specific setup](gke_setup.md)
 - [Create custom deployments](create_deployment.md)
 - [Dynamo Operator details](dynamo_operator.md)
