@@ -53,7 +53,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			initialArgs:         []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
-			expectedArgs:        []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectedArgs:        []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 			expectProbesRemoved: true,
 		},
 		{
@@ -63,7 +63,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:           &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialArgs:         []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:        []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
+			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 			expectProbesRemoved: true,
 		},
 		{
@@ -155,14 +155,14 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:      []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectedArgs:      []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 		},
 		{
 			name:              "worker with LWS deployment",
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialArgs:       []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:      []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
+			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 		},
 		{
 			name:              "main role does not modify args",
