@@ -8,25 +8,22 @@ use openai_harmony::{
     HarmonyEncoding, HarmonyEncodingName, StreamableParser, load_harmony_encoding,
 };
 use serde_json::Value;
-use std::sync::OnceLock;
 
-static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
-    OnceLock::new();
+static GLOBAL_HARMONY_GPTOSS_ENCODING: tokio::sync::OnceCell<
+    Result<HarmonyEncoding, anyhow::Error>,
+> = tokio::sync::OnceCell::const_new();
 
-/// Async accessor for the global Harmony encoding
-pub async fn get_harmony_encoding() -> anyhow::Result<&'static HarmonyEncoding> {
-    let enc_result = GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss));
-    match enc_result.as_ref() {
-        Ok(enc) => Ok(enc),
-        Err(e) => Err(anyhow::anyhow!(e.to_string())),
-    }
-}
-
-/// Synchronous accessor retained for internal use by sync APIs
-fn get_harmony_encoding_sync() -> &'static Result<HarmonyEncoding, anyhow::Error> {
+pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING
-        .get_or_init(|| load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss))
+        .get_or_init(|| async {
+            tokio::task::spawn_blocking(|| {
+                load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
+            })
+            .await
+            .map_err(anyhow::Error::msg)
+            .flatten()
+        })
+        .await
 }
 
 /// Parse tool calls from Harmony Format text
@@ -55,7 +52,7 @@ pub async fn parse_tool_calls_harmony(
         trimmed.push_str(end_token);
     }
 
-    let enc = match get_harmony_encoding().await {
+    let enc = match get_harmony_encoding().await.as_ref() {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
@@ -164,9 +161,7 @@ pub async fn parse_tool_calls_harmony(
         }
     }
     Ok((res, Some(normal_text.to_string())))
-}
-
-/// Parse tool calls from a complete Harmony Format text chunk using direct token parsing.
+}/// Parse tool calls from a complete Harmony Format text chunk using direct token parsing.
 ///
 /// This function is optimized for parsing complete text chunks where the entire content
 /// is available at once. It uses `parse_messages_from_completion_tokens` to directly
@@ -185,11 +180,11 @@ pub async fn parse_tool_calls_harmony(
 /// # Returns
 /// * `Ok((tool_calls, normal_text))` - Tuple containing extracted tool calls and any normal text
 /// * `Err(e)` - If parsing fails due to encoding or tokenization errors
-pub fn parse_tool_calls_harmony_complete(
+pub async fn parse_tool_calls_harmony_complete(
     text: &str,
     _config: &JsonParserConfig,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
-    let enc = match get_harmony_encoding_sync().as_ref() {
+    let enc = match get_harmony_encoding().await.as_ref() {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
@@ -377,7 +372,9 @@ mod tests {
     async fn test_parse_tool_calls_harmony_complete_basic() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
         let (tool_calls, normal_content) =
-            parse_tool_calls_harmony_complete(text, &Default::default()).unwrap();
+            parse_tool_calls_harmony_complete(text, &Default::default())
+                .await
+                .unwrap();
         assert_eq!(normal_content, Some("".to_string()));
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
