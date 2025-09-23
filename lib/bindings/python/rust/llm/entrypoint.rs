@@ -6,9 +6,9 @@ use std::path::PathBuf;
 
 use pyo3::{exceptions::PyException, prelude::*};
 
-use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
+use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -42,12 +42,13 @@ impl KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_snapshot_threshold=10000, router_reset_states=false))]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, router_replica_sync=false, router_track_active_blocks=true, router_snapshot_threshold=10000, router_reset_states=false))]
     fn new(
         overlap_score_weight: f64,
         router_temperature: f64,
         use_kv_events: bool,
         router_replica_sync: bool,
+        router_track_active_blocks: bool,
         router_snapshot_threshold: Option<u32>,
         router_reset_states: bool,
     ) -> Self {
@@ -57,9 +58,9 @@ impl KvRouterConfig {
                 router_temperature,
                 use_kv_events,
                 router_replica_sync,
+                router_track_active_blocks,
                 router_snapshot_threshold,
                 router_reset_states,
-                ..Default::default()
             },
         }
     }

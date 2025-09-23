@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 accelerate==1.6.0
+aiconfigurator==0.2.0
 aiofiles
 av==15.0.0
-fastapi==0.115.6
+fastapi==0.115.12
 ftfy
 genai-perf==0.0.15
 grpcio-tools==1.66.0
@@ -26,7 +27,7 @@ prometheus-api-client
 prometheus_client
 prophet
 protobuf==5.29.5
-pydantic==2.7.1
+pydantic==2.10.6
 pyright
 PyYAML
 scikit-learn

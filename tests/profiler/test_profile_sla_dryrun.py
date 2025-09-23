@@ -45,6 +45,10 @@ class TestProfileSLADryRun:
             decode_interpolation_granularity = 6
             service_name = ""
             dry_run = True
+            use_ai_configurator = False
+            aic_system = None
+            aic_model_name = None
+            backend_version = None
 
         return Args()
 
@@ -70,6 +74,10 @@ class TestProfileSLADryRun:
             decode_interpolation_granularity = 6
             service_name = ""
             dry_run = True
+            use_ai_configurator = False
+            aic_system = None
+            aic_model_name = None
+            backend_version = None
 
         return Args()
 
@@ -109,6 +117,10 @@ class TestProfileSLADryRun:
             decode_interpolation_granularity = 6
             service_name = ""
             dry_run = True
+            use_ai_configurator = False
+            aic_system = None
+            aic_model_name = None
+            backend_version = None
 
         return Args()
 
