@@ -322,11 +322,8 @@ export NAMESPACE=benchmarking
 # Deploy the benchmark job with default settings
 kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 
-# Monitor the job
+# Monitor the job, wait for it to complete
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
-
-# Check job status
-kubectl get job dynamo-benchmark -n $NAMESPACE
 ```
 
 #### Customize the job configuration
@@ -439,7 +436,6 @@ Results are stored in `/data/results` and follow the same structure as client-si
 
 ### Check Job Status
 ```bash
-kubectl get jobs -n $NAMESPACE
 kubectl describe job dynamo-benchmark -n $NAMESPACE
 ```
 
@@ -447,9 +443,6 @@ kubectl describe job dynamo-benchmark -n $NAMESPACE
 ```bash
 # Follow logs in real-time
 kubectl logs -f job/dynamo-benchmark -n $NAMESPACE
-
-# Get logs from specific container
-kubectl logs job/dynamo-benchmark -c benchmark-runner -n $NAMESPACE
 ```
 
 ### Debug Failed Jobs
