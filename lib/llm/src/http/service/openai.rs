@@ -1082,8 +1082,8 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1099,8 +1099,8 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -1115,8 +1115,8 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }
