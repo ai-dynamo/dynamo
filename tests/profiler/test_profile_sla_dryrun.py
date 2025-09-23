@@ -131,7 +131,6 @@ class TestProfileSLADryRun:
         # Run the profile in dry-run mode - should complete without errors
         await run_profile(trtllm_args)
 
-
     @pytest.fixture
     def sglang_moe_args(self):
         """Create arguments for trtllm backend dry-run test."""
