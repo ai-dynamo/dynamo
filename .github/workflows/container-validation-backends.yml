@@ -20,9 +20,9 @@ jobs:
       has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Check for changes
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
         id: filter
         with:
           filters: .github/filters.yaml
@@ -42,10 +42,10 @@ jobs:
     if: needs.changed-files.outputs.has_code_changes == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Build Container
         id: build-image
-        uses: ./.github/actions/docker-build-composite-action
+        uses: ./.github/actions/docker-build
         with:
           framework: vllm
           target: runtime
@@ -56,7 +56,7 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       - name: Run tests
-        uses: ./.github/actions/pytest-composite-action
+        uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and vllm and gpu_1 and not slow"
@@ -67,10 +67,10 @@ jobs:
     if: needs.changed-files.outputs.has_code_changes == 'true'
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Build Container
         id: build-image
-        uses: ./.github/actions/docker-build-composite-action
+        uses: ./.github/actions/docker-build
         with:
           framework: sglang
           target: runtime
@@ -81,7 +81,7 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       - name: Run tests
-        uses: ./.github/actions/pytest-composite-action
+        uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and sglang and gpu_1"
@@ -92,10 +92,10 @@ jobs:
     if: needs.changed-files.outputs.has_code_changes == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Build Container
         id: build-image
-        uses: ./.github/actions/docker-build-composite-action
+        uses: ./.github/actions/docker-build
         with:
           framework: trtllm
           target: runtime
@@ -106,7 +106,7 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       - name: Run tests
-        uses: ./.github/actions/pytest-composite-action
+        uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
