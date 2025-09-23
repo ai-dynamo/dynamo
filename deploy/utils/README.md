@@ -6,7 +6,7 @@ This directory contains utilities and manifests for Dynamo benchmarking and prof
 
 **Before using these utilities, you must first set up Dynamo Cloud following the main installation guide:**
 
-👉 **[Follow the Dynamo Cloud installation guide](/docs/guides/dynamo_deploy/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
+👉 **[Follow the Dynamo Cloud installation guide](/docs/kubernetes/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
 
 This includes:
 1. Installing the Dynamo CRDs
