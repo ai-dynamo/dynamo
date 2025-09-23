@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import AsyncGenerator
 
@@ -35,7 +36,6 @@ class BaseWorkerHandler(ABC):
         self.default_sampling_params = default_sampling_params
         self.kv_publisher = None
         self.engine_monitor = VllmEngineMonitor(runtime, engine)
-        self._abort_tasks = set()  # Track running abort monitoring tasks
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -56,12 +56,20 @@ class BaseWorkerHandler(ABC):
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
 
-    def _create_abort_task(self, context, request_id, is_prefill=False):
-        """Create and track an abort monitoring task."""
+    @asynccontextmanager
+    async def _abort_monitor(self, context, request_id, is_prefill=False):
+        """Context manager that creates and automatically cleans up an abort monitoring task."""
         task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
-        self._abort_tasks.add(task)
-        task.add_done_callback(self._abort_tasks.discard)
-        return task
+        try:
+            yield task
+        finally:
+            # Cancel the abort monitoring task when exiting the context
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def clear_kv_blocks(self, request=None):
         try:
@@ -208,21 +216,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "kv_transfer_params"
             ] = prefill_response.kv_transfer_params
 
-        # Abort monitoring background task
-        abort_task = self._create_abort_task(context, request_id)
-
-        try:
-            async for tok in self.generate_tokens(prompt, sampling_params, request_id):
-                yield tok
-        except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
-        finally:
-            # Cancel the abort monitoring task when done
-            if not abort_task.done():
-                abort_task.cancel()
+        async with self._abort_monitor(context, request_id):
+            try:
+                async for tok in self.generate_tokens(
+                    prompt, sampling_params, request_id
+                ):
+                    yield tok
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -236,37 +240,31 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
 
-        # Abort monitoring background task
-        abort_task = self._create_abort_task(context, request_id, is_prefill=True)
+        async with self._abort_monitor(context, request_id, is_prefill=True):
+            try:
+                gen = self.engine_client.generate(prompt, sampling_params, request_id)
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
 
-        try:
-            gen = self.engine_client.generate(prompt, sampling_params, request_id)
-        except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
-
-        # Generate only 1 token in prefill
-        try:
-            async for res in gen:
-                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-                yield MyRequestOutput(
-                    request_id=res.request_id,
-                    prompt=res.prompt,
-                    prompt_token_ids=res.prompt_token_ids,
-                    prompt_logprobs=res.prompt_logprobs,
-                    outputs=res.outputs,
-                    finished=res.finished,
-                    metrics=res.metrics,
-                    kv_transfer_params=res.kv_transfer_params,
-                ).model_dump_json()
-        except asyncio.CancelledError:
-            # raise the error because we cannot migrate prefill requests
-            raise GeneratorExit(
-                "Prefill engine was shut down during token generation"
-            ) from None
-        finally:
-            # Cancel the abort monitoring task when done
-            if not abort_task.done():
-                abort_task.cancel()
+            # Generate only 1 token in prefill
+            try:
+                async for res in gen:
+                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+                    yield MyRequestOutput(
+                        request_id=res.request_id,
+                        prompt=res.prompt,
+                        prompt_token_ids=res.prompt_token_ids,
+                        prompt_logprobs=res.prompt_logprobs,
+                        outputs=res.outputs,
+                        finished=res.finished,
+                        metrics=res.metrics,
+                        kv_transfer_params=res.kv_transfer_params,
+                    ).model_dump_json()
+            except asyncio.CancelledError:
+                # raise the error because we cannot migrate prefill requests
+                raise GeneratorExit(
+                    "Prefill engine was shut down during token generation"
+                ) from None
