@@ -11,7 +11,7 @@ from typing import Optional
 
 from prometheus_client import Gauge, start_http_server
 
-from dynamo.planner import KubernetesConnector, VirtualConnector
+from dynamo.planner import KubernetesConnector, VirtualConnector, TargetReplica, SubComponentType
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -120,6 +120,9 @@ class Planner:
         else:
             self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
             self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+
+        self.prefill_component_name = WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker_k8s_name
+        self.decode_component_name = WORKER_COMPONENT_NAMES[self.args.backend].decode_worker_k8s_name
 
         if not self.dryrun:
             self.prefill_client = None
@@ -430,10 +433,18 @@ class Planner:
 
         if not self.args.no_operation:
             # Ensure change for virtual connector does not break things
-            target_replicas = {
-                "prefill": next_num_p,
-                "decode": next_num_d,
-            }
+            target_replicas = [
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL, 
+                    component_name=self.prefill_component_name, 
+                    desired_replicas=next_num_p
+                ),
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE, 
+                    component_name=self.decode_component_name, 
+                    desired_replicas=next_num_d
+                ),
+            ]
             await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def run(self):
@@ -441,7 +452,13 @@ class Planner:
 
         # Fail fast if the deployment does not contain prefill and decode components
         logger.info("Verifying prefill and decode components exist...")
-        await self.connector.verify_prefill_and_decode_components_exist()
+
+        # TODO: still supporting framework component names for backwards compatibility
+        # Should be deprecated in favor of service subComponentType
+        await self.connector.verify_prefill_and_decode_components_exist(
+            prefill_component_name=self.prefill_component_name, 
+            decode_component_name=self.decode_component_name
+        )
         logger.info("Successfully verified prefill and decode components exist")
 
         await self.connector.wait_for_deployment_ready()

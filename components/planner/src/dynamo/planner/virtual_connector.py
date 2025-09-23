@@ -98,7 +98,12 @@ class VirtualConnector(PlannerConnector):
         num_prefill = None
         num_decode = None
 
-        for worker_type, replicas in target_replicas.items():
+        for component_name, replicas in target_replicas.items():
+            worker_type = self._component_to_worker_type(component_name)
+            if worker_type is None:
+                logger.warning(f"Unknown component name: {component_name}, skipping")
+                continue
+
             if worker_type == "prefill":
                 num_prefill = replicas
             elif worker_type == "decode":

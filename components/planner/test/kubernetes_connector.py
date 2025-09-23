@@ -26,7 +26,7 @@ from dynamo.planner.utils.exceptions import (
     EmptyTargetReplicasError,
     SubComponentNotFoundError,
 )
-from dynamo.planner.kubernetes_connector import KubernetesConnector
+from dynamo.planner.kubernetes_connector import KubernetesConnector, SubComponentType, TargetReplica
 
 
 @pytest.fixture
@@ -74,19 +74,37 @@ def test_get_service_name_from_sub_component_type(kubernetes_connector):
         },
     }
 
-    service = kubernetes_connector.get_service_from_sub_component_type(deployment, "prefill")
+    service = kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.PREFILL)
     assert service.name == "test-component-prefill"
     assert service.number_replicas() == 2
 
-    service = kubernetes_connector.get_service_from_sub_component_type(deployment, "decode")
+    # should still work if the component_name is provided
+    service = kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.PREFILL, "test-component-prefill")
+    assert service.name == "test-component-prefill"
+    assert service.number_replicas() == 2
+
+    # should respect subComponentType first
+    service = kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.DECODE, "test-component-prefill")
     assert service.name == "test-component-decode"
     assert service.number_replicas() == 3
 
+def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector):
+    deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {
+            "services": {
+                "test-component-decode": {"replicas": 3, "subComponentType": "decode"},
+            }
+        },
+    }
     with pytest.raises(SubComponentNotFoundError) as exc_info:
-        kubernetes_connector.get_service_from_sub_component_type(deployment, "dne")
+        kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.PREFILL)
+
+    with pytest.raises(SubComponentNotFoundError) as exc_info:
+        kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.PREFILL, "test-component-decode")
 
     exception = exc_info.value
-    assert exception.sub_component_type == "dne"
+    assert exception.sub_component_type == SubComponentType.PREFILL.value
 
 def test_get_service_name_from_sub_component_type_duplicate(kubernetes_connector):
     deployment = {
@@ -95,20 +113,32 @@ def test_get_service_name_from_sub_component_type_duplicate(kubernetes_connector
     }
 
     with pytest.raises(DuplicateSubComponentError) as exc_info:
-        kubernetes_connector.get_service_from_sub_component_type(deployment, "prefill")
+        # even though "test-component-prefill" is provided, subComponentType duplicates should result in an error
+        kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.PREFILL, "test-component-prefill")
 
     exception = exc_info.value
-    assert exception.sub_component_type == "prefill"
+    assert exception.sub_component_type == SubComponentType.PREFILL.value
     assert set(exception.service_names) == {"test-component-prefill", "test-component-prefill-2"}
+
+def test_get_service_name_from_sub_component_type_or_name(kubernetes_connector):
+    deployment = {
+        "metadata": {"name": "test-graph"},
+        "spec": {"services": {"test-component-prefill": {"replicas": 2}, "test-component-decode": {"replicas": 3}}},
+    }
+
+    service = kubernetes_connector.get_service_from_sub_component_type_or_name(deployment, SubComponentType.PREFILL, "test-component-prefill")
+    assert service.name == "test-component-prefill"
+    assert service.number_replicas() == 2
+
 
 @pytest.mark.asyncio
 async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_api):
     # Arrange
-    sub_component_type = "prefill"
+    sub_component_type = SubComponentType.PREFILL
     component_name = "test-component"
     mock_deployment = {
         "metadata": {"name": "test-graph"},
-        "spec": {"services": {component_name: {"replicas": 1, "subComponentType": sub_component_type}}},
+        "spec": {"services": {component_name: {"replicas": 1, "subComponentType": sub_component_type.value}}},
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
     mock_kube_api.update_graph_replicas.return_value = None
@@ -130,11 +160,11 @@ async def test_add_component_with_no_replicas_specified(
     kubernetes_connector, mock_kube_api
 ):
     # Arrange
-    sub_component_type = "prefill"
+    sub_component_type = SubComponentType.PREFILL
     component_name = "test-component"
     mock_deployment = {
         "metadata": {"name": "test-graph"},
-        "spec": {"services": {component_name: {"subComponentType": sub_component_type}}},
+        "spec": {"services": {component_name: {"subComponentType": sub_component_type.value}}},
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
@@ -171,7 +201,7 @@ async def test_add_component_component_not_found(
 
     # Act
     with pytest.raises(SubComponentNotFoundError) as exc_info:
-        await kubernetes_connector.add_component("prefill")
+        await kubernetes_connector.add_component(SubComponentType.PREFILL)
 
         mock_kube_api.update_graph_replicas.assert_not_called()
         mock_kube_api.wait_for_graph_deployment_ready.assert_not_called()
@@ -184,10 +214,10 @@ async def test_add_component_component_not_found(
 async def test_remove_component_decreases_replicas(kubernetes_connector, mock_kube_api):
     # Arrange
     component_name = "test-component"
-    sub_component_type = "prefill"
+    sub_component_type = SubComponentType.PREFILL
     mock_deployment = {
         "metadata": {"name": "test-graph"},
-        "spec": {"services": {"test-component": {"replicas": 2, "subComponentType": sub_component_type}}},
+        "spec": {"services": {"test-component": {"replicas": 2, "subComponentType": sub_component_type.value}}},
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
@@ -205,10 +235,10 @@ async def test_remove_component_decreases_replicas(kubernetes_connector, mock_ku
 async def test_remove_component_with_zero_replicas(kubernetes_connector, mock_kube_api):
     # Arrange
     component_name = "test-component"
-    sub_component_type = "prefill"
+    sub_component_type = SubComponentType.PREFILL
     mock_deployment = {
         "metadata": {"name": "test-graph"},
-        "spec": {"services": {component_name: {"replicas": 0, "subComponentType": sub_component_type}}},
+        "spec": {"services": {component_name: {"replicas": 0, "subComponentType": sub_component_type.value}}},
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
@@ -223,16 +253,16 @@ async def test_remove_component_with_zero_replicas(kubernetes_connector, mock_ku
 async def test_remove_component_component_not_found(kubernetes_connector, mock_kube_api):
     # Arrange
     component_name = "test-component"
-    sub_component_type = "prefill"
+    sub_component_type = SubComponentType.PREFILL
     mock_deployment = {
         "metadata": {"name": "test-graph"},
-        "spec": {"services": {component_name: {"replicas": 0, "subComponentType": sub_component_type}}},
+        "spec": {"services": {component_name: {"replicas": 0, "subComponentType": sub_component_type.value}}},
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     # Act
     with pytest.raises(SubComponentNotFoundError) as exc_info:
-        await kubernetes_connector.remove_component("decode")
+        await kubernetes_connector.remove_component(SubComponentType.DECODE)
 
         # Assert
         mock_kube_api.update_graph_replicas.assert_not_called()
@@ -245,11 +275,11 @@ async def test_remove_component_component_not_found(kubernetes_connector, mock_k
 @pytest.mark.asyncio
 async def test_set_component_replicas(kubernetes_connector, mock_kube_api):
     # Arrange
-    target_replicas = {"prefill": 3, "decode": 2}
+    target_replicas = [TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3), TargetReplica(sub_component_type=SubComponentType.DECODE, component_name="component2", desired_replicas=2)]
     mock_deployment = {
         "metadata": {"name": "test-graph"},
         "spec": {
-            "services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 1, "subComponentType": "decode"}}
+            "services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 1}}
         },
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
@@ -273,11 +303,11 @@ async def test_set_component_replicas(kubernetes_connector, mock_kube_api):
 @pytest.mark.asyncio
 async def test_set_component_replicas_component_not_found(kubernetes_connector, mock_kube_api):
     # Arrange
-    target_replicas = {"prefill": 3, "dne": 2}
+    target_replicas = [TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3), TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2)]
     mock_deployment = {
         "metadata": {"name": "test-graph"},
         "spec": {
-            "services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 1, "subComponentType": "decode"}}
+            "services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 1}}
         },
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
@@ -290,12 +320,12 @@ async def test_set_component_replicas_component_not_found(kubernetes_connector, 
         await kubernetes_connector.set_component_replicas(target_replicas)
 
     exception = exc_info.value
-    assert exception.sub_component_type == "dne"
+    assert exception.sub_component_type == SubComponentType.DECODE.value
 
 @pytest.mark.asyncio
 async def test_set_component_replicas_component_already_at_desired_replicas(kubernetes_connector, mock_kube_api):
     # Arrange
-    target_replicas = {"prefill": 3, "decode": 2}
+    target_replicas = [TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3), TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2)]
     mock_deployment = {
         "metadata": {"name": "test-graph"},
         "spec": {
@@ -326,7 +356,7 @@ async def test_set_component_replicas_deployment_not_found(
     kubernetes_connector, mock_kube_api
 ):
     # Arrange
-    target_replicas = {"component1": 3}
+    target_replicas = [TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3)]
     mock_kube_api.get_graph_deployment.side_effect = DynamoGraphDeploymentNotFoundError()
 
     # Act & Assert
@@ -339,7 +369,7 @@ async def test_set_component_replicas_empty_target_replicas(
     kubernetes_connector, mock_kube_api
 ):
     # Arrange
-    target_replicas: dict[str, int] = {}
+    target_replicas: list[TargetReplica] = []
 
     # Act & Assert
     with pytest.raises(EmptyTargetReplicasError):
@@ -347,7 +377,7 @@ async def test_set_component_replicas_empty_target_replicas(
 
 async def test_set_component_replicas_deployment_not_ready(kubernetes_connector, mock_kube_api):
     # Arrange
-    target_replicas = {"prefill": 3, "decode": 2}
+    target_replicas = [TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3), TargetReplica(sub_component_type=SubComponentType.DECODE, desired_replicas=2)]
     mock_deployment = {
         "metadata": {"name": "test-graph"},
         "spec": {"services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 2, "subComponentType": "decode"}}},
@@ -369,13 +399,13 @@ async def test_verify_prefill_and_decode_components_exist_true(kubernetes_connec
     mock_deployment = {
         "metadata": {"name": "test-graph"},
         "spec": {
-            "services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 2, "subComponentType": "decode"}}
+            "services": {"component1": {"replicas": 1, "subComponentType": "prefill"}, "component2": {"replicas": 2}}
         },
     }
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     # Act
-    await kubernetes_connector.verify_prefill_and_decode_components_exist()
+    await kubernetes_connector.verify_prefill_and_decode_components_exist(decode_component_name="component2")
 
 @pytest.mark.asyncio
 async def test_verify_prefill_and_decode_components_fail(kubernetes_connector, mock_kube_api):

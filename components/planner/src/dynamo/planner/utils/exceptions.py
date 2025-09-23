@@ -53,7 +53,7 @@ class DynamoGraphDeploymentNotFoundError(PlannerError):
         super().__init__(message)
 
 
-class SubComponentConfigurationError(PlannerError):
+class ComponentError(PlannerError):
     """Base class for subComponent configuration issues.
     
     This serves as a parent class for all exceptions related to
@@ -62,7 +62,7 @@ class SubComponentConfigurationError(PlannerError):
     pass
 
 
-class SubComponentNotFoundError(SubComponentConfigurationError):
+class SubComponentNotFoundError(ComponentError):
     """Raised when a required subComponentType is not found in the deployment.
     
     This occurs when the DynamoGraphDeployment doesn't contain any service
@@ -77,7 +77,7 @@ class SubComponentNotFoundError(SubComponentConfigurationError):
         super().__init__(message)
 
 
-class DuplicateSubComponentError(SubComponentConfigurationError):
+class DuplicateSubComponentError(ComponentError):
     """Raised when multiple services have the same subComponentType.
     
     This occurs when the DynamoGraphDeployment contains more than one service
