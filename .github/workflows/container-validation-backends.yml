@@ -11,23 +11,18 @@ on:
 
 jobs:
   build-test:
-    runs-on: gpu-l40-amd64
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang, trtllm]
-        platform: ["linux/arm64", "linux/amd64"]
-        include:
-          - framework: vllm
-            target: runtime
-            pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          - framework: sglang
-            target: runtime
-            pytest_marks: "e2e and sglang and gpu_1 and not slow"
-          - framework: trtllm
-            target: runtime
-            pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+        framework:
+          - { name: vllm, target: runtime, pytest_marks: "e2e and vllm and gpu_1 and not slow" }
+          - { name: sglang, target: runtime, pytest_marks: "e2e and sglang and gpu_1 and not slow" }
+          - { name: trtllm, target: runtime, pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow" }
+        platform:
+          - { arch: "linux/amd64", runner: cpu-arm-r8g-4xlarge }
+          - { arch: "linux/arm64", runner: gpu-l40-amd64 }
 
+    runs-on: ${{ matrix.platform.runner }}
     # Do not cancel main branch runs
     concurrency:
       group: ${{ github.workflow }}-${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
@@ -63,7 +58,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           ./container/build.sh --tag ${{ matrix.framework }}:latest \
-            --platform ${{ matrix.platform }} \
+            --platform ${{ matrix.platform.arch }} \
             --target ${{ matrix.target }} \
             --framework ${{ matrix.framework }} \
             --use-sccache \
