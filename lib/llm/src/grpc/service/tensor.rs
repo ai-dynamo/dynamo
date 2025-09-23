@@ -299,36 +299,7 @@ impl tensor::Tensor {
         // For BYTES type, we need to parse length-prefixed strings and properly slice them
         // into bytes of array, and early return
         if data_size == 0 {
-            let mut bytes_contents = vec![];
-            let mut offset = 0;
-            while offset + 4 <= raw_input.len() {
-                let len =
-                    u32::from_le_bytes(raw_input[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                if offset + len > raw_input.len() {
-                    return Err(Status::invalid_argument(format!(
-                        "Invalid length-prefixed BYTES input for '{}', length exceeds raw input size",
-                        self.metadata.name
-                    )));
-                }
-                bytes_contents.push(raw_input[offset..offset + len].to_vec());
-                offset += len;
-            }
-            if offset != raw_input.len() {
-                return Err(Status::invalid_argument(format!(
-                    "Invalid length-prefixed BYTES input for '{}', extra bytes at the end",
-                    self.metadata.name
-                )));
-            }
-            if element_count != bytes_contents.len() {
-                return Err(Status::invalid_argument(format!(
-                    "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
-                    self.metadata.name,
-                    element_count,
-                    bytes_contents.len()
-                )));
-            }
-            self.data = tensor::FlattenTensor::Bytes(bytes_contents);
+            self.data = self.raw_input_to_bytes_tensor(element_count, raw_input)?;
             return Ok(());
         }
 
@@ -350,6 +321,46 @@ impl tensor::Tensor {
         self.data = self.raw_input_to_typed_tensor(raw_input)?;
 
         Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn raw_input_to_bytes_tensor(
+        &self,
+        element_count: usize,
+        raw_input: &[u8],
+    ) -> Result<tensor::FlattenTensor, Status> {
+        // element is not fixed size for bytes type, so the raw input has
+        // length-prefixed bytes for each element.
+        let mut bytes_contents = vec![];
+        let mut offset = 0;
+        while offset + 4 <= raw_input.len() {
+            let len =
+                u32::from_le_bytes(raw_input[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            if offset + len > raw_input.len() {
+                return Err(Status::invalid_argument(format!(
+                    "Invalid length-prefixed BYTES input for '{}', length exceeds raw input size",
+                    self.metadata.name
+                )));
+            }
+            bytes_contents.push(raw_input[offset..offset + len].to_vec());
+            offset += len;
+        }
+        if offset != raw_input.len() {
+            return Err(Status::invalid_argument(format!(
+                "Invalid length-prefixed BYTES input for '{}', extra bytes at the end",
+                self.metadata.name
+            )));
+        }
+        if element_count != bytes_contents.len() {
+            return Err(Status::invalid_argument(format!(
+                "Raw input element count for '{}' does not match expected size, expected {} elements, got {} elements",
+                self.metadata.name,
+                element_count,
+                bytes_contents.len()
+            )));
+        }
+        Ok(tensor::FlattenTensor::Bytes(bytes_contents))
     }
 
     #[allow(clippy::result_large_err)]
