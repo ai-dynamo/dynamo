@@ -474,7 +474,7 @@ async def run_profile(args):
                 max_thpt_idx = valid_indices[int(np.argmax(valid_thpts))]
                 selected_prefill_idx = max_thpt_idx
             logger.info(
-                f"Suggested prefill {prefill_num_gpus[selected_prefill_idx]}GPUs (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
+                f"Suggested number of GPUs for prefill: {prefill_num_gpus[selected_prefill_idx]} (TTFT {prefill_ttft[selected_prefill_idx]:.2f} ms, throughput {prefill_thpt_per_gpu[selected_prefill_idx]:.2f} tokens/s/GPU)"
             )
 
             # scale up if estimated TTFT is 120% of target TTFT
