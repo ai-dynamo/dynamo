@@ -110,6 +110,10 @@ spec:
         {{- if .Values.dynamo.metrics.prometheusEndpoint }}
           - --prometheus-endpoint={{ .Values.dynamo.metrics.prometheusEndpoint }}
         {{- end }}
+        {{- if .Values.dynamo.mpiRun.secretName }}
+          - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
+          - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
+        {{- end }}
         command:
         - /manager
         env:

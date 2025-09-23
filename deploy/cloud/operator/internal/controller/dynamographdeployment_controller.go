@@ -25,6 +25,8 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secret"
+
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -66,6 +68,7 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
+	MPISecretReplicator   *secret.SecretReplicator
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -166,6 +169,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
+
+	// Always ensure MPI SSH secret is available in this namespace
+	if r.MPISecretReplicator != nil {
+		err := r.MPISecretReplicator.Replicate(ctx, dynamoDeployment.Namespace)
+		if err != nil {
+			logger.Error(err, "Failed to replicate MPI secret", "namespace", dynamoDeployment.Namespace)
+			return "", "", "", fmt.Errorf("failed to replicate MPI secret: %w", err)
+		}
+	}
 
 	if enableGrove && r.Config.Grove.Enabled {
 		logger.Info("Reconciling Grove resources", "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled, "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
