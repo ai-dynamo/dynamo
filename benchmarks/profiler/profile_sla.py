@@ -171,7 +171,7 @@ async def run_profile(args):
                 and not args.force_rerun
                 and check_prefill_results_exist(args.output_dir, num_gpus, args.isl)
             ):
-                logger.info(f"Skipping prefill {num_gpus}GPUs - results already exist")
+                logger.info(f"Skipping prefill {num_gpus} GPU(s) - results already exist")
                 ttft, thpt_per_gpu = load_existing_prefill_results(
                     args.output_dir, num_gpus, args.isl
                 )
