@@ -44,7 +44,25 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return
 	}
 
-	// Check if container.command[0] is a python command
+	/*
+	 * Flag Injection Strategy for Multinode SGLang Deployments
+	 *
+	 * This code handles the injection of distributed training flags (--dist-init-addr, --nnodes, --node-rank)
+	 * into container commands for multinode SGLang deployments. The complexity arises from supporting multiple
+	 * container command patterns and ensuring proper environment variable interpretation.
+	 *
+	 * Two main scenarios are handled:
+	 *
+	 * 1. Direct Python Command (e.g., Command: ["python3"], Args: ["-m", "sglang", "..."])
+	 *    - If shell interpretation is needed (for env vars): Wrap in "sh -c" with exec
+	 *    - If no shell needed: Simply append flags to the Args array
+	 *
+	 * 2. Non-Python Command (e.g., Command: ["sh"], Args: ["-c", "python3 -m sglang ..."])
+	 *    - Use regex-based injection to find embedded Python+SGLang commands within args
+	 *    - Insert flags after the Python command but before any shell operators (|, &, ;)
+	 *
+	 * The needsShell flag indicates when environment variables require shell interpretation
+	 */
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct python command case
 		if needsShell {
@@ -53,8 +71,10 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 			originalArgs := strings.Join(container.Args, " ")
 			var shellCommand string
 			if len(container.Args) > 0 {
+				// Use exec to ensure PID 1 is given to the python command
 				shellCommand = fmt.Sprintf("exec %s %s %s", fullCommand, originalArgs, flags)
 			} else {
+				// Use exec to ensure PID 1 is given to the python command
 				shellCommand = fmt.Sprintf("exec %s %s", fullCommand, flags)
 			}
 			container.Command = []string{"sh", "-c"}
