@@ -315,7 +315,7 @@ async def run_profile(args):
                         (num_gpus, engine_decode_itl, engine_decode_thpt_per_gpu)
                     )
                     logger.info(
-                        f"Loaded {len(existing_results)} existing decode results for {num_gpus}GPUs"
+                        f"Loaded {len(existing_results)} existing decode results for {num_gpus} GPU(s)"
                     )
                 continue
 
