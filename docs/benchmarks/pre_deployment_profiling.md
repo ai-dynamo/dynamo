@@ -66,7 +66,7 @@ In prefill engine, prefills are usually done with batch size=1 and only the ISL 
 ### Decode Interpolation Data
 In decode engine, decode requests are added inflight and iteration time (or ITL) depends on both the context length and the real-time load of the engine. We capture the real-time load of the engine with active kv usage and average context length. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
 
-![images](../images/itl_interpolation.png)
+![images](../../docs/images/itl_interpolation.png)
 
 The script profiles the selected decode TP configuration across different active kv blocks and average context length.
 
@@ -100,31 +100,6 @@ pip install -r deploy/utils/requirements.txt
 
 Use the injector utility to place your DGD manifest into the PVC. The profiling job will read the path you specify.
 
-```bash
-# Inject your disagg manifest
-python3 -m deploy.utils.inject_manifest \
-  --namespace $NAMESPACE \
-  --src components/backends/vllm/deploy/disagg.yaml \
-  --dest /data/configs/disagg.yaml
-
-# Set the docker image for the profiling job; any docker image that contains your script.
-export DOCKER_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
-```
-
-### Configure container image (optional)
-
-You have two options for configuring your profiling setup:
-
-**Option A: Use pre-built image with custom config injection (recommended)**
-
-Use the default pre-built image and inject custom configurations via PVC:
-
-1. **Set the container image:**
-   ```bash
-   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag
-   ```
-
-2. **Inject your custom disagg configuration:**
    ```bash
    # Use default disagg.yaml config
    python3 -m deploy.utils.inject_manifest --namespace $NAMESPACE --src components/backends/vllm/deploy/disagg.yaml --dest /data/configs/disagg.yaml
@@ -137,16 +112,6 @@ Use the default pre-built image and inject custom configurations via PVC:
    ```
 
    > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
-
-3. **Set the config path for the profiling job:**
-   ```bash
-   export DGD_CONFIG_FILE=/workspace/profiling_results/disagg.yaml # or your custom path
-   ```
-
-This approach allows you to:
-- Customize DGD configurations without rebuilding container images
-- Test different model configurations easily
-- Version control your DGD configs alongside your code
 
 > **Important**: For profiling, disagg configs should be run with Grove disabled by adding the annotation `nvidia.com/enable-grove: "false"` to avoid alpha Grove status issues.
 
@@ -173,13 +138,25 @@ spec:
             - <vllm/sglang>
 ```
 
-**Step 3: Run profiling (required)**
+**Step 3: Define the container image and config path**
+
+1. **Set the container image:**
+   ```bash
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag (TODO: update to 0.5.0 upon release as profiling with 0.4.1 is broken)
+   ```
+
+3. **Set the config path for the profiling job:**
+   ```bash
+   export DGD_CONFIG_FILE=/data/configs/disagg.yaml # should be the same path you set for --dest in Step 1
+   ```
+
+**Step 4: Run profiling (required)**
 
 ```bash
 envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
 ```
 
-**Step 4: Wait for profiling to complete**
+**Step 5: Wait for profiling to complete**
 ```bash
 kubectl get jobs -n $NAMESPACE
 kubectl logs job/profile-sla -n $NAMESPACE
@@ -265,8 +242,67 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
    ```
 
 2. Verify the service account was created with the image pull secret:
-   ```bash
-kubectl get serviceaccount dynamo-sa -n $NAMESPACE -o yaml
+  ```bash
+  kubectl get serviceaccount dynamo-sa -n $NAMESPACE -o yaml
    ```
 
 3. The service account should show `imagePullSecrets` containing `nvcr-imagepullsecret`.
+
+
+## Running the Profiling Script with `aiconfigurator`
+The profiling script can be run much quicker by using `aiconfigurator` to estimate perf numbers instead of running and benchmarking real dynamo deployments. To enable estimation using `aiconfigurator`, pass the `--use-ai-configurator` flag to the profiling script.
+
+**Advantages** of `--use-ai-configurator`:
+* Script will finish in seconds rather than hours.
+* No k8s or GPU access is required.
+
+**Disadvantages**:
+* Estimated perf could contain some error, especially when the input dimensions out-of-distribution compared to the sampled values in aiconfigurator.
+* `aiconfigurator` has a limited list of supported models.
+* `aiconfigurator`'s database has a limited list of systems and backends.
+
+### Prerequisites
+You will need a virtual environment with `dynamo` installed. Either use the local dev environment or the docker images. If using local environment, install the required dependencies:
+```bash
+pip install -r deploy/utils/requirements.txt
+```
+
+Additionally, install `aiconfigurator`:
+```bash
+pip install aiconfigurator
+```
+
+### Available Models, Systems, and Backends
+`aiconfigurator` supports a limited list of models, systems, and backends.
+You can use the `aiconfigurator` CLI to see the support matrix:
+```bash
+aiconfigurator cli --help
+```
+This will display:
+```
+...options...
+  --model {GPT_7B,GPT_13B,GPT_30B,GPT_66B,GPT_175B,LLAMA2_7B,LLAMA2_13B,LLAMA2_70B,LLAMA3.1_8B,LLAMA3.1_70B,LLAMA3.1_405B,MOE_Mixtral8x7B,MOE_Mixtral8x22B,DEEPSEEK_V3,KIMI_K2,QWEN2.5_1.5B,QWEN2.5_7B,QWEN2.5_32B,QWEN2.5_72B,QWEN3_32B,QWEN3_235B,QWEN3_480B,Nemotron_super_v1.1}
+                        Model name
+  --system {h100_sxm,h200_sxm}
+                        System name
+  --backend {trtllm,sglang,vllm}
+                        Backend name, suport trtllm for now
+  --version VERSION     Version, 0.20.0,1.0.0rc3 for trtllm
+...more options...
+```
+
+### Running the Script
+
+In addition to passing the `--use-ai-configurator` flag, you must also provide the `--aic-system`, `--aic-model-name`, and `--backend-version` arguments.
+
+Example command:
+```bash
+python3 profile_sla.py \
+   --config ../../components/backends/trtllm/deploy/disagg.yaml \
+   --use-ai-configurator \
+   --aic-system h200_sxm \
+   --aic-model-name QWEN3_32B \
+   --backend trtllm \
+   --backend-version 0.20.0
+```
+The output will be written to `./profiling_results/`.

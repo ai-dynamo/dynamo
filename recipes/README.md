@@ -6,7 +6,7 @@
 | llama-3-70b   | vllm    | disagg-multi-node   |     ✓      |     ✓     |
 | llama-3-70b   | vllm    | disagg-single-node  |     ✓      |     ✓     |
 | oss-gpt       | trtllm  | aggregated          |     ✓      |     ✓     |
-| DeepSeek-R1   | sglang  | disaggregated       |     🚧     |    🚧     |
+| DeepSeek-R1   | sglang  | disaggregated       |     ✓      |    🚧     |
 
 
 ## Prerequisites

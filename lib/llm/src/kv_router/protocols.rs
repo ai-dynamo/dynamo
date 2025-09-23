@@ -163,7 +163,7 @@ pub struct ActiveSequenceEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveSequenceEventData {
     AddRequest {
-        token_sequence: Vec<SequenceHash>,
+        token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
     },

@@ -4,14 +4,14 @@
 #![cfg(feature = "integration")]
 
 use dynamo_runtime::{
-    pipeline::PushRouter, protocols::annotated::Annotated, DistributedRuntime, Result, Runtime,
+    DistributedRuntime, Result, Runtime, pipeline::PushRouter, protocols::annotated::Annotated,
 };
 use futures::StreamExt;
 use rand::Rng;
 use reqwest;
 use std::env;
-use system_metrics::{backend, DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
-use tokio::time::{sleep, Duration};
+use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, backend};
+use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_backend_with_metrics() -> Result<()> {
