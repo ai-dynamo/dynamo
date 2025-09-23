@@ -1382,6 +1382,7 @@ name = "dynamo-llm"
 version = "0.5.0"
 dependencies = [
  "ahash",
+ "aho-corasick",
  "akin",
  "anyhow",
  "async-nats",
