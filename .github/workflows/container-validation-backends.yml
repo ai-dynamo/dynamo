@@ -23,11 +23,11 @@ jobs:
           - { name: sglang, target: runtime, pytest_marks: "e2e and sglang and gpu_1 and not slow" }
           - { name: trtllm, target: runtime, pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow" }
         platform:
-          - { arch: "linux/amd64", runner: cpu-arm-r8g-4xlarge }
-          - { arch: "linux/arm64", runner: gpu-l40-amd64 }
+          - { arch: "linux/amd64", runner: gpu-l40-amd64  }
+          - { arch: "linux/arm64", runner: cpu-arm-r8g-4xlarge }
 
     runs-on: ${{ matrix.platform.runner }}
-    name: Build and Test - ${{ matrix.framework.name }}
+    name: build-test-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework.name }}
       PYTEST_XML_FILE: pytest_test_report.xml
