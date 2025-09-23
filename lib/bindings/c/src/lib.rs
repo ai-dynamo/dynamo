@@ -82,6 +82,34 @@ pub unsafe extern "C" fn dynamo_llm_init(
         }
     };
 
+    // TODO rm
+    if let Some(drt) = DRT.get() {
+        match drt.namespace(namespace.clone()) {
+            Ok(ns) => {
+                match ns.component(component.clone()) {
+                    Ok(comp) => {
+                        eprintln!(
+                            "!!! drt: component resolved: {}/{}",
+                            comp.namespace().name(),
+                            comp.name()
+                        );
+                        // NOTE: we can't list endpoints here; use a preflight call (below) to prove wiring.
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "!!! drt: missing component {}/{}: {:?}",
+                            namespace, component, e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("!!! drt: missing namespace {}: {:?}", namespace, e);
+            }
+        }
+    }
+    //end of TODO
+
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
             dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
@@ -436,12 +464,21 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 
     // Build on the same worker runtime (secondary handle)
     let make_pipeline = || async {
-        let router_mode = if use_kv_routing {
+        // let router_mode = if use_kv_routing {
+        //     RouterMode::KV
+        // } else {
+        //     RouterMode::RoundRobin
+        // };
+        // TODO rm later
+        let force_rr = std::env::var("DYNAMO_FORCE_RR").ok().as_deref() == Some("1");
+        let router_mode = if force_rr {
+            RouterMode::RoundRobin
+        } else if use_kv_routing {
             RouterMode::KV
         } else {
             RouterMode::RoundRobin
         };
-
+        eprintln!("!!! router_mode={:?} (force_rr={})", router_mode, force_rr);
         let kv_router_config = if use_kv_routing {
             use dynamo_llm::kv_router::KvRouterConfig;
             Some(KvRouterConfig::new(
@@ -476,12 +513,106 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             return DynamoLlmResult::ERR;
         }
     };
+    // TODO rm
+    // ---- preflight sanity check: run a tiny query to verify the graph is wired ----
+    // Store and hand out an ID-backed handle *before* preflight so we can reuse the FFI
+    // use std::sync::atomic::AtomicU64; // <-- do NOT import Ordering again here
+
+    // let id = NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed);
+    // {
+    //     let mut map = pipelines().lock().unwrap();
+    //     map.insert(id, pipeline);
+    // }
+
+    // // Create the handle we’ll return to the caller
+    // let handle = Box::new(WorkerSelectionPipeline { id });
+
+    // // ---- preflight sanity using the same exported FFI you call from Go ----
+    // let sanity_json = format!(
+    //     r#"{{
+    //         "model":"{}",
+    //         "messages":[{{"role":"user","content":"ping"}}],
+    //         "stream":true,
+    //         "max_tokens":1,
+    //         "temperature":0.0,
+    //         "nvext":{{"annotations":["query_instance_id"]}}
+    //     }}"#,
+    //     model
+    // );
+
+    // // Prepare C args/outs
+    // let c_req = match std::ffi::CString::new(sanity_json) {
+    //     Ok(s) => s,
+    //     Err(e) => {
+    //         eprintln!("preflight: CString failed: {:?}", e);
+    //         // continue; this is diagnostic only
+    //         unsafe { *pipeline_out = Box::into_raw(handle) };
+    //         return DynamoLlmResult::OK;
+    //     }
+    // };
+
+    // let mut wid_out: i64 = 0;
+    // let mut toks_ptr: *mut u32 = std::ptr::null_mut();
+    // let mut toks_len: usize = 0;
+    // let mut ann_json_ptr: *mut c_char = std::ptr::null_mut();
+
+    // let rc = unsafe {
+    //     // SAFETY: `handle` points to a valid WorkerSelectionPipeline we just created.
+    //     dynamo_query_worker_selection_and_annotate(
+    //         Box::into_raw(handle),          // temporarily transfer ownership for the call
+    //         c_req.as_ptr(),
+    //         &mut wid_out as *mut i64,
+    //         &mut toks_ptr as *mut *mut u32,
+    //         &mut toks_len as *mut usize,
+    //         &mut ann_json_ptr as *mut *mut c_char,
+    //     )
+    // };
+
+    // // Re-acquire ownership of the handle (the FFI doesn’t keep it)
+    // let handle = unsafe { Box::from_raw(*pipeline_out) };
+    // // ^ Wait—we haven’t assigned pipeline_out yet. Instead, do this:
+    // let mut handle = handle; // keep ownership locally
+
+    // if rc != DynamoLlmResult::OK {
+    //     eprintln!("preflight FAILED (FFI): dynamo_query_worker_selection_and_annotate returned ERR");
+    // } else {
+    //     eprintln!("preflight OK: worker_id={}, tokens_len={}", wid_out, toks_len);
+    // }
+
+    // // Free preflight outputs if any
+    // let _ = unsafe {
+    //     dynamo_free_worker_selection_result(toks_ptr, toks_len, ann_json_ptr)
+    // };
+
+    // // Finally return the handle to the caller
+    // unsafe { *pipeline_out = Box::into_raw(handle) };
+    // DynamoLlmResult::OK
+
+    // match wk
+    //     .runtime()
+    //     .secondary()
+    //     .block_on(async { query_worker_selection_and_annotate(&pipeline, sanity_req).await })
+    // {
+    //     Ok((wid, toks, _ann)) => {
+    //         eprintln!("preflight OK: worker_id={wid}, tokens_len={}", toks.len());
+    //     }
+    //     Err(e) => {
+    //         eprintln!("preflight FAILED (graph likely unwired): {e:?}");
+    //         // keep going; this is diagnostic but tells you queries will fail later too
+    //     }
+    // }
+    // End of TODO
 
     // Store and hand out an ID-backed handle
     let id = NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed);
     {
         let mut map = pipelines().lock().unwrap();
-        map.insert(id, Arc::new(pipeline)); // <-- wrap in Arc
+        map.insert(id, Arc::new(pipeline));
+        eprintln!(
+            "!!! pipeline[{}] created at {:p}",
+            id,
+            &*map.get(&id).unwrap()
+        );
     }
 
     let handle = Box::new(WorkerSelectionPipeline { id });
@@ -533,6 +664,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         eprintln!("Pipeline pointer is null");
         return DynamoLlmResult::ERR;
     }
+
     if worker_instance_id_out.is_null()
         || token_ids_out.is_null()
         || token_count_out.is_null()
@@ -574,7 +706,6 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let id = unsafe { &*pipeline }.id;
 
     // Look up the pipeline
-    // Look up the pipeline
     let pipeline_arc = {
         let map = pipelines().lock().unwrap();
         match map.get(&id) {
@@ -585,6 +716,10 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             }
         }
     };
+    eprintln!(
+        "!!! pipeline[{}] query using instance {:p}",
+        id, &*pipeline_arc
+    );
 
     // Execute on the same worker runtime (secondary)
     let fut = async move {
