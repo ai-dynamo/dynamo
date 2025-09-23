@@ -337,7 +337,7 @@ use dynamo_llm::types::{Annotated, openai::chat_completions::NvCreateChatComplet
 use dynamo_runtime::pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // Opaque handle exposed to C
 pub struct WorkerSelectionPipeline {
@@ -349,9 +349,11 @@ static PIPELINES: OnceLock<
     Mutex<
         HashMap<
             u64,
-            ServiceEngine<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<LLMEngineOutput>>,
+            Arc<
+                ServiceEngine<
+                    SingleIn<NvCreateChatCompletionRequest>,
+                    ManyOut<Annotated<LLMEngineOutput>>,
+                >,
             >,
         >,
     >,
@@ -360,7 +362,12 @@ static PIPELINES: OnceLock<
 fn pipelines() -> &'static Mutex<
     HashMap<
         u64,
-        ServiceEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+        Arc<
+            ServiceEngine<
+                SingleIn<NvCreateChatCompletionRequest>,
+                ManyOut<Annotated<LLMEngineOutput>>,
+            >,
+        >,
     >,
 > {
     PIPELINES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -474,7 +481,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     let id = NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed);
     {
         let mut map = pipelines().lock().unwrap();
-        map.insert(id, pipeline);
+        map.insert(id, Arc::new(pipeline)); // <-- wrap in Arc
     }
 
     let handle = Box::new(WorkerSelectionPipeline { id });
@@ -567,10 +574,11 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     let id = unsafe { &*pipeline }.id;
 
     // Look up the pipeline
-    let pipeline_engine = {
+    // Look up the pipeline
+    let pipeline_arc = {
         let map = pipelines().lock().unwrap();
         match map.get(&id) {
-            Some(p) => p.clone(),
+            Some(p) => Arc::clone(p), // <-- clone the Arc
             None => {
                 eprintln!("invalid pipeline id");
                 return DynamoLlmResult::ERR;
@@ -578,8 +586,11 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
 
-    // Execute the async query on the same worker runtime (secondary handle)
-    let fut = async move { query_worker_selection_and_annotate(&pipeline_engine, request).await };
+    // Execute on the same worker runtime (secondary)
+    let fut = async move {
+        // pass &*pipeline_arc (reference to the SAME instance)
+        query_worker_selection_and_annotate(&*pipeline_arc, request).await
+    };
 
     let (worker_id, tokens, annotated_req) = match wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
