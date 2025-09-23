@@ -51,7 +51,7 @@ Each backend has deployment examples and configuration options:
 
 ```bash
 # Set same namespace from platform install
-export NAMESPACE=dynamo-cloud
+export NAMESPACE=dynamo-kubernetes
 
 # Deploy any example (this uses vLLM with Qwen model using aggregated serving)
 kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}

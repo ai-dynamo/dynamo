@@ -108,8 +108,8 @@ Build and deploy from source for customization.
 
 ```bash
 # 1. Set environment
-export NAMESPACE=dynamo-cloud
-export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
+export NAMESPACE=dynamo-kubernetes
+export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo  # or your registry
 export DOCKER_USERNAME='$oauthtoken'
 export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
 export IMAGE_TAG=${RELEASE_VERSION}
