@@ -33,7 +33,7 @@ def get_num_request_range(attn_dp_size, engine_max_concurrency, granularity):
         ans = range(attn_dp_size, conc_per_dp * attn_dp_size + 1, attn_dp_size)
     else:
         step = (conc_per_dp - 1) * attn_dp_size / (granularity - 1)
-        ans = [attn_dp_size + int(i * step) for i in range(granularity)]
+        ans = [attn_dp_size + int(i * step) * attn_dp_size for i in range(granularity)]
     return ans
 
 
