@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dynamo-benchmark
+spec:
+  template:
+    spec:
+      serviceAccountName: dynamo-sa
+      imagePullSecrets:
+      - name: docker-imagepullsecret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: benchmark-runner
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+        resources:
+          requests:
+            cpu: "4"
+            memory: "8Gi"
+          limits:
+            cpu: "8"
+            memory: "16Gi"
+        env:
+          - name: HUGGING_FACE_HUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: HF_TOKEN
+        command: ["python3", "-m", "benchmarks.utils.benchmark"]
+        args:
+          - --model
+          - "Qwen/Qwen3-0.6B"
+          - --isl
+          - "2000"
+          - --std
+          - "10"
+          - --osl
+          - "256"
+          - --output-dir
+          - /data/results
+          - --input
+          - "qwen-vllm-agg=vllm-agg-frontend:8000"
+          # add more copies of lines 58-59 for each additional service if you want to benchmark multiple services
+          # - --input
+          # - "name=service-url:port"
+        volumeMounts:
+          - name: data-volume
+            mountPath: /data
+      restartPolicy: Never
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: dynamo-pvc
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600  # Clean up job after 1 hour
