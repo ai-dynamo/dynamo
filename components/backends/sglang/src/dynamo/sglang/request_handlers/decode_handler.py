@@ -53,7 +53,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_params["ignore_eos"] = request["stop_conditions"]["ignore_eos"]
         return sampling_params
 
-    async def generate(self, request: str):
+    async def generate(self, request: dict):
         sampling_params = self._build_sampling_params(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -62,7 +62,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 DisaggPreprocessedRequest(
                     request=request,
                     sampling_params=sampling_params,
-                ).model_dump_json()
+                ).model_dump()
             )
 
             bootstrap_info = None
