@@ -121,7 +121,7 @@ Use the injector utility to place your DGD manifest into the PVC. The profiling 
 
 **Step 2: Set SLA target**
 
-For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
+For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to match the dynamo deployment in the `DGD_CONFIG_FILE`.
 
 For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
 
