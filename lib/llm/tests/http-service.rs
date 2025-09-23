@@ -531,12 +531,7 @@ async fn test_http_service() {
         .await
         .unwrap();
 
-    assert_eq!(
-        response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{:?}",
-        response
-    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{:?}", response);
 
     // =========== Query /metrics endpoint ===========
     let response = client
