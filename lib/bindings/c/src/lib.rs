@@ -54,10 +54,19 @@ fn start_host_on_worker_runtime() -> Result<(), String> {
         return Ok(());
     }
 
+    // We need the worker's runtime handle to pass into DRT::from_settings
+    let wk = WK.get().ok_or("WK not initialized")?.clone();
+    let rt_handle = wk.runtime().clone();
+
     // channel the rest of the code uses to talk to the host loop
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Cmd>(128);
 
-    // host loop on a dedicated OS thread
+    // Let init() know when DRT is ready (or failed)
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    // host loop on a dedicated OS thread, but:
+    //  - initialize DRT here
+    //  - THEN build/run pipelines here
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -65,6 +74,22 @@ fn start_host_on_worker_runtime() -> Result<(), String> {
             .expect("host runtime build failed");
 
         rt.block_on(async move {
+            // Initialize DRT on THIS runtime so all network tasks/edges live together
+            let drt_res = DRT
+                .get_or_try_init(async {
+                    DistributedRuntime::from_settings(rt_handle.clone()).await
+                })
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"));
+
+            // Signal init() and bail if DRT failed
+            if let Err(msg) = drt_res {
+                let _ = ready_tx.send(Err(msg));
+                return; // host thread exits; HOST won't be set so calls will fail cleanly
+            }
+            let _ = ready_tx.send(Ok(()));
+
             use std::collections::HashMap;
             use std::sync::atomic::{AtomicU64, Ordering};
             static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -77,6 +102,7 @@ fn start_host_on_worker_runtime() -> Result<(), String> {
             }
             let mut pipelines: HashMap<u64, HeldPipeline> = HashMap::new();
 
+            // Serve commands
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     Cmd::CreatePipeline {
@@ -166,8 +192,14 @@ fn start_host_on_worker_runtime() -> Result<(), String> {
         // runtime drops here
     });
 
-    HOST.set(Host { tx })
-        .map_err(|_| "HOST already set".to_string())
+    // Only expose HOST after the host thread confirmed DRT is up
+    match ready_rx.blocking_recv() {
+        Ok(Ok(())) => HOST
+            .set(Host { tx })
+            .map_err(|_| "HOST already set".to_string()),
+        Ok(Err(msg)) => Err(msg),
+        Err(_) => Err("host thread aborted during DRT init".to_string()),
+    }
 }
 
 fn initialize_tracing() {
@@ -208,6 +240,8 @@ fn ffi_guard<F: FnOnce() -> DynamoLlmResult>(f: F) -> DynamoLlmResult {
 
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
+/// # Safety
+/// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_llm_init(
     namespace_c_str: *const c_char,
@@ -219,7 +253,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
         initialize_tracing();
         tracing::info!(target: "capi", "init: begin");
 
-        // 1) Ensure Worker exists (no spawn on its runtime)
+        // 1) Worker (creates/returns the shared runtime handle)
         let wk = match WK.get_or_try_init(Worker::from_settings) {
             Ok(wk) => wk.clone(),
             Err(e) => {
@@ -228,13 +262,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
             }
         };
 
-        // 2) Start host loop thread/runtime
-        if let Err(e) = start_host_on_worker_runtime() {
-            tracing::error!(target: "capi", error=%e, "start_host_on_worker_runtime failed");
-            return DynamoLlmResult::ERR;
-        }
-
-        // 3) Parse inputs
+        // 2) Parse inputs BEFORE moving anything around
         let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
             Ok(s) => s.to_owned(),
             Err(e) => {
@@ -251,29 +279,23 @@ pub unsafe extern "C" fn dynamo_llm_init(
         };
         tracing::debug!(target: "capi", %namespace, %component, worker_id, kv_block_size, "init: parsed inputs");
 
-        // 4) Initialize DRT on a local runtime without borrowing `wk` across threads
-        let rt_handle = wk.runtime().clone(); // <- CLONE THE HANDLE
-        let drt_init = run_on_local_runtime(move || async move {
-            DRT.get_or_try_init(async {
-                DistributedRuntime::from_settings(rt_handle.clone()).await
-            })
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))
-        });
-
-        if let Err(msg) = drt_init {
-            tracing::error!(target: "capi", "DRT init failed: {msg}");
+        // 3) Start the host loop; it will init DRT on its own runtime and only then expose HOST
+        if let Err(e) = start_host_on_worker_runtime() {
+            tracing::error!(target: "capi", error=%e, "start_host_on_worker_runtime failed");
             return DynamoLlmResult::ERR;
         }
-        tracing::info!(target: "capi", "DRT ready");
+        tracing::info!(target: "capi", "DRT ready (via host thread)");
 
-        // 5) Initialize the KV publisher once
+        // 4) Create KV publisher (needs DRT to be initialized already)
         match KV_PUB.get_or_try_init({
             let namespace = namespace.clone();
             let component = component.clone();
             move || {
-                tracing::info!(target: "capi", %namespace, %component, worker_id, kv_block_size, "creating KvEventPublisher");
+                tracing::info!(
+                    target: "capi",
+                    %namespace, %component, worker_id, kv_block_size,
+                    "creating KvEventPublisher"
+                );
                 dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
             }
         }) {
@@ -288,8 +310,6 @@ pub unsafe extern "C" fn dynamo_llm_init(
         }
     })
 }
-
-/* ---------------------------- shutdown ---------------------------- */
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
