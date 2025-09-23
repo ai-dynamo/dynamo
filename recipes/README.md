@@ -19,7 +19,7 @@ export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
 ```
 
-2. **Dynamo Cloud Platform installed** - Follow [Quickstart Guide](../docs/guides/dynamo_deploy/README.md)
+2. **Dynamo Cloud Platform installed** - Follow [Quickstart Guide](../docs/kubernetes/README.md)
 
 3. **Kubernetes cluster with GPU support**
 

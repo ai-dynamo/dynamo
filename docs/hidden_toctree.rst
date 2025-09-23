@@ -24,16 +24,16 @@
    API/nixl_connect/write_operation.md
    API/nixl_connect/README.md
 
-   guides/dynamo_deploy/api_reference.md
-   guides/dynamo_deploy/create_deployment.md
+   kubernetes/api_reference.md
+   kubernetes/create_deployment.md
 
-   guides/dynamo_deploy/fluxcd.md
-   guides/dynamo_deploy/gke_setup.md
-   guides/dynamo_deploy/grove.md
-   guides/dynamo_deploy/model_caching_with_fluid.md
-   guides/dynamo_deploy/README.md
+   kubernetes/fluxcd.md
+   kubernetes/gke_setup.md
+   kubernetes/grove.md
+   kubernetes/model_caching_with_fluid.md
+   kubernetes/README.md
    guides/dynamo_run.md
-   guides/dynamo_deploy/sla_planner_deployment.md
+   kubernetes/sla_planner_deployment.md
    guides/metrics.md
    guides/run_kvbm_in_vllm.md
    guides/run_kvbm_in_trtllm.md

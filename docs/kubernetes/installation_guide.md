@@ -21,7 +21,7 @@ Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestra
 
 ## Quick Start Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../../deploy/cloud/helm/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](/deploy/cloud/helm/platform/README.md).
 
 **Path A: Production Install**
 Install from published artifacts on your existing cluster → [Jump to Path A](#path-a-production-install)
@@ -31,6 +31,20 @@ Set up Minikube first → [Minikube Setup](minikube.md) → Then follow Path A
 
 **Path C: Custom Development**
 Build from source for customization → [Jump to Path C](#path-c-custom-development)
+
+All helm install commands could be overridden by either setting the values.yaml file or by passing in your own values.yaml:
+
+```bash
+helm install ...
+  -f your-values.yaml
+```
+
+and/or setting values as flags to the helm install command, as follows:
+
+```bash
+helm install ...
+  --set "your-value=your-value"
+```
 
 ## Prerequisites
 
@@ -68,7 +82,9 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 ```
 
 > [!TIP]
-> By default, Grove and Kai Scheduler are NOT installed. You can enable them by setting the following flags in the helm install command:
+> For multinode deployments, you need to enable Grove and Kai Scheduler.
+> You might chose to install them manually or through the dynamo-platform helm install command.
+> When using the dynamo-platform helm install command, Grove and Kai Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
 
 ```bash
 --set "grove.enabled=true"
@@ -111,7 +127,7 @@ docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG . && docker push $DOCK
 
 cd -
 
-# 3. Create namespace and secrets to be able to pull the operator image
+# 3. Create namespace and secrets to be able to pull the operator image (only needed if you pushed the operator image to a private registry)
 kubectl create namespace ${NAMESPACE}
 kubectl create secret docker-registry docker-imagepullsecret \
   --docker-server=${DOCKER_SERVER} \
@@ -123,9 +139,8 @@ kubectl create secret docker-registry docker-imagepullsecret \
 helm upgrade --install dynamo-crds ./crds/ --namespace default
 
 # 5. Install Platform
-helm repo add bitnami https://charts.bitnami.com/bitnami
 helm dep build ./platform/
-helm upgrade --install dynamo-platform ./platform/ \
+helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --set dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator \
   --set dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG} \
@@ -158,9 +173,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](../../../components/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](../../../components/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](../../../components/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](/components/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](/components/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](/components/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](metrics.md)
@@ -200,7 +215,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../../deploy/cloud/helm/platform/README.md)
+- [Helm Chart Configuration](/deploy/cloud/helm/platform/README.md)
 - [GKE-specific setup](gke_setup.md)
 - [Create custom deployments](create_deployment.md)
 - [Dynamo Operator details](dynamo_operator.md)

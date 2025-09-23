@@ -56,7 +56,7 @@ fi
 if ! kubectl get pods -n "$NAMESPACE" | grep -q "dynamo-platform"; then
   warn "Dynamo platform pods not found in namespace $NAMESPACE"
   warn "Please ensure Dynamo Cloud platform is installed first:"
-  warn "  See: docs/guides/dynamo_deploy/installation_guide.md"
+  warn "  See: docs/kubernetes/installation_guide.md"
   if [[ -z "${FORCE:-}" && -z "${YES:-}" ]]; then
     read -p "Continue anyway? [y/N]: " -r ans
     [[ "$ans" =~ ^[Yy]$ ]] || exit 1

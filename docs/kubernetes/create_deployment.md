@@ -13,13 +13,13 @@ Select the architecture pattern as your template that best fits your use case.
 For example, when using the `VLLM` inference backend:
 
 - **Development / Testing**
-  Use [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml) as the base configuration.
+  Use [`agg.yaml`](/components/backends/vllm/deploy/agg.yaml) as the base configuration.
 
 - **Production with Load Balancing**
-  Use [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
+  Use [`agg_router.yaml`](/components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
 - **High Performance / Disaggregated Deployment**
-  Use [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+  Use [`disagg_router.yaml`](/components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
 
 
 ## Step 2: Customize the Template
@@ -90,7 +90,7 @@ Consult the corresponding sh file. Each of the python commands to launch a compo
 
 The front end is launched with "python3 -m dynamo.frontend [--http-port 8000] [--router-mode kv]"
 Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flags `command.
-If you are a Dynamo contributor the [dynamo run guide](../dynamo_run.md) for details on how to run this command.
+If you are a Dynamo contributor the [dynamo run guide](/docs/guides/dynamo_run.md) for details on how to run this command.
 
 
 ## Step 3: Key Customization Points

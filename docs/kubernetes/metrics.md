@@ -28,7 +28,7 @@ helm install prometheus -n monitoring --create-namespace prometheus-community/ku
 > The commands enumerated below assume you have installed the kube-prometheus-stack with the installation method listed above. Depending on your installation configuration of the monitoring stack, you may need to modify the `kubectl` commands that follow in this document accordingly (e.g modifying Namespace or Service names accordingly).
 
 ### Install Dynamo Operator
-Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](../dynamo_deploy/installation_guide.md) for detailed instructions on deploying the Dynamo operator.
+Before setting up metrics collection, you'll need to have the Dynamo operator installed in your cluster. Follow our [Installation Guide](/docs/kubernetes/installation_guide.md) for detailed instructions on deploying the Dynamo operator.
 Make sure to set the `prometheusEndpoint` to the Prometheus endpoint you installed in the previous step.
 
 ```bash
@@ -64,8 +64,8 @@ This will create two components:
 - A Worker component exposing metrics on its system port
 
 Both components expose a `/metrics` endpoint following the OpenMetrics format, but with different metrics appropriate to their roles. For details about:
-- Deployment configuration: See the [vLLM README](../../components/backends/vllm/README.md)
-- Available metrics: See the [metrics guide](../metrics.md)
+- Deployment configuration: See the [vLLM README](/components/backends/vllm/README.md)
+- Available metrics: See the [metrics guide](/docs/guides/metrics.md)
 
 ### Validate the Deployment
 
