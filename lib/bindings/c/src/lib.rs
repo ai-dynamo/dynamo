@@ -433,7 +433,7 @@ fn ensure_host_started() -> Result<&'static Host, String> {
                             namespace,
                             component,
                             model,
-                            use_kv_routing,
+                            use_kv_routing: _, // TODO rm
                             busy_threshold,
                             overlap_score_weight,
                             router_temperature,
@@ -441,6 +441,7 @@ fn ensure_host_started() -> Result<&'static Host, String> {
                             router_replica_sync,
                             resp,
                         } => {
+                            let use_kv_routing = false; // TODO rm
                             tracing::info!(
                                 target: "capi",
                                 "CreatePipeline ns={:?} component={:?} model={:?} use_kv_routing={:?} busy_threshold={:?} overlap_score_weight={:?} router_temperature={:?} use_kv_events={:?} router_replica_sync={:?}",
@@ -467,6 +468,8 @@ fn ensure_host_started() -> Result<&'static Host, String> {
                                 } else {
                                     None
                                 };
+                                tracing::info!("Host creating pipeline: ns={namespace} component={component} mode={:?}",
+                                                if use_kv_routing { RouterMode::KV } else { RouterMode::RoundRobin });
 
                                 let pipeline = create_worker_selection_pipeline_chat(
                                     &namespace,
