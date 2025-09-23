@@ -13,7 +13,7 @@ Support matrix:
 | vLLM | Dense | ✅ |
 | vLLM | MoE | 🚧 |
 | SGLang | Dense | ✅ |
-| SGLang | MoE | 🚧 |
+| SGLang | MoE | ✅ |
 | TensorRT-LLM | Dense | ✅ |
 | TensorRT-LLM | MoE | 🚧 |
 
@@ -63,8 +63,14 @@ After finding the best TP size for prefill and decode, the script will then inte
 
 In prefill engine, prefills are usually done with batch size=1 and only the ISL (excluding prefix cache hit) affects the iteration time. The script profiles the selected prefill TP configuration across different ISLs and record the TTFT and prefill throughput per GPU under those ISLs.
 
+For dense models, the script profiles different TP sizes.
+For MoE models, the script only profiles different TEP sizes, since DEP is generally not the optimal prefill configuration.
+
 ### Decode Interpolation Data
 In decode engine, decode requests are added inflight and iteration time (or ITL) depends on both the context length and the real-time load of the engine. We capture the real-time load of the engine with active kv usage and average context length. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
+
+For dense models, the script profiles different TP sizes.
+For MoE models, the script profiles different DEP sizes. TEP decode engines for low latency will be supported in the future. 
 
 ![images](../../docs/images/itl_interpolation.png)
 
@@ -148,9 +154,9 @@ This approach allows you to:
 - Test different model configurations easily
 - Version control your DGD configs alongside your code
 
-**Step 2: Set SLA target**
+**Step 2: Set SLA target and prepare model cache**
 
-Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
+For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
 
 ```yaml
 spec:
@@ -171,10 +177,18 @@ spec:
             - <vllm/sglang>
 ```
 
+For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
+
+If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
+
 **Step 3: Run profiling (required)**
 
 ```bash
+# for dense models
 envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
+
+# for MoE models
+envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
 ```
 
 **Step 4: Wait for profiling to complete**
