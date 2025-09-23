@@ -41,9 +41,17 @@ class DistributedRuntime:
         """
         ...
 
-    def etcd_client(self) -> Optional[EtcdClient]:
+    def do_not_use_etcd_client(self) -> Optional[EtcdClient]:
         """
         Get the `EtcdClient` object. Not available for static workers.
+        This will be removed soon, do not use it.
+        """
+        ...
+
+    def allocate_port_block(self, namespace, port_min, port_max, block_size, context=None) -> List[int]:
+        """
+        Allocate a contiguous block of ports from the specified range and atomically reserve them.
+        Returns a list of all allocated ports in order.
         """
         ...
 
@@ -52,6 +60,7 @@ class DistributedRuntime:
         Shutdown the runtime by triggering the cancellation token
         """
         ...
+
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
@@ -172,12 +181,6 @@ class EtcdKvCache:
         """
         ...
 
-    async def clear_all(self) -> None:
-        """
-        Delete all key-value pairs from the cache and etcd.
-        """
-        ...
-
 class Namespace:
     """
     A namespace is a collection of components
@@ -217,7 +220,7 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -226,6 +229,8 @@ class Endpoint:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
             metrics_labels: Optional list of metrics labels to add to the metrics
+            health_check_payload: Optional dict containing the health check request payload
+                                  that will be used to verify endpoint health
         """
         ...
 
@@ -891,71 +896,6 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 
-class NatsQueue:
-    """
-    A queue implementation using NATS JetStream for task distribution
-    """
-
-    def __init__(self, stream_name: str, nats_server: str, dequeue_timeout: float) -> None:
-        """
-        Create a new NatsQueue instance.
-
-        Args:
-            stream_name: Name of the NATS JetStream stream
-            nats_server: URL of the NATS server
-            dequeue_timeout: Default timeout in seconds for dequeue operations
-        """
-        ...
-
-    async def connect(self) -> None:
-        """
-        Connect to the NATS server
-        """
-        ...
-
-    async def ensure_connection(self) -> None:
-        """
-        Ensure connection to the NATS server, connecting if not already connected
-        """
-        ...
-
-    async def close(self) -> None:
-        """
-        Close the connection to the NATS server
-        """
-        ...
-
-    async def enqueue_task(self, task_data: bytes) -> None:
-        """
-        Enqueue a task to the NATS JetStream
-
-        Args:
-            task_data: The task data as bytes
-        """
-        ...
-
-    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
-        """
-        Dequeue a task from the NATS JetStream
-
-        Args:
-            timeout: Optional timeout in seconds for this specific dequeue operation.
-                    If None, uses the default timeout specified during initialization.
-
-        Returns:
-            The task data as bytes if available, None if no task is available
-        """
-        ...
-
-    async def get_queue_size(self) -> int:
-        """
-        Get the current size of the queue
-
-        Returns:
-            The number of messages in the queue
-        """
-        ...
-
 class Layer:
     """
     A KV cache block layer
@@ -1214,6 +1154,103 @@ class ZmqKvEventListener:
         """
         ...
 
+class KvRouter:
+    """
+    A KV Router that decides which worker to use based on KV cache overlap.
+    This router tracks request states and manages KV cache distribution across workers.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        block_size: int,
+        kv_router_config: Optional[KvRouterConfig] = None,
+        consumer_uuid: Optional[str] = None,
+    ) -> None:
+        """
+        Create a new KvRouter instance.
+
+        Args:
+            endpoint: The endpoint to associate with this router
+            block_size: The KV cache block size
+            kv_router_config: Optional configuration for the KV router
+            consumer_uuid: Optional unique identifier for this router instance.
+                          If not provided, a UUID will be generated.
+        """
+        ...
+
+    async def find_best_match(
+        self,
+        request_id: str,
+        tokens: List[int],
+        *,
+        update_states: bool = False,
+        router_config_override: Optional[JsonLike] = None,
+    ) -> Tuple[int, int]:
+        """
+        Find the best matching worker for the given tokens.
+
+        Args:
+            request_id: Unique identifier for the request used for tracking
+            tokens: List of token IDs to find matches for
+            update_states: Whether to update router states for this request (default: False)
+            router_config_override: Optional router configuration override with fields:
+                - overlap_score_weight: Optional weight for overlap score
+                - router_temperature: Optional temperature for worker selection
+
+        Returns:
+            A tuple of (worker_id, overlap_blocks) where:
+                - worker_id: The ID of the best matching worker
+                - overlap_blocks: The number of overlapping blocks found
+        """
+        ...
+
+    async def add_request(
+        self,
+        request_id: str,
+        tokens: List[int],
+        overlap_blocks: int,
+        worker_id: int,
+    ) -> None:
+        """
+        Add a request to the router's tracking system.
+
+        Args:
+            request_id: Unique identifier for the request
+            tokens: List of token IDs for the request
+            overlap_blocks: Number of overlapping blocks found
+            worker_id: ID of the worker handling this request
+        """
+        ...
+
+    async def mark_prefill_completed(self, request_id: str) -> None:
+        """
+        Mark that prefill has been completed for a request.
+
+        Args:
+            request_id: The request ID to mark as prefill completed
+        """
+        ...
+
+    async def free(self, request_id: str) -> None:
+        """
+        Free resources associated with a request.
+
+        Args:
+            request_id: The request ID to free
+        """
+        ...
+
+    @property
+    def block_size(self) -> int:
+        """
+        Get the KV cache block size.
+
+        Returns:
+            The block size in tokens
+        """
+        ...
+
 class KvPushRouter:
     """
     A KV-aware push router that performs intelligent routing based on KV cache overlap.
@@ -1271,7 +1308,6 @@ class KvPushRouter:
 
     async def best_worker_id(
         self,
-        context_id: str,
         token_ids: List[int],
         router_config_override: Optional[JsonLike] = None,
     ) -> Tuple[int, int]:
@@ -1279,7 +1315,6 @@ class KvPushRouter:
         Find the best matching worker for the given tokens without updating states.
 
         Args:
-            context_id: String identifier for the request
             token_ids: List of token IDs to find matches for
             router_config_override: Optional router configuration override
 

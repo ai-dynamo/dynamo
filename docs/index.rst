@@ -26,7 +26,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 .. admonition:: 💎 Discover the latest developments!
    :class: seealso
 
-   This guide is a snapshot at a specific point in time. For the latest information and examples, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo>`_.
+   This guide is a snapshot of a specific point in time. For the latest information, examples, and Release Assets, see the `Dynamo GitHub repository <https://github.com/ai-dynamo/dynamo/releases/latest>`_.
 
 Quickstart
 ==========
@@ -51,6 +51,7 @@ Quickstart
    :caption: Kubernetes Deployment
 
    Quickstart (K8s) <../guides/dynamo_deploy/README.md>
+   Detailed Installation Guide <../guides/dynamo_deploy/installation_guide.md>
    Dynamo Operator <../guides/dynamo_deploy/dynamo_operator.md>
    Metrics <../guides/dynamo_deploy/metrics.md>
    Logging <../guides/dynamo_deploy/logging.md>
@@ -70,6 +71,10 @@ Quickstart
    :hidden:
    :caption: Developer Guide
 
+   Benchmarking Guide <benchmarks/benchmarking.md>
+   Planner Benchmark Example <guides/planner_benchmark/README.md>
+   Logging <guides/logging.md>
+   Health Checks <guides/health_check.md>
    Tuning Disaggregated Serving Performance <guides/disagg_perf_tuning.md>
    Writing Python Workers in Dynamo <guides/backend.md>
    Glossary <dynamo_glossary.md>

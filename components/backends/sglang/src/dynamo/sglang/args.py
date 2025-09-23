@@ -20,7 +20,9 @@ from dynamo.sglang import __version__
 
 configure_dynamo_logging()
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
+
 DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
     "endpoint": {
         "flags": ["--endpoint"],

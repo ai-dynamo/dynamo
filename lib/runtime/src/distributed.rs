@@ -155,6 +155,31 @@ impl DistributedRuntime {
             );
         }
 
+        // Start health check manager if enabled
+        if config.health_check_enabled {
+            let health_check_config = crate::health_check::HealthCheckConfig {
+                canary_wait_time: std::time::Duration::from_secs(config.canary_wait_time_secs),
+                request_timeout: std::time::Duration::from_secs(
+                    config.health_check_request_timeout_secs,
+                ),
+            };
+
+            // Start the health check manager (spawns per-endpoint monitoring tasks)
+            match crate::health_check::start_health_check_manager(
+                distributed_runtime.clone(),
+                Some(health_check_config),
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(
+                    "Health check manager started (canary_wait_time: {}s, request_timeout: {}s)",
+                    config.canary_wait_time_secs,
+                    config.health_check_request_timeout_secs
+                ),
+                Err(e) => tracing::error!("Health check manager failed to start: {}", e),
+            }
+        }
+
         Ok(distributed_runtime)
     }
 
@@ -300,6 +325,19 @@ impl DistributedRuntime {
             Some(callbacks) => callbacks.iter().map(|callback| callback()).collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Clear everything in etcd under a key.
+    /// todo: Remove as soon as we auto-delete the MDC.
+    pub async fn temp_clear_namespace(&self, name: &str) -> anyhow::Result<()> {
+        let Some(etcd_client) = self.etcd_client() else {
+            return Ok(()); // no etcd, nothing to clear
+        };
+        let kvs = etcd_client.kv_get_prefix(name).await?;
+        for kv in kvs {
+            etcd_client.kv_delete(kv.key(), None).await?;
+        }
+        Ok(())
     }
 
     /// Get all registered hierarchy keys. Private because it is only used for testing.

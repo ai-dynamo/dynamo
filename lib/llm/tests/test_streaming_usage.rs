@@ -146,6 +146,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
         inner,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     }
 }
 
