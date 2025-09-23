@@ -605,6 +605,7 @@ impl OpenAIPreprocessor {
                         && !inner.finished
                     {
                         inner.usage_chunk_sent = true;
+                        inner.finished = true; // Mark as finished BEFORE returning the usage chunk
 
                         // Create the final usage chunk
                         let usage_chunk = inner.response_generator.create_usage_chunk();
@@ -956,6 +957,8 @@ impl
 
         // set the runtime configuration
         response_generator.set_reasoning_parser(self.runtime_config.clone());
+        // set the tokenizer for reasoning token counting
+        response_generator.set_tokenizer(Some(self.tokenizer.clone()));
         let enable_tool_calling =
             maybe_enable_tool_call(self.tool_call_parser.as_deref(), &request);
         // convert the chat completion request to a common completion request

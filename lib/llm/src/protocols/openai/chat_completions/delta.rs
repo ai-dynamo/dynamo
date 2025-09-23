@@ -7,6 +7,7 @@ use crate::{
     protocols::common::{self},
     types::TokenIdType,
 };
+use anyhow::Context;
 use dynamo_parsers::{ParserResult, ReasoningParser, ReasoningParserType, ReasoningParserWrapper};
 
 /// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
@@ -47,7 +48,6 @@ pub struct DeltaGeneratorOptions {
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
-#[derive(Debug)]
 pub struct DeltaGenerator {
     /// Unique identifier for the chat completion session.
     id: String,
@@ -71,6 +71,30 @@ pub struct DeltaGenerator {
     /// This is used to parse reasoning content in the response.
     /// None means no reasoning parsing will be performed.
     reasoning_parser: Option<ReasoningParserWrapper>,
+
+    /// Tokenizer for accurate reasoning token counting
+    tokenizer: Option<std::sync::Arc<dyn crate::tokenizers::traits::Tokenizer>>,
+    /// Counter for reasoning tokens (separate from completion_tokens)
+    reasoning_tokens: u32,
+}
+
+impl std::fmt::Debug for DeltaGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeltaGenerator")
+            .field("id", &self.id)
+            .field("object", &self.object)
+            .field("created", &self.created)
+            .field("model", &self.model)
+            .field("system_fingerprint", &self.system_fingerprint)
+            .field("service_tier", &self.service_tier)
+            .field("usage", &self.usage)
+            .field("msg_counter", &self.msg_counter)
+            .field("options", &self.options)
+            .field("reasoning_parser", &self.reasoning_parser)
+            .field("tokenizer", &"<tokenizer>") // Don't try to debug the tokenizer
+            .field("reasoning_tokens", &self.reasoning_tokens)
+            .finish()
+    }
 }
 
 impl DeltaGenerator {
@@ -122,6 +146,8 @@ impl DeltaGenerator {
             msg_counter: 0,
             options,
             reasoning_parser,
+            tokenizer: None,
+            reasoning_tokens: 0,
         }
     }
 
@@ -145,6 +171,146 @@ impl DeltaGenerator {
     /// * `isl` - The number of prompt tokens used.
     pub fn update_isl(&mut self, isl: u32) {
         self.usage.prompt_tokens = isl;
+    }
+
+    /// Sets the tokenizer for accurate reasoning token counting.
+    ///
+    /// # Arguments
+    /// * `tokenizer` - Optional tokenizer for token counting
+    pub fn set_tokenizer(
+        &mut self,
+        tokenizer: Option<std::sync::Arc<dyn crate::tokenizers::traits::Tokenizer>>,
+    ) {
+        self.tokenizer = tokenizer;
+    }
+
+    /// Count tokens in reasoning vs normal text with fallback strategy.
+    ///
+    /// # Arguments
+    /// * `reasoning_text` - Text content identified as reasoning
+    /// * `normal_text` - Text content identified as normal response
+    /// * `total_tokens` - Total number of tokens in the chunk
+    ///
+    /// # Returns
+    /// * `(reasoning_token_count, normal_token_count)` - Tuple of token counts
+    fn count_reasoning_tokens(
+        &self,
+        reasoning_text: &str,
+        normal_text: &str,
+        total_tokens: u32,
+    ) -> (u32, u32) {
+        // PRIMARY: Try accurate tokenizer-based counting
+        if let Some(_tokenizer) = &self.tokenizer {
+            match self.tokenize_accurately(reasoning_text, normal_text) {
+                Ok((reasoning_count, normal_count)) => {
+                    tracing::debug!(
+                        reasoning_tokens = reasoning_count,
+                        normal_tokens = normal_count,
+                        method = "tokenizer_accurate",
+                        "Token counting successful"
+                    );
+                    return (reasoning_count, normal_count);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        reasoning_text_len = reasoning_text.len(),
+                        normal_text_len = normal_text.len(),
+                        "Tokenizer encoding failed, falling back to approximation"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                reasoning_text_len = reasoning_text.len(),
+                normal_text_len = normal_text.len(),
+                "No tokenizer available, using approximation"
+            );
+        }
+
+        // FALLBACK: Character-ratio approximation (only when necessary)
+        self.approximate_token_counts(reasoning_text, normal_text, total_tokens)
+    }
+
+    /// Accurate tokenizer-based counting.
+    ///
+    /// # Arguments
+    /// * `reasoning_text` - Text content identified as reasoning
+    /// * `normal_text` - Text content identified as normal response
+    ///
+    /// # Returns
+    /// * `Result<(reasoning_count, normal_count), anyhow::Error>` - Token counts or error
+    fn tokenize_accurately(
+        &self,
+        reasoning_text: &str,
+        normal_text: &str,
+    ) -> anyhow::Result<(u32, u32)> {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No tokenizer available"))?;
+
+        // Handle empty text cases efficiently
+        let reasoning_count = if reasoning_text.is_empty() {
+            0
+        } else {
+            tokenizer
+                .encode(reasoning_text)
+                .with_context(|| format!("Failed to encode reasoning text: '{}'", reasoning_text))?
+                .token_ids()
+                .len() as u32
+        };
+
+        let normal_count = if normal_text.is_empty() {
+            0
+        } else {
+            tokenizer
+                .encode(normal_text)
+                .with_context(|| format!("Failed to encode normal text: '{}'", normal_text))?
+                .token_ids()
+                .len() as u32
+        };
+
+        Ok((reasoning_count, normal_count))
+    }
+
+    /// Fallback approximation (only when accurate method fails).
+    ///
+    /// # Arguments
+    /// * `reasoning_text` - Text content identified as reasoning
+    /// * `normal_text` - Text content identified as normal response
+    /// * `total_tokens` - Total number of tokens in the chunk
+    ///
+    /// # Returns
+    /// * `(reasoning_count, normal_count)` - Approximated token counts
+    fn approximate_token_counts(
+        &self,
+        reasoning_text: &str,
+        normal_text: &str,
+        total_tokens: u32,
+    ) -> (u32, u32) {
+        let total_chars = reasoning_text.len() + normal_text.len();
+
+        if total_chars == 0 {
+            tracing::debug!("Empty text content, no tokens to count");
+            return (0, total_tokens);
+        }
+
+        let reasoning_ratio = reasoning_text.len() as f32 / total_chars as f32;
+        let reasoning_tokens = (total_tokens as f32 * reasoning_ratio).round() as u32;
+        let normal_tokens = total_tokens.saturating_sub(reasoning_tokens);
+
+        tracing::warn!(
+            reasoning_tokens,
+            normal_tokens,
+            reasoning_ratio,
+            total_chars,
+            total_tokens,
+            method = "character_approximation",
+            "Using fallback token counting method"
+        );
+
+        (reasoning_tokens, normal_tokens)
     }
 
     pub fn create_logprobs(
@@ -295,6 +461,36 @@ impl DeltaGenerator {
         let mut usage = self.usage.clone();
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
 
+        // Add reasoning tokens to response if reasoning parser is configured or reasoning tokens detected
+        if self.reasoning_parser.is_some() || self.reasoning_tokens > 0 {
+            let mut details = usage.completion_tokens_details.unwrap_or_default();
+
+            if self.reasoning_tokens > 0 {
+                details.reasoning_tokens = Some(self.reasoning_tokens);
+                // Include reasoning tokens in total count
+                usage.total_tokens = usage.total_tokens.saturating_add(self.reasoning_tokens);
+
+                tracing::info!(
+                    prompt_tokens = usage.prompt_tokens,
+                    completion_tokens = usage.completion_tokens,
+                    reasoning_tokens = self.reasoning_tokens,
+                    total_tokens = usage.total_tokens,
+                    "Final usage statistics with reasoning tokens"
+                );
+            } else {
+                details.reasoning_tokens = None;
+
+                tracing::debug!(
+                    prompt_tokens = usage.prompt_tokens,
+                    completion_tokens = usage.completion_tokens,
+                    total_tokens = usage.total_tokens,
+                    "Usage statistics - reasoning parser configured but no reasoning tokens detected"
+                );
+            }
+
+            usage.completion_tokens_details = Some(details);
+        }
+
         dynamo_async_openai::types::CreateChatCompletionStreamResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -330,18 +526,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         &mut self,
         delta: crate::protocols::common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateChatCompletionStreamResponse> {
-        // Aggregate token usage if enabled.
-        if self.options.enable_usage {
-            // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
-            // but this will not be an issue until context lengths exceed 4_294_967_295.
-            let token_length: u32 = delta
-                .token_ids
-                .len()
-                .try_into()
-                .expect("token_ids length exceeds u32::MAX");
-
-            self.usage.completion_tokens += token_length;
-        }
+        // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
+        // but this will not be an issue until context lengths exceed 4_294_967_295.
+        let total_tokens: u32 = delta
+            .token_ids
+            .len()
+            .try_into()
+            .expect("token_ids length exceeds u32::MAX");
 
         let logprobs = self.create_logprobs(
             delta.tokens,
@@ -380,6 +571,36 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 ),
                 None => (delta.text, None),
             };
+
+        // Enhanced token counting with reasoning support
+        if self.options.enable_usage && total_tokens > 0 {
+            let reasoning_text = reasoning_content.as_deref().unwrap_or("");
+            let normal_text_str = normal_text.as_deref().unwrap_or("");
+
+            if !reasoning_text.is_empty() {
+                // Split tokens between reasoning and normal content
+                let (reasoning_count, normal_count) =
+                    self.count_reasoning_tokens(reasoning_text, normal_text_str, total_tokens);
+
+                self.reasoning_tokens += reasoning_count;
+                self.usage.completion_tokens += normal_count;
+
+                tracing::trace!(
+                    reasoning_tokens = reasoning_count,
+                    normal_tokens = normal_count,
+                    total_tokens,
+                    "Token counting completed with reasoning split"
+                );
+            } else {
+                // No reasoning content, all tokens are normal completion tokens
+                self.usage.completion_tokens += total_tokens;
+
+                tracing::trace!(
+                    completion_tokens = total_tokens,
+                    "Token counting completed - all tokens as completion"
+                );
+            }
+        }
 
         // Create the streaming response.
         let index = 0;
