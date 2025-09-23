@@ -180,7 +180,7 @@ async def run_profile(args):
                     prefill_ttft.append(ttft)
                     prefill_thpt_per_gpu.append(thpt_per_gpu)
                     logger.info(
-                        f"Loaded existing prefill results: {num_gpus}GPUs TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
+                        f"Loaded existing prefill results: {num_gpus} GPU TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
                     )
                 continue
 
