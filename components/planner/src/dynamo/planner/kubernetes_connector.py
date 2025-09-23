@@ -48,7 +48,7 @@ class KubernetesConnector(PlannerConnector):
 
         graph_deployment_name = os.getenv("DYN_PARENT_DGD_K8S_NAME")
         if not graph_deployment_name:
-            raise ValueError("DYN_PARENT_DGD_K8S_NAME environment variable is not set")
+            raise DeploymentValidationError(["DYN_PARENT_DGD_K8S_NAME environment variable is not set"])
 
         self.graph_deployment_name = graph_deployment_name
 

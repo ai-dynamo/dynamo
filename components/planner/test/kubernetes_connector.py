@@ -57,8 +57,11 @@ def kubernetes_connector(mock_kube_api_class, monkeypatch):
         return connector
 
 def test_kubernetes_connector_no_env_var():
-    with pytest.raises(ValueError, match="DYN_PARENT_DGD_K8S_NAME environment variable is not set"):
+    with pytest.raises(DeploymentValidationError) as exc_info:
         KubernetesConnector("test-dynamo-namespace", "default")
+
+    exception = exc_info.value
+    assert set(exception.errors) == {"DYN_PARENT_DGD_K8S_NAME environment variable is not set"}
 
 def test_get_service_name_from_sub_component_type(kubernetes_connector):
     deployment = {
