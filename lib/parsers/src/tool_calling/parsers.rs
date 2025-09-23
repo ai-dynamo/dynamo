@@ -43,7 +43,8 @@ pub async fn try_tool_call_parse(
             Ok((results, normal_content))
         }
         ToolCallParserType::Harmony => {
-            let (results, normal_content) = parse_tool_calls_harmony_complete(message, &config.json).await?;
+            let (results, normal_content) =
+                parse_tool_calls_harmony_complete(message, &config.json).await?;
             Ok((results, normal_content))
         }
         ToolCallParserType::Pythonic => {
@@ -151,7 +152,9 @@ mod tests {
     #[tokio::test]
     async fn parses_single_parameters_object() {
         let input = r#"{ "name": "hello", "parameters": { "x": 1, "y": 2 } }"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -164,7 +167,9 @@ mod tests {
     #[tokio::test]
     async fn parses_single_arguments_object() {
         let input = r#"{ "name": "world", "arguments": { "a": "abc", "b": 42 } }"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -177,7 +182,9 @@ mod tests {
     #[tokio::test]
     async fn parses_vec_of_parameters() {
         let input = r#"[{ "name": "first", "parameters": { "a": 1 } }, { "name": "second", "parameters": { "b": 2 } }]"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -192,7 +199,9 @@ mod tests {
     #[tokio::test]
     async fn parses_vec_of_arguments() {
         let input = r#"[{ "name": "alpha", "arguments": { "a": "x" } }, { "name": "omega", "arguments": { "z": "y" } }]"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -208,7 +217,9 @@ mod tests {
     async fn parses_toolcall_wrapped_payload() {
         let input =
             r#"<TOOLCALL>[{ "name": "wrapped", "parameters": { "foo": "bar" } }]</TOOLCALL>"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -231,7 +242,8 @@ mod tests {
                 },
             },
         )
-        .await.unwrap();
+        .await
+        .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -243,7 +255,9 @@ mod tests {
     #[tokio::test]
     async fn returns_none_on_invalid_input() {
         let input = r#"not even json"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("not even json".to_string()));
         assert!(result.is_empty());
     }
@@ -251,7 +265,9 @@ mod tests {
     #[tokio::test]
     async fn returns_none_on_valid_json_wrong_shape() {
         let input = r#"{ "foo": "bar" }"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some("{ \"foo\": \"bar\" }".to_string()));
         assert!(result.is_empty());
     }
@@ -264,7 +280,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 </think>
 
 <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("nemotron_deci")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("nemotron_deci"))
+            .await
+            .unwrap();
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
         assert_eq!(content, Some("<think>\nOkay, the user is asking for the weather in San Francisco in Fahrenheit. Let me check the tools available.\n</think>".to_string()));
@@ -277,7 +295,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[tokio::test]
     async fn test_nvidia_llama3_nemotron_super_49b_simple_with_no_think() {
         let input = r#"<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}]</TOOLCALL>"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("nemotron_deci")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("nemotron_deci"))
+            .await
+            .unwrap();
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
         assert_eq!(content, Some("".to_string()));
@@ -345,7 +365,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -360,7 +382,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"Hey How are you? <tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -371,7 +395,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -705,7 +731,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[tokio::test]
     async fn test_meta_llama_llama31_8b_instruct_simple() {
         let input = r#"{"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -718,7 +746,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[tokio::test]
     async fn test_meta_llama_llama31_8b_instruct_simple_with_normal_text() {
         let input = r#"Hey How are you? {"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral())
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -734,7 +764,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         {"name": "get_weather",
         "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
         "#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -747,7 +779,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[tokio::test]
     async fn test_meta_llama_llama31_8b_instruct_with_python_tag() {
         let input = r#"<|python_tag|>{ "name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -760,7 +794,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
     #[tokio::test]
     async fn test_meta_llama_llama31_8b_instruct_with_python_tag_with_normal_text() {
         let input = r#"Hey How are you? <|python_tag|>{ "name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -776,7 +812,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         <|python_tag|>
         {"name": "get_weather", "parameters": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
         "#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -794,7 +832,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         <|python_tag|>
         {"name": "get_weather", "parameters": {"location": "New York, NY", "unit": "fahrenheit" }}
         "#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("llama3_json"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
@@ -823,13 +863,17 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 
         // Known parser, but invalid input (not JSON) should return Ok(None)
         let input = "not a json";
-        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("not a json".to_string()));
         assert!(result.is_empty());
 
         // Known parser, but valid JSON with wrong shape should return Ok(None)
         let input = r#"{"foo": "bar"}"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes"))
+            .await
+            .unwrap();
         assert_eq!(content, Some(r#"{"foo": "bar"}"#.to_string()));
         assert!(result.is_empty());
     }
@@ -842,7 +886,9 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 - **Summer (June to August)**: Average highs range from the mid-60s to low 70s Fahrenheit, with cooler mornings and evenings. Coastal areas may be cooler than inland spots.
 
 Remember, San Francisco weather can be quite unpredictable, particularly with its famous fog, which can significantly lower temperatures. Always check a local weather forecast for the most accurate and up-to-date information."#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::default())
+            .await
+            .unwrap();
         assert_eq!(content, Some(input.to_string()));
         assert!(result.is_empty()); // This model doesn't produce tool calls
     }
@@ -1012,7 +1058,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag() {
         let input = r#"{ "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral())
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -1026,7 +1074,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_detect_and_parse_tool_call_default_parser_llama3_json_without_python_tag_with_normal_text()
      {
         let input = r#"Hey How are you? { "name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit" } }"#;
-        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral()).await.unwrap();
+        let (result, content) = try_tool_call_parse(input, &ToolCallConfig::mistral())
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
@@ -1040,7 +1090,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_phi4_single_function_call() {
         let input =
             r#"functools[{"name": "get_country_capital", "arguments": {"country": "Poland"}}]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1051,7 +1103,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_phi4_single_function_call_with_normal_text() {
         let input = r#"Hey How are you? functools[{"name": "get_country_capital", "arguments": {"country": "Poland"}}]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1065,7 +1119,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
   {"name": "get_country_capital", "arguments": {"country": "Poland"}},
   {"name": "get_population", "arguments": {"city": "Warsaw"}}
 ]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
 
@@ -1084,7 +1140,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
   {"name": "get_country_capital", "arguments": {"country": "Poland"}},
   {"name": "get_population", "arguments": {"city": "Warsaw"}}
 ]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert_eq!(result.len(), 2);
 
@@ -1102,7 +1160,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let input = r#"functools[{"name": "get_weather_forecast", "arguments":
         {"location": {"city": "San Francisco",
         "state": "CA"}, "date": "2023-10-05"}}]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1117,7 +1177,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let input = r#"Hey How are you? functools[{"name": "get_weather_forecast", "arguments":
         {"location": {"city": "San Francisco",
         "state": "CA"}, "date": "2023-10-05"}}]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1131,7 +1193,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_phi4_function_call_with_parameters_instead_of_arguments() {
         let input = r#"functools[{"name": "calculate_distance",
          "parameters": {"from": "New York", "to": "Los Angeles"}}]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1144,7 +1208,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_phi4_function_call_with_parameters_instead_of_arguments_with_normal_text() {
         let input = r#"Hey How are you? functools[{"name": "calculate_distance",
          "parameters": {"from": "New York", "to": "Los Angeles"}}]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1158,7 +1224,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         // Reproduce the issue where "functools" appears in content field
         // This might happen when there's malformed JSON or parsing issues
         let input = r#"functools{"name": "get_weather","arguments":{"location":"San Francisco"}}"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         // Content should be empty, not contain "functools"
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
@@ -1172,7 +1240,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         // Test the case where only the token appears without JSON
         // This case is less critical but shouldn't leak the full token
         let input = r#"functools"#;
-        let (result, _content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, _content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         // Content may contain the token if no valid JSON follows, but shouldn't crash
         // The important thing is that no tool calls are returned
         assert_eq!(result.len(), 0); // No tool calls found
@@ -1183,7 +1253,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_phi4_token_with_invalid_json() {
         // Test the case where token is followed by invalid JSON
         let input = r#"functools{invalid json}"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         // Content should be empty, not contain "functools" or leak the token
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 0); // No tool calls found due to invalid JSON
@@ -1233,7 +1305,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         // are correctly treated as normal content, not tool calls
 
         let input = r#"funk music is great"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         // Should be treated as normal content, not tool call
         assert_eq!(
             result.len(),
@@ -1252,7 +1326,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         // Test words that start with "func" but are not "functools"
 
         let input = r#"The function works well"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(
             result.len(),
             0,
@@ -1261,7 +1337,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(content, Some("The function works well".to_string()));
 
         let input = r#"functional programming"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("phi4")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("phi4"))
+            .await
+            .unwrap();
         assert_eq!(
             result.len(),
             0,
@@ -1284,7 +1362,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         ];
 
         for test_input in test_cases {
-            let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4")).await.unwrap();
+            let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4"))
+                .await
+                .unwrap();
             assert_eq!(
                 result.len(),
                 0,
@@ -1312,7 +1392,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         ];
 
         for test_input in test_cases {
-            let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4")).await.unwrap();
+            let (result, content) = detect_and_parse_tool_call(test_input, Some("phi4"))
+                .await
+                .unwrap();
             assert_eq!(
                 result.len(),
                 0,
@@ -1331,7 +1413,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_pythonic_parser_basic_with_constants() {
         let input = r#"[get_weather(location="San Francisco", unit="fahrenheit"), get_weather(location="New York", unit="fahrenheit")]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("pythonic")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("pythonic"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1348,7 +1432,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[ignore]
     async fn test_pythonic_parser_with_constants_and_normal_text() {
         let input = r#"Hey How are you? [get_weather(location="San Francisco", unit="fahrenheit"), get_weather(location="New York", unit="fahrenheit")]"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("pythonic")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("pythonic"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert_eq!(result.len(), 2);
 
@@ -1366,7 +1452,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_harmony_parser_basic() {
         let input = r#"
         <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("harmony")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("harmony"))
+            .await
+            .unwrap();
         assert_eq!(
             content,
             Some("Need to use function get_current_weather.".to_string())
@@ -1381,7 +1469,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_deepseek_v3_1_parser_basic() {
         let input = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Paris"}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3_1")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("deepseek_v3_1"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1396,7 +1486,9 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     async fn test_hermes_parser_without_new_line() {
         let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "celsius"}}</tool_call>"
         "#;
-        let (result, content) = detect_and_parse_tool_call(input, Some("hermes")).await.unwrap();
+        let (result, content) = detect_and_parse_tool_call(input, Some("hermes"))
+            .await
+            .unwrap();
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());

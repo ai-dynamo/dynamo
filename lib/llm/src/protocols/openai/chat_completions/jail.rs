@@ -152,8 +152,9 @@ impl ChoiceJailState {
                         let (jailed_part, trailing_part) = full_content.split_at(split_pos);
 
                         // Create the tool call choice
-                        let tool_choice =
-                            jail_stream.create_tool_call_choice(choice.index, jailed_part, choice).await;
+                        let tool_choice = jail_stream
+                            .create_tool_call_choice(choice.index, jailed_part, choice)
+                            .await;
 
                         if tool_choice.delta.tool_calls.is_some() {
                             emissions.push(ChoiceEmission::ToolCall(tool_choice));
@@ -272,7 +273,8 @@ impl ChoiceJailState {
             // Already jailed - accumulate and check for unjail
             self.accumulate(content);
 
-            let (should_end, split_pos) = jail_stream.should_end_jail(&self.accumulated_content).await;
+            let (should_end, split_pos) =
+                jail_stream.should_end_jail(&self.accumulated_content).await;
 
             if should_end {
                 tracing::debug!(
@@ -284,8 +286,9 @@ impl ChoiceJailState {
                 let (jailed_part, trailing_part) = self.accumulated_content.split_at(split_pos);
 
                 // Create the unjailed choice
-                let unjailed_choice =
-                    jail_stream.create_tool_call_choice(choice.index, jailed_part, choice).await;
+                let unjailed_choice = jail_stream
+                    .create_tool_call_choice(choice.index, jailed_part, choice)
+                    .await;
 
                 // Determine emission type based on whether tool calls were parsed
                 if unjailed_choice.delta.tool_calls.is_some() {
@@ -346,11 +349,9 @@ impl ChoiceJailState {
                 logprobs: None,
             };
 
-            let final_choice = jail_stream.create_tool_call_choice(
-                self.index,
-                &self.accumulated_content,
-                &dummy_choice,
-            ).await;
+            let final_choice = jail_stream
+                .create_tool_call_choice(self.index, &self.accumulated_content, &dummy_choice)
+                .await;
 
             // End jailing
             self.end_jail();
@@ -659,7 +660,8 @@ impl JailedStream {
         } else if early_exit {
             // For early exit, find where the complete tool call ends
             if let Some(parser) = &self.tool_call_parser {
-                if let Ok((_, _)) = try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
+                if let Ok((_, _)) =
+                    try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
                 {
                     let split_pos = self.find_tool_call_end_position(accumulated_content, parser);
                     (true, split_pos)
@@ -682,7 +684,8 @@ impl JailedStream {
         base_choice: &ChatChoiceStream,
     ) -> ChatChoiceStream {
         if let Ok((tool_calls, normal_text)) =
-            try_tool_call_parse_aggregate(accumulated_content, self.tool_call_parser.as_deref()).await
+            try_tool_call_parse_aggregate(accumulated_content, self.tool_call_parser.as_deref())
+                .await
             && !tool_calls.is_empty()
         {
             // Convert to streaming format
@@ -739,7 +742,9 @@ impl JailedStream {
     async fn should_exit_jail_early(&self, accumulated: &str) -> bool {
         if let Some(ref parser) = self.tool_call_parser {
             // Try to parse - if successful and we have complete tool calls, exit early
-            if let Ok((tool_calls, _)) = try_tool_call_parse_aggregate(accumulated, Some(parser)).await {
+            if let Ok((tool_calls, _)) =
+                try_tool_call_parse_aggregate(accumulated, Some(parser)).await
+            {
                 return !tool_calls.is_empty();
             }
         }

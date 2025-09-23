@@ -161,7 +161,8 @@ pub async fn parse_tool_calls_harmony(
         }
     }
     Ok((res, Some(normal_text.to_string())))
-}/// Parse tool calls from a complete Harmony Format text chunk using direct token parsing.
+}
+/// Parse tool calls from a complete Harmony Format text chunk using direct token parsing.
 ///
 /// This function is optimized for parsing complete text chunks where the entire content
 /// is available at once. It uses `parse_messages_from_completion_tokens` to directly
