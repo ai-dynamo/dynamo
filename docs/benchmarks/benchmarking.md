@@ -82,16 +82,12 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 
 1. **Dynamo container environment** - You must be running inside a Dynamo container with the benchmarking tools pre-installed.
 
-2. **Ubuntu 24.04** - GenAI-Perf requires Ubuntu 24.04 or higher to work properly. If you are on Ubuntu 22.04 or lower, you will need to build perf_analyzer [from source](https://github.com/triton-inference-server/perf_analyzer/blob/main/docs/install.md#build-from-source).
-
-3. **kubectl access** - You need `kubectl` installed and configured to access your Kubernetes cluster.
-
-4. **HTTP endpoints** - Ensure you have HTTP endpoints available for benchmarking. These can be:
+2. **HTTP endpoints** - Ensure you have HTTP endpoints available for benchmarking. These can be:
    - DynamoGraphDeployments exposed via HTTP endpoints
    - External services (vLLM, llm-d, AIBrix, etc.)
    - Any HTTP endpoint serving HuggingFace-compatible models
 
-5. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
+3. **Benchmark dependencies** - Since benchmarks run locally, you need to install the required Python dependencies. Install them using:
    ```bash
    pip install -r deploy/utils/requirements.txt
    ```
