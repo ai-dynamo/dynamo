@@ -9,8 +9,11 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
+    http::Request,
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
@@ -65,7 +68,7 @@ fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
     error: String,
 }
@@ -162,6 +165,62 @@ impl ErrorMessage {
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
         ErrorMessage { error: err.message }
+    }
+}
+
+// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
+// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
+// Solution: Added a middleware at axum router level to catch read the raw request and catch any json syntax errors and return a 400.
+pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
+    // Only process POST requests with JSON content
+    if request.method() != axum::http::Method::POST {
+        return next.run(request).await;
+    }
+
+    // Check if content-type is JSON
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|ct| ct.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.contains("application/json") {
+        return next.run(request).await;
+    }
+
+    // Extract the request body
+    let (parts, body) = request.into_parts();
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            // If we can't read the body, return a 400
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    error: "Failed to read request body".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Try to parse as JSON first to catch pure JSON syntax errors
+    match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        Err(json_err) => {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorMessage {
+                    error: format!("Invalid JSON syntax: {}", json_err),
+                }),
+            )
+                .into_response()
+        }
+        // Pass through for any other errors as it is
+        Ok(_) => {
+            let new_body = Body::from(body_bytes);
+            let new_request = Request::from_parts(parts, new_body);
+            next.run(new_request).await
+        }
     }
 }
 
@@ -1055,6 +1114,7 @@ pub fn completions_router(
     let router = Router::new()
         .route(&path, post(handler_completions))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1071,6 +1131,7 @@ pub fn chat_completions_router(
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -1086,6 +1147,7 @@ pub fn embeddings_router(
     let router = Router::new()
         .route(&path, post(embeddings))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1117,6 +1179,7 @@ pub fn responses_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
     (vec![doc], router)
 }
