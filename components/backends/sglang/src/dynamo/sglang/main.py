@@ -116,7 +116,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         ready_event.set()
         logging.info("Model registration succeeded; processing queued requests")
 
-    health_check_payload = SglangHealthCheckPayload().to_dict()
+    health_check_payload = SglangHealthCheckPayload(engine).to_dict()
 
     try:
         # Start endpoint immediately and register model concurrently
@@ -157,7 +157,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     handler = PrefillWorkerHandler(component, engine, config)
 
-    health_check_payload = SglangPrefillHealthCheckPayload().to_dict()
+    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
     tasks = [
         generate_endpoint.serve_endpoint(
