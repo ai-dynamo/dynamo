@@ -4,7 +4,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 
@@ -261,7 +261,7 @@ def create_efficiency_plot(
 
 
 def generate_plots(
-    base_output_dir: Path, output_dir: Path, benchmark_names: List[str] = None
+    base_output_dir: Path, output_dir: Path, benchmark_names: Optional[List[str]] = None
 ) -> None:
     """
     Generate performance plots from benchmark results.
@@ -273,19 +273,24 @@ def generate_plots(
     """
     print(f"Generating plots from results in {base_output_dir}")
 
+    if not base_output_dir.exists():
+        print(f"Results directory does not exist: {base_output_dir}")
+        return
+
     # Create plots directory
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse results for each deployment type
     deployment_results = {}
 
     # Find all subdirectories that contain benchmark results
+    names_set = set(benchmark_names) if benchmark_names is not None else None
     for item in base_output_dir.iterdir():
         if item.is_dir() and item.name != "plots":
             deployment_type = item.name
 
             # If benchmark_names is specified, only process those directories
-            if benchmark_names is not None and deployment_type not in benchmark_names:
+            if names_set is not None and deployment_type not in names_set:
                 print(f"Skipping {deployment_type} (not in specified benchmark names)")
                 continue
 
@@ -298,10 +303,20 @@ def generate_plots(
 
     if not deployment_results:
         if benchmark_names:
+            available = sorted(
+                [
+                    p.name
+                    for p in base_output_dir.iterdir()
+                    if p.is_dir() and p.name != "plots"
+                ]
+            )
+            missing = sorted([n for n in benchmark_names if n not in available])
             print(f"No benchmark results found for specified names: {benchmark_names}")
+            if missing:
+                print(f"Missing (not found under {base_output_dir}): {missing}")
+            print(f"Available experiments: {available}")
         else:
             print("No benchmark results found to plot!")
-        return
 
     # 1. P50 Inter-token Latency vs Concurrency
     p50_data = []
@@ -429,7 +444,7 @@ if __name__ == "__main__":
         "--output-dir", help="Output directory for plots (defaults to data-dir/plots)"
     )
     parser.add_argument(
-        "--benchmark_name",
+        "--benchmark-name",
         action="append",
         help="Specific benchmark experiment name to plot (can be specified multiple times). If not specified, plots all subdirectories.",
     )

@@ -136,7 +136,7 @@ python3 -m benchmarks.utils.benchmark \
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 
 # Or plot only specific benchmark experiments
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark_name experiment-a --benchmark_name experiment-b
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name experiment-a --benchmark-name experiment-b
 ```
 
 ## Use Cases
@@ -203,7 +203,7 @@ The plotting script supports several options for customizing which experiments t
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 
 # Plot only specific benchmark experiments
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark_name experiment-a --benchmark_name experiment-b
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name experiment-a --benchmark-name experiment-b
 
 # Specify custom output directory for plots
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --output-dir ./custom-plots
@@ -211,10 +211,10 @@ python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --output-dir ./
 
 **Available Options:**
 - `--data-dir`: Directory containing benchmark results (required)
-- `--benchmark_name`: Specific benchmark experiment name to plot (can be specified multiple times)
+- `--benchmark-name`: Specific benchmark experiment name to plot (can be specified multiple times). Names must match subdirectory names under the data dir.
 - `--output-dir`: Custom output directory for plots (defaults to data-dir/plots)
 
-**Note**: If `--benchmark_name` is not specified, the script will plot all subdirectories found in the data directory.
+**Note**: If `--benchmark-name` is not specified, the script will plot all subdirectories found in the data directory.
 
 ### Using Your Own Models and Configuration
 

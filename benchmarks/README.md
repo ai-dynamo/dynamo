@@ -35,7 +35,7 @@ python3 -m benchmarks.utils.benchmark \
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 
 # Or plot only specific benchmark experiments
-python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark_name my-benchmark
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name my-benchmark
 ```
 
 ## Features
