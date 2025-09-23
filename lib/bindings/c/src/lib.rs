@@ -1,215 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use dynamo_llm::entrypoint::input::worker_selection_pipeline::{
-    create_worker_selection_pipeline_chat, query_worker_selection_and_annotate,
-};
 use dynamo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
 };
-use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-use dynamo_llm::types::{Annotated, openai::chat_completions::NvCreateChatCompletionRequest};
-use dynamo_runtime::{
-    DistributedRuntime, Worker,
-    pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn},
-};
-
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
+use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
-
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
-
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
-
-/// Run async work on a fresh single-threaded Tokio runtime on a plain OS thread.
-/// Uses `shutdown_background()` so dropping the runtime is safe from this thread.
-fn run_on_local_runtime<T, Fut>(op: impl FnOnce() -> Fut + Send + 'static) -> Result<T, String>
-where
-    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
-    T: Send + 'static,
-{
-    std::thread::spawn(move || -> Result<T, String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build local runtime: {e:?}"))?;
-
-        let out = rt.block_on(op());
-        rt.shutdown_background();
-        out
-    })
-    .join()
-    .map_err(|_| "panic in local runtime thread".to_string())?
-}
-
-fn start_host_on_worker_runtime() -> Result<(), String> {
-    if HOST.get().is_some() {
-        return Ok(());
-    }
-
-    // We need the worker's runtime handle to pass into DRT::from_settings
-    let wk = WK.get().ok_or("WK not initialized")?.clone();
-    let rt_handle = wk.runtime().clone();
-
-    // channel the rest of the code uses to talk to the host loop
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Cmd>(128);
-
-    // Let init() know when DRT is ready (or failed)
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-
-    // host loop on a dedicated OS thread, but:
-    //  - initialize DRT here
-    //  - THEN build/run pipelines here
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("host runtime build failed");
-
-        rt.block_on(async move {
-            // Initialize DRT on THIS runtime so all network tasks/edges live together
-            let drt_res = DRT
-                .get_or_try_init(async {
-                    DistributedRuntime::from_settings(rt_handle.clone()).await
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"));
-
-            // Signal init() and bail if DRT failed
-            if let Err(msg) = drt_res {
-                let _ = ready_tx.send(Err(msg));
-                return; // host thread exits; HOST won't be set so calls will fail cleanly
-            }
-            let _ = ready_tx.send(Ok(()));
-
-            use std::collections::HashMap;
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-            struct HeldPipeline {
-                pipeline: ServiceEngine<
-                    SingleIn<NvCreateChatCompletionRequest>,
-                    ManyOut<Annotated<LLMEngineOutput>>,
-                >,
-            }
-            let mut pipelines: HashMap<u64, HeldPipeline> = HashMap::new();
-
-            // Serve commands
-            while let Some(cmd) = rx.recv().await {
-                match cmd {
-                    Cmd::CreatePipeline {
-                        namespace,
-                        component,
-                        model,
-                        use_kv_routing,
-                        busy_threshold,
-                        overlap_score_weight,
-                        router_temperature,
-                        use_kv_events,
-                        router_replica_sync,
-                        resp,
-                    } => {
-                        let out = async move {
-                            let router_mode = if use_kv_routing {
-                                RouterMode::KV
-                            } else {
-                                RouterMode::RoundRobin
-                            };
-                            let kv_router_config = if use_kv_routing {
-                                use dynamo_llm::kv_router::KvRouterConfig;
-                                Some(KvRouterConfig::new(
-                                    overlap_score_weight,
-                                    router_temperature,
-                                    Some(use_kv_events),
-                                    Some(router_replica_sync),
-                                    None,
-                                    None,
-                                    None,
-                                ))
-                            } else {
-                                None
-                            };
-
-                            let pipeline = create_worker_selection_pipeline_chat(
-                                &namespace,
-                                &component,
-                                &model,
-                                router_mode,
-                                busy_threshold,
-                                kv_router_config,
-                            )
-                            .await
-                            .map_err(|e| format!("{e:?}"))?;
-
-                            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                            Ok::<(u64, _), String>((id, pipeline))
-                        }
-                        .await;
-
-                        let res = match out {
-                            Ok((id, pipeline)) => {
-                                pipelines.insert(id, HeldPipeline { pipeline });
-                                Ok(id)
-                            }
-                            Err(err) => Err(err),
-                        };
-                        let _ = resp.send(res);
-                    }
-
-                    Cmd::Query {
-                        pipeline_id,
-                        request,
-                        resp,
-                    } => {
-                        let out = async {
-                            let hp = pipelines
-                                .get(&pipeline_id)
-                                .ok_or_else(|| "invalid pipeline id".to_string())?;
-                            query_worker_selection_and_annotate(&hp.pipeline, request)
-                                .await
-                                .map_err(|e| format!("{e:?}"))
-                        }
-                        .await;
-                        let _ = resp.send(out);
-                    }
-
-                    Cmd::DestroyPipeline { pipeline_id, resp } => {
-                        pipelines.remove(&pipeline_id);
-                        let _ = resp.send(());
-                    }
-                }
-            }
-        });
-
-        // runtime drops here
-    });
-
-    // Only expose HOST after the host thread confirmed DRT is up
-    match ready_rx.blocking_recv() {
-        Ok(Ok(())) => HOST
-            .set(Host { tx })
-            .map_err(|_| "HOST already set".to_string()),
-        Ok(Err(msg)) => Err(msg),
-        Err(_) => Err("host thread aborted during DRT init".to_string()),
-    }
-}
 
 fn initialize_tracing() {
     // Sets up RUST_LOG environment variable for logging while KV Publishing
     // Example: os.environ["RUST_LOG"] = "debug"
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_level(true)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -223,23 +34,6 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
-/* ---------- small helpers: panic guard + local runtime ---------- */
-
-#[inline]
-fn ffi_guard<F: FnOnce() -> DynamoLlmResult>(f: F) -> DynamoLlmResult {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(r) => r,
-        Err(_) => {
-            eprintln!("Rust panic crossed FFI; returning ERR");
-            DynamoLlmResult::ERR
-        }
-    }
-}
-
-/* ------------------------------ init ------------------------------ */
-
-/// # Safety
-/// the namespace_c_str and component_c_str are passed as pointers to C strings
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
@@ -249,85 +43,72 @@ pub unsafe extern "C" fn dynamo_llm_init(
     worker_id: i64,
     kv_block_size: u32,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        initialize_tracing();
-        tracing::info!(target: "capi", "init: begin");
-
-        // 1) Worker (creates/returns the shared runtime handle)
-        let wk = match WK.get_or_try_init(Worker::from_settings) {
-            Ok(wk) => wk.clone(),
-            Err(e) => {
-                tracing::error!(target: "capi", error=?e, "Worker::from_settings failed");
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        // 2) Parse inputs BEFORE moving anything around
-        let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
-            Ok(s) => s.to_owned(),
-            Err(e) => {
-                tracing::error!(target: "capi", error=?e, "bad namespace C string");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let component = match CStr::from_ptr(component_c_str).to_str() {
-            Ok(s) => s.to_owned(),
-            Err(e) => {
-                tracing::error!(target: "capi", error=?e, "bad component C string");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        tracing::debug!(target: "capi", %namespace, %component, worker_id, kv_block_size, "init: parsed inputs");
-
-        // 3) Start the host loop; it will init DRT on its own runtime and only then expose HOST
-        if let Err(e) = start_host_on_worker_runtime() {
-            tracing::error!(target: "capi", error=%e, "start_host_on_worker_runtime failed");
+    initialize_tracing();
+    let wk = match WK.get_or_try_init(Worker::from_settings) {
+        Ok(wk) => wk.clone(),
+        Err(e) => {
+            eprintln!("Failed to initialize runtime: {:?}", e);
             return DynamoLlmResult::ERR;
         }
-        tracing::info!(target: "capi", "DRT ready (via host thread)");
-
-        // 4) Create KV publisher (needs DRT to be initialized already)
-        match KV_PUB.get_or_try_init({
-            let namespace = namespace.clone();
-            let component = component.clone();
-            move || {
-                tracing::info!(
-                    target: "capi",
-                    %namespace, %component, worker_id, kv_block_size,
-                    "creating KvEventPublisher"
-                );
-                dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
-            }
-        }) {
-            Ok(_) => {
-                tracing::info!(target: "capi", "KvEventPublisher ready");
-                DynamoLlmResult::OK
-            }
+    };
+    let rt = wk.runtime();
+    let secondary = rt.secondary().clone();
+    let result = secondary.block_on(async {
+        // Initialize the distributed runtime
+        match DRT
+            .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
+            .await
+        {
+            Ok(_) => Ok(()),
             Err(e) => {
-                tracing::error!(target: "capi", error=?e, "KvEventPublisher creation failed");
-                DynamoLlmResult::ERR
+                eprintln!("Failed to initialize distributed runtime: {:?}", e);
+                Err(DynamoLlmResult::ERR)
             }
         }
-    })
+    });
+    let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            eprintln!("Failed to convert C string to Rust string: {:?}", e);
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            eprintln!("Failed to convert C string to Rust string: {:?}", e);
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    match result {
+        Ok(_) => match KV_PUB.get_or_try_init(move || {
+            dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
+        }) {
+            Ok(_) => DynamoLlmResult::OK,
+            Err(e) => {
+                eprintln!("Failed to initialize distributed runtime: {:?}", e);
+                DynamoLlmResult::ERR
+            }
+        },
+        Err(e) => e,
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
-    ffi_guard(|| {
-        let Some(wk) = WK.get().cloned() else {
+    let wk = match WK.get() {
+        Some(wk) => wk,
+        None => {
             eprintln!("Runtime not initialized");
             return DynamoLlmResult::ERR;
-        };
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            // bounce to a plain thread to avoid Tokio’s guard
-            let _ = std::thread::spawn(move || wk.runtime().shutdown()).join();
-        }));
-        if res.is_err() {
-            eprintln!("Runtime shutdown panicked; ignoring");
-            return DynamoLlmResult::ERR;
         }
-        DynamoLlmResult::OK
-    })
+    };
+
+    wk.runtime().shutdown();
+
+    DynamoLlmResult::OK
 }
 
 #[unsafe(no_mangle)]
@@ -335,7 +116,12 @@ pub extern "C" fn dynamo_llm_load_publisher_create() -> DynamoLlmResult {
     DynamoLlmResult::OK
 }
 
-/* ---------------------- KV publisher helpers ---------------------- */
+// instantiate a kv publisher
+// this will bring up the task to publish and the channels to await publishing events
+// the [`dynamo_kv_publish_store_event`] call will use a handle to the publisher to send events
+// store and the [`dynamo_kv_event_create_removed`] will create remove events
+// these call mus be driving by external c++ threads that are consuming the kv events from the
+// c++ executor api
 
 fn dynamo_create_kv_publisher(
     namespace: String,
@@ -372,7 +158,6 @@ fn kv_event_create_stored_block_from_parts(
         tokens_hash,
     }
 }
-
 static WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 
 fn kv_event_create_stored_from_parts(
@@ -452,8 +237,6 @@ pub struct DynamoKvStoredEventParams {
     pub lora_id: u64,
 }
 
-/* --------------------------- KV FFI --------------------------- */
-
 /// # Safety
 /// parent_hash is passed as pointer to indicate whether the blocks
 /// has a parent hash or not. nullptr is used to represent no parent hash
@@ -467,39 +250,31 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     parent_hash: *const u64,
     lora_id: u64,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        let parent_hash = {
-            if parent_hash.is_null() {
-                None
-            } else {
-                Some(unsafe { *parent_hash })
-            }
-        };
-        let kv_params = DynamoKvStoredEventParams {
-            event_id,
-            token_ids,
-            num_block_tokens,
-            block_ids,
-            num_blocks,
-            parent_hash,
-            lora_id,
-        };
-        let publisher = match KV_PUB.get() {
-            Some(p) => p,
-            None => {
-                eprintln!("KV publisher not initialized");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
-        match publisher.publish(event) {
-            Ok(_) => DynamoLlmResult::OK,
-            Err(e) => {
-                eprintln!("Error publishing stored kv event {:?}", e);
-                DynamoLlmResult::ERR
-            }
+    let parent_hash = {
+        if parent_hash.is_null() {
+            None
+        } else {
+            Some(unsafe { *parent_hash })
         }
-    })
+    };
+    let kv_params = DynamoKvStoredEventParams {
+        event_id,
+        token_ids,
+        num_block_tokens,
+        block_ids,
+        num_blocks,
+        parent_hash,
+        lora_id,
+    };
+    let publisher = KV_PUB.get().unwrap();
+    let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
+    match publisher.publish(event) {
+        Ok(_) => DynamoLlmResult::OK,
+        Err(e) => {
+            eprintln!("Error publishing stored kv event {:?}", e);
+            DynamoLlmResult::ERR
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -508,85 +283,97 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
     block_ids: *const u64,
     num_blocks: usize,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        let publisher = match KV_PUB.get() {
-            Some(p) => p,
-            None => {
-                eprintln!("KV publisher not initialized");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
-        match publisher.publish(event) {
-            Ok(_) => DynamoLlmResult::OK,
-            Err(e) => {
-                eprintln!("Error publishing removed kv event {:?}", e);
-                DynamoLlmResult::ERR
-            }
+    let publisher = KV_PUB.get().unwrap();
+    let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
+    match publisher.publish(event) {
+        Ok(_) => DynamoLlmResult::OK,
+        Err(e) => {
+            eprintln!("Error publishing removed kv event {:?}", e);
+            DynamoLlmResult::ERR
         }
-    })
+    }
 }
 
-/* ------------------------------------------------------------- */
-/* ----------------- worker selection pipeline ----------------- */
-/* ------------------------------------------------------------- */
-use tokio::sync::{mpsc, oneshot};
+// Need to setup etcd and nats to run these tests
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use std::ffi::CString;
 
-enum Cmd {
-    CreatePipeline {
-        namespace: String,
-        component: String,
-        model: String,
-        use_kv_routing: bool,
-        busy_threshold: Option<f64>,
-        overlap_score_weight: Option<f64>,
-        router_temperature: Option<f64>,
-        use_kv_events: bool,
-        router_replica_sync: bool,
-        resp: oneshot::Sender<Result<u64, String>>, // returns a pipeline id
-    },
-    Query {
-        pipeline_id: u64,
-        request: NvCreateChatCompletionRequest,
-        resp: oneshot::Sender<Result<(i64, Vec<u32>, NvCreateChatCompletionRequest), String>>,
-    },
-    DestroyPipeline {
-        pipeline_id: u64,
-        resp: oneshot::Sender<()>,
-    },
-}
+//     #[test]
+//     fn test_dynamo_llm_init() {
+//         // Create C-compatible strings
+//         let namespace = CString::new("test_namespace").unwrap();
+//         let component = CString::new("test_component").unwrap();
 
-struct Host {
-    tx: mpsc::Sender<Cmd>,
-}
+//         // Call the init function
+//         let result = unsafe {
+//             dynamo_llm_init(
+//                 namespace.as_ptr(),
+//                 component.as_ptr(),
+//                 1,  // worker_id
+//                 32, // kv_block_size
+//             )
+//         };
 
-static HOST: OnceCell<Host> = OnceCell::new();
+//         assert_eq!(result as u32, DynamoLlmResult::OK as u32);
 
-fn ensure_host_started() -> Result<&'static Host, String> {
-    HOST.get().ok_or_else(|| "host not started".to_string())
-}
+//         assert!(WK.get().is_some());
 
-// Worker selection pipeline handle containing the actual pipeline
+//         let shutdown_result = dynamo_llm_shutdown();
+//         assert_eq!(shutdown_result as u32, DynamoLlmResult::OK as u32);
+//     }
+// }
+
+/* ------------------------------------------------------------------------
+ * Worker selection pipeline
+ * ------------------------------------------------------------------------ */
+
+use dynamo_llm::entrypoint::input::worker_selection_pipeline::{
+    create_worker_selection_pipeline_chat, query_worker_selection_and_annotate,
+};
+use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+use dynamo_llm::types::{Annotated, openai::chat_completions::NvCreateChatCompletionRequest};
+use dynamo_runtime::pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Mutex, OnceLock};
+
+// Opaque handle exposed to C
 pub struct WorkerSelectionPipeline {
-    id: u64, // id known by the host thread
+    id: u64,
 }
 
-/// C FFI wrapper for creating a worker selection pipeline
-///
-/// Returns a pipeline handle that can be used repeatedly for queries.
-/// Call dynamo_destroy_worker_selection_pipeline when done.
-/// Uses the "generate" endpoint by default.
+// Global registry for created pipelines (lives entirely in-process)
+static PIPELINES: OnceLock<
+    Mutex<
+        HashMap<
+            u64,
+            ServiceEngine<
+                SingleIn<NvCreateChatCompletionRequest>,
+                ManyOut<Annotated<LLMEngineOutput>>,
+            >,
+        >,
+    >,
+> = OnceLock::new();
+
+fn pipelines() -> &'static Mutex<
+    HashMap<
+        u64,
+        ServiceEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    >,
+> {
+    PIPELINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[unsafe(no_mangle)]
+/// Create a worker-selection pipeline ("generate" endpoint) and return an opaque handle.
 ///
 /// # Safety
-/// The namespace_c_str, component_c_str, and model_name_c_str
-/// are passed as pointers to C strings
-///
-/// # KV Router Configuration Parameters
-/// - overlap_score_weight: Weight for KV cache overlap in worker selection (use negative value for default)
-/// - router_temperature: Randomness in worker selection, 0.0 = deterministic (use negative value for default)
-/// - use_kv_events: Whether to use KV cache events for tracking
-/// - router_replica_sync: Whether to synchronize router state across replicas
-#[unsafe(no_mangle)]
+/// - All `*_c_str` must be valid, nul-terminated C strings.
+/// - `pipeline_out` must be a valid non-null pointer to receive the handle.
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
@@ -599,132 +386,134 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     router_replica_sync: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        if pipeline_out.is_null() {
-            eprintln!("pipeline_out pointer is null");
+    if pipeline_out.is_null() {
+        eprintln!("pipeline_out pointer is null");
+        return DynamoLlmResult::ERR;
+    }
+
+    // Ensure WK/DRT were already initialized by dynamo_llm_init
+    let wk = match WK.get() {
+        Some(wk) => wk,
+        None => {
+            eprintln!("Worker not initialized. Call dynamo_llm_init first.");
             return DynamoLlmResult::ERR;
         }
+    };
+    if DRT.get().is_none() {
+        eprintln!("DistributedRuntime not initialized. Call dynamo_llm_init first.");
+        return DynamoLlmResult::ERR;
+    }
 
-        // start host once
-        let host = match ensure_host_started() {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("{e}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-            Ok(s) => s.to_owned(),
-            Err(e) => {
-                eprintln!("bad namespace: {e:?}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-            Ok(s) => s.to_owned(),
-            Err(e) => {
-                eprintln!("bad component: {e:?}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let model = match unsafe { CStr::from_ptr(model_name_c_str) }.to_str() {
-            Ok(s) => s.to_owned(),
-            Err(e) => {
-                eprintln!("bad model: {e:?}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        let (tx, rx) = oneshot::channel();
-        let cmd = Cmd::CreatePipeline {
-            namespace,
-            component,
-            model,
-            use_kv_routing,
-            busy_threshold: if busy_threshold < 0.0 {
-                None
-            } else {
-                Some(busy_threshold)
-            },
-            overlap_score_weight: if overlap_score_weight < 0.0 {
-                None
-            } else {
-                Some(overlap_score_weight)
-            },
-            router_temperature: if router_temperature < 0.0 {
-                None
-            } else {
-                Some(router_temperature)
-            },
-            use_kv_events,
-            router_replica_sync,
-            resp: tx,
-        };
-        if let Err(e) = host.tx.blocking_send(cmd) {
-            eprintln!("host channel closed: {e}");
+    // Parse inputs
+    let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("bad namespace: {e:?}");
             return DynamoLlmResult::ERR;
         }
+    };
+    let component = match CStr::from_ptr(component_c_str).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("bad component: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+    let model = match CStr::from_ptr(model_name_c_str).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("bad model: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
 
-        let id = match rx.blocking_recv() {
-            Ok(Ok(id)) => id,
-            Ok(Err(msg)) => {
-                eprintln!("{msg}");
-                return DynamoLlmResult::ERR;
-            }
-            Err(e) => {
-                eprintln!("host dropped response: {e}");
-                return DynamoLlmResult::ERR;
-            }
+    // Build on the same worker runtime (secondary handle)
+    let make_pipeline = || async {
+        let router_mode = if use_kv_routing {
+            RouterMode::KV
+        } else {
+            RouterMode::RoundRobin
         };
 
-        let handle = Box::new(WorkerSelectionPipeline { id });
-        unsafe {
-            *pipeline_out = Box::into_raw(handle);
+        let kv_router_config = if use_kv_routing {
+            use dynamo_llm::kv_router::KvRouterConfig;
+            Some(KvRouterConfig::new(
+                // None => default, Some(x) => override
+                (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
+                (router_temperature >= 0.0).then_some(router_temperature),
+                Some(use_kv_events),
+                Some(router_replica_sync),
+                None, // max_num_batched_tokens (use default)
+                None, // router_snapshot_threshold (use default)
+                None, // router_reset_states (use default)
+            ))
+        } else {
+            None
+        };
+
+        create_worker_selection_pipeline_chat(
+            &namespace,
+            &component,
+            &model,
+            router_mode,
+            (busy_threshold >= 0.0).then_some(busy_threshold),
+            kv_router_config,
+        )
+        .await
+    };
+
+    let pipeline = match wk.runtime().secondary().block_on(make_pipeline()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("create_worker_selection_pipeline_chat failed: {e:?}");
+            return DynamoLlmResult::ERR;
         }
-        DynamoLlmResult::OK
-    })
+    };
+
+    // Store and hand out an ID-backed handle
+    let id = NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut map = pipelines().lock().unwrap();
+        map.insert(id, pipeline);
+    }
+
+    let handle = Box::new(WorkerSelectionPipeline { id });
+    unsafe { *pipeline_out = Box::into_raw(handle) };
+    DynamoLlmResult::OK
 }
 
-/// Destroy a worker selection pipeline and free its memory
+#[unsafe(no_mangle)]
+/// Destroy a previously created pipeline.
 ///
 /// # Safety
-/// The pipeline pointer must be valid and should not be used after this call
-#[unsafe(no_mangle)]
+/// - `pipeline` must be a valid pointer returned by `dynamo_create_worker_selection_pipeline`.
 pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
     pipeline: *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        if pipeline.is_null() {
-            eprintln!("Pipeline pointer is null");
-            return DynamoLlmResult::ERR;
-        }
-        let id = unsafe { &*pipeline }.id;
-        let _boxed: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
+    if pipeline.is_null() {
+        eprintln!("Pipeline pointer is null");
+        return DynamoLlmResult::ERR;
+    }
 
-        if let Ok(host) = ensure_host_started() {
-            let (tx, rx) = oneshot::channel();
-            let _ = host.tx.blocking_send(Cmd::DestroyPipeline {
-                pipeline_id: id,
-                resp: tx,
-            });
-            let _ = rx.blocking_recv(); // best-effort
-        }
-        DynamoLlmResult::OK
-    })
+    // Take ownership and remove from registry
+    let id = unsafe { &*pipeline }.id;
+    let _boxed: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
+
+    let mut map = pipelines().lock().unwrap();
+    map.remove(&id);
+    DynamoLlmResult::OK
 }
 
-/// Query worker selection and return annotated request
-///
-/// This function takes an original OpenAI request (as JSON), adds query_instance_id annotation,
-/// runs it through the pipeline to get worker selection, then returns the worker_id, tokens,
-/// and the original request annotated with worker_instance_id and token_data.
+#[unsafe(no_mangle)]
+/// Query worker selection on an existing pipeline and return:
+/// - worker_instance_id_out (i64)
+/// - token_ids_out (malloc'ed array, caller must free via `dynamo_free_worker_selection_result`)
+/// - token_count_out
+/// - annotated_request_json_out (CString*, caller frees via same free fn)
 ///
 /// # Safety
-/// All pointer parameters must be valid. The request_json_c_str must be a valid C string
-/// containing valid JSON. The caller is responsible for freeing the allocated memory
-/// for token_ids_out and annotated_request_json_out.
-#[unsafe(no_mangle)]
+/// - `pipeline` must be a valid pointer returned by `dynamo_create_worker_selection_pipeline`.
+/// - `request_json_c_str` must be a valid, nul-terminated C string containing valid JSON.
 pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     pipeline: *mut WorkerSelectionPipeline,
     request_json_c_str: *const c_char,
@@ -733,133 +522,141 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     token_count_out: *mut usize,
     annotated_request_json_out: *mut *mut c_char,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        if pipeline.is_null() {
-            eprintln!("Pipeline pointer is null");
+    if pipeline.is_null() {
+        eprintln!("Pipeline pointer is null");
+        return DynamoLlmResult::ERR;
+    }
+    if worker_instance_id_out.is_null()
+        || token_ids_out.is_null()
+        || token_count_out.is_null()
+        || annotated_request_json_out.is_null()
+    {
+        eprintln!("One or more output pointers are null");
+        return DynamoLlmResult::ERR;
+    }
+
+    // Ensure WK/DRT initialized by your init
+    let wk = match WK.get() {
+        Some(wk) => wk,
+        None => {
+            eprintln!("Worker not initialized. Call dynamo_llm_init first.");
             return DynamoLlmResult::ERR;
         }
-        let host = match ensure_host_started() {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("{e}");
-                return DynamoLlmResult::ERR;
-            }
-        };
+    };
+    if DRT.get().is_none() {
+        eprintln!("DistributedRuntime not initialized. Call dynamo_llm_init first.");
+        return DynamoLlmResult::ERR;
+    }
 
-        let req_str = match unsafe { CStr::from_ptr(request_json_c_str) }.to_str() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("bad request json: {e:?}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("parse request failed: {e:?}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        let id = unsafe { &*pipeline }.id;
-
-        let (tx, rx) = oneshot::channel();
-        if let Err(e) = host.tx.blocking_send(Cmd::Query {
-            pipeline_id: id,
-            request,
-            resp: tx,
-        }) {
-            eprintln!("host channel closed: {e}");
+    let req_str = match CStr::from_ptr(request_json_c_str).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("bad request json: {e:?}");
             return DynamoLlmResult::ERR;
         }
+    };
 
-        let (worker_id, tokens, annotated_req) = match rx.blocking_recv() {
-            Ok(Ok(t)) => t,
-            Ok(Err(msg)) => {
-                eprintln!("Failed to query worker selection: {msg}");
-                return DynamoLlmResult::ERR;
-            }
-            Err(e) => {
-                eprintln!("host dropped response: {e}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        // marshal outputs (same as your current code)
-        let tokens_ptr = if tokens.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            let len = tokens.len();
-            let layout = std::alloc::Layout::array::<u32>(len).unwrap();
-            let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
-            if ptr.is_null() {
-                eprintln!("alloc tokens failed");
-                return DynamoLlmResult::ERR;
-            }
-            unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len) };
-            ptr
-        };
-
-        let annotated_json = match serde_json::to_string(&annotated_req) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("serialize annotated req failed: {e:?}");
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let cjson = match std::ffi::CString::new(annotated_json) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("cstr annotated failed: {e:?}");
-                if !tokens_ptr.is_null() {
-                    let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-                    unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
-                }
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        unsafe {
-            *worker_instance_id_out = worker_id;
-            *token_ids_out = tokens_ptr;
-            *token_count_out = tokens.len();
-            *annotated_request_json_out = cjson.into_raw();
+    let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("parse request failed: {e:?}");
+            return DynamoLlmResult::ERR;
         }
-        DynamoLlmResult::OK
-    })
+    };
+
+    let id = unsafe { &*pipeline }.id;
+
+    // Look up the pipeline
+    let pipeline_engine = {
+        let map = pipelines().lock().unwrap();
+        match map.get(&id) {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("invalid pipeline id");
+                return DynamoLlmResult::ERR;
+            }
+        }
+    };
+
+    // Execute the async query on the same worker runtime (secondary handle)
+    let fut = async move { query_worker_selection_and_annotate(&pipeline_engine, request).await };
+
+    let (worker_id, tokens, annotated_req) = match wk.runtime().secondary().block_on(fut) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("query_worker_selection_and_annotate failed: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    // Marshal tokens to heap memory (C-side will free)
+    let tokens_ptr = if tokens.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        let len = tokens.len();
+        let layout = std::alloc::Layout::array::<u32>(len).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
+        if ptr.is_null() {
+            eprintln!("alloc tokens failed");
+            return DynamoLlmResult::ERR;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len) };
+        ptr
+    };
+
+    // Serialize annotated request JSON
+    let annotated_json = match serde_json::to_string(&annotated_req) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("serialize annotated req failed: {e:?}");
+            if !tokens_ptr.is_null() {
+                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
+            }
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    let cjson = match std::ffi::CString::new(annotated_json) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cstr annotated failed: {e:?}");
+            if !tokens_ptr.is_null() {
+                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
+            }
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    unsafe {
+        *worker_instance_id_out = worker_id;
+        *token_ids_out = tokens_ptr;
+        *token_count_out = tokens.len();
+        *annotated_request_json_out = cjson.into_raw();
+    }
+    DynamoLlmResult::OK
 }
 
-/// Free memory allocated by dynamo_query_worker_selection_and_annotate
+#[unsafe(no_mangle)]
+/// Free buffers allocated by `dynamo_query_worker_selection_and_annotate`.
 ///
 /// # Safety
-/// The pointers must have been allocated by dynamo_query_worker_selection_and_annotate
-/// and should not be used after this call.
-#[unsafe(no_mangle)]
+/// - `token_ids`/`annotated_request_json` must be pointers returned by the query function.
 pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     token_ids: *mut u32,
     token_count: usize,
     annotated_request_json: *mut c_char,
 ) -> DynamoLlmResult {
-    ffi_guard(|| {
-        // Free tokens array if not null
-        if !token_ids.is_null() && token_count > 0 {
-            let layout = match std::alloc::Layout::array::<u32>(token_count) {
-                Ok(layout) => layout,
-                Err(_) => {
-                    eprintln!("Invalid layout for tokens array");
-                    return DynamoLlmResult::ERR;
-                }
-            };
+    // Free tokens array if present
+    if !token_ids.is_null() && token_count > 0 {
+        if let Ok(layout) = std::alloc::Layout::array::<u32>(token_count) {
             unsafe { std::alloc::dealloc(token_ids as *mut u8, layout) };
         }
-
-        // Free JSON string if not null
-        if !annotated_request_json.is_null() {
-            let _cstring = unsafe { std::ffi::CString::from_raw(annotated_request_json) };
-            // CString will be automatically freed when it goes out of scope
-        }
-
-        DynamoLlmResult::OK
-    })
+    }
+    // Free annotated JSON CString if present
+    if !annotated_request_json.is_null() {
+        let _ = unsafe { std::ffi::CString::from_raw(annotated_request_json) };
+    }
+    DynamoLlmResult::OK
 }
