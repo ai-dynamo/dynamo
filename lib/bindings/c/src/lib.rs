@@ -28,11 +28,156 @@ static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
 
+/// Run async work on a fresh single-threaded Tokio runtime on a plain OS thread.
+/// Uses `shutdown_background()` so dropping the runtime is safe from this thread.
+fn run_on_local_runtime<T, Fut>(op: impl FnOnce() -> Fut + Send + 'static) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::spawn(move || -> Result<T, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build local runtime: {e:?}"))?;
+
+        let out = rt.block_on(op());
+        rt.shutdown_background();
+        out
+    })
+    .join()
+    .map_err(|_| "panic in local runtime thread".to_string())?
+}
+
+fn start_host_on_worker_runtime() -> Result<(), String> {
+    if HOST.get().is_some() {
+        return Ok(());
+    }
+
+    // channel the rest of the code uses to talk to the host loop
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Cmd>(128);
+
+    // host loop on a dedicated OS thread
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("host runtime build failed");
+
+        rt.block_on(async move {
+            use std::collections::HashMap;
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+            struct HeldPipeline {
+                pipeline: ServiceEngine<
+                    SingleIn<NvCreateChatCompletionRequest>,
+                    ManyOut<Annotated<LLMEngineOutput>>,
+                >,
+            }
+            let mut pipelines: HashMap<u64, HeldPipeline> = HashMap::new();
+
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    Cmd::CreatePipeline {
+                        namespace,
+                        component,
+                        model,
+                        use_kv_routing,
+                        busy_threshold,
+                        overlap_score_weight,
+                        router_temperature,
+                        use_kv_events,
+                        router_replica_sync,
+                        resp,
+                    } => {
+                        let out = async move {
+                            let router_mode = if use_kv_routing {
+                                RouterMode::KV
+                            } else {
+                                RouterMode::RoundRobin
+                            };
+                            let kv_router_config = if use_kv_routing {
+                                use dynamo_llm::kv_router::KvRouterConfig;
+                                Some(KvRouterConfig::new(
+                                    overlap_score_weight,
+                                    router_temperature,
+                                    Some(use_kv_events),
+                                    Some(router_replica_sync),
+                                    None,
+                                    None,
+                                    None,
+                                ))
+                            } else {
+                                None
+                            };
+
+                            let pipeline = create_worker_selection_pipeline_chat(
+                                &namespace,
+                                &component,
+                                &model,
+                                router_mode,
+                                busy_threshold,
+                                kv_router_config,
+                            )
+                            .await
+                            .map_err(|e| format!("{e:?}"))?;
+
+                            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                            Ok::<(u64, _), String>((id, pipeline))
+                        }
+                        .await;
+
+                        let res = match out {
+                            Ok((id, pipeline)) => {
+                                pipelines.insert(id, HeldPipeline { pipeline });
+                                Ok(id)
+                            }
+                            Err(err) => Err(err),
+                        };
+                        let _ = resp.send(res);
+                    }
+
+                    Cmd::Query {
+                        pipeline_id,
+                        request,
+                        resp,
+                    } => {
+                        let out = async {
+                            let hp = pipelines
+                                .get(&pipeline_id)
+                                .ok_or_else(|| "invalid pipeline id".to_string())?;
+                            query_worker_selection_and_annotate(&hp.pipeline, request)
+                                .await
+                                .map_err(|e| format!("{e:?}"))
+                        }
+                        .await;
+                        let _ = resp.send(out);
+                    }
+
+                    Cmd::DestroyPipeline { pipeline_id, resp } => {
+                        pipelines.remove(&pipeline_id);
+                        let _ = resp.send(());
+                    }
+                }
+            }
+        });
+
+        // runtime drops here
+    });
+
+    HOST.set(Host { tx })
+        .map_err(|_| "HOST already set".to_string())
+}
+
 fn initialize_tracing() {
     // Sets up RUST_LOG environment variable for logging while KV Publishing
     // Example: os.environ["RUST_LOG"] = "debug"
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_level(true)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -59,32 +204,6 @@ fn ffi_guard<F: FnOnce() -> DynamoLlmResult>(f: F) -> DynamoLlmResult {
     }
 }
 
-/// Run async work on a fresh single-threaded Tokio runtime on a plain OS thread.
-/// Uses `shutdown_background()` to avoid the "Cannot drop a runtime where blocking
-/// is not allowed" panic during runtime drop.
-fn run_on_local_runtime<T, Fut>(op: impl FnOnce() -> Fut + Send + 'static) -> Result<T, String>
-where
-    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
-    T: Send + 'static,
-{
-    std::thread::spawn(move || -> Result<T, String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("build local runtime: {e:?}"))?;
-
-        // run the future
-        let out = rt.block_on(op());
-
-        // IMPORTANT: avoid blocking shutdown on this thread
-        rt.shutdown_background();
-
-        out
-    })
-    .join()
-    .map_err(|_| "panic in local runtime thread".to_string())?
-}
-
 /* ------------------------------ init ------------------------------ */
 
 /// # Safety
@@ -98,52 +217,72 @@ pub unsafe extern "C" fn dynamo_llm_init(
 ) -> DynamoLlmResult {
     ffi_guard(|| {
         initialize_tracing();
+        tracing::info!(target: "capi", "init: begin");
 
+        // 1) Ensure Worker exists (no spawn on its runtime)
         let wk = match WK.get_or_try_init(Worker::from_settings) {
             Ok(wk) => wk.clone(),
             Err(e) => {
-                eprintln!("Failed to initialize runtime: {:?}", e);
+                tracing::error!(target: "capi", error=?e, "Worker::from_settings failed");
                 return DynamoLlmResult::ERR;
             }
         };
 
-        // Convert C strings to owned Rust Strings before we jump threads.
-        let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-            Ok(s) => s.to_string(),
-            Err(e) => {
-                eprintln!("Failed to convert C string to Rust string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
-        let component = match unsafe { CStr::from_ptr(component_c_str) }.to_str() {
-            Ok(s) => s.to_string(),
-            Err(e) => {
-                eprintln!("Failed to convert C string to Rust string: {:?}", e);
-                return DynamoLlmResult::ERR;
-            }
-        };
-
-        // Initialize DistributedRuntime on an isolated runtime/thread.
-        let rt = wk.runtime().clone();
-        let drt_init_res = run_on_local_runtime(move || async move {
-            DRT.get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
-                .await
-                .map(|_| ())
-                .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))
-        });
-
-        if let Err(msg) = drt_init_res {
-            eprintln!("{msg}");
+        // 2) Start host loop thread/runtime
+        if let Err(e) = start_host_on_worker_runtime() {
+            tracing::error!(target: "capi", error=%e, "start_host_on_worker_runtime failed");
             return DynamoLlmResult::ERR;
         }
 
-        // Initialize the KV publisher once.
-        match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
-        }) {
-            Ok(_) => DynamoLlmResult::OK,
+        // 3) Parse inputs
+        let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
+            Ok(s) => s.to_owned(),
             Err(e) => {
-                eprintln!("Failed to create KV publisher: {:?}", e);
+                tracing::error!(target: "capi", error=?e, "bad namespace C string");
+                return DynamoLlmResult::ERR;
+            }
+        };
+        let component = match CStr::from_ptr(component_c_str).to_str() {
+            Ok(s) => s.to_owned(),
+            Err(e) => {
+                tracing::error!(target: "capi", error=?e, "bad component C string");
+                return DynamoLlmResult::ERR;
+            }
+        };
+        tracing::debug!(target: "capi", %namespace, %component, worker_id, kv_block_size, "init: parsed inputs");
+
+        // 4) Initialize DRT on a local runtime without borrowing `wk` across threads
+        let rt_handle = wk.runtime().clone(); // <- CLONE THE HANDLE
+        let drt_init = run_on_local_runtime(move || async move {
+            DRT.get_or_try_init(async {
+                DistributedRuntime::from_settings(rt_handle.clone()).await
+            })
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to initialize distributed runtime: {e:?}"))
+        });
+
+        if let Err(msg) = drt_init {
+            tracing::error!(target: "capi", "DRT init failed: {msg}");
+            return DynamoLlmResult::ERR;
+        }
+        tracing::info!(target: "capi", "DRT ready");
+
+        // 5) Initialize the KV publisher once
+        match KV_PUB.get_or_try_init({
+            let namespace = namespace.clone();
+            let component = component.clone();
+            move || {
+                tracing::info!(target: "capi", %namespace, %component, worker_id, kv_block_size, "creating KvEventPublisher");
+                dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
+            }
+        }) {
+            Ok(_) => {
+                tracing::info!(target: "capi", "KvEventPublisher ready");
+                DynamoLlmResult::OK
+            }
+            Err(e) => {
+                tracing::error!(target: "capi", error=?e, "KvEventPublisher creation failed");
                 DynamoLlmResult::ERR
             }
         }
@@ -404,128 +543,7 @@ struct Host {
 static HOST: OnceCell<Host> = OnceCell::new();
 
 fn ensure_host_started() -> Result<&'static Host, String> {
-    HOST.get_or_try_init(|| -> Result<Host, String> {
-        let (tx, mut rx) = mpsc::channel::<Cmd>(128);
-
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("host runtime build failed");
-
-            rt.block_on(async move {
-                use std::collections::HashMap;
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-                // Pipeline state lives inside the runtime
-                struct HeldPipeline {
-                    pipeline: ServiceEngine<
-                        SingleIn<NvCreateChatCompletionRequest>,
-                        ManyOut<Annotated<LLMEngineOutput>>,
-                    >,
-                }
-                let mut pipelines: HashMap<u64, HeldPipeline> = HashMap::new();
-
-                while let Some(cmd) = rx.recv().await {
-                    match cmd {
-                        Cmd::CreatePipeline {
-                            namespace,
-                            component,
-                            model,
-                            use_kv_routing: _, // TODO rm
-                            busy_threshold,
-                            overlap_score_weight,
-                            router_temperature: _,      // we’ll force 0.0 TODO
-                            use_kv_events: _,           // we’ll force false TODO
-                            router_replica_sync: _,     // pick false for now TODO
-                            resp,
-                        } => {
-                            // TODO rm
-                            // Force KV mode + deterministic routing
-                            let use_kv_routing = true;
-                            let router_temperature = Some(0.0);
-                            let use_kv_events = false;
-                            let router_replica_sync = false;
-
-                            tracing::info!(
-                                target: "capi",
-                                "CreatePipeline ns={:?} component={:?} model={:?} KV_ROUTING={:?} busy_threshold={:?} overlap_score_weight={:?} router_temperature={:?} use_kv_events={:?} router_replica_sync={:?}",
-                                namespace, component, model, use_kv_routing, busy_threshold, overlap_score_weight, router_temperature, use_kv_events, router_replica_sync
-                            );
-
-                            // 1) Build the pipeline inside a future that does NOT capture `pipelines`
-                            let build = async move {
-                                let router_mode = RouterMode::KV;
-
-                                let kv_router_config = {
-                                    use dynamo_llm::kv_router::KvRouterConfig;
-                                    Some(KvRouterConfig::new(
-                                        overlap_score_weight,      // keep caller/defaults
-                                        router_temperature,        // Some(0.0) => deterministic
-                                        Some(use_kv_events),       // false
-                                        Some(router_replica_sync), // false
-                                        None, None, None,
-                                    ))
-                                };
-
-                                create_worker_selection_pipeline_chat(
-                                    &namespace,
-                                    &component, // "backend"
-                                    &model,
-                                    router_mode,
-                                    busy_threshold,
-                                    kv_router_config,
-                                )
-                                .await
-                                .map_err(|e| format!("{e:?}"))
-                            };
-
-                            // 2) Await the build, THEN insert into `pipelines` synchronously
-                            let out = match build.await {
-                                Ok(pipeline) => {
-                                    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                                    pipelines.insert(id, HeldPipeline { pipeline });
-                                    Ok(id)
-                                }
-                                Err(err) => Err(err),
-                            };
-
-                            // 3) Reply
-                            let _ = resp.send(out);
-                        }
-
-                        Cmd::Query {
-                            pipeline_id,
-                            request,
-                            resp,
-                        } => {
-                            let fut = async {
-                                let hp = pipelines
-                                    .get(&pipeline_id)
-                                    .ok_or_else(|| "invalid pipeline id".to_string())?;
-
-                                query_worker_selection_and_annotate(&hp.pipeline, request)
-                                    .await
-                                    .map_err(|e| format!("{e:?}"))
-                            };
-
-                            let _ = resp.send(fut.await);
-                        }
-
-                        Cmd::DestroyPipeline { pipeline_id, resp } => {
-                            pipelines.remove(&pipeline_id);
-                            let _ = resp.send(());
-                        }
-                    }
-                }
-            });
-
-            // runtime drops here when loop ends
-        });
-
-        Ok(Host { tx })
-    })
+    HOST.get().ok_or_else(|| "host not started".to_string())
 }
 
 // Worker selection pipeline handle containing the actual pipeline
