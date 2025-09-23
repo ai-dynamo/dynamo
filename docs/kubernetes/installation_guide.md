@@ -84,7 +84,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 > [!TIP]
 > For multinode deployments, you need to enable Grove and Kai Scheduler.
 > You might chose to install them manually or through the dynamo-platform helm install command.
-> Using the dynamo-platform helm install command, by default, Grove and Kai Scheduler are NOT installed. You can enable their installation by setting the following flags in the helm install command:
+> When using the dynamo-platform helm install command, Grove and Kai Scheduler are NOT installed by default. You can enable their installation by setting the following flags in the helm install command:
 
 ```bash
 --set "grove.enabled=true"
