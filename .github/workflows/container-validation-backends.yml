@@ -3,6 +3,10 @@
 
 name: NVIDIA Dynamo Backends Github Validation
 
+concurrency:
+  group: ${{ github.workflow }}-build-test-frameworks-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 on:
   push:
     branches:
@@ -23,18 +27,13 @@ jobs:
           - { arch: "linux/arm64", runner: gpu-l40-amd64 }
 
     runs-on: ${{ matrix.platform.runner }}
-    # Do not cancel main branch runs
-    concurrency:
-      group: ${{ github.workflow }}-${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
-    name: Build and Test - ${{ matrix.framework }}
+    name: Build and Test - ${{ matrix.framework.name }}
     env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework.name }}
       PYTEST_XML_FILE: pytest_test_report.xml
-      FRAMEWORK: ${{ matrix.framework }}
-      TARGET: ${{ matrix.target }}
-      PYTEST_MARKS: ${{ matrix.pytest_marks }}
+      FRAMEWORK: ${{ matrix.framework.name }}
+      TARGET: ${{ matrix.framework.target }}
+      PYTEST_MARKS: ${{ matrix.framework.pytest_marks }}
 
     steps:
       - name: Checkout repository
@@ -57,10 +56,10 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          ./container/build.sh --tag ${{ matrix.framework }}:latest \
+          ./container/build.sh --tag ${{ matrix.framework.name }}:latest \
             --platform ${{ matrix.platform.arch }} \
-            --target ${{ matrix.target }} \
-            --framework ${{ matrix.framework }} \
+            --target ${{ matrix.framework.target }} \
+            --framework ${{ matrix.framework.name }} \
             --use-sccache \
             --sccache-bucket "$SCCACHE_S3_BUCKET" \
             --sccache-region "$AWS_DEFAULT_REGION"
@@ -73,5 +72,5 @@ jobs:
           docker run --runtime=nvidia --rm --gpus all -w /workspace \
             --network host \
             --name ${{ env.CONTAINER_ID }}_pytest \
-            ${{ matrix.framework }}:latest \
+            ${{ matrix.framework.name }}:latest \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
