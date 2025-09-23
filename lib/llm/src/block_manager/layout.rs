@@ -325,7 +325,7 @@ impl FullyContiguousConfig {
         let outer_dim_stride_in_bytes =
             config.page_size * config.inner_dim * config.dtype_width_bytes;
         let layer_stride_in_bytes = outer_dim_stride_in_bytes * config.outer_dim;
-        let memory_region_size = layer_stride_in_bytes;
+        let memory_region_size = outer_dim_stride_in_bytes;
         let natural_block_stride = config.num_layers * layer_stride_in_bytes;
 
         let block_stride_in_bytes = if alignment > 1 {
