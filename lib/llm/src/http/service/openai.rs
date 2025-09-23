@@ -206,15 +206,13 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
     // Try to parse as JSON first to catch pure JSON syntax errors
     match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-        Err(json_err) => {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorMessage {
-                    error: format!("Invalid JSON syntax: {}", json_err),
-                }),
-            )
-                .into_response()
-        }
+        Err(json_err) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorMessage {
+                error: format!("Invalid JSON syntax: {}", json_err),
+            }),
+        )
+            .into_response(),
         // Pass through for any other errors as it is
         Ok(_) => {
             let new_body = Body::from(body_bytes);
