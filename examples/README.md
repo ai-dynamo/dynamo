@@ -46,7 +46,7 @@ Platform-specific deployment guides for production environments:
 
 Low-level runtime examples for developers using Python<>Rust bindings:
 
-- **[Hello World](runtime/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
 
 ## Getting Started
 

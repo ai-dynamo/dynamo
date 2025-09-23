@@ -69,12 +69,6 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
-    /// Maximum number of batched tokens for KV routing
-    /// Needed for informing the KV router
-    /// NOTE: this is not actually used for now
-    #[arg(long, default_value = "8192")]
-    pub max_num_batched_tokens: Option<u32>,
-
     /// KV Router: Weight for overlap score in worker selection.
     /// Higher values prioritize KV cache reuse. Default: 1.0
     #[arg(long)]
@@ -98,6 +92,13 @@ pub struct Flags {
     /// Default: false
     #[arg(long)]
     pub router_replica_sync: Option<bool>,
+
+    /// KV Router: Whether to track active blocks in the router for memory management.
+    /// When false, the router will not maintain state about which blocks are active,
+    /// reducing memory overhead but potentially affecting scheduling decisions.
+    /// Default: true
+    #[arg(long)]
+    pub router_track_active_blocks: Option<bool>,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -228,7 +229,7 @@ impl Flags {
                 self.router_temperature,
                 self.use_kv_events,
                 self.router_replica_sync,
-                self.max_num_batched_tokens,
+                self.router_track_active_blocks,
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
                 None,
                 None,
