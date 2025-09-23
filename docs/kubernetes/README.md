@@ -171,5 +171,5 @@ Key customization points include:
 - **[Logging](/docs/kubernetes/logging.md)** - For logging setup
 - **[Multinode Deployment](/docs/kubernetes/multinode-deployment.md)** - For multinode deployment
 - **[Grove](/docs/kubernetes/grove.md)** - For grove details and custom installation
-- **[Monitoring](/docs/kubernetes/monitoring.md)** - For monitoring setup
+- **[Monitoring](/docs/kubernetes/metrics.md)** - For monitoring setup
 - **[Model Caching with Fluid](/docs/kubernetes/model_caching_with_fluid.md)** - For model caching with Fluid
