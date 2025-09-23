@@ -1,0 +1,26 @@
+name: DCO Check Comment
+
+on:
+  check_suite:
+    types: [completed]
+
+jobs:
+  dco-comment:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    if: >
+      github.event.check_suite.conclusion == 'failure' &&
+      github.event.check_suite.app.name == 'DCO' &&
+      github.event.check_suite.pull_requests[0].number != null
+    steps:
+      - name: Add or update DCO failure comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.check_suite.pull_requests[0].number }}
+          body: |
+            ⚠️ Your pull request failed the **DCO check**. Don’t worry!  
+            Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.
+          edit-mode: replace
