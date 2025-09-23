@@ -6,7 +6,6 @@
 import argparse
 import re
 import sys
-from typing import Dict, Tuple
 from urllib.parse import urlsplit
 
 from benchmarks.utils.workflow import has_http_scheme, run_benchmark_workflow
@@ -37,13 +36,13 @@ def validate_benchmark_name(name: str) -> None:
     """Validate benchmark name"""
     if not name.strip():
         raise ValueError("Benchmark name cannot be empty")
-    
+
     name = name.strip()
-    
+
     # Validate name characters
     if not re.match(r"^[a-zA-Z0-9_-]+$", name):
         raise ValueError(f"Invalid benchmark name: {name}")
-    
+
     # Validate reserved names
     if name.lower() == "plots":
         raise ValueError("Benchmark name 'plots' is reserved")
