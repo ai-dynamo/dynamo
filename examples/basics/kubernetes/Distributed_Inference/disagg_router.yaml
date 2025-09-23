@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-v1-disagg-router
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: vllm-v1-disagg-router
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+    VllmDecodeWorker:
+      dynamoNamespace: vllm-v1-disagg-router
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+      envs:
+        - name: DYN_LOG
+          value: "debug"
+      extraPodSpec:
+        volumes:
+        - name: local-model-cache
+          hostPath:
+            path: /YOUR/LOCAL/CACHE/FOLDER
+            type: DirectoryOrCreate
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi 
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/components/backends/vllm
+          volumeMounts:
+          - name: local-model-cache
+            mountPath: /root/.cache
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8
+    VllmPrefillWorker:
+      dynamoNamespace: vllm-v1-disagg-router
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      envs:
+        - name: DYN_LOG
+          value: "debug"
+      extraPodSpec:
+        volumes:
+        - name: local-model-cache
+          hostPath:
+            path: /YOUR/LOCAL/CACHE/FOLDER
+            type: DirectoryOrCreate
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+          workingDir: /workspace/components/backends/vllm
+          volumeMounts:
+          - name: local-model-cache
+            mountPath: /root/.cache
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 4 --is-prefill-worker
