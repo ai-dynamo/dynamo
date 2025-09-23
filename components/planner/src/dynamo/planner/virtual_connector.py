@@ -44,6 +44,7 @@ class VirtualConnector(PlannerConnector):
 
         self.backend = backend
         self.worker_component_names = WORKER_COMPONENT_NAMES[backend]
+        self.dynamo_namespace = dynamo_namespace
 
     async def _async_init(self):
         """Async initialization that must be called after __init__"""
@@ -59,22 +60,8 @@ class VirtualConnector(PlannerConnector):
         """Wait for the deployment environment to report that scaling is complete"""
         await self.connector.wait_for_scaling_completion()
 
-    def _component_to_worker_type(self, component_name: str) -> Optional[str]:
-        """Map component name to worker type (prefill or decode)"""
-        if component_name == self.worker_component_names.prefill_worker_k8s_name:
-            return "prefill"
-        elif component_name == self.worker_component_names.decode_worker_k8s_name:
-            return "decode"
-        else:
-            return None
-
-    async def add_component(self, component_name: str, blocking: bool = True):
+    async def add_component(self, worker_type: str, blocking: bool = True):
         """Add a component by increasing its replica count by 1"""
-        worker_type = self._component_to_worker_type(component_name)
-        if worker_type is None:
-            logger.warning(f"Unknown component name: {component_name}, skipping")
-            return
-
         state = self.connector.read_state()
 
         if worker_type == "prefill":
@@ -87,13 +74,8 @@ class VirtualConnector(PlannerConnector):
         if blocking:
             await self._wait_for_scaling_completion()
 
-    async def remove_component(self, component_name: str, blocking: bool = True):
+    async def remove_component(self, worker_type: str, blocking: bool = True):
         """Remove a component by decreasing its replica count by 1"""
-        worker_type = self._component_to_worker_type(component_name)
-        if worker_type is None:
-            logger.warning(f"Unknown component name: {component_name}, skipping")
-            return
-
         state = self.connector.read_state()
 
         if worker_type == "prefill":
@@ -116,12 +98,7 @@ class VirtualConnector(PlannerConnector):
         num_prefill = None
         num_decode = None
 
-        for component_name, replicas in target_replicas.items():
-            worker_type = self._component_to_worker_type(component_name)
-            if worker_type is None:
-                logger.warning(f"Unknown component name: {component_name}, skipping")
-                continue
-
+        for worker_type, replicas in target_replicas.items():
             if worker_type == "prefill":
                 num_prefill = replicas
             elif worker_type == "decode":

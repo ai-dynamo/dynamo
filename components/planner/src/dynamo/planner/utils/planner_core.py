@@ -429,18 +429,22 @@ class Planner:
                 return
 
         if not self.args.no_operation:
+            # Ensure change for virtual connector does not break things
             target_replicas = {
-                WORKER_COMPONENT_NAMES[
-                    self.args.backend
-                ].prefill_worker_k8s_name: next_num_p,
-                WORKER_COMPONENT_NAMES[
-                    self.args.backend
-                ].decode_worker_k8s_name: next_num_d,
+                "prefill": next_num_p,
+                "decode": next_num_d,
             }
             await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def run(self):
         """Main loop for the planner"""
+
+        # Fail fast if the deployment does not contain prefill and decode components
+        logger.info("Verifying prefill and decode components exist...")
+        await self.connector.verify_prefill_and_decode_components_exist()
+        logger.info("Successfully verified prefill and decode components exist")
+
+        await self.connector.wait_for_deployment_ready()
 
         self.last_adjustment_time = time.time()
 
@@ -453,10 +457,6 @@ class Planner:
             ):
                 self.last_adjustment_time = time.time()
                 logger.info("New adjustment interval started!")
-
-                if isinstance(self.connector, KubernetesConnector):
-                    deployment = await self.connector.kube_api.get_graph_deployment()
-                    logger.info(f"k8s DGD: {deployment}")
 
                 await self.observe_metrics()
                 await self.make_adjustments()
