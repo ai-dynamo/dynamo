@@ -126,7 +126,7 @@ For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.
 For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
 
 > [!NOTE]
->If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
+> If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
 
 ```yaml
 spec:
