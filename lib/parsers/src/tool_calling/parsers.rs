@@ -2,9 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::config::{ToolCallConfig, ToolCallParserType};
-use super::harmony::{detect_tool_call_start_harmony, parse_tool_calls_harmony_complete};
-use super::json::{detect_tool_call_start_json, try_tool_call_parse_json};
-use super::pythonic::{detect_tool_call_start_pythonic, try_tool_call_parse_pythonic};
+use super::harmony::{
+    detect_tool_call_start_harmony, find_tool_call_end_position_harmony,
+    parse_tool_calls_harmony_complete,
+};
+use super::json::{
+    detect_tool_call_start_json, find_tool_call_end_position_json, try_tool_call_parse_json,
+};
+use super::pythonic::{
+    detect_tool_call_start_pythonic, find_tool_call_end_position_pythonic,
+    try_tool_call_parse_pythonic,
+};
 use super::response::ToolCallResponse;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -116,6 +124,41 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     }
 }
 
+pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usize {
+    let parser_map = get_tool_parser_map();
+    let parser_key = match parser_str {
+        Some(s) if !s.is_empty() => s,
+        _ => "default",
+    };
+
+    match parser_map.get(parser_key) {
+        Some(config) => match config.format {
+            ToolCallParserType::Json => {
+                // For "default", use "nemotron_deci" as the effective parser; otherwise, use the provided parser_key
+                let effective_parser = if parser_key == "default" {
+                    "nemotron_deci"
+                } else {
+                    parser_key
+                };
+                find_tool_call_end_position_json(chunk, effective_parser, &config.json)
+            }
+            ToolCallParserType::Harmony => find_tool_call_end_position_harmony(chunk, &config.json),
+            ToolCallParserType::Pythonic => find_tool_call_end_position_pythonic(chunk),
+            ToolCallParserType::Typescript => {
+                // Typescript parser not implemented
+                chunk.len()
+            }
+            ToolCallParserType::Xml => {
+                // Xml parser not implemented
+                chunk.len()
+            }
+        },
+        None => {
+            // Unknown parser, return full content length
+            chunk.len()
+        }
+    }
+}
 // Tests
 // cargo test postprocessor::tool_calling::parsers
 #[cfg(test)]
