@@ -692,21 +692,24 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
-        let (request, context) = request.into_parts();
+        let (mut request, context) = request.into_parts();
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
         let _requested_streaming = request.inner.stream.unwrap_or(false);
 
-        // Build per-request handle (None if DYN_AUDIT_ENABLED=0)
-        let mut audit = crate::audit::handle::create_handle(&request, &request_id);
+        // Build audit handle (None if DYN_AUDIT_ENABLED=0)
+        let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         // If Full mode, stash the full inbound request now (no-op in UsageOnly)
-        if let Some(ref mut h) = audit
+        if let Some(ref mut h) = audit_handle
             && h.mode() == crate::audit::handle::AuditMode::Full
         {
             h.set_request(std::sync::Arc::new(request.clone()));
         }
+
+        // Set stream=true for internal processing (after audit capture)
+        request.inner.stream = Some(true);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -767,45 +770,31 @@ impl
             Box::pin(stream)
         };
 
-        // Handle audit wrapping after transform (tool-calling & reasoning safe)
-        let final_stream: Pin<Box<dyn Stream<Item = _> + Send>> = match audit {
-            None => {
-                // auditing disabled => just forward transformed stream
-                transformed_stream
-            }
-            Some(mut h) => {
-                use crate::audit::handle::AuditMode::*;
-                match h.mode() {
-                    Full => {
-                        // Wrap AFTER transform: pass-through + aggregate final full response for audit
-                        let (pass_through, final_resp_fut) =
-                            crate::audit::stream::scan_aggregate_with_future(transformed_stream);
+        // Step 4: Apply audit aggregation strategy
+        let final_stream = if let Some(mut audit) = audit_handle {
+            let (stream, agg_fut) = if audit.streaming() {
+                // Streaming: apply scan (pass-through + parallel aggregation)
+                crate::audit::stream::scan_aggregate_with_future(transformed_stream)
+            } else {
+                // Non-streaming: apply fold (collect all, then emit single chunk)
+                crate::audit::stream::fold_aggregate_with_future(transformed_stream)
+            };
 
-                        // Emit one record off-path when done
-                        tokio::spawn(async move {
-                            let final_resp = final_resp_fut.await;
-                            if let Some(u) = final_resp.usage.clone() {
-                                h.add_usage(u);
-                            }
-                            h.set_response(std::sync::Arc::new(final_resp));
-                            h.emit(); // publish final AuditRecord to bus; sinks do I/O
-                        });
-
-                        Box::pin(pass_through)
-                    }
-                    UsageOnly => {
-                        // For usage-only mode, we don't need the full response aggregation
-                        // Just emit the audit record with whatever usage info we can gather
-                        let h2 = h;
-                        tokio::spawn(async move {
-                            // TODO: Extract usage from stream metrics if needed
-                            // For now, emit without usage - can be enhanced later
-                            h2.emit();
-                        });
-                        transformed_stream
-                    }
+            // Spawn audit task
+            tokio::spawn(async move {
+                let final_resp = agg_fut.await;
+                if let Some(usage) = final_resp.usage.clone() {
+                    audit.add_usage(usage);
                 }
-            }
+                if audit.mode() == crate::audit::handle::AuditMode::Full {
+                    audit.set_response(Arc::new(final_resp));
+                }
+                audit.emit();
+            });
+
+            Box::pin(stream)
+        } else {
+            transformed_stream
         };
 
         // prepend the annotations to the response stream
