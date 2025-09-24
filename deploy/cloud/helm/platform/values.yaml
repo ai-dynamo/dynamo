@@ -32,7 +32,7 @@ dynamo-operator:
   # -- Namespace access controls for the operator
   namespaceRestriction:
     # -- Whether to restrict operator to specific namespaces
-    enabled: true
+    enabled: false
     # -- Target namespace for operator deployment (leave empty for current namespace)
     targetNamespace:
 
