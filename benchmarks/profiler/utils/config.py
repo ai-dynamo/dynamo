@@ -296,6 +296,8 @@ def get_service_name_from_sub_component_type(services: dict[str, Service], sub_c
 
     return matching_service_names[0]
 
+# TODO: Config Modifiers use subComponentType first for converting configs but fallback
+# to worker service names for backwards compatibility. We should remove the fallback in future releases.
 class VllmV1ConfigModifier:
     @classmethod
     def convert_config(

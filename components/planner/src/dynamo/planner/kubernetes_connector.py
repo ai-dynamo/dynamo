@@ -99,7 +99,8 @@ class KubernetesConnector(PlannerConnector):
 
     async def verify_prefill_and_decode_components_exist(self, prefill_component_name: str = None, decode_component_name: str = None):
         """
-        Verify that the deployment contains services with subComponentType prefill and decode
+        Verify that the deployment contains services with subComponentType prefill and decode. 
+        Will fallback to worker service names for backwards compatibility. (TODO: deprecate)
 
         Raises:
             DeploymentValidationError: If the deployment does not contain services with subComponentType prefill and decode

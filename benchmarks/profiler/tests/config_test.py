@@ -1,5 +1,4 @@
 from copy import deepcopy
-from typing import Optional
 import pytest
 
 from benchmarks.profiler.utils.config import (
@@ -258,9 +257,9 @@ def test_vllm_config_get_model_name(vllm_config, vllm_config_no_sub_component_ty
             }
         }
     }
-
     assert config_modifier.get_model_name(config_no_extra_pod_spec) == DEFAULT_MODEL_NAME
 
+    # no model arg returns default model name
     config_no_model_arg = {
         "metadata": {
             "name": "vllm-agg"
@@ -280,9 +279,9 @@ def test_vllm_config_get_model_name(vllm_config, vllm_config_no_sub_component_ty
             }
         }
     }
-
     assert config_modifier.get_model_name(config_no_model_arg) == DEFAULT_MODEL_NAME
 
+    # no sub component type returns default model name (relies on worker service names - backwards compatibility)
     assert config_modifier.get_model_name(vllm_config_no_sub_component_type) == "openai/gpt-oss-120b"
 
 
@@ -303,9 +302,9 @@ def test_sglang_config_get_model_name(sglang_config, sglang_config_no_sub_compon
             }
         }
     }
-
     assert config_modifier.get_model_name(config_no_extra_pod_spec) == DEFAULT_MODEL_NAME
 
+    # no model arg returns default model name
     config_no_model_arg = {
         "metadata": {
             "name": "sglang-agg"
@@ -325,16 +324,16 @@ def test_sglang_config_get_model_name(sglang_config, sglang_config_no_sub_compon
             }
         }
     }
-
     assert config_modifier.get_model_name(config_no_model_arg) == DEFAULT_MODEL_NAME
 
+    # no sub component type returns default model name (relies on worker service names - backwards compatibility)
     assert config_modifier.get_model_name(sglang_config_no_sub_component_type) == "openai/gpt-oss-120b"
 
 def test_trtllm_config_get_model_name(trtllm_config, trtllm_config_no_sub_component_type):
     config_modifier = TrtllmConfigModifier()
     assert config_modifier.get_model_name(trtllm_config) == "openai/gpt-oss-120b"
 
-        # no extra pod spec returns default model name
+    # no extra pod spec returns default model name
     config_no_extra_pod_spec = {
         "metadata": {
             "name": "trtllm-agg"
@@ -347,9 +346,9 @@ def test_trtllm_config_get_model_name(trtllm_config, trtllm_config_no_sub_compon
             }
         }
     }
-
     assert config_modifier.get_model_name(config_no_extra_pod_spec) == DEFAULT_MODEL_NAME
 
+    # no model arg returns default model name
     config_no_model_arg = {
         "metadata": {
             "name": "trtllm-agg"
@@ -369,9 +368,9 @@ def test_trtllm_config_get_model_name(trtllm_config, trtllm_config_no_sub_compon
             }
         }
     }
-
     assert config_modifier.get_model_name(config_no_model_arg) == DEFAULT_MODEL_NAME
 
+    # no sub component type returns default model name (relies on worker service names - backwards compatibility)
     assert config_modifier.get_model_name(trtllm_config_no_sub_component_type) == "openai/gpt-oss-120b"
 
 def test_vllm_config_convert_config_prefill(vllm_config, vllm_config_no_sub_component_type):
@@ -393,6 +392,7 @@ def test_vllm_config_convert_config_prefill(vllm_config, vllm_config_no_sub_comp
 
         assert prefill_worker.replicas == 1
 
+    # validate config using sub component type
     cfg = get_prefill_config(vllm_config)
     assert get_service_name_from_sub_component_type(cfg.spec.services, "decode") is None
     prefill_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "prefill")
@@ -401,6 +401,7 @@ def test_vllm_config_convert_config_prefill(vllm_config, vllm_config_no_sub_comp
     assert prefill_worker is not None
     validate_prefill_worker(prefill_worker)
 
+    # validate config using worker service names (backwards compatibility)
     cfg = get_prefill_config(vllm_config_no_sub_component_type)
     prefill_worker = cfg.spec.services.get("VllmDecodeWorker")
     assert prefill_worker is not None
@@ -427,6 +428,7 @@ def test_vllm_config_convert_config_decode(vllm_config, vllm_config_no_sub_compo
 
         assert decode_worker.replicas == 1
 
+    # validate config using sub component type
     cfg = get_decode_config(vllm_config)
     assert cfg.spec.services.get("Planner") is None
     decode_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
@@ -436,6 +438,7 @@ def test_vllm_config_convert_config_decode(vllm_config, vllm_config_no_sub_compo
     assert decode_worker is not None
     validate_decode_worker(decode_worker)
 
+    # validate config using worker service names (backwards compatibility)
     cfg = get_decode_config(vllm_config_no_sub_component_type)
     assert cfg.spec.services.get("Planner") is None
     decode_worker = cfg.spec.services.get("VllmDecodeWorker")
@@ -464,6 +467,7 @@ def test_sglang_config_convert_config_prefill(sglang_config, sglang_config_no_su
 
         assert prefill_worker.replicas == 1
 
+    # validate config using sub component type
     cfg = get_prefill_config(sglang_config)
     assert cfg.spec.services.get("Planner") is None
     assert get_service_name_from_sub_component_type(cfg.spec.services, "decode") is None
@@ -473,6 +477,7 @@ def test_sglang_config_convert_config_prefill(sglang_config, sglang_config_no_su
     assert prefill_worker is not None
     validate_prefill_worker(prefill_worker)
 
+    # validate config using worker service names (backwards compatibility)
     cfg = get_prefill_config(sglang_config_no_sub_component_type)
     assert cfg.spec.services.get("Planner") is None
     prefill_worker = cfg.spec.services.get("SGLangDecodeWorker")
@@ -501,6 +506,7 @@ def test_sglang_config_convert_config_decode(sglang_config, sglang_config_no_sub
 
         assert decode_worker.replicas == 1
 
+    # validate config using sub component type
     cfg = get_decode_config(sglang_config)
     assert cfg.spec.services.get("Planner") is None
     assert get_service_name_from_sub_component_type(cfg.spec.services, "prefill") is None
@@ -510,6 +516,7 @@ def test_sglang_config_convert_config_decode(sglang_config, sglang_config_no_sub
     assert decode_worker is not None
     validate_decode_worker(decode_worker)
 
+    # validate config using worker service names (backwards compatibility)
     cfg = get_decode_config(sglang_config_no_sub_component_type)
     assert cfg.spec.services.get("Planner") is None
     decode_worker = cfg.spec.services.get("SGLangDecodeWorker")
@@ -538,6 +545,7 @@ def test_trtllm_config_convert_config_prefill(trtllm_config, trtllm_config_no_su
 
         assert prefill_worker.replicas == 1
 
+    # validate config using sub component type
     cfg = get_prefill_config(trtllm_config)
     assert cfg.spec.services.get("Planner") is None
     assert get_service_name_from_sub_component_type(cfg.spec.services, "decode") is None
@@ -547,6 +555,7 @@ def test_trtllm_config_convert_config_prefill(trtllm_config, trtllm_config_no_su
     assert prefill_worker is not None
     validate_prefill_worker(prefill_worker)
 
+    # validate config using worker service names (backwards compatibility)
     cfg = get_prefill_config(trtllm_config_no_sub_component_type)
     assert cfg.spec.services.get("Planner") is None
     prefill_worker = cfg.spec.services.get("TRTLLMWorker")
@@ -576,6 +585,7 @@ def test_trtllm_config_convert_config_decode(trtllm_config, trtllm_config_no_sub
 
         assert decode_worker.replicas == 1
 
+    # validate config using sub component type
     cfg = get_decode_config(trtllm_config)
     assert cfg.spec.services.get("Planner") is None
     assert get_service_name_from_sub_component_type(cfg.spec.services, "prefill") is None
@@ -585,6 +595,7 @@ def test_trtllm_config_convert_config_decode(trtllm_config, trtllm_config_no_sub
     assert decode_worker is not None
     validate_decode_worker(decode_worker)
 
+    # validate config using worker service names (backwards compatibility)
     cfg = get_decode_config(trtllm_config_no_sub_component_type)
     assert cfg.spec.services.get("Planner") is None
     decode_worker = cfg.spec.services.get("TRTLLMWorker")
@@ -610,26 +621,27 @@ def test_vllm_config_set_config_tp_size(vllm_config, vllm_config_no_sub_componen
         assert "--tensor-parallel-size" in args
         assert args[args.index("--tensor-parallel-size") + 1] == str(tp_size)
 
+    # validate prefill config using sub component type
     prefill_config = config_modifier.convert_config(vllm_config, "prefill")
     prefill_config = config_modifier.set_config_tp_size(prefill_config, 2, "prefill")
     prefill_cfg = Config.model_validate(prefill_config)
-
     prefill_worker_name = get_service_name_from_sub_component_type(prefill_cfg.spec.services, "prefill")
     assert prefill_worker_name is not None
     prefill_worker = prefill_cfg.spec.services.get(prefill_worker_name)
     assert prefill_worker is not None
     validate_worker(prefill_worker, 2)
 
+    # validate decode config using sub component type
     decode_config = config_modifier.convert_config(vllm_config, "decode")
     decode_config = config_modifier.set_config_tp_size(decode_config, 8, "decode")
     decode_cfg = Config.model_validate(decode_config)
-
     decode_worker_name = get_service_name_from_sub_component_type(decode_cfg.spec.services, "decode")
     assert decode_worker_name is not None
     decode_worker = decode_cfg.spec.services.get(decode_worker_name)
     assert decode_worker is not None
     validate_worker(decode_worker, 8)
 
+    # validate prefill config using worker service names (backwards compatibility)
     prefill_config = config_modifier.convert_config(vllm_config_no_sub_component_type, "prefill")
     prefill_config = config_modifier.set_config_tp_size(prefill_config, 4, "prefill")
     prefill_cfg = Config.model_validate(prefill_config)
@@ -637,6 +649,7 @@ def test_vllm_config_set_config_tp_size(vllm_config, vllm_config_no_sub_componen
     assert prefill_worker is not None
     validate_worker(prefill_worker, 4)
 
+    # validate decode config using worker service names (backwards compatibility)
     decode_config = config_modifier.convert_config(vllm_config_no_sub_component_type, "decode")
     decode_config = config_modifier.set_config_tp_size(decode_config, 16, "decode")
     decode_cfg = Config.model_validate(decode_config)
@@ -661,26 +674,27 @@ def test_sglang_config_set_config_tp_size(sglang_config, sglang_config_no_sub_co
         assert "--tp" in args
         assert args[args.index("--tp") + 1] == str(tp_size)
 
+    # validate prefill config using sub component type
     prefill_config = config_modifier.convert_config(sglang_config, "prefill")
     prefill_config = config_modifier.set_config_tp_size(prefill_config, 2, "prefill")
     prefill_cfg = Config.model_validate(prefill_config)
-
     prefill_worker_name = get_service_name_from_sub_component_type(prefill_cfg.spec.services, "prefill")
     assert prefill_worker_name is not None
     prefill_worker = prefill_cfg.spec.services.get(prefill_worker_name)
     assert prefill_worker is not None
     validate_worker(prefill_worker, 2)
 
+    # validate decode config using sub component type
     decode_config = config_modifier.convert_config(sglang_config, "decode")
     decode_config = config_modifier.set_config_tp_size(decode_config, 8, "decode")
     decode_cfg = Config.model_validate(decode_config)
-
     decode_worker_name = get_service_name_from_sub_component_type(decode_cfg.spec.services, "decode")
     assert decode_worker_name is not None
     decode_worker = decode_cfg.spec.services.get(decode_worker_name)
     assert decode_worker is not None
     validate_worker(decode_worker, 8)
 
+    # validate prefill config using worker service names (backwards compatibility)
     prefill_config = config_modifier.convert_config(sglang_config_no_sub_component_type, "prefill")
     prefill_config = config_modifier.set_config_tp_size(prefill_config, 4, "prefill")
     prefill_cfg = Config.model_validate(prefill_config)
@@ -688,6 +702,7 @@ def test_sglang_config_set_config_tp_size(sglang_config, sglang_config_no_sub_co
     assert prefill_worker is not None
     validate_worker(prefill_worker, 4)
 
+    # validate decode config using worker service names (backwards compatibility)
     decode_config = config_modifier.convert_config(sglang_config_no_sub_component_type, "decode")
     decode_config = config_modifier.set_config_tp_size(decode_config, 16, "decode")
     decode_cfg = Config.model_validate(decode_config)
@@ -712,26 +727,27 @@ def test_trtllm_config_set_config_tp_size(trtllm_config, trtllm_config_no_sub_co
         override_dict, args = parse_override_engine_args(args)
         assert override_dict["tensor_parallel_size"] == tp_size
 
+    # validate prefill config using sub component type
     prefill_config = config_modifier.convert_config(trtllm_config, "prefill")
     prefill_config = config_modifier.set_config_tp_size(prefill_config, 2, "prefill")
     prefill_cfg = Config.model_validate(prefill_config)
-
     prefill_worker_name = get_service_name_from_sub_component_type(prefill_cfg.spec.services, "prefill")
     assert prefill_worker_name is not None
     prefill_worker = prefill_cfg.spec.services.get(prefill_worker_name)
     assert prefill_worker is not None
     validate_worker(prefill_worker, 2)
 
+    # validate decode config using sub component type
     decode_config = config_modifier.convert_config(trtllm_config, "decode")
     decode_config = config_modifier.set_config_tp_size(decode_config, 8, "decode")
     decode_cfg = Config.model_validate(decode_config)
-
     decode_worker_name = get_service_name_from_sub_component_type(decode_cfg.spec.services, "decode")
     assert decode_worker_name is not None
     decode_worker = decode_cfg.spec.services.get(decode_worker_name)
     assert decode_worker is not None
     validate_worker(decode_worker, 8)
 
+    # validate prefill config using worker service names (backwards compatibility)
     prefill_config = config_modifier.convert_config(trtllm_config_no_sub_component_type, "prefill")
     prefill_config = config_modifier.set_config_tp_size(prefill_config, 4, "prefill")
     prefill_cfg = Config.model_validate(prefill_config)
@@ -739,6 +755,7 @@ def test_trtllm_config_set_config_tp_size(trtllm_config, trtllm_config_no_sub_co
     assert prefill_worker is not None
     validate_worker(prefill_worker, 4)
 
+    # validate decode config using worker service names (backwards compatibility)
     decode_config = config_modifier.convert_config(trtllm_config_no_sub_component_type, "decode")
     decode_config = config_modifier.set_config_tp_size(decode_config, 16, "decode")
     decode_cfg = Config.model_validate(decode_config)
