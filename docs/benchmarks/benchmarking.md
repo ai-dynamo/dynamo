@@ -311,6 +311,7 @@ Deploy your DynamoGraphDeployment using the [deployment documentation](../../com
 
 ### Step 2: Deploy and Run Benchmark Job
 
+**Note**: The server-side benchmarking job requires a Docker image containing the Dynamo benchmarking tools. Before the 0.5.1 release, you must build your own Docker image using the [container build instructions](../../container/README.md), push it to your container registry, then update the `image` field in `benchmarks/incluster/benchmark_job.yaml` to use your built image tag.
 
 ```bash
 export NAMESPACE=benchmarking
