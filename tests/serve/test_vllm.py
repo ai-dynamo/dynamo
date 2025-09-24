@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from tests.serve.common import run_serve_deployment
+from tests.serve.common import params_with_model_mark, run_serve_deployment
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload,
@@ -185,12 +185,7 @@ vllm_configs = {
 }
 
 
-@pytest.fixture(
-    params=[
-        pytest.param(config_name, marks=config.marks)
-        for config_name, config in vllm_configs.items()
-    ]
-)
+@pytest.fixture(params=params_with_model_mark(vllm_configs))
 def vllm_config_test(request):
     """Fixture that provides different vLLM test configurations"""
     return vllm_configs[request.param]
@@ -198,7 +193,9 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-def test_serve_deployment(vllm_config_test, request, runtime_services):
+def test_serve_deployment(
+    vllm_config_test, request, runtime_services, predownload_models
+):
     """
     Test dynamo serve deployments with different graph configurations.
     """

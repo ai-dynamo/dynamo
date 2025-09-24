@@ -3,12 +3,12 @@
 
 use super::*;
 
+use crate::DistributedRuntime as PyDistributedRuntime;
+use crate::llm::block_manager::BlockManagerBuilder;
 use crate::llm::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
-use crate::llm::block_manager::BlockManagerBuilder;
 use crate::llm::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
-use crate::DistributedRuntime as PyDistributedRuntime;
 use anyhow;
 use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
 use dynamo_runtime::metrics::prometheus_names::kvbm_connector;

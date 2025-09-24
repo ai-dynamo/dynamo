@@ -6,8 +6,9 @@ toolchain go1.24.3
 
 require (
 	emperror.dev/errors v0.8.1
-	github.com/NVIDIA/grove/operator/api v0.0.0-20250825164137-da01400261a6
+	github.com/NVIDIA/grove/operator/api v0.1.0-alpha.1
 	github.com/bsm/gomega v1.27.10
+	github.com/go-logr/logr v1.4.2
 	github.com/google/go-cmp v0.7.0
 	github.com/imdario/mergo v0.3.6
 	github.com/onsi/ginkgo/v2 v2.23.4
@@ -39,7 +40,6 @@ require (
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
-	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.21.0 // indirect

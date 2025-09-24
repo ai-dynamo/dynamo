@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::{
+    DistributedRuntime, Result,
     metrics::MetricsRegistry,
     pipeline::{
-        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
     },
     protocols::annotated::Annotated,
-    stream, DistributedRuntime, Result,
+    stream,
 };
 use prometheus::IntCounter;
 use std::sync::Arc;

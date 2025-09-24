@@ -12,13 +12,13 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+from dynamo.runtime import DistributedRuntime
 
 from . import __version__
 from .ports import (
     DEFAULT_DYNAMO_PORT_MAX,
     DEFAULT_DYNAMO_PORT_MIN,
     DynamoPortRange,
-    EtcdContext,
     PortAllocationRequest,
     PortMetadata,
     allocate_and_reserve_port,
@@ -195,10 +195,8 @@ def parse_args() -> Config:
     return config
 
 
-async def configure_ports_with_etcd(config: Config, etcd_client):
-    """Configure all settings that require ETCD, including port allocation and vLLM overrides."""
-
-    etcd_context = EtcdContext(client=etcd_client, namespace=config.namespace)
+async def configure_ports(runtime: DistributedRuntime, config: Config):
+    """Configure including port allocation and vLLM overrides."""
 
     dp_rank = config.engine_args.data_parallel_rank or 0
     worker_id = f"vllm-{config.component}-dp{dp_rank}"
@@ -207,7 +205,8 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
     if config.engine_args.enable_prefix_caching:
         kv_metadata = PortMetadata(worker_id=worker_id, reason="zmq_kv_event_port")
         kv_port = await allocate_and_reserve_port(
-            etcd_context=etcd_context,
+            runtime=runtime,
+            namespace=config.namespace,
             metadata=kv_metadata,
             port_range=config.port_range,
         )
@@ -230,12 +229,13 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
             worker_id=worker_id, reason="nixl_side_channel_port"
         )
         nixl_request = PortAllocationRequest(
-            etcd_context=etcd_context,
             metadata=nixl_metadata,
             port_range=config.port_range,
             block_size=tp_size,
         )
-        allocated_ports = await allocate_and_reserve_port_block(nixl_request)
+        allocated_ports = await allocate_and_reserve_port_block(
+            runtime, config.namespace, nixl_request
+        )
         first_port_for_dp_rank = allocated_ports[0]
 
         # Calculate the base port that NIXL expects
@@ -273,7 +273,7 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     logger.info("Creating Dynamo default kv_events_config for prefix caching")
     if config.kv_port is None:
         raise ValueError(
-            "config.kv_port is not set; call configure_ports_with_etcd(...) before overwrite_args "
+            "config.kv_port is not set; call configure_ports(...) before overwrite_args "
             "or provide --kv-event-config to supply an explicit endpoint."
         )
     dp_rank = config.engine_args.data_parallel_rank or 0

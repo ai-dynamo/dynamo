@@ -9,11 +9,14 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
+    http::Request,
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
+        sse::{KeepAlive, Sse},
     },
     routing::{get, post},
 };
@@ -28,12 +31,15 @@ use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
-    metrics::{Endpoint, ResponseMetricCollector},
+    metrics::{
+        Endpoint, EventConverter, process_response_and_observe_metrics,
+        process_response_using_event_converter_and_observe_metrics,
+    },
     service_v2,
 };
+use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
-    ParsingOptions,
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -41,7 +47,6 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
-use crate::{discovery::ModelManager, preprocessor::LLMMetricAnnotation};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -63,7 +68,7 @@ fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
     error: String,
 }
@@ -163,7 +168,33 @@ impl From<HttpError> for ErrorMessage {
     }
 }
 
+// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
+// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
+// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
+    let response = next.run(request).await;
+
+    if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
+        let (_parts, body) = response.into_parts();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .unwrap_or_default();
+        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorMessage {
+                error: error_message,
+            }),
+        )
+            .into_response()
+    } else {
+        // Pass through if it is not a 422
+        response
+    }
+}
+
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
+// TODO: Similar function exists in lib/llm/src/grpc/service/openai.rs but with different signature and simpler logic
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context()
@@ -193,13 +224,6 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     };
 
     uuid.to_string()
-}
-
-fn get_parsing_options(manager: &ModelManager, model: &str) -> ParsingOptions {
-    let tool_call_parser = manager.get_model_tool_call_parser(model);
-    let reasoning_parser = None; // TODO: Implement reasoning parser
-
-    ParsingOptions::new(tool_call_parser, reasoning_parser)
 }
 
 /// OpenAI Completions Request Handler
@@ -254,10 +278,18 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    validate_completion_fields_generic(&request)?;
+
     let request_id = request.id().to_string();
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
+
+    // todo - make the protocols be optional for model name
+    // todo - when optional, if none, apply a default
+    let model = request.inner.model.clone();
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // update the request to always stream
     let request = request.map(|mut req| {
@@ -265,27 +297,24 @@ async fn completions(
         req
     });
 
-    // todo - make the protocols be optional for model name
-    // todo - when optional, if none, apply a default
-    let model = &request.inner.model;
-
     // todo - error handling should be more robust
     let engine = state
         .manager()
-        .get_completions_engine(model)
+        .get_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), model);
+    let parsing_options = state.manager().get_parsing_options(&model);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Completions, streaming);
-
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
+
+    // Create inflight_guard before calling engine to ensure errors are counted
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
 
     // issue the generate call on the engine
     let stream = engine
@@ -317,8 +346,15 @@ async fn completions(
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
+        // For streaming, we'll drop the http_queue_guard on the first token
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &mut response_collector)
+            // Calls observe_response() on each token
+            process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            )
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -331,8 +367,14 @@ async fn completions(
         Ok(sse_stream.into_response())
     } else {
         // Tap the stream to collect metrics for non-streaming requests without altering items
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
-            process_metrics_only(response, &mut response_collector);
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
         });
 
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -371,6 +413,9 @@ async fn embeddings(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
+
     // todo - error handling should be more robust
     let engine = state
         .manager()
@@ -383,11 +428,24 @@ async fn embeddings(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Embeddings, streaming);
 
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
+
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
 
     // Embeddings are typically returned as a single response (non-streaming)
     // so we fold the stream into a single response
@@ -468,6 +526,9 @@ async fn chat_completions(
     // Handle required fields like messages shouldn't be empty.
     validate_chat_completion_required_fields(&request)?;
 
+    // Handle Rest of Validation Errors
+    validate_chat_completion_fields_generic(&request)?;
+
     // Apply template values if present
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -493,27 +554,30 @@ async fn chat_completions(
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
-    let model = &request.inner.model;
-
     // todo - determine the proper error code for when a request model is not present
+    let model = request.inner.model.clone();
+
+    // Create HTTP queue guard after template resolution so labels are correct
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
         .manager()
-        .get_chat_completions_engine(model)
+        .get_chat_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), model);
+    let parsing_options = state.manager().get_parsing_options(&model);
 
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    let annotations = request.annotations();
+
+    // Create inflight_guard before calling engine to ensure errors are counted
     let mut inflight_guard =
         state
             .metrics_clone()
-            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
-
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
-
-    tracing::trace!("Issuing generate call for chat completions");
-    let annotations = request.annotations();
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
 
     // issue the generate call on the engine
     let stream = engine
@@ -545,10 +609,16 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        stream_handle.arm();
+        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
 
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &mut response_collector)
+            // Calls observe_response() on each token
+            process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            )
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
@@ -560,8 +630,14 @@ async fn chat_completions(
 
         Ok(sse_stream.into_response())
     } else {
+        let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream.inspect(move |response| {
-            process_metrics_only(response, &mut response_collector);
+            // Calls observe_response() on each token - drops http_queue_guard on first token
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
         });
 
         let response =
@@ -598,12 +674,6 @@ pub fn validate_chat_completion_unsupported_fields(
         ));
     }
 
-    if inner.stream == Some(true) && inner.tools.is_some() {
-        return Err(ErrorMessage::not_implemented_error(
-            "`stream: true` is not supported when `tools` are provided.",
-        ));
-    }
-
     if inner.function_call.is_some() {
         return Err(ErrorMessage::not_implemented_error(
             "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
@@ -634,6 +704,36 @@ pub fn validate_chat_completion_required_fields(
     }
 
     Ok(())
+}
+
+/// Validates a chat completion request and returns an error response if validation fails.
+///
+/// This function calls the `validate` method implemented for `NvCreateChatCompletionRequest`.
+/// If validation fails, it maps the error into an OpenAI-compatible error response.
+pub fn validate_chat_completion_fields_generic(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    request.validate().map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: e.to_string(),
+        })
+    })
+}
+
+/// Validates a completion request and returns an error response if validation fails.
+///
+/// This function calls the `validate` method implemented for `NvCreateCompletionRequest`.
+/// If validation fails, it maps the error into an OpenAI-compatible error response.
+pub fn validate_completion_fields_generic(
+    request: &NvCreateCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    request.validate().map_err(|e| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: e.to_string(),
+        })
+    })
 }
 
 /// OpenAI Responses Request Handler
@@ -680,6 +780,10 @@ async fn responses(
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let model = request.inner.model.clone();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -730,23 +834,16 @@ async fn responses(
         request
     });
 
-    let model = &request.inner.model;
-
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
         .manager()
-        .get_chat_completions_engine(model)
+        .get_chat_completions_engine(&model)
         .map_err(|_| ErrorMessage::model_not_found())?;
 
-    let parsing_options = get_parsing_options(state.manager(), model);
+    let parsing_options = state.manager().get_parsing_options(&model);
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::Responses, false);
-
-    let _response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     tracing::trace!("Issuing generate call for chat completions");
 
@@ -755,6 +852,23 @@ async fn responses(
         .generate(request)
         .await
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
+
+    // Create inflight_guard now that actual processing has begun
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Responses, false);
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        // Calls observe_response() on each token - drops http_queue_guard on first token
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
 
     // TODO: handle streaming, currently just unary
     let response =
@@ -958,69 +1072,6 @@ struct ModelListing {
     owned_by: String,
 }
 
-struct EventConverter<T>(Annotated<T>);
-
-impl<T> From<Annotated<T>> for EventConverter<T> {
-    fn from(annotated: Annotated<T>) -> Self {
-        EventConverter(annotated)
-    }
-}
-
-fn process_metrics_only<T>(
-    annotated: &Annotated<T>,
-    response_collector: &mut ResponseMetricCollector,
-) {
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-    }
-}
-
-fn process_event_converter<T: Serialize>(
-    annotated: EventConverter<T>,
-    response_collector: &mut ResponseMetricCollector,
-) -> Result<Event, axum::Error> {
-    let mut annotated = annotated.0;
-
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
-        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
-            annotated.event = None;
-            annotated.comment = None;
-        }
-    }
-
-    let mut event = Event::default();
-
-    if let Some(data) = annotated.data {
-        event = event.json_data(data)?;
-    }
-
-    if let Some(msg) = annotated.event {
-        if msg == "error" {
-            let msgs = annotated
-                .comment
-                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-            return Err(axum::Error::new(msgs.join(" -- ")));
-        }
-        event = event.event(msg);
-    }
-
-    if let Some(comments) = annotated.comment {
-        for comment in comments {
-            event = event.comment(comment);
-        }
-    }
-
-    Ok(event)
-}
-
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`
 pub fn completions_router(
@@ -1031,6 +1082,7 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
@@ -1047,6 +1099,7 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
@@ -1062,6 +1115,7 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
@@ -1094,6 +1148,7 @@ pub fn responses_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -1102,6 +1157,12 @@ pub fn responses_router(
 mod tests {
     use std::collections::HashMap;
 
+    use super::*;
+    use crate::discovery::ModelManagerError;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use crate::protocols::openai::common_ext::CommonExt;
+    use crate::protocols::openai::completions::NvCreateCompletionRequest;
+    use crate::protocols::openai::responses::NvCreateResponse;
     use dynamo_async_openai::types::responses::{
         CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
         Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
@@ -1110,11 +1171,8 @@ mod tests {
     use dynamo_async_openai::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        CreateCompletionRequest,
     };
-
-    use super::*;
-    use crate::discovery::ModelManagerError;
-    use crate::protocols::openai::responses::NvCreateResponse;
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
 
@@ -1324,6 +1382,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            chat_template_args: None,
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
@@ -1351,8 +1410,327 @@ mod tests {
             },
             common: Default::default(),
             nvext: None,
+            chat_template_args: None,
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    // Test for all Bad Requests Example for Chat Completion
+    // 1. Echo:  Should be a boolean : Not Done
+    // 2. Frequency Penalty: Should be a float between -2.0 and 2.0 : Done
+    // 3. logprobs: Done
+    // 4. Model Format: Should be a string : Not Done
+    // 5. Prompt or Messages Validation
+    // 6. Max Tokens: Should be a positive integer
+    // 7. Presence Penalty: Should be a float between -2.0 and 2.0 : Done
+    // 8. Stop : Should be a string or an array of strings : Not Done
+    // 9. Invalid or Out of range temperature: Done
+    // 10.Invalid or out of range top_p: Done
+    // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
+    // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
+    // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
+    // add_special_tokens null or invalid : Not Done
+    // guided_whitespace_pattern null or invalid : Not Done
+    // "response_format": { "type": "invalid_format" } : Not Done
+    // "logit_bias": { "invalid_token": "not_a_number" }, : Partial Validation is already there
+    fn test_bad_base_request_for_completion() {
+        // Frequency Penalty: Should be a float between -2.0 and 2.0
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                frequency_penalty: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+        };
+
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Frequency penalty must be between -2 and 2, got -3"
+            );
+        }
+
+        // Presence Penalty: Should be a float between -2.0 and 2.0
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                presence_penalty: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+        };
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Presence penalty must be between -2 and 2, got -3"
+            );
+        }
+
+        // Temperature: Should be a float between 0.0 and 2.0
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                temperature: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+        };
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Temperature must be between 0 and 2, got -3"
+            );
+        }
+
+        // Top P: Should be a float between 0.0 and 1.0
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                top_p: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+        };
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Top_p must be between 0 and 1, got -3"
+            );
+        }
+
+        // Repetition Penalty: Should be a float between 0.0 and 2.0
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                ..Default::default()
+            },
+            common: CommonExt::builder()
+                .repetition_penalty(-3.0)
+                .build()
+                .unwrap(),
+            nvext: None,
+        };
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Repetition penalty must be between 0 and 2, got -3"
+            );
+        }
+
+        // Logprobs: Should be a positive integer between 0 and 5
+        let request = NvCreateCompletionRequest {
+            inner: CreateCompletionRequest {
+                model: "test-model".to_string(),
+                prompt: "Hello".into(),
+                logprobs: Some(6),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+        };
+        let result = validate_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Logprobs must be between 0 and 5, got 6"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bad_base_request_for_chatcompletion() {
+        // Frequency Penalty: Should be a float between -2.0 and 2.0
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                frequency_penalty: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+        };
+
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Frequency penalty must be between -2 and 2, got -3"
+            );
+        }
+
+        // Presence Penalty: Should be a float between -2.0 and 2.0
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                presence_penalty: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+        };
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Presence penalty must be between -2 and 2, got -3"
+            );
+        }
+
+        // Temperature: Should be a float between 0.0 and 2.0
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                temperature: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+        };
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Temperature must be between 0 and 2, got -3"
+            );
+        }
+
+        // Top P: Should be a float between 0.0 and 1.0
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                top_p: Some(-3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+        };
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Top_p must be between 0 and 1, got -3"
+            );
+        }
+
+        // Repetition Penalty: Should be a float between 0.0 and 2.0
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                ..Default::default()
+            },
+            common: CommonExt::builder()
+                .repetition_penalty(-3.0)
+                .build()
+                .unwrap(),
+            nvext: None,
+            chat_template_args: None,
+        };
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Repetition penalty must be between 0 and 2, got -3"
+            );
+        }
+
+        // Top Logprobs: Should be a positive integer between 0 and 20
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                top_logprobs: Some(25),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+        };
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "Top_logprobs must be between 0 and 20, got 25"
+            );
+        }
     }
 }

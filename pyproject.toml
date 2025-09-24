@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.5.0"
+version = "0.5.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.5.0",
+    "ai-dynamo-runtime==0.5.1",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -48,7 +48,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.1.0rc3",
+    "tensorrt-llm==1.1.0rc5",
 ]
 
 vllm = [
@@ -177,7 +177,8 @@ markers = [
     "sglang: marks tests as requiring sglang",
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
-    "kvbm: marks tests for KV behavior and model determinism"
+    "kvbm: marks tests for KV behavior and model determinism",
+    "model: model id used by a test or parameter"
 ]
 
 # Linting/formatting

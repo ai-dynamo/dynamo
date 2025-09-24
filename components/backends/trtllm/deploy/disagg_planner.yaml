@@ -18,7 +18,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3
@@ -66,10 +66,10 @@ spec:
       pvc:
         create: false
         name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /workspace/profiling_results
+        mountPoint: /data
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -82,7 +82,7 @@ spec:
             - --environment=kubernetes
             - --backend=trtllm
             - --adjustment-interval=60
-            - --profile-results-dir=/workspace/profiling_results
+            - --profile-results-dir=/data/profiling_results
             - --prometheus-port=9085
     Prometheus: # NOTE: this is set on Prometheus to ensure a service is created for the Prometheus component. This is a workaround and should be managed differently.
       dynamoNamespace: trtllm-disagg-planner
@@ -114,7 +114,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3
@@ -152,7 +152,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3
@@ -186,7 +186,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3

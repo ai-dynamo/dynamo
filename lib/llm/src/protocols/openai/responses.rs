@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use dynamo_async_openai::types::responses::{
     Content, Input, OutputContent, OutputMessage, OutputStatus, OutputText, Response,
@@ -112,6 +100,18 @@ impl OpenAISamplingOptionsProvider for NvCreateResponse {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+
+    fn get_seed(&self) -> Option<i64> {
+        None // TODO setting as None for now
+    }
+
+    fn get_n(&self) -> Option<u8> {
+        None // TODO setting as None for now
+    }
+
+    fn get_best_of(&self) -> Option<u8> {
+        None // TODO setting as None for now
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateResponse`,
@@ -187,6 +187,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
+            chat_template_args: None,
         })
     }
 }

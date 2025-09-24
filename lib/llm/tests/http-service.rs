@@ -212,6 +212,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
         Endpoint::Responses => todo!(),
+        Endpoint::Tensor => todo!(),
     };
 
     let request_type = match request_type {
@@ -531,12 +532,7 @@ async fn test_http_service() {
         .await
         .unwrap();
 
-    assert_eq!(
-        response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{:?}",
-        response
-    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{:?}", response);
 
     // =========== Query /metrics endpoint ===========
     let response = client
@@ -768,6 +764,7 @@ async fn test_nv_custom_client() {
         inner: inner_request,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -807,6 +804,7 @@ async fn test_nv_custom_client() {
         inner: inner_request,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -847,6 +845,7 @@ async fn test_nv_custom_client() {
         inner: inner_request,
         common: Default::default(),
         nvext: None,
+        chat_template_args: None,
     };
 
     let result = nv_custom_client

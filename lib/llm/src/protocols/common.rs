@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Engine Protocols
 //! ================
@@ -286,14 +274,14 @@ pub const FREQUENCY_PENALTY_RANGE: (f32, f32) = (-1.0, 1.0);
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SamplingOptions {
     /// Number of output sequences to return for the given prompt
-    pub n: Option<i32>,
+    pub n: Option<u8>,
 
     /// Number of output sequences that are generated from the prompt.
     /// From these `best_of` sequences, the top `n` sequences are returned.
     /// `best_of` must be greater than or equal to `n`. This is treated as
     /// the beam width when `use_beam_search` is True. By default, `best_of`
     /// is set to `n`.
-    pub best_of: Option<i32>,
+    pub best_of: Option<u8>,
 
     /// Float that penalizes new tokens based on whether they
     /// appear in the generated text so far. Values > 0 encourage the model

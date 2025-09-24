@@ -191,3 +191,6 @@ You may type this line on your own when writing your commit messages.
 However, if your user.name and user.email are set in your git configs,
 you can use `-s` or `--signoff` to add the `Signed-off-by` line to
 the end of the commit message.
+
+⚠️ **Contributor-Friendly DCO Guide:**
+If your pull request fails the DCO check, don’t worry! Check out our [DCO Troubleshooting Guide](DCO.md) for step-by-step instructions to fix it quickly.

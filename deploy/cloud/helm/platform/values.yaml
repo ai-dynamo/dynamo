@@ -31,8 +31,8 @@ dynamo-operator:
   modelExpressURL: ""
   # -- Namespace access controls for the operator
   namespaceRestriction:
-    # -- Whether to restrict operator to specific namespaces
-    enabled: true
+    # -- Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace).
+    enabled: false
     # -- Target namespace for operator deployment (leave empty for current namespace)
     targetNamespace:
 
@@ -40,6 +40,16 @@ dynamo-operator:
   controllerManager:
     # -- Node tolerations for controller manager pods
     tolerations: []
+
+    # -- Affinity for controller manager pods
+    affinity: []
+
+    # Leader election configuration for cluster-wide coordination
+    leaderElection:
+      # -- Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously.
+      id: ""  # If empty, defaults to: dynamo.nvidia.com (shared across all cluster-wide operators)
+      # -- Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election.
+      namespace: ""
 
     manager:
       # Container image configuration for the operator manager
@@ -115,6 +125,15 @@ dynamo-operator:
     metrics:
       # -- Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables
       prometheusEndpoint: ""
+
+    # MPI Run configuration
+    mpiRun:
+      # -- Name of the secret containing the SSH key for MPI Run
+      secretName: "mpi-run-ssh-secret"
+      # SSH key generation configuration
+      sshKeygen:
+        # -- Whether to enable SSH key generation for MPI Run
+        enabled: true
 
 
 # Grove component - distributed inference orchestration
@@ -528,7 +547,7 @@ nats:
   ############################################################
   natsBox:
     # Whether to deploy NATS Box for CLI access and debugging
-    enabled: true
+    enabled: false
 
     ############################################################
     # NATS client contexts for authentication and connection

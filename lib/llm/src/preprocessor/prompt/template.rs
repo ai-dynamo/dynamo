@@ -30,9 +30,12 @@ impl PromptFormatter {
                         mdc.display_name
                     );
                 };
-                let content = std::fs::read_to_string(file)
+                let contents = std::fs::read_to_string(file)
                     .with_context(|| format!("fs:read_to_string '{}'", file.display()))?;
-                let mut config: ChatTemplate = serde_json::from_str(&content)?;
+                let mut config: ChatTemplate =
+                    serde_json::from_str(&contents).inspect_err(|err| {
+                        crate::log_json_err(&file.display().to_string(), &contents, err)
+                    })?;
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and

@@ -63,8 +63,9 @@ class Processor(ProcessMixIn):
 
     @classmethod
     def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
-        DEFAULT_ENDPOINT = "dyn://dynamo.processor.generate"
-        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.encoder.generate"
+        DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+        DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.processor.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = f"dyn://{DYN_NAMESPACE}.encoder.generate"
 
         parser = FlexibleArgumentParser(
             description="vLLM based processor for Dynamo LLM."

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use crate::config::HealthStatus;
 use crate::logging::make_request_span;
@@ -96,15 +84,15 @@ pub async fn spawn_system_status_server(
         .system_health
         .lock()
         .unwrap()
-        .health_path
-        .clone();
+        .health_path()
+        .to_string();
     let live_path = server_state
         .drt()
         .system_health
         .lock()
         .unwrap()
-        .live_path
-        .clone();
+        .live_path()
+        .to_string();
 
     let app = Router::new()
         .route(
@@ -168,9 +156,10 @@ pub async fn spawn_system_status_server(
     Ok((actual_address, handle))
 }
 
-/// Health handler
+/// Health handler with optional active health checking
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+    // Get basic health status
     let system_health = state.drt().system_health.lock().unwrap();
     let (healthy, endpoints) = system_health.get_health_status();
     let uptime = Some(system_health.uptime());
@@ -185,7 +174,7 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let response = json!({
         "status": healthy_string,
         "uptime": uptime,
-        "endpoints": endpoints
+        "endpoints": endpoints,
     });
 
     tracing::trace!("Response {}", response.to_string());
@@ -444,21 +433,27 @@ mod integration_tests {
 
                 // Prepare test cases
                 let mut test_cases = vec![];
-                if custom_health_path.is_none() {
-                    // When using default paths, test the default paths
-                    test_cases.push(("/health", expected_status, expected_body));
-                } else {
-                    // When using custom paths, default paths should not exist
-                    test_cases.push(("/health", 404, "Route not found"));
-                    test_cases.push((custom_health_path.unwrap(), expected_status, expected_body));
+                match custom_health_path {
+                    None => {
+                        // When using default paths, test the default paths
+                        test_cases.push(("/health", expected_status, expected_body));
+                    }
+                    Some(chp) => {
+                        // When using custom paths, default paths should not exist
+                        test_cases.push(("/health", 404, "Route not found"));
+                        test_cases.push((chp, expected_status, expected_body));
+                    }
                 }
-                if custom_live_path.is_none() {
-                    // When using default paths, test the default paths
-                    test_cases.push(("/live", expected_status, expected_body));
-                } else {
-                    // When using custom paths, default paths should not exist
-                    test_cases.push(("/live", 404, "Route not found"));
-                    test_cases.push((custom_live_path.unwrap(), expected_status, expected_body));
+                match custom_live_path {
+                    None => {
+                        // When using default paths, test the default paths
+                        test_cases.push(("/live", expected_status, expected_body));
+                    }
+                    Some(clp) => {
+                        // When using custom paths, default paths should not exist
+                        test_cases.push(("/live", 404, "Route not found"));
+                        test_cases.push((clp, expected_status, expected_body));
+                    }
                 }
                 test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
                 assert_eq!(test_cases.len(), expected_num_tests);
@@ -614,7 +609,8 @@ mod integration_tests {
                 // Create the ingress and start the endpoint service
                 let ingress = Ingress::for_engine(std::sync::Arc::new(TestHandler)).unwrap();
 
-                // Start the service and endpoint
+                // Start the service and endpoint with a health check payload
+                // This will automatically register the endpoint for health monitoring
                 tokio::spawn(async move {
                     let _ = component
                         .service_builder()
@@ -624,6 +620,9 @@ mod integration_tests {
                         .endpoint(ENDPOINT_NAME)
                         .endpoint_builder()
                         .handler(ingress)
+                        .health_check_payload(serde_json::json!({
+                            "test": "health_check"
+                        }))
                         .start()
                         .await;
                 });
@@ -704,6 +703,107 @@ mod integration_tests {
                     );
                 }
                 // DRT handles server cleanup automatically
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn test_health_check_with_payload_and_timeout() {
+        // Test the complete health check flow with the new canary-based system:
+        crate::logging::init();
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_ENABLED", Some("true")),
+                ("DYN_SYSTEM_PORT", Some("0")),
+                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("notready")),
+                (
+                    "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    Some("[\"test.endpoint\"]"),
+                ),
+                // Enable health check with short intervals for testing
+                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
+                ("DYN_CANARY_WAIT_TIME", Some("1")), // Send canary after 1 second of inactivity
+                ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("1")), // Immediately timeout to mimic unresponsiveness
+                ("RUST_LOG", Some("info")),                      // Enable logging for test
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
+
+                // Get system status server info
+                let system_info = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started");
+                let addr = system_info.socket_addr;
+
+                let client = reqwest::Client::new();
+                let health_url = format!("http://{}/health", addr);
+
+                // Register an endpoint with health check payload
+                let endpoint = "test.endpoint";
+                let health_check_payload = serde_json::json!({
+                    "prompt": "health check test",
+                    "_health_check": true
+                });
+
+                // Register the endpoint and its health check payload
+                {
+                    let system_health = drt.system_health.lock().unwrap();
+                    system_health.register_health_check_target(
+                        endpoint,
+                        crate::component::Instance {
+                            component: "test_component".to_string(),
+                            endpoint: "health".to_string(),
+                            namespace: "test_namespace".to_string(),
+                            instance_id: 1,
+                            transport: crate::component::TransportType::NatsTcp(
+                                endpoint.to_string(),
+                            ),
+                        },
+                        health_check_payload.clone(),
+                    );
+                }
+
+                // Check initial health - should be ready (default state)
+                let response = client.get(&health_url).send().await.unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+                assert_eq!(status, 503, "Should be unhealthy initially (default state)");
+                assert!(
+                    body.contains("\"status\":\"notready\""),
+                    "Should show notready status initially"
+                );
+
+                // Set endpoint to healthy state
+                drt.system_health
+                    .lock()
+                    .unwrap()
+                    .set_endpoint_health_status(endpoint, HealthStatus::Ready);
+
+                // Check health again - should now be healthy
+                let response = client.get(&health_url).send().await.unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+
+                assert_eq!(status, 200, "Should be healthy due to recent response");
+                assert!(
+                    body.contains("\"status\":\"ready\""),
+                    "Should show ready status after response"
+                );
+
+                // Verify the endpoint status in SystemHealth directly
+                let endpoint_status = drt
+                    .system_health
+                    .lock()
+                    .unwrap()
+                    .get_endpoint_health_status(endpoint);
+                assert_eq!(
+                    endpoint_status,
+                    Some(HealthStatus::Ready),
+                    "SystemHealth should show endpoint as Ready after response"
+                );
             },
         )
         .await;

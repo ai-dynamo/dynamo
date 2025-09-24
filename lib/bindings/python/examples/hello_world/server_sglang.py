@@ -21,6 +21,7 @@
 
 import argparse
 import asyncio
+import os
 import sys
 
 import sglang
@@ -30,7 +31,8 @@ from sglang.srt.server_args import ServerArgs
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 DEFAULT_TEMPERATURE = 0.7
 

@@ -318,36 +318,19 @@ dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/Tin
 dynamo-run in=http out=auto --router-mode kv
 ```
 
-### echo_full
+### echo
 
-The `echo_full` engine accepts un-processed requests and echoes the prompt back as the response.
-
-```
-dynamo-run in=http out=echo_full --model-name my_model
-```
-
-### echo_core
-
-The `echo_core` engine accepts pre-processed requests and echoes the tokens back as the response. This is useful for testing pre-processing functionality as the response includes the full prompt template.
+The `echo` engine echoes the prompt back as the response.
 
 ```
-dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
+dynamo-run in=http out=echo --model-name my_model
 ```
 
-Note that to use it with `in=http` you need to tell the post processor to ignore stop tokens from the template by adding `nvext.ignore_eos` like this:
-```
-curl -N -d '{"nvext": {"ignore_eos": true}, "stream": true, "model": "Qwen2.5-3B-Instruct", "max_completion_tokens": 4096, "messages":[{"role":"user", "content": "Tell me a story" }]}' ...
-```
-
-The default `in=text` sets that for you.
-
-### Echo Configuration
-
-Both echo engines use a configurable delay between tokens to simulate generation speed. You can adjust this using the `DYN_TOKEN_ECHO_DELAY_MS` environment variable:
+The echo engine uses a configurable delay between tokens to simulate generation speed. You can adjust this using the `DYN_TOKEN_ECHO_DELAY_MS` environment variable:
 
 ```
 # Set token echo delay to 1ms (1000 tokens per second)
-DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo_full
+DYN_TOKEN_ECHO_DELAY_MS=1 dynamo-run in=http out=echo
 ```
 
 The default delay is 10ms, which produces approximately 100 tokens per second.

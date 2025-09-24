@@ -6,7 +6,6 @@ import logging
 import random
 import socket
 
-import msgspec
 import sglang as sgl
 from sglang.srt.utils import get_ip
 
@@ -46,8 +45,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         return bootstrap_host, bootstrap_port
 
-    async def generate(self, request: str):
-        req = msgspec.json.decode(request, type=dict)
+    async def generate(self, request: dict):
         bootstrap_room = self._generate_bootstrap_room()
 
         bootstrap_info = {
@@ -58,9 +56,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         yield bootstrap_info
 
+        input_param = self._get_input_param(request["request"])
+
         results = await self.engine.async_generate(
-            input_ids=req["request"]["token_ids"],
-            sampling_params=req["sampling_params"],
+            **input_param,
+            sampling_params=request["sampling_params"],
             stream=True,
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,

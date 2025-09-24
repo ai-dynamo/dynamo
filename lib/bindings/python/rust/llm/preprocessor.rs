@@ -8,10 +8,10 @@ use llm_rs::{
     preprocessor::OpenAIPreprocessor,
     protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
+        Annotated,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        Annotated,
     },
 };
 

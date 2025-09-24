@@ -22,6 +22,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="profile a given endpoint's performance for prefill or decode"
     )
+    # TODO: use kebab case
     parser.add_argument(
         "--mode",
         type=str,
@@ -79,6 +80,12 @@ if __name__ == "__main__":
         default=8,
         help="interpolation granularity for the results",
     )
+    parser.add_argument(
+        "--attention_dp_size",
+        type=int,
+        default=1,
+        help="attention dp size of the endpoint for MoE models",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.work_dir, exist_ok=True)
@@ -105,6 +112,7 @@ if __name__ == "__main__":
             args.max_kv_tokens,
             args.max_context_length,
             args.interpolation_granularity,
+            args.attention_dp_size,
         )
     else:
         raise ValueError(f"Invalid mode: {args.mode}")

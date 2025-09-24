@@ -23,11 +23,11 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
-from benchmarks.profiler.utils.config import deep_update
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
+from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -37,6 +37,7 @@ from dynamo.trtllm.request_handlers.handlers import (
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
+    deep_update,
     is_first_worker,
     parse_endpoint,
 )
@@ -280,8 +281,28 @@ async def init(runtime: DistributedRuntime, config: Config):
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
 
+        # Set values from config that are available immediately
+        # Note: We populate max_num_seqs and max_num_batched_tokens from config
+        # to ensure Prometheus metrics are available even without engine stats
+
+        # Naming clarification:
+        # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
+        # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
+        # Both parameters control the same thing: how many requests can be processed simultaneously
+        runtime_config.max_num_seqs = config.max_batch_size
+        runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
+
+        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
+        logging.info(
+            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
+        )
+
+        # The get_engine_runtime_config function exists but is not called here due to:
+        # 1. get_stats_async requires active requests to work properly
+        # 2. We need runtime config during registration, before any requests are made
+        # 3. total_kv_blocks would ideally come from engine stats but is not critical for basic operation
 
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
@@ -316,6 +337,9 @@ async def init(runtime: DistributedRuntime, config: Config):
                 runtime_config=runtime_config,
             )
 
+        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
+        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+
         if config.publish_events_and_metrics and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
@@ -334,11 +358,15 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 await endpoint.serve_endpoint(
-                    handler.generate, metrics_labels=metrics_labels
+                    handler.generate,
+                    metrics_labels=metrics_labels,
+                    health_check_payload=health_check_payload,
                 )
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-            await endpoint.serve_endpoint(handler.generate)
+            await endpoint.serve_endpoint(
+                handler.generate, health_check_payload=health_check_payload
+            )
 
 
 def main():

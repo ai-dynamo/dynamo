@@ -50,11 +50,11 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self.num_gpu_block = 1
         self.request_total_slots = 1
 
-    # TODO: Remove this and pass as metadata through etcd
+    # TODO: Remove this and pass as metadata through shared storage
     def set_num_gpu_block(self, num_blocks):
         self.num_gpu_block = num_blocks
 
-    # TODO: Remove this and pass as metadata through etcd
+    # TODO: Remove this and pass as metadata through shared storage
     def set_num_request_total_slots(self, request_total_slots):
         self.request_total_slots = request_total_slots
 
@@ -66,7 +66,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     ):
         # request_total_slots and kv_total_blocks are properties of model + gpu
         # we should only publish them once, not every metric update
-        # they should be part of some runtime metadata tied to MDC or put in etcd ?
+        # they should be part of some runtime metadata tied to MDC or put in shared storage ?
         hit_rate = 0
         if scheduler_stats.prefix_cache_stats.queries > 0:
             hit_rate = (
@@ -160,7 +160,7 @@ class StatLoggerFactory:
     def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
         return self.create_stat_logger(dp_rank=dp_rank)
 
-    # TODO Remove once we publish metadata to etcd
+    # TODO Remove once we publish metadata to shared storage
     def set_num_gpu_blocks_all(self, num_blocks):
         if self.created_logger:
             self.created_logger.set_num_gpu_block(num_blocks)

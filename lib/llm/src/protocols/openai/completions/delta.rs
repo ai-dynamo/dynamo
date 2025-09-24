@@ -9,7 +9,12 @@ impl NvCreateCompletionRequest {
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
         let options = DeltaGeneratorOptions {
-            enable_usage: true,
+            enable_usage: self
+                .inner
+                .stream_options
+                .as_ref()
+                .map(|opts| opts.include_usage)
+                .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
         };
 
@@ -143,11 +148,9 @@ impl DeltaGenerator {
     ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
 
-        let mut usage = self.usage.clone();
-        if self.options.enable_usage {
-            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
-        }
-
+        // According to OpenAI spec: when stream_options.include_usage is true,
+        // all intermediate chunks should have usage: null
+        // The final usage chunk will be sent separately with empty choices
         let inner = dynamo_async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -160,14 +163,37 @@ impl DeltaGenerator {
                 finish_reason,
                 logprobs,
             }],
-            usage: if self.options.enable_usage {
-                Some(usage)
-            } else {
-                None
-            },
+            usage: None, // Always None for chunks with content/choices
         };
 
         NvCreateCompletionResponse { inner }
+    }
+
+    /// Creates a final usage-only chunk for OpenAI compliance.
+    /// This should be sent after the last content chunk when stream_options.include_usage is true.
+    ///
+    /// # Returns
+    /// * A [`NvCreateCompletionResponse`] with empty choices and usage stats.
+    pub fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
+        let mut usage = self.usage.clone();
+        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+
+        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+            id: self.id.clone(),
+            object: self.object.clone(),
+            created: self.created,
+            model: self.model.clone(),
+            system_fingerprint: self.system_fingerprint.clone(),
+            choices: vec![], // Empty choices for usage-only chunk
+            usage: Some(usage),
+        };
+
+        NvCreateCompletionResponse { inner }
+    }
+
+    /// Check if usage tracking is enabled
+    pub fn is_usage_enabled(&self) -> bool {
+        self.options.enable_usage
     }
 }
 
@@ -206,5 +232,13 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
     fn get_isl(&self) -> Option<u32> {
         Some(self.usage.prompt_tokens)
+    }
+
+    fn create_usage_chunk(&self) -> NvCreateCompletionResponse {
+        DeltaGenerator::create_usage_chunk(self)
+    }
+
+    fn is_usage_enabled(&self) -> bool {
+        DeltaGenerator::is_usage_enabled(self)
     }
 }

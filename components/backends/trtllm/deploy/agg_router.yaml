@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+          image: my-registry/trtllm-runtime:my-tag
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
@@ -27,7 +27,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh

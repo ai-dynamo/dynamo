@@ -25,8 +25,9 @@ python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
   --disaggregation-mode prefill \
+  --disaggregation-bootstrap-port 12345 \
+  --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl &
 PREFILL_PID=$!
 
@@ -37,6 +38,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
   --disaggregation-mode decode \
+  --disaggregation-bootstrap-port 12345 \
+  --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl

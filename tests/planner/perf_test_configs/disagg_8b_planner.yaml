@@ -5,8 +5,6 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
-  annotations:
-    nvidia.com/enable-grove: "false"
 spec:
   envs:
     - name: DYNAMO_SERVICE_CONFIG
@@ -45,7 +43,7 @@ spec:
           memory: "100Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -81,7 +79,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -130,7 +128,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -181,7 +179,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - python3
@@ -237,7 +235,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0902-01
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - python3

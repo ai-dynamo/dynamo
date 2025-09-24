@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -110,6 +111,9 @@ class EngineProcess(ManagedProcess):
 
         # Optionally validate expected log patterns after response handling
         if payload.expected_log:
+            time.sleep(
+                0.5
+            )  # The kv event sometimes needs extra time to arrive and be reflected in the log.
             self.validate_expected_logs(payload.expected_log)
 
     def validate_expected_logs(self, patterns: Any) -> None:

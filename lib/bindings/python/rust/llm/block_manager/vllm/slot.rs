@@ -67,7 +67,11 @@ impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
             .iter()
             .map(|b| b.block_id())
             .collect::<Vec<_>>();
-        write!(f, "Slot(computed_position: {}, prefill_position: {}, immutable_block_ids: {:?}, mutable_block_ids: {:?})", self.computed_position, self.prefill_position, immutable_block_ids, mutable_block_ids)
+        write!(
+            f,
+            "Slot(computed_position: {}, prefill_position: {}, immutable_block_ids: {:?}, mutable_block_ids: {:?})",
+            self.computed_position, self.prefill_position, immutable_block_ids, mutable_block_ids
+        )
     }
 }
 

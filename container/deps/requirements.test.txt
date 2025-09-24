@@ -22,6 +22,7 @@ pytest-asyncio
 pytest-benchmark
 pytest-codeblocks
 pytest-cov
+pytest-forked
 pytest-md-report
 pytest-mypy
 pytest-timeout

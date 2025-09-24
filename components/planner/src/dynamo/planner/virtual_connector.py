@@ -42,7 +42,7 @@ class VirtualConnector(PlannerConnector):
     def __init__(
         self, runtime: DistributedRuntime, dynamo_namespace: str, backend: str
     ):
-        etcd_client = runtime.etcd_client()
+        etcd_client = runtime.do_not_use_etcd_client()
         if etcd_client is None:
             raise RuntimeError("ETCD client is not initialized")
 

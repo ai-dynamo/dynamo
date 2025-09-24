@@ -368,3 +368,18 @@ def cmd_line_args():
     config.tool_call_parser = args.dyn_tool_call_parser
 
     return config
+
+
+def deep_update(target: dict, source: dict) -> None:
+    """
+    Recursively update nested dictionaries.
+
+    Args:
+        target: Dictionary to update
+        source: Dictionary with new values
+    """
+    for key, value in source.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            deep_update(target[key], value)
+        else:
+            target[key] = value

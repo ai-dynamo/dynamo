@@ -124,7 +124,15 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         if self.is_fully_contiguous() {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
-            let size = mr.size() * self.num_layers();
+            let size = mr.size()
+                .checked_mul(self.num_layers())
+                .and_then(|intermediate| intermediate.checked_mul(self.num_outer_dims()))
+                .ok_or_else(|| {
+                    BlockError::InvalidState(format!(
+                        "Block size calculation overflow: region_size={} * layers={} * outer_dims={}",
+                        mr.size(), self.num_layers(), self.num_outer_dims()
+                    ))
+                })?;
             let storage_type = mr.storage_type();
             unsafe { view::BlockView::new(self, offset, size, storage_type) }
         } else {
@@ -138,7 +146,15 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         if self.is_fully_contiguous() {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
-            let size = mr.size() * self.num_layers();
+            let size = mr.size()
+                .checked_mul(self.num_layers())
+                .and_then(|intermediate| intermediate.checked_mul(self.num_outer_dims()))
+                .ok_or_else(|| {
+                    BlockError::InvalidState(format!(
+                        "Block size calculation overflow: region_size={} * layers={} * outer_dims={}",
+                        mr.size(), self.num_layers(), self.num_outer_dims()
+                    ))
+                })?;
             let storage_type = mr.storage_type();
             unsafe { view::BlockViewMut::new(self, offset, size, storage_type) }
         } else {

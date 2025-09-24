@@ -299,5 +299,3 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 - Per-request processing only (batch size must be 1); beam width > 1 is not supported.
 - Processors must modify logits in-place and not return a new tensor.
 - If your processor needs tokenization, ensure the tokenizer is initialized (do not skip tokenizer init).
-
-

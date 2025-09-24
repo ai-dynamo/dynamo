@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import AsyncGenerator
 
@@ -40,6 +41,36 @@ class BaseWorkerHandler(ABC):
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
         raise NotImplementedError
 
+    async def _monitor_abort(self, context, request_id, is_prefill):
+        """Background task that monitors for context cancellation and aborts the request."""
+        try:
+            await context.async_killed_or_stopped()
+            # If we reach here, the context was stopped or killed
+            await self.engine_client.abort(request_id)
+            logger.debug(
+                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
+        except asyncio.CancelledError:
+            # Task was cancelled, normal cleanup if not aborted
+            pass
+        except Exception as e:
+            logger.error(f"Error in abort monitor for request {request_id}: {e}")
+
+    @asynccontextmanager
+    async def _abort_monitor(self, context, request_id, is_prefill=False):
+        """Context manager that creates and automatically cleans up an abort monitoring task."""
+        task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
+        try:
+            yield task
+        finally:
+            # Cancel the abort monitoring task when exiting the context
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
     async def clear_kv_blocks(self, request=None):
         try:
             await self.engine_client.reset_prefix_cache()
@@ -59,12 +90,6 @@ class BaseWorkerHandler(ABC):
             try:
                 async for res in gen:
                     # res is vllm's RequestOutput
-
-                    # This is the expected way for a request to end.
-                    # The new token ID will be eos, don't forward it.
-                    if res.finished:
-                        yield {"finish_reason": "stop", "token_ids": []}
-                        break
 
                     if not res.outputs:
                         yield {"finish_reason": "error", "token_ids": []}
@@ -100,9 +125,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         prefill_worker_client=None,
+        prefill_router_client=None,
+        prefill_router_free_client=None,
     ):
         super().__init__(runtime, component, engine, default_sampling_params)
         self.prefill_worker_client = prefill_worker_client
+        self.prefill_router_client = prefill_router_client
+        self.prefill_router_free_client = prefill_router_free_client
         self.can_prefill = 0
         self._prefill_check_task = None
 
@@ -149,7 +178,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
-        # TODO Change to prefill queue
+        # TODO: Change to prefill queue
+        # TODO: (PeaBrane) eventually, do not use a router_client and a free_client directly.
+        # This is least intrusive for now, but quite error prone. Should consider (major) refactoring
+        # TODO: (PeaBrane) longer term, decode workers should not handle prefill routing at all.
+        # Prefill routing logic should be integrated directly into the frontend service potentially.
         if self.can_prefill:
             # Create a copy for prefill with specific modifications
             prefill_sampling_params = deepcopy(sampling_params)
@@ -168,19 +201,51 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "request_id": request_id,
             }
 
+            used_prefill_router = False
             try:
-                prefill_response = await anext(
-                    await self.prefill_worker_client.round_robin(
-                        prefill_request, context=context
+                prefill_worker_id = None
+                if (
+                    self.prefill_router_client is not None
+                    and self.prefill_router_client.instance_ids()
+                ):
+                    used_prefill_router = True
+                    best_worker_response = await anext(
+                        await self.prefill_router_client.generate(
+                            {
+                                "token_ids": request["token_ids"],
+                                "request_id": request_id,
+                            }
+                        )
                     )
-                )
+                    prefill_worker_id = best_worker_response.data().get("worker_id")
+
+                if prefill_worker_id is not None:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.direct(
+                            prefill_request, prefill_worker_id, context=context
+                        )
+                    )
+                else:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.round_robin(
+                            prefill_request, context=context
+                        )
+                    )
+
             except Exception as e:
-                # TODO: Cancellation does not propagate until the first token is received
                 if context.is_stopped() or context.is_killed():
                     logger.debug(f"Aborted Remote Prefill Request ID: {request_id}")
-                    # TODO: Raise asyncio.CancelledError into bindings
                     return
                 raise e
+
+            finally:
+                if used_prefill_router:
+                    await anext(
+                        await self.prefill_router_free_client.generate(
+                            {"request_id": request_id}
+                        )
+                    )
+                    logger.debug(f"Freed router state for request {request_id}")
 
             prefill_response = MyRequestOutput.model_validate_json(
                 prefill_response.data()
@@ -193,21 +258,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "kv_transfer_params"
             ] = prefill_response.kv_transfer_params
 
-        try:
-            async for tok in self.generate_tokens(prompt, sampling_params, request_id):
-                if context.is_stopped() or context.is_killed():
-                    await self.engine_client.abort(request_id)
-                    logger.debug(f"Aborted Request ID: {request_id}")
-                    # TODO: Raise asyncio.CancelledError into bindings
-                    break
-
-                yield tok
-
-        except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+        async with self._abort_monitor(context, request_id):
+            try:
+                async for tok in self.generate_tokens(
+                    prompt, sampling_params, request_id
+                ):
+                    yield tok
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -221,36 +282,31 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
 
-        try:
-            gen = self.engine_client.generate(prompt, sampling_params, request_id)
-        except EngineDeadError as e:
-            logger.error(f"vLLM EngineDeadError: {e}")
-            logger.warning("Initiating Dynamo Runtime shutdown.")
-            self.runtime.shutdown()
-            os._exit(1)
+        async with self._abort_monitor(context, request_id, is_prefill=True):
+            try:
+                gen = self.engine_client.generate(prompt, sampling_params, request_id)
+            except EngineDeadError as e:
+                logger.error(f"vLLM EngineDeadError: {e}")
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
 
-        # Generate only 1 token in prefill
-        try:
-            async for res in gen:
-                if context.is_stopped() or context.is_killed():
-                    await self.engine_client.abort(request_id)
-                    logger.debug(f"Aborted Prefill Request ID: {request_id}")
-                    # TODO: Raise asyncio.CancelledError into bindings
-                    break
-
-                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-                yield MyRequestOutput(
-                    request_id=res.request_id,
-                    prompt=res.prompt,
-                    prompt_token_ids=res.prompt_token_ids,
-                    prompt_logprobs=res.prompt_logprobs,
-                    outputs=res.outputs,
-                    finished=res.finished,
-                    metrics=res.metrics,
-                    kv_transfer_params=res.kv_transfer_params,
-                ).model_dump_json()
-        except asyncio.CancelledError:
-            # raise the error because we cannot migrate prefill requests
-            raise GeneratorExit(
-                "Prefill engine was shut down during token generation"
-            ) from None
+            # Generate only 1 token in prefill
+            try:
+                async for res in gen:
+                    logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+                    yield MyRequestOutput(
+                        request_id=res.request_id,
+                        prompt=res.prompt,
+                        prompt_token_ids=res.prompt_token_ids,
+                        prompt_logprobs=res.prompt_logprobs,
+                        outputs=res.outputs,
+                        finished=res.finished,
+                        metrics=res.metrics,
+                        kv_transfer_params=res.kv_transfer_params,
+                    ).model_dump_json()
+            except asyncio.CancelledError:
+                # raise the error because we cannot migrate prefill requests
+                raise GeneratorExit(
+                    "Prefill engine was shut down during token generation"
+                ) from None

@@ -46,7 +46,7 @@ Platform-specific deployment guides for production environments:
 
 Low-level runtime examples for developers using Python<>Rust bindings:
 
-- **[Hello World](runtime/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
 
 ## Getting Started
 
@@ -54,7 +54,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
-   docker compose -f deploy/metrics/docker-compose.yml up -d
+   docker compose -f deploy/docker-compose.yml up -d
    ```
 
 3. **Follow the example**: Each directory contains detailed setup instructions and configuration files specific to that deployment pattern.

@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+from typing import Optional
 
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -22,14 +23,9 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import (
-    ENABLE_LMCACHE,
-    Config,
-    configure_ports_with_etcd,
-    overwrite_args,
-    parse_args,
-)
+from .args import ENABLE_LMCACHE, Config, configure_ports, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
@@ -68,8 +64,7 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
-    etcd_client = runtime.etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    await configure_ports(runtime, config)
     overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
@@ -91,6 +86,40 @@ async def worker(runtime: DistributedRuntime):
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
+
+
+def setup_kv_event_publisher(
+    config: Config,
+    component,
+    generate_endpoint,
+    vllm_config,
+) -> Optional[ZmqKvEventPublisher]:
+    """
+    Set up KV event publisher for prefix caching if enabled.
+
+    Returns:
+        ZmqKvEventPublisher if prefix caching is enabled, None otherwise.
+    """
+    if not config.engine_args.enable_prefix_caching:
+        return None
+
+    # TODO: We start off with a valid endpoint, then we increment it by dp_rank
+    # May no longer be valid. Lets remove the increment behavior from vLLM and here
+    zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+        config.engine_args.kv_events_config.endpoint,
+        data_parallel_rank=config.engine_args.data_parallel_rank or 0,
+    ).replace("*", "127.0.0.1")
+
+    zmq_config = ZmqKvEventPublisherConfig(
+        worker_id=generate_endpoint.lease_id(),
+        kv_block_size=vllm_config.cache_config.block_size,
+        zmq_endpoint=zmq_endpoint,
+    )
+    kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+
+    logger.info(f"Worker reading KV events from {zmq_endpoint}")
+
+    return kv_publisher
 
 
 def setup_vllm_engine(config, stat_logger=None):
@@ -143,13 +172,13 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, _, default_sampling_params = setup_vllm_engine(config)
-
-    # TODO register_prefill in similar vein to register_llm
+    engine_client, vllm_config, default_sampling_params = setup_vllm_engine(config)
 
     handler = PrefillWorkerHandler(
         runtime, component, engine_client, default_sampling_params
     )
+
+    health_check_payload = VllmPrefillHealthCheckPayload(engine_client).to_dict()
 
     try:
         logger.debug("Starting serve_endpoint for prefill worker")
@@ -162,6 +191,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=[("model", config.model)],
+                health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]
@@ -187,6 +217,20 @@ async def init(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
+    prefill_router_client = (
+        await runtime.namespace(config.namespace)
+        .component("prefill_router")  # TODO don't hardcode
+        .endpoint("find_best_worker")
+        .client()
+    )
+
+    prefill_router_free_client = (
+        await runtime.namespace(config.namespace)
+        .component("prefill_router")  # TODO don't hardcode
+        .endpoint("free")
+        .client()
+    )
+
     prefill_worker_client = (
         await runtime.namespace(config.namespace)
         .component("prefill")  # TODO don't hardcode
@@ -203,7 +247,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config, factory
     )
 
-    # TODO Hack to get data, move this to registering in ETCD
+    # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
@@ -216,25 +260,15 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         prefill_worker_client,
+        prefill_router_client,
+        prefill_router_free_client,
     )
 
-    if config.engine_args.enable_prefix_caching:
-        # TODO: We start off with a valid endpoint, then we increment it by dp_rank
-        # May no longer be valid. Lets remove the increment behavior from vLLM and here
-        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-            config.engine_args.kv_events_config.endpoint,
-            data_parallel_rank=config.engine_args.data_parallel_rank or 0,
-        ).replace("*", "127.0.0.1")
-
-        zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
-            kv_block_size=vllm_config.cache_config.block_size,
-            zmq_endpoint=zmq_endpoint,
-        )
-        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
-
-        logger.info(f"Reading Events from {zmq_endpoint}")
-
+    # Set up KV event publisher for prefix caching if enabled
+    kv_publisher = setup_kv_event_publisher(
+        config, component, generate_endpoint, vllm_config
+    )
+    if kv_publisher:
         handler.kv_publisher = kv_publisher
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
@@ -263,6 +297,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             custom_template_path=config.custom_jinja_template,
         )
 
+    health_check_payload = VllmHealthCheckPayload(engine_client).to_dict()
+
     try:
         logger.debug("Starting serve_endpoint for decode worker")
         await asyncio.gather(
@@ -272,6 +308,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 handler.generate,
                 graceful_shutdown=config.migration_limit <= 0,
                 metrics_labels=[("model", config.model)],
+                health_check_payload=health_check_payload,
             ),
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks, metrics_labels=[("model", config.model)]

@@ -6,6 +6,11 @@ pub mod kserve_test {
     pub mod inference {
         tonic::include_proto!("inference");
     }
+    use dynamo_llm::discovery::ModelEntry;
+    use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_llm::model_type::{ModelInput, ModelType};
+    use dynamo_llm::protocols::tensor;
+    use dynamo_runtime::protocols::EndpointId;
     use inference::grpc_inference_service_client::GrpcInferenceServiceClient;
     use inference::{
         DataType, ModelConfigRequest, ModelInferRequest, ModelInferResponse, ModelMetadataRequest,
@@ -22,6 +27,7 @@ pub mod kserve_test {
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
+        tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     };
     use dynamo_runtime::{
         CancellationToken,
@@ -181,6 +187,52 @@ pub mod kserve_test {
         }
     }
 
+    struct TensorEngine {}
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateTensorRequest>,
+            ManyOut<Annotated<NvCreateTensorResponse>>,
+            Error,
+        > for TensorEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<NvCreateTensorRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateTensorResponse>>, Error> {
+            // Echo input tensor in response, additionally check if there is input tensor
+            // name "repeat", if so, send the same response as many time as the value of the tensor
+            let (request, context) = request.transfer(());
+            let ctx = context.context();
+
+            let repeat_count = request
+                .tensors
+                .iter()
+                .find_map(|t| {
+                    if t.metadata.name == "repeat"
+                        && let tensor::FlattenTensor::Int32(data) = &t.data
+                        && !data.is_empty()
+                    {
+                        return Some(data[0]);
+                    }
+                    None
+                })
+                .unwrap_or(1);
+            let stream = async_stream::stream! {
+                for _ in 0..repeat_count {
+                    yield Annotated::from_data(NvCreateTensorResponse {
+                        id: request.id.clone(),
+                        model: request.model.clone(),
+                        tensors: request.tensors.clone(),
+                    });
+                }
+            };
+
+            Ok(ResponseStream::new(Box::pin(stream), ctx))
+        }
+    }
+
     /// Wait for the HTTP service to be ready by checking its health endpoint
     async fn get_ready_client(port: u16, timeout_secs: u64) -> GrpcInferenceServiceClient<Channel> {
         let start = tokio::time::Instant::now();
@@ -232,15 +284,58 @@ pub mod kserve_test {
         manager
             .add_completions_model("split", split.clone())
             .unwrap();
+        manager.save_model_entry(
+            "split",
+            ModelEntry {
+                name: "split".to_string(),
+                endpoint_id: EndpointId {
+                    namespace: "namespace".to_string(),
+                    component: "component".to_string(),
+                    name: "split".to_string(),
+                },
+                model_type: ModelType::Completions,
+                model_input: ModelInput::Text,
+                runtime_config: None,
+            },
+        );
+
         manager
             .add_chat_completions_model("failure", failure.clone())
             .unwrap();
         manager
             .add_completions_model("failure", failure.clone())
             .unwrap();
+        manager.save_model_entry(
+            "failure",
+            ModelEntry {
+                name: "failure".to_string(),
+                endpoint_id: EndpointId {
+                    namespace: "namespace".to_string(),
+                    component: "component".to_string(),
+                    name: "failure".to_string(),
+                },
+                model_type: ModelType::Completions | ModelType::Chat,
+                model_input: ModelInput::Text,
+                runtime_config: None,
+            },
+        );
         manager
             .add_completions_model("long_running", long_running.clone())
             .unwrap();
+        manager.save_model_entry(
+            "long_running",
+            ModelEntry {
+                name: "long_running".to_string(),
+                endpoint_id: EndpointId {
+                    namespace: "namespace".to_string(),
+                    component: "component".to_string(),
+                    name: "long_running".to_string(),
+                },
+                model_type: ModelType::Completions,
+                model_input: ModelInput::Text,
+                runtime_config: None,
+            },
+        );
 
         (service, split, failure, long_running)
     }
@@ -276,6 +371,7 @@ pub mod kserve_test {
         InferCancellation = 8992,
         StreamInferCancellation = 8993,
         ModelInfo = 8994,
+        TensorModel = 8995,
     }
 
     #[rstest]
@@ -474,8 +570,8 @@ pub mod kserve_test {
                     );
                     assert_eq!(
                         output.shape,
-                        vec![0],
-                        "Expected 'finish_reason' to have shape [0]"
+                        vec![1],
+                        "Expected 'finish_reason' to have shape [1]"
                     );
                 }
                 _ => panic!("Unexpected output name: {}", output.name),
@@ -632,8 +728,8 @@ pub mod kserve_test {
                                 );
                                 assert_eq!(
                                     output.shape,
-                                    vec![0],
-                                    "Expected 'finish_reason' to have shape [0]"
+                                    vec![1],
+                                    "Expected 'finish_reason' to have shape [1]"
                                 );
                             }
                             _ => panic!("Unexpected output name: {}", output.name),
@@ -724,8 +820,8 @@ pub mod kserve_test {
                                 );
                                 assert_eq!(
                                     output.shape,
-                                    vec![0],
-                                    "Expected 'finish_reason' to have shape [0]"
+                                    vec![1],
+                                    "Expected 'finish_reason' to have shape [1]"
                                 );
                             }
                             _ => panic!("Unexpected output name: {}", output.name),
@@ -1049,6 +1145,328 @@ pub mod kserve_test {
                     );
                 }
                 _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_tensor_infer(
+        #[with(TestPort::TensorModel as u16)] service_with_engines: (
+            KserveService,
+            Arc<SplitEngine>,
+            Arc<AlwaysFailEngine>,
+            Arc<LongRunningEngine>,
+        ),
+        text_input: inference::model_infer_request::InferInputTensor,
+    ) {
+        // add tensor model
+        let tensor = Arc::new(TensorEngine {});
+        service_with_engines
+            .0
+            .model_manager()
+            .add_tensor_model("tensor", tensor.clone())
+            .unwrap();
+
+        // start server
+        let _running = RunningService::spawn(service_with_engines.0.clone());
+
+        let mut client = get_ready_client(TestPort::TensorModel as u16, 5).await;
+
+        let request = tonic::Request::new(ModelMetadataRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+
+        // Failure, model registered as Tensor but does not provide model config (in runtime config)
+        let entry = ModelEntry {
+            name: "tensor".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "endpoint".to_string(),
+            },
+            model_type: ModelType::TensorBased,
+            model_input: ModelInput::Tensor,
+            runtime_config: None,
+        };
+        service_with_engines
+            .0
+            .model_manager()
+            .save_model_entry("key", entry);
+
+        let response = client.model_metadata(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "Expected InvalidArgument error for unregistered model, get {}",
+            err
+        );
+        assert!(
+            err.message()
+                .contains("has type Tensor but no model config is provided"),
+            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
+            err.message()
+        );
+
+        let request = tonic::Request::new(ModelConfigRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+
+        let response = client.model_config(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "Expected InvalidArgument error for unregistered model, get {}",
+            err
+        );
+        assert!(
+            err.message()
+                .contains("has type Tensor but no model config is provided"),
+            "Expected error message to contain 'has type Tensor but no model config is provided', got: {}",
+            err.message()
+        );
+
+        // Change model entry to have model config
+        service_with_engines
+            .0
+            .model_manager()
+            .remove_model_entry("key");
+        let entry = ModelEntry {
+            name: "tensor".to_string(),
+            endpoint_id: EndpointId {
+                namespace: "namespace".to_string(),
+                component: "component".to_string(),
+                name: "endpoint".to_string(),
+            },
+            model_type: ModelType::TensorBased,
+            model_input: ModelInput::Tensor,
+            runtime_config: Some(ModelRuntimeConfig {
+                tensor_model_config: Some(tensor::TensorModelConfig {
+                    name: "tensor".to_string(),
+                    inputs: vec![tensor::TensorMetadata {
+                        name: "input".to_string(),
+                        data_type: tensor::DataType::Bytes,
+                        shape: vec![1],
+                    }],
+                    outputs: vec![tensor::TensorMetadata {
+                        name: "output".to_string(),
+                        data_type: tensor::DataType::Bool,
+                        shape: vec![-1],
+                    }],
+                }),
+                ..Default::default()
+            }),
+        };
+        service_with_engines
+            .0
+            .model_manager()
+            .save_model_entry("key", entry);
+
+        // Success
+        let request = tonic::Request::new(ModelMetadataRequest {
+            name: "tensor".into(),
+            version: "".into(),
+        });
+        let response = client.model_metadata(request).await.unwrap();
+        assert_eq!(
+            response.get_ref().name,
+            "tensor",
+            "Expected response of the same model name",
+        );
+        // input
+        for io in &response.get_ref().inputs {
+            match io.name.as_str() {
+                "input" => {
+                    assert_eq!(
+                        io.datatype, "BYTES",
+                        "Expected 'input' to have datatype 'BYTES'"
+                    );
+                    assert_eq!(io.shape, vec![1], "Expected 'input' to have shape [1]");
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+        // output
+        for io in &response.get_ref().outputs {
+            match io.name.as_str() {
+                "output" => {
+                    assert_eq!(
+                        io.datatype, "BOOL",
+                        "Expected 'output' to have datatype 'BOOL'"
+                    );
+                    assert_eq!(io.shape, vec![-1], "Expected 'output' to have shape [-1]");
+                }
+                _ => panic!("Unexpected output name: {}", io.name),
+            }
+        }
+
+        let model_name = "tensor";
+        let inputs = vec![text_input.clone()];
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: model_name.into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: inputs.clone(),
+            ..Default::default()
+        });
+
+        let response = client.model_infer(request).await.unwrap();
+        validate_tensor_response(response, model_name, inputs);
+
+        // streaming response in model_infer(), expect failure
+        let repeat = inference::model_infer_request::InferInputTensor {
+            name: "repeat".into(),
+            datatype: "INT32".into(),
+            shape: vec![1],
+            contents: Some(inference::InferTensorContents {
+                int_contents: vec![2],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let inputs = vec![text_input.clone(), repeat.clone()];
+        let request = tonic::Request::new(ModelInferRequest {
+            model_name: model_name.into(),
+            model_version: "1".into(),
+            id: "1234".into(),
+            inputs: inputs.clone(),
+            ..Default::default()
+        });
+
+        let response = client.model_infer(request).await;
+        assert!(response.is_err());
+        let err = response.unwrap_err();
+        assert_eq!(
+            err.code(),
+            tonic::Code::Internal,
+            "Expected Internal error for trying to stream response in ModelInfer, get {}",
+            err
+        );
+        // assert "stream" in error message
+        assert!(
+            err.message()
+                .contains("Multiple responses in non-streaming mode"),
+            "Expected error message to contain 'Multiple responses in non-streaming mode', got: {}",
+            err.message()
+        );
+
+        // model_stream_infer() and raw_input_contents
+        {
+            let inputs = vec![text_input.clone(), repeat.clone()];
+            let outbound = async_stream::stream! {
+                let request_count = 1;
+                for _ in 0..request_count {
+                    let mut text_input = text_input.clone();
+                    text_input.contents = None; // Clear contents to use raw_input_contents
+                    let text_input_str = "dummy input";
+                    let input_len = text_input_str.len() as u32;
+                    let mut serialized_text_input = input_len.to_le_bytes().to_vec();
+                    serialized_text_input.extend_from_slice(text_input_str.as_bytes());
+
+                    let mut repeat = repeat.clone();
+                    repeat.contents = None; // Clear contents to use raw_input_contents
+                    let serialized_repeat = 2i32.to_le_bytes().to_vec();
+
+                    let request = ModelInferRequest {
+                        model_name: model_name.into(),
+                        model_version: "1".into(),
+                        id: "1234".into(),
+                        inputs: vec![text_input.clone(), repeat.clone()],
+                        raw_input_contents: vec![serialized_text_input, serialized_repeat],
+                        ..Default::default()
+                    };
+
+                    yield request;
+                }
+            };
+
+            let response = client
+                .model_stream_infer(Request::new(outbound))
+                .await
+                .unwrap();
+            let mut inbound = response.into_inner();
+
+            let mut response_idx = 0;
+            while let Some(response) = inbound.message().await.unwrap() {
+                assert!(
+                    response.error_message.is_empty(),
+                    "Expected successful inference"
+                );
+                assert!(
+                    response.infer_response.is_some(),
+                    "Expected successful inference"
+                );
+
+                if let Some(response) = &response.infer_response {
+                    validate_tensor_response(
+                        Response::new(response.clone()),
+                        model_name,
+                        inputs.clone(),
+                    );
+                }
+                response_idx += 1;
+            }
+            assert_eq!(response_idx, 2, "Expected 2 responses")
+        }
+    }
+
+    fn validate_tensor_response(
+        response: Response<ModelInferResponse>,
+        model_name: &str,
+        inputs: Vec<inference::model_infer_request::InferInputTensor>,
+    ) {
+        assert_eq!(
+            response.get_ref().model_name,
+            model_name,
+            "Expected response of the same model name",
+        );
+        assert_eq!(
+            response.get_ref().model_version,
+            "1",
+            "Expected response of the same model version"
+        );
+        assert_eq!(
+            response.get_ref().id,
+            "1234",
+            "Expected response of the same request ID"
+        );
+        assert_eq!(
+            response.get_ref().outputs.len(),
+            inputs.len(),
+            "Expected the same number of outputs as inputs",
+        );
+        for output in &response.get_ref().outputs {
+            let mut found = false;
+            for input in &inputs {
+                if input.name != output.name {
+                    continue;
+                }
+                assert_eq!(
+                    output.name, input.name,
+                    "Expected output name to be '{}', got '{}'",
+                    input.name, output.name
+                );
+                assert_eq!(
+                    output.datatype, input.datatype,
+                    "Expected output datatype to be '{}', got '{}'",
+                    input.datatype, output.datatype
+                );
+                assert_eq!(
+                    output.shape, input.shape,
+                    "Expected output shape to be '{:?}', got '{:?}'",
+                    input.shape, output.shape
+                );
+                found = true;
+                break;
+            }
+            if !found {
+                panic!("Unexpected output name: {}", output.name);
             }
         }
     }

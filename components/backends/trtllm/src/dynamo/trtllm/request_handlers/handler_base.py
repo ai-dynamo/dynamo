@@ -212,9 +212,6 @@ class HandlerBase:
                         request_id, model_name
                     )
                     yield final_out
-                else:
-                    yield {"finish_reason": "stop", "token_ids": []}
-                break
 
             if not res.outputs:
                 yield {"finish_reason": "error", "token_ids": []}

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
@@ -136,6 +124,18 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+
+    fn get_seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+
+    fn get_n(&self) -> Option<u8> {
+        self.inner.n
+    }
+
+    fn get_best_of(&self) -> Option<u8> {
+        self.inner.best_of
+    }
 }
 
 impl CommonExtProvider for NvCreateCompletionRequest {
@@ -198,6 +198,14 @@ impl CommonExtProvider for NvCreateCompletionRequest {
             "top_k",
             self.common.top_k.as_ref(),
             self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
+        )
+    }
+
+    fn get_min_p(&self) -> Option<f32> {
+        choose_with_deprecation(
+            "min_p",
+            self.common.min_p.as_ref(),
+            self.nvext.as_ref().and_then(|nv| nv.min_p.as_ref()),
         )
     }
 
@@ -424,6 +432,9 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         validate::validate_user(self.inner.user.as_deref())?;
         // none for seed
+
+        // Common Ext
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
 
         Ok(())
     }
