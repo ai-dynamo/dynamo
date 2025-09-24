@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Dict, List
 
 from benchmarks.utils.genai import run_concurrency_sweep
-from benchmarks.utils.plot import generate_plots
 from deploy.utils.kubernetes import is_running_in_cluster
 
 
@@ -68,19 +67,11 @@ def run_endpoint_benchmark(
 
 def print_final_summary(output_dir: Path, labels: List[str]) -> None:
     """Print final benchmark summary"""
-    print("📊 Generating performance plots...")
-    generate_plots(base_output_dir=output_dir, output_dir=output_dir / "plots")
-    print(f"📈 Plots saved to: {output_dir / 'plots'}")
-    print(f"📋 Summary saved to: {output_dir / 'plots' / 'SUMMARY.txt'}")
-
-    print()
     print("🎉 Benchmark workflow completed successfully!")
     print(f"📁 All results available at: {output_dir}")
 
     if labels:
         print(f"🚀 Benchmarked: {', '.join(labels)}")
-
-    print(f"📊 View plots at: {output_dir / 'plots'}")
 
 
 def run_benchmark_workflow(

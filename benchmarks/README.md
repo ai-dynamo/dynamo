@@ -28,7 +28,8 @@ kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev
 
 # Run benchmark
 python3 -m benchmarks.utils.benchmark \
-    --input my-benchmark=http://localhost:8000 \
+    --benchmark-name my-benchmark \
+    --endpoint-url http://localhost:8000 \
     --model "<your-model>"
 
 # Generate plots
@@ -43,15 +44,10 @@ python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-nam
 Benchmark any HTTP endpoints! The benchmarking framework supports:
 
 **Flexible Configuration:**
-- User-defined labels for each input using `--input label=value` format
-- Support for multiple inputs to enable comparisons
+- User-defined benchmark names using `--benchmark-name` flag
+- Support for single endpoint benchmarking with `--endpoint-url` flag
 - Customizable concurrency levels (configurable via CONCURRENCIES env var), sequence lengths, and models
-- Automated performance plot generation with custom labels
-
-**Sequential Execution:**
-- Benchmarks are run sequentially, not in parallel
-- To avoid interference, ensure only one deployment is utilizing the target GPUs during a run
-- This helps produce more comparable measurements across configurations
+- Automated performance plot generation with custom benchmark names
 
 **Supported Backends:**
 - DynamoGraphDeployments with port-forwarded endpoints
