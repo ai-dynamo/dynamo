@@ -67,12 +67,12 @@ pip3 install aiconfigurator
 ```sh
 aiconfigurator cli --model LLAMA3.1_70B --total_gpus 16 --system h200_sxm
 ```
-and from the output, you can see the Parento curve with suggest P/D settings 
+and from the output, you can see the Pareto curve with suggest P/D settings
 ![text](images/pareto.png)
 3. Start the serving with 1 prefill workers with tensor parallem 4 and 1 decoding worker with tensor parallem 8 as AI Configurator suggested
 ![text](images/settings.png)
 ```sh
 kubectl apply -f disagg_router.yaml --namespace ${NAMESPACE}
-```  
+```
 
-4. Forward the port and test out the performance as described in the section above. 
+4. Forward the port and test out the performance as described in the section above.
