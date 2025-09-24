@@ -41,6 +41,9 @@ dynamo-operator:
     # -- Node tolerations for controller manager pods
     tolerations: []
 
+    # -- Affinity for controller manager pods
+    affinity: []
+
     manager:
       # Container image configuration for the operator manager
       image:
