@@ -89,7 +89,7 @@ resources:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
+    image: my-registry/trtllm-runtime:my-tag
     workingDir: /workspace/components/backends/trtllm
     args:
       - "python3"
@@ -109,7 +109,7 @@ Before using these templates, ensure you have:
 
 ### Container Images
 
-The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/trtllm-runtime`. If you don't have access, build and push your own image:
+The deployment files currently require access to `my-registry/trtllm-runtime`. If you don't have access, build and push your own image:
 
 ```bash
 ./container/build.sh --framework tensorrtllm
@@ -141,7 +141,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/trtllm-runtime:your-tag
+image: my-registry/trtllm-runtime:my-tag
 
 # Configure your model and deployment settings
 args:

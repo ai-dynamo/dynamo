@@ -20,7 +20,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -43,7 +43,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -91,7 +91,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -114,7 +114,7 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -137,7 +137,7 @@ spec:
               port: 9090
             periodSeconds: 30
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtime:dep-301.6
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
