@@ -196,7 +196,7 @@ def get_worker_service_from_config(config: dict):
 
 # TODO: make is work for all frameworks
 def setup_worker_service_resources(
-    worker_service, gpu_count: int, num_gpus_per_node: int = None
+    worker_service, gpu_count: int, num_gpus_per_node: Optional[int] = None
 ):
     """Helper function to set up worker service resources (requests and limits)."""
     # Handle multinode configuration if num_gpus_per_node is provided
