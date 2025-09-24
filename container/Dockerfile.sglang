@@ -102,7 +102,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git checkout v${SGLANG_VERSION} && \
     uv pip install --no-cache-dir \
         https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu${CUDA_INDEX}-cp310-abi3-manylinux2014_$(uname -m).whl \
-        --force-reinstall --no-deps ; && \
+        --force-reinstall --no-deps && \
     # Install in editable mode for development
     uv pip install -e "python[all]"
 
