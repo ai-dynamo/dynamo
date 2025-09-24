@@ -130,7 +130,7 @@ uv pip install --prerelease=allow sglang[all]==0.4.9.post6
 <summary>Instructions</summary>
 
 ```bash
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.5.1
 ```
 
 </details>

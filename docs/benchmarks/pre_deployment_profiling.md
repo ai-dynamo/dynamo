@@ -151,7 +151,7 @@ spec:
 
 1. **Set the container image:**
    ```bash
-   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
    ```
 
 2. **Set the config path for the profiling job:**

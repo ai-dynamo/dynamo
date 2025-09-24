@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -32,7 +32,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -51,7 +51,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

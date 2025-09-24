@@ -93,7 +93,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/trtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.5.1
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
@@ -123,7 +123,7 @@ spec:
             - name: nvidia-config
               mountPath: /workspace/components/backends/trtllm/engine_configs
               readOnly: true
-          image: my-registry/trtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.5.1
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
@@ -153,7 +153,7 @@ spec:
             - name: nvidia-config
               mountPath: /workspace/components/backends/trtllm/engine_configs
               readOnly: true
-          image: my-registry/trtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/trtllm-runtime:0.5.1
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
