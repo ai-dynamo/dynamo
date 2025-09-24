@@ -24,7 +24,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 ```bash
 # 1. Set environment
 export NAMESPACE=dynamo-kubernetes
-export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=0.5.0 # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
 # 2. Install CRDs
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
@@ -33,19 +33,51 @@ helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz --namespace default
 # 3. Install Platform
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
+
+# For multinode deployments, enable Grove/KAI with:
+# helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace \
+#   --set grove.enabled=true \
+#   --set kai.enabled=true
 ```
 
 For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](/docs/kubernetes/installation_guide.md)**.
 
-## 2. Choose Your Backend
+## 2. Choose Your Backend and Deployment Pattern
 
-Each backend has deployment examples and configuration options:
+### **Aggregated Serving**
+Prefill and decode phases run on the same worker - simplest deployment pattern.
 
-| Backend | Available Configurations |
-|---------|--------------------------|
-| **[vLLM](/components/backends/vllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated + Planner, Disaggregated Multi-node |
-| **[SGLang](/components/backends/sglang/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Planner, Disaggregated Multi-node |
-| **[TensorRT-LLM](/components/backends/trtllm/deploy/README.md)** | Aggregated, Aggregated + Router, Disaggregated, Disaggregated + Router, Disaggregated Multi-node |
+| Backend | Configuration | Deploy Command |
+|---------|---------------|----------------|
+| **vLLM** | [Aggregated](components/backends/vllm/deploy/agg.yaml) | `kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}` |
+| **vLLM** | [Aggregated + Router](components/backends/vllm/deploy/agg_router.yaml) | `kubectl apply -f components/backends/vllm/deploy/agg_router.yaml -n ${NAMESPACE}` |
+| **SGLang** | [Aggregated](components/backends/sglang/deploy/agg.yaml) | `kubectl apply -f components/backends/sglang/deploy/agg.yaml -n ${NAMESPACE}` |
+| **SGLang** | [Aggregated + Router](components/backends/sglang/deploy/agg_router.yaml) | `kubectl apply -f components/backends/sglang/deploy/agg_router.yaml -n ${NAMESPACE}` |
+| **TensorRT-LLM** | [Aggregated](components/backends/trtllm/deploy/agg.yaml) | `kubectl apply -f components/backends/trtllm/deploy/agg.yaml -n ${NAMESPACE}` |
+| **TensorRT-LLM** | [Aggregated + Router](components/backends/trtllm/deploy/agg_router.yaml) | `kubectl apply -f components/backends/trtllm/deploy/agg_router.yaml -n ${NAMESPACE}` |
+
+### **Disaggregated Serving**
+Prefill and decode phases run on separate workers - higher performance and scalability.
+
+| Backend | Configuration | Deploy Command |
+|---------|---------------|----------------|
+| **vLLM** | [Disaggregated](components/backends/vllm/deploy/disagg.yaml) | `kubectl apply -f components/backends/vllm/deploy/disagg.yaml -n ${NAMESPACE}` |
+| **vLLM** | [Disaggregated + Router](components/backends/vllm/deploy/disagg_router.yaml) | `kubectl apply -f components/backends/vllm/deploy/disagg_router.yaml -n ${NAMESPACE}` |
+| **vLLM** | [Disaggregated + Planner](components/backends/vllm/deploy/disagg_planner.yaml) | `kubectl apply -f components/backends/vllm/deploy/disagg_planner.yaml -n ${NAMESPACE}` |
+| **SGLang** | [Disaggregated](components/backends/sglang/deploy/disagg.yaml) | `kubectl apply -f components/backends/sglang/deploy/disagg.yaml -n ${NAMESPACE}` |
+| **SGLang** | [Disaggregated + Planner](components/backends/sglang/deploy/disagg_planner.yaml) | `kubectl apply -f components/backends/sglang/deploy/disagg_planner.yaml -n ${NAMESPACE}` |
+| **TensorRT-LLM** | [Disaggregated](components/backends/trtllm/deploy/disagg.yaml) | `kubectl apply -f components/backends/trtllm/deploy/disagg.yaml -n ${NAMESPACE}` |
+| **TensorRT-LLM** | [Disaggregated + Router](components/backends/trtllm/deploy/disagg_router.yaml) | `kubectl apply -f components/backends/trtllm/deploy/disagg_router.yaml -n ${NAMESPACE}` |
+| **TensorRT-LLM** | [Disaggregated + Planner](components/backends/trtllm/deploy/disagg_planner.yaml) | `kubectl apply -f components/backends/trtllm/deploy/disagg_planner.yaml -n ${NAMESPACE}` |
+
+### **Multi-node Deployment** (Model replicaes across multiple nodes)
+Scale disaggregated serving across multiple Kubernetes nodes for maximum performance.
+
+| Backend | Configuration | Deploy Command |
+|---------|---------------|----------------|
+| **vLLM** | [Multi-node](components/backends/vllm/deploy/disagg-multinode.yaml) | `kubectl apply -f components/backends/vllm/deploy/disagg-multinode.yaml -n ${NAMESPACE}` |
+| **SGLang** | [Multi-node](components/backends/sglang/deploy/disagg-multinode.yaml) | `kubectl apply -f components/backends/sglang/deploy/disagg-multinode.yaml -n ${NAMESPACE}` |
+| **TensorRT-LLM** | [Multi-node](components/backends/trtllm/deploy/disagg-multinode.yaml) | `kubectl apply -f components/backends/trtllm/deploy/disagg-multinode.yaml -n ${NAMESPACE}` |
 
 ## 3. Deploy Your First Model
 
