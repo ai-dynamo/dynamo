@@ -212,6 +212,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
         Endpoint::Responses => todo!(),
+        Endpoint::Tensor => todo!(),
     };
 
     let request_type = match request_type {

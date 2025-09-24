@@ -11,10 +11,10 @@ use crate::http::service::Metrics;
 use crate::http::service::metrics;
 
 use crate::discovery::ModelManager;
+use crate::protocols::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
-use dynamo_async_openai::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 use dynamo_runtime::transports::etcd;
 use futures::pin_mut;
 use tokio::task::JoinHandle;
@@ -22,6 +22,8 @@ use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::grpc::service::openai::completion_response_stream;
+use crate::grpc::service::tensor::tensor_response_stream;
+use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
 
 use crate::protocols::openai::completions::{
@@ -33,8 +35,8 @@ pub mod inference {
 }
 use inference::grpc_inference_service_server::{GrpcInferenceService, GrpcInferenceServiceServer};
 use inference::{
-    InferParameter, ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest,
-    ModelInferResponse, ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
+    ModelConfig, ModelConfigRequest, ModelConfigResponse, ModelInferRequest, ModelInferResponse,
+    ModelMetadataRequest, ModelMetadataResponse, ModelStreamInferResponse,
 };
 
 /// [gluo TODO] 'metrics' are for HTTP service and there is HTTP endpoint
@@ -78,6 +80,10 @@ impl State {
 
     pub fn etcd_client(&self) -> Option<&etcd::Client> {
         self.etcd_client.as_ref()
+    }
+
+    fn is_tensor_model(&self, model: &String) -> bool {
+        self.manager.list_tensor_models().contains(model)
     }
 }
 
@@ -180,8 +186,34 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
+        let model = request.get_ref().model_name.clone();
         let request = request.into_inner();
         let request_id = request.id.clone();
+
+        // [gluo TODO] refactor to reuse code, inference logic is largely the same
+        if self.state().is_tensor_model(&model) {
+            // Fallback handling by assuming the model is OpenAI Completions model
+            let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
+                .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
+
+            let stream = tensor_response_stream(self.state_clone(), tensor_request, false).await?;
+
+            let tensor_response = NvCreateTensorResponse::from_annotated_stream(stream)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to fold completions stream: {:?}", e);
+                    Status::internal(format!("Failed to fold completions stream: {}", e))
+                })?;
+
+            let mut reply: ModelInferResponse = tensor_response.try_into().map_err(|e| {
+                Status::invalid_argument(format!("Failed to parse response: {}", e))
+            })?;
+            reply.id = request_id;
+
+            return Ok(Response::new(reply));
+        }
+
+        // Fallback handling by assuming the model is OpenAI Completions model
         let mut completion_request: NvCreateCompletionRequest = request
             .try_into()
             .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
@@ -216,13 +248,12 @@ impl GrpcInferenceService for KserveService {
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to fold completions stream: {:?}", e);
-                    Status::internal("Failed to fold completions stream")
+                    Status::internal(format!("Failed to fold completions stream: {}", e))
                 })?;
 
         let mut reply: ModelInferResponse = completion_response
             .try_into()
             .map_err(|e| Status::invalid_argument(format!("Failed to parse response: {}", e)))?;
-
         reply.id = request_id;
 
         Ok(Response::new(reply))
@@ -244,9 +275,7 @@ impl GrpcInferenceService for KserveService {
             // and passing AsyncEngineStream for each request to the response stream
             // which will be collectively polling.
             while let Some(request) = request_stream.next().await {
-                // Must keep track of 'request_id' which will be returned in corresponding response
-                let request_id: String;
-                let mut completion_request: NvCreateCompletionRequest = match request {
+                let request = match request {
                     Err(e) => {
                         tracing::error!("Unexpected gRPC failed to read request: {}", e);
                         yield ModelStreamInferResponse {
@@ -256,12 +285,48 @@ impl GrpcInferenceService for KserveService {
                         continue;
                     }
                     Ok(request) => {
-                        request_id = request.id.clone();
-                        request.try_into().map_err(|e| {
-                            Status::invalid_argument(format!("Failed to parse request: {}", e))
-                        })?
+                        request
                     }
                 };
+
+                let model = request.model_name.clone();
+
+                // [gluo TODO] refactor to reuse code, inference logic is largely the same
+                if state.is_tensor_model(&model) {
+                    // Must keep track of 'request_id' which will be returned in corresponding response
+                    let request_id = request.id.clone();
+                    let tensor_request: NvCreateTensorRequest = request.try_into().map_err(|e| {
+                        Status::invalid_argument(format!("Failed to parse request: {}", e))
+                    })?;
+
+                    let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
+
+                    pin_mut!(stream);
+                    while let Some(response) = stream.next().await {
+                        match response.data {
+                            Some(data) => {
+                                let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {
+                                    Status::invalid_argument(format!("Failed to parse response: {}", e))
+                                })?;
+                                if reply.infer_response.is_some() {
+                                    reply.infer_response.as_mut().unwrap().id = request_id.clone();
+                                }
+                                yield reply;
+                            },
+                            None => {
+                                // Skip if no data is present, the response is for annotation
+                            },
+                        }
+                    }
+                    continue;
+                }
+
+                // Fallback handling by assuming the model is OpenAI Completions model
+                // Must keep track of 'request_id' which will be returned in corresponding response
+                let request_id = request.id.clone();
+                let mut completion_request: NvCreateCompletionRequest = request.try_into().map_err(|e| {
+                    Status::invalid_argument(format!("Failed to parse request: {}", e))
+                })?;
 
                 // Apply template values if present
                 if let Some(template) = &template {
@@ -309,7 +374,7 @@ impl GrpcInferenceService for KserveService {
                                 "Failed to fold completions stream: {:?}",
                                 e
                             );
-                            Status::internal("Failed to fold completions stream")
+                            Status::internal(format!("Failed to fold completions stream: {}", e))
                         })?;
 
                     let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
@@ -332,38 +397,77 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelMetadataRequest>,
     ) -> Result<Response<ModelMetadataResponse>, Status> {
-        let models = self.state.manager().list_completions_models();
+        let entries = self.state.manager().get_model_entries();
         let request_model_name = &request.into_inner().name;
-        if let Some(model_name) = models.into_iter().find(|n| request_model_name == n) {
-            return Ok(Response::new(ModelMetadataResponse {
-                name: model_name,
-                versions: vec!["1".to_string()],
-                platform: "dynamo".to_string(),
-                inputs: vec![
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "text_input".to_string(),
-                        datatype: "BYTES".to_string(),
-                        shape: vec![1],
-                    },
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "streaming".to_string(),
-                        datatype: "BOOL".to_string(),
-                        shape: vec![1],
-                    },
-                ],
-                outputs: vec![
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "text_output".to_string(),
-                        datatype: "BYTES".to_string(),
-                        shape: vec![-1],
-                    },
-                    inference::model_metadata_response::TensorMetadata {
-                        name: "finish_reason".to_string(),
-                        datatype: "BYTES".to_string(),
-                        shape: vec![-1],
-                    },
-                ],
-            }));
+        if let Some(entry) = entries
+            .into_iter()
+            .find(|entry| request_model_name == &entry.name)
+        {
+            if entry.model_type.supports_tensor() {
+                if let Some(config) = entry.runtime_config.as_ref()
+                    && let Some(tensor_model_config) = config.tensor_model_config.as_ref()
+                {
+                    return Ok(Response::new(ModelMetadataResponse {
+                        name: tensor_model_config.name.clone(),
+                        versions: vec!["1".to_string()],
+                        platform: "dynamo".to_string(),
+                        inputs: tensor_model_config
+                            .inputs
+                            .iter()
+                            .map(|input| inference::model_metadata_response::TensorMetadata {
+                                name: input.name.clone(),
+                                datatype: input.data_type.to_string(),
+                                shape: input.shape.clone(),
+                            })
+                            .collect(),
+                        outputs: tensor_model_config
+                            .outputs
+                            .iter()
+                            .map(
+                                |output| inference::model_metadata_response::TensorMetadata {
+                                    name: output.name.clone(),
+                                    datatype: output.data_type.to_string(),
+                                    shape: output.shape.clone(),
+                                },
+                            )
+                            .collect(),
+                    }));
+                }
+                Err(Status::invalid_argument(format!(
+                    "Model '{}' has type Tensor but no model config is provided",
+                    request_model_name
+                )))?
+            } else if entry.model_type.supports_completions() {
+                return Ok(Response::new(ModelMetadataResponse {
+                    name: entry.name,
+                    versions: vec!["1".to_string()],
+                    platform: "dynamo".to_string(),
+                    inputs: vec![
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "text_input".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![1],
+                        },
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "streaming".to_string(),
+                            datatype: "BOOL".to_string(),
+                            shape: vec![1],
+                        },
+                    ],
+                    outputs: vec![
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "text_output".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![-1],
+                        },
+                        inference::model_metadata_response::TensorMetadata {
+                            name: "finish_reason".to_string(),
+                            datatype: "BYTES".to_string(),
+                            shape: vec![-1],
+                        },
+                    ],
+                }));
+            }
         }
         Err(Status::not_found(format!(
             "Model '{}' not found",
@@ -375,251 +479,94 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelConfigRequest>,
     ) -> Result<Response<ModelConfigResponse>, Status> {
-        let models = self.state.manager().list_completions_models();
+        let entries = self.state.manager().get_model_entries();
         let request_model_name = &request.into_inner().name;
-        if let Some(model_name) = models.into_iter().find(|n| request_model_name == n) {
-            let config = ModelConfig {
-                name: model_name,
-                platform: "dynamo".to_string(),
-                backend: "dynamo".to_string(),
-                input: vec![
-                    ModelInput {
-                        name: "text_input".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![1],
+        if let Some(entry) = entries
+            .into_iter()
+            .find(|entry| request_model_name == &entry.name)
+        {
+            if entry.model_type.supports_tensor() {
+                if let Some(config) = entry.runtime_config.as_ref()
+                    && let Some(tensor_model_config) = config.tensor_model_config.as_ref()
+                {
+                    let model_config = ModelConfig {
+                        name: tensor_model_config.name.clone(),
+                        platform: "dynamo".to_string(),
+                        backend: "dynamo".to_string(),
+                        input: tensor_model_config
+                            .inputs
+                            .iter()
+                            .map(|input| ModelInput {
+                                name: input.name.clone(),
+                                data_type: input.data_type.to_kserve(),
+                                dims: input.shape.clone(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        output: tensor_model_config
+                            .outputs
+                            .iter()
+                            .map(|output| ModelOutput {
+                                name: output.name.clone(),
+                                data_type: output.data_type.to_kserve(),
+                                dims: output.shape.clone(),
+                                ..Default::default()
+                            })
+                            .collect(),
                         ..Default::default()
-                    },
-                    ModelInput {
-                        name: "streaming".to_string(),
-                        data_type: DataType::TypeBool as i32,
-                        dims: vec![1],
-                        optional: true,
-                        ..Default::default()
-                    },
-                ],
-                output: vec![
-                    ModelOutput {
-                        name: "text_output".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![-1],
-                        ..Default::default()
-                    },
-                    ModelOutput {
-                        name: "finish_reason".to_string(),
-                        data_type: DataType::TypeString as i32,
-                        dims: vec![-1],
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            };
-            return Ok(Response::new(ModelConfigResponse {
-                config: Some(config),
-            }));
+                    };
+                    return Ok(Response::new(ModelConfigResponse {
+                        config: Some(model_config.clone()),
+                    }));
+                }
+                Err(Status::invalid_argument(format!(
+                    "Model '{}' has type Tensor but no model config is provided",
+                    request_model_name
+                )))?
+            } else if entry.model_type.supports_completions() {
+                let config = ModelConfig {
+                    name: entry.name,
+                    platform: "dynamo".to_string(),
+                    backend: "dynamo".to_string(),
+                    input: vec![
+                        ModelInput {
+                            name: "text_input".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![1],
+                            ..Default::default()
+                        },
+                        ModelInput {
+                            name: "streaming".to_string(),
+                            data_type: DataType::TypeBool as i32,
+                            dims: vec![1],
+                            optional: true,
+                            ..Default::default()
+                        },
+                    ],
+                    output: vec![
+                        ModelOutput {
+                            name: "text_output".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![-1],
+                            ..Default::default()
+                        },
+                        ModelOutput {
+                            name: "finish_reason".to_string(),
+                            data_type: DataType::TypeString as i32,
+                            dims: vec![-1],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                };
+                return Ok(Response::new(ModelConfigResponse {
+                    config: Some(config),
+                }));
+            }
         }
         Err(Status::not_found(format!(
             "Model '{}' not found",
             request_model_name
         )))
-    }
-}
-
-impl TryFrom<ModelInferRequest> for NvCreateCompletionRequest {
-    type Error = Status;
-
-    fn try_from(request: ModelInferRequest) -> Result<Self, Self::Error> {
-        // Protocol requires if `raw_input_contents` is used to hold input data,
-        // it must be used for all inputs.
-        if !request.raw_input_contents.is_empty()
-            && request.inputs.len() != request.raw_input_contents.len()
-        {
-            return Err(Status::invalid_argument(
-                "`raw_input_contents` must be used for all inputs",
-            ));
-        }
-
-        // iterate through inputs
-        let mut text_input = None;
-        let mut stream = false;
-        for (idx, input) in request.inputs.iter().enumerate() {
-            match input.name.as_str() {
-                "text_input" => {
-                    if input.datatype != "BYTES" {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected 'text_input' to be of type BYTES for string input, got {:?}",
-                            input.datatype
-                        )));
-                    }
-                    if input.shape != vec![1] && input.shape != vec![1, 1] {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected 'text_input' to have shape [1], got {:?}",
-                            input.shape
-                        )));
-                    }
-                    match &input.contents {
-                        Some(content) => {
-                            let bytes = &content.bytes_contents[0];
-                            text_input = Some(String::from_utf8_lossy(bytes).to_string());
-                        }
-                        None => {
-                            let raw_input =
-                                request.raw_input_contents.get(idx).ok_or_else(|| {
-                                    Status::invalid_argument("Missing raw input for 'text_input'")
-                                })?;
-                            if raw_input.len() < 4 {
-                                return Err(Status::invalid_argument(
-                                    "'text_input' raw input must be length-prefixed (>= 4 bytes)",
-                                ));
-                            }
-                            // We restrict the 'text_input' only contain one element, only need to
-                            // parse the first element. Skip first four bytes that is used to store
-                            // the length of the input.
-                            text_input = Some(String::from_utf8_lossy(&raw_input[4..]).to_string());
-                        }
-                    }
-                }
-                "streaming" | "stream" => {
-                    if input.datatype != "BOOL" {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected '{}' to be of type BOOL, got {:?}",
-                            input.name, input.datatype
-                        )));
-                    }
-                    if input.shape != vec![1] {
-                        return Err(Status::invalid_argument(format!(
-                            "Expected 'stream' to have shape [1], got {:?}",
-                            input.shape
-                        )));
-                    }
-                    match &input.contents {
-                        Some(content) => {
-                            stream = content.bool_contents[0];
-                        }
-                        None => {
-                            let raw_input =
-                                request.raw_input_contents.get(idx).ok_or_else(|| {
-                                    Status::invalid_argument("Missing raw input for 'stream'")
-                                })?;
-                            if raw_input.is_empty() {
-                                return Err(Status::invalid_argument(
-                                    "'stream' raw input must contain at least one byte",
-                                ));
-                            }
-                            stream = raw_input[0] != 0;
-                        }
-                    }
-                }
-                _ => {
-                    return Err(Status::invalid_argument(format!(
-                        "Invalid input name: {}, supported inputs are 'text_input', 'stream'",
-                        input.name
-                    )));
-                }
-            }
-        }
-
-        // return error if text_input is None
-        let text_input = match text_input {
-            Some(input) => input,
-            None => {
-                return Err(Status::invalid_argument(
-                    "Missing required input: 'text_input'",
-                ));
-            }
-        };
-
-        Ok(NvCreateCompletionRequest {
-            inner: CreateCompletionRequest {
-                model: request.model_name,
-                prompt: Prompt::String(text_input),
-                stream: Some(stream),
-                user: if request.id.is_empty() {
-                    None
-                } else {
-                    Some(request.id.clone())
-                },
-                ..Default::default()
-            },
-            common: Default::default(),
-            nvext: None,
-        })
-    }
-}
-
-impl TryFrom<NvCreateCompletionResponse> for ModelInferResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
-        let mut outputs = vec![];
-        let mut text_output = vec![];
-        let mut finish_reason = vec![];
-        for choice in &response.inner.choices {
-            text_output.push(choice.text.clone());
-            if let Some(reason) = choice.finish_reason.as_ref() {
-                match reason {
-                    CompletionFinishReason::Stop => {
-                        finish_reason.push("stop".to_string());
-                    }
-                    CompletionFinishReason::Length => {
-                        finish_reason.push("length".to_string());
-                    }
-                    CompletionFinishReason::ContentFilter => {
-                        finish_reason.push("content_filter".to_string());
-                    }
-                }
-            }
-        }
-        outputs.push(inference::model_infer_response::InferOutputTensor {
-            name: "text_output".to_string(),
-            datatype: "BYTES".to_string(),
-            shape: vec![text_output.len() as i64],
-            contents: Some(inference::InferTensorContents {
-                bytes_contents: text_output
-                    .into_iter()
-                    .map(|text| text.as_bytes().to_vec())
-                    .collect(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-        outputs.push(inference::model_infer_response::InferOutputTensor {
-            name: "finish_reason".to_string(),
-            datatype: "BYTES".to_string(),
-            shape: vec![finish_reason.len() as i64],
-            contents: Some(inference::InferTensorContents {
-                bytes_contents: finish_reason
-                    .into_iter()
-                    .map(|text| text.as_bytes().to_vec())
-                    .collect(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-
-        Ok(ModelInferResponse {
-            model_name: response.inner.model,
-            model_version: "1".to_string(),
-            id: response.inner.id,
-            outputs,
-            parameters: ::std::collections::HashMap::<String, InferParameter>::new(),
-            raw_output_contents: vec![],
-        })
-    }
-}
-
-impl TryFrom<NvCreateCompletionResponse> for ModelStreamInferResponse {
-    type Error = anyhow::Error;
-
-    fn try_from(response: NvCreateCompletionResponse) -> Result<Self, Self::Error> {
-        match ModelInferResponse::try_from(response) {
-            Ok(response) => Ok(ModelStreamInferResponse {
-                infer_response: Some(response),
-                ..Default::default()
-            }),
-            Err(e) => Ok(ModelStreamInferResponse {
-                infer_response: None,
-                error_message: format!("Failed to convert response: {}", e),
-            }),
-        }
     }
 }
