@@ -192,7 +192,7 @@ async def run_profile(args):
                 )
             else:
                 prefill_config = config_modifier.set_config_tp_size(
-                    prefill_config, num_gpus
+                    prefill_config, num_gpus, "prefill"
                 )
             logger.info(f"Dynamo config: {prefill_config}")
 
@@ -329,7 +329,7 @@ async def run_profile(args):
                 )
             else:
                 decode_config = config_modifier.set_config_tp_size(
-                    decode_config, num_gpus
+                    decode_config, num_gpus, "decode"
                 )
             logger.info(f"Dynamo config: {decode_config}")
 
@@ -377,8 +377,7 @@ async def run_profile(args):
                 # For MoE models, attention_dp_size = DEP size (num_gpus), for dense models = 1
                 attention_dp_size = num_gpus if args.is_moe_model else 1
                 max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                    f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
-                    attention_dp_size=attention_dp_size,
+                    decode_config, work_dir, client.deployment_name, "decode", attention_dp_size
                 )
                 max_concurrency = max_kv_tokens // (args.isl + args.osl)
 
@@ -552,7 +551,7 @@ async def run_profile(args):
             )
         else:
             prefill_config = config_modifier.set_config_tp_size(
-                prefill_config, best_prefill_gpus
+                prefill_config, best_prefill_gpus, "prefill"
             )
         logger.info(f"Dynamo config: {prefill_config}")
 
@@ -629,7 +628,7 @@ async def run_profile(args):
             )
         else:
             decode_config = config_modifier.set_config_tp_size(
-                decode_config, best_decode_gpus
+                decode_config, best_decode_gpus, "decode"
             )
         logger.info(f"Dynamo config: {decode_config}")
 
@@ -682,8 +681,7 @@ async def run_profile(args):
             # For MoE models, attention_dp_size = DEP size (best_decode_gpus), for dense models = 1
             attention_dp_size = best_decode_gpus if args.is_moe_model else 1
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log",
-                attention_dp_size=attention_dp_size,
+                decode_config, work_dir, client.deployment_name, "decode", attention_dp_size
             )
 
             base_url = client.get_service_url()

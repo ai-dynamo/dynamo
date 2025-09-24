@@ -58,11 +58,7 @@ class Service(BaseModel):
     replicas: Optional[int] = None
     resources: Optional[ServiceResources] = None
     extraPodSpec: Optional[PodSpec] = None
-    model_config = {"extra": "allow"}
-
-
-class Services(BaseModel):
-    Frontend: Service
+    subComponentType: Optional[str] = None
     model_config = {"extra": "allow"}
 
 
@@ -257,7 +253,7 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int) -> dict:
+    def set_config_tp_size(cls, config: dict, tp_size: int, target: Literal["prefill", "decode"]) -> dict:
         ...
 
     @classmethod
@@ -281,11 +277,24 @@ class ConfigModifierProtocol(Protocol):
         ...
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(
-        cls, dynamo_log_fn: str, attention_dp_size: int = 1
-    ) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, config: dict, work_dir: str, deployment_name: str, target: Literal["prefill", "decode"], attention_dp_size: int = 1) -> int:
         ...
 
+def get_dynamo_log_path(work_dir: str, deployment_name: str, component_name: str) -> str:
+    return f"{work_dir}/{deployment_name}/{component_name.lower()}/0.log"
+
+def get_service_name_from_sub_component_type(services: dict[str, Service], sub_component_type: Literal["prefill", "decode"]) -> Optional[str]:
+    matching_service_names = []
+    for service_name, service in services.items():
+        if service.subComponentType == sub_component_type:
+            matching_service_names.append(service_name)
+
+    if len(matching_service_names) > 1:
+        raise ValueError(f"Multiple services with subComponentType {sub_component_type} found")
+    if len(matching_service_names) == 0:
+        return None
+
+    return matching_service_names[0]
 
 class VllmV1ConfigModifier:
     @classmethod
@@ -308,27 +317,35 @@ class VllmV1ConfigModifier:
         # disable planner
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
+        
+        decode_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
+        if not decode_worker_name:
+            decode_worker_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+
+        prefill_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "prefill")
+        if not prefill_worker_name:
+            prefill_worker_name = WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
 
         if target == "prefill":
             # convert prefill worker into decode worker
             cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+                decode_worker_name
             ] = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
+                prefill_worker_name
             ]
             del cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
+                prefill_worker_name
             ]
 
             worker_service = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+                decode_worker_name
             ]
             if (
                 not worker_service.extraPodSpec
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{WORKER_COMPONENT_NAMES['vllm'].decode_worker_k8s_name}'"
+                    f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{decode_worker_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -348,18 +365,18 @@ class VllmV1ConfigModifier:
         elif target == "decode":
             # delete prefill worker
             del cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].prefill_worker_k8s_name
+                prefill_worker_name
             ]
 
             worker_service = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+                decode_worker_name
             ]
             if (
                 not worker_service.extraPodSpec
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{WORKER_COMPONENT_NAMES['vllm'].decode_worker_k8s_name}'"
+                    f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{decode_worker_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -375,18 +392,23 @@ class VllmV1ConfigModifier:
 
         # set num workers to 1
         decode_worker_config = cfg.spec.services[
-            WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+            decode_worker_name
         ]
         decode_worker_config.replicas = 1
 
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
+    def set_config_tp_size(cls, config: dict, tp_size: int, target: Literal["prefill", "decode"]) -> dict:
         cfg = Config.model_validate(config)
 
+        worker_name = get_service_name_from_sub_component_type(cfg.spec.services, target)
+        if not worker_name:
+            # prefill and decode worker are both set to decode worker name
+            worker_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+
         worker_service = cfg.spec.services[
-            WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+            worker_name
         ]
 
         # Ensure resources exists
@@ -408,7 +430,7 @@ class VllmV1ConfigModifier:
             or not worker_service.extraPodSpec.mainContainer
         ):
             raise ValueError(
-                f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{WORKER_COMPONENT_NAMES['vllm'].decode_worker_k8s_name}'"
+                f"Missing extraPodSpec or mainContainer in VLLM decode worker service '{worker_name}'"
             )
         args = worker_service.extraPodSpec.mainContainer.args
 
@@ -439,8 +461,14 @@ class VllmV1ConfigModifier:
     @classmethod
     def get_model_name(cls, config: dict) -> str:
         cfg = Config.model_validate(config)
-        worker_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-        worker_service = cfg.spec.services[worker_name]
+
+        worker_service_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
+
+        if not worker_service_name:
+            worker_service_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+        
+        worker_service = cfg.spec.services[worker_service_name]
+
         if (
             not worker_service.extraPodSpec
             or not worker_service.extraPodSpec.mainContainer
@@ -461,6 +489,7 @@ class VllmV1ConfigModifier:
         )
         return DEFAULT_MODEL_NAME
 
+    # TODO: should use componentType for service instead of service name "Frontend"
     @classmethod
     def get_port(cls, config: dict) -> int:
         cfg = Config.model_validate(config)
@@ -493,9 +522,14 @@ class VllmV1ConfigModifier:
             return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(
-        cls, dynamo_log_fn: str, attention_dp_size: int = 1
-    ) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, config: dict, work_dir: str, deployment_name: str, target: Literal["prefill", "decode"], attention_dp_size: int = 1) -> int:
+        cfg = Config.model_validate(config)
+
+        worker_name = get_service_name_from_sub_component_type(cfg.spec.services, target)
+        if not worker_name:
+            worker_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+
+        dynamo_log_fn = get_dynamo_log_path(work_dir, deployment_name, worker_name)
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -534,26 +568,34 @@ class SGLangConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
+        prefill_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "prefill")
+        if not prefill_worker_name:
+            prefill_worker_name = WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+
+        decode_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
+        if not decode_worker_name:
+            decode_worker_name = WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+
         if target == "prefill":
             # convert prefill worker into decode worker
             cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+                decode_worker_name
             ] = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+                prefill_worker_name
             ]
             del cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+                prefill_worker_name
             ]
 
             worker_service = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+                decode_worker_name
             ]
             if (
                 not worker_service.extraPodSpec
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
+                    f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{decode_worker_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -573,18 +615,18 @@ class SGLangConfigModifier:
         elif target == "decode":
             # delete prefill worker
             del cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].prefill_worker_k8s_name
+                prefill_worker_name
             ]
 
             worker_service = cfg.spec.services[
-                WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+                decode_worker_name
             ]
             if (
                 not worker_service.extraPodSpec
                 or not worker_service.extraPodSpec.mainContainer
             ):
                 raise ValueError(
-                    f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{WORKER_COMPONENT_NAMES['sglang'].decode_worker_k8s_name}'"
+                    f"Missing extraPodSpec or mainContainer in SGLang decode worker service '{decode_worker_name}'"
                 )
             args = worker_service.extraPodSpec.mainContainer.args
 
@@ -611,18 +653,23 @@ class SGLangConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = join_arguments(args)
 
-        # set num workers to 1
-        decode_worker_config = config["spec"]["services"][
-            WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+        decode_worker_config = cfg.spec.services[
+            decode_worker_name
         ]
-        decode_worker_config["replicas"] = 1
+        decode_worker_config.replicas = 1
 
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
+    def set_config_tp_size(cls, config: dict, tp_size: int, target: Literal["prefill", "decode"]) -> dict:
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(config)
+        worker_name = get_service_name_from_sub_component_type(cfg.spec.services, target)
+        if worker_name:
+            worker_service = cfg.spec.services[
+                worker_name
+            ]
+        else:
+            worker_service = get_worker_service_from_config(config)
 
         # Set up resources
         setup_worker_service_resources(worker_service, tp_size)
@@ -693,8 +740,14 @@ class SGLangConfigModifier:
     @classmethod
     def get_model_name(cls, config: dict) -> str:
         cfg = Config.model_validate(config)
-        worker_name = WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
-        worker_service = cfg.spec.services[worker_name]
+
+        worker_service_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
+
+        if not worker_service_name:
+            worker_service_name = WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+
+        worker_service = cfg.spec.services[worker_service_name]
+
         if (
             not worker_service.extraPodSpec
             or not worker_service.extraPodSpec.mainContainer
@@ -747,9 +800,15 @@ class SGLangConfigModifier:
             return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(
-        cls, dynamo_log_fn: str, attention_dp_size: int = 1
-    ) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, config: dict, work_dir: str, deployment_name: str, target: Literal["prefill", "decode"], attention_dp_size: int = 1) -> int:
+        cfg = Config.model_validate(config)
+
+        worker_name = get_service_name_from_sub_component_type(cfg.spec.services, target)
+        if not worker_name:
+            worker_name = WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name
+
+        dynamo_log_fn = get_dynamo_log_path(work_dir, deployment_name, worker_name)
+        # TODO
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -785,18 +844,26 @@ class TrtllmConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
+        prefill_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "prefill")
+        if not prefill_worker_name:
+            prefill_worker_name = "TRTLLMPrefillWorker"
+
+        decode_worker_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
+        if not decode_worker_name:
+            decode_worker_name = "TRTLLMDecodeWorker"
+
         if target == "prefill":
             # Convert to prefill-only aggregated setup
             # Merge prefill worker config into a single worker
-            if "TRTLLMPrefillWorker" in cfg.spec.services:
+            if prefill_worker_name in cfg.spec.services:
                 # Rename prefill worker to generic worker
                 cfg.spec.services["TRTLLMWorker"] = cfg.spec.services[
-                    "TRTLLMPrefillWorker"
+                    prefill_worker_name
                 ]
-                del cfg.spec.services["TRTLLMPrefillWorker"]
+                del cfg.spec.services[prefill_worker_name]
 
             # Remove decode worker
-            del cfg.spec.services["TRTLLMDecodeWorker"]
+            del cfg.spec.services[decode_worker_name]
 
             worker_service = cfg.spec.services["TRTLLMWorker"]
             if (
@@ -840,16 +907,16 @@ class TrtllmConfigModifier:
         elif target == "decode":
             # Convert to decode-only aggregated setup
             # Use decode worker as the main worker
-            if "TRTLLMDecodeWorker" in cfg.spec.services:
+            if decode_worker_name in cfg.spec.services:
                 # Rename decode worker to generic worker
                 cfg.spec.services["TRTLLMWorker"] = cfg.spec.services[
-                    "TRTLLMDecodeWorker"
+                    decode_worker_name
                 ]
-                del cfg.spec.services["TRTLLMDecodeWorker"]
+                del cfg.spec.services[decode_worker_name]
 
             # Remove prefill worker if exists
-            if "TRTLLMPrefillWorker" in cfg.spec.services:
-                del cfg.spec.services["TRTLLMPrefillWorker"]
+            if prefill_worker_name in cfg.spec.services:
+                del cfg.spec.services[prefill_worker_name]
 
             worker_service = cfg.spec.services["TRTLLMWorker"]
             if (
@@ -893,10 +960,16 @@ class TrtllmConfigModifier:
         return cfg.model_dump()
 
     @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
+    def set_config_tp_size(cls, config: dict, tp_size: int, target: Literal["prefill", "decode"]) -> dict:
         cfg = Config.model_validate(config)
 
-        worker_service = cfg.spec.services["TRTLLMWorker"]
+        worker_name = get_service_name_from_sub_component_type(cfg.spec.services, target)
+        if not worker_name:
+            worker_name = "TRTLLMWorker"
+
+        worker_service = cfg.spec.services[
+            worker_name
+        ]
 
         # Ensure resources exists
         if worker_service.resources is None:
@@ -952,8 +1025,14 @@ class TrtllmConfigModifier:
     @classmethod
     def get_model_name(cls, config: dict) -> str:
         cfg = Config.model_validate(config)
-        worker_name = "TRTLLMWorker"
-        worker_service = cfg.spec.services.get(worker_name)
+        worker_service_name = get_service_name_from_sub_component_type(cfg.spec.services, "prefill")
+        if not worker_service_name:
+            worker_service_name = get_service_name_from_sub_component_type(cfg.spec.services, "decode")
+
+        if not worker_service_name:
+            worker_service_name = "TRTLLMWorker"
+        
+        worker_service = cfg.spec.services.get(worker_service_name)
 
         # Also check for disagg worker names
         if not worker_service:
@@ -1007,9 +1086,15 @@ class TrtllmConfigModifier:
         return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
-    def get_kv_cache_size_from_dynamo_log(
-        cls, dynamo_log_fn: str, attention_dp_size: int = 1
-    ) -> int:
+    def get_kv_cache_size_from_dynamo_log(cls, config: dict, work_dir: str, deployment_name: str, target: Literal["prefill", "decode"], attention_dp_size: int = 1) -> int:
+        cfg = Config.model_validate(config)
+
+        worker_name = get_service_name_from_sub_component_type(cfg.spec.services, target)
+        if not worker_name:
+            worker_name = WORKER_COMPONENT_NAMES["trtllm"].decode_worker_k8s_name
+
+        dynamo_log_fn = get_dynamo_log_path(work_dir, deployment_name, worker_name)
+
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
         try:
