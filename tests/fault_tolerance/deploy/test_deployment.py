@@ -5,7 +5,6 @@ import logging
 import multiprocessing
 import time
 from contextlib import contextmanager
-from multiprocessing import Process
 
 import pytest
 
@@ -13,8 +12,6 @@ from tests.fault_tolerance.deploy.client import client
 from tests.fault_tolerance.deploy.parse_results import main as parse_results
 from tests.fault_tolerance.deploy.scenarios import scenarios
 from tests.utils.managed_deployment import ManagedDeployment
-
-multiprocessing.set_start_method("spawn")
 
 
 @pytest.fixture(params=scenarios.keys())
@@ -37,9 +34,10 @@ def _clients(
     max_request_rate,
 ):
     procs = []
+    ctx = multiprocessing.get_context("spawn")
     for i in range(num_clients):
         procs.append(
-            Process(
+            ctx.Process(
                 target=client,
                 args=(
                     deployment_spec,

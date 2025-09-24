@@ -8,7 +8,7 @@ import re
 import shlex
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import kr8s
 import kubernetes
@@ -179,6 +179,10 @@ class DeploymentSpec:
         """Deployment name"""
         return self._deployment_spec["metadata"]["name"]
 
+    @name.setter
+    def name(self, value: str):
+        self._deployment_spec["metadata"]["name"] = value
+
     @property
     def port(self) -> int:
         """Deployment port"""
@@ -192,10 +196,6 @@ class DeploymentSpec:
     @property
     def endpoint(self) -> str:
         return self._endpoint
-
-    @name.setter
-    def name(self, value: str):
-        self._deployment_spec["metadata"]["name"] = value
 
     @property
     def namespace(self) -> str:
@@ -353,12 +353,13 @@ class ManagedDeployment:
     namespace: str
     frontend_service_name: Optional[str] = "Frontend"
 
-    _custom_api = None
-    _core_api = None
-    _in_cluster = False
-    _logger = logging.getLogger()
-    _port_forward = None
-    _deployment_name = None
+    _custom_api: Optional[Any] = None
+    _core_api: Optional[Any] = None
+    _in_cluster: bool = False
+    _logger: logging.Logger = logging.getLogger()
+    _port_forward: Optional[Any] = None
+    _deployment_name: Optional[str] = None
+    _apps_v1: Optional[Any] = None
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
@@ -379,6 +380,7 @@ class ManagedDeployment:
 
     async def _wait_for_pods(self, label, expected, timeout=300):
         for _ in range(timeout):
+            assert self._core_api is not None, "Kubernetes API not initialized"
             pods = await self._core_api.list_namespaced_pod(
                 self.namespace, label_selector=label
             )
@@ -397,6 +399,7 @@ class ManagedDeployment:
 
     async def _scale_statfulset(self, name, label, replicas):
         body = {"spec": {"replicas": replicas}}
+        assert self._apps_v1 is not None, "Kubernetes API not initialized"
         await self._apps_v1.patch_namespaced_stateful_set_scale(
             name, self.namespace, body
         )
@@ -406,6 +409,7 @@ class ManagedDeployment:
         self._logger.info(f"Restarting {name} {label}")
 
         await self._scale_statfulset(name, label, 0)
+        assert self._core_api is not None, "Kubernetes API not initialized"
         nats_pvc = await self._core_api.list_namespaced_persistent_volume_claim(
             self.namespace, label_selector=label
         )
@@ -434,6 +438,7 @@ class ManagedDeployment:
         while (time.time() - start_time) < timeout:
             try:
                 attempt += 1
+                assert self._custom_api is not None, "Kubernetes API not initialized"
                 status = await self._custom_api.get_namespaced_custom_object(
                     group="nvidia.com",
                     version="v1alpha1",
@@ -520,6 +525,7 @@ class ManagedDeployment:
         )
 
         try:
+            assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
                 version="v1alpha1",
@@ -652,7 +658,7 @@ class ManagedDeployment:
         Delete the DynamoGraphDeployment CR.
         """
         try:
-            if self._deployment_name:
+            if self._deployment_name and self._custom_api is not None:
                 await self._custom_api.delete_namespaced_custom_object(
                     group="nvidia.com",
                     version="v1alpha1",

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Optional
 
 from tests.utils.managed_deployment import DeploymentSpec
 
@@ -26,7 +27,7 @@ class Load:
     output_token_length: int = 100
     max_retries: int = 1
     max_request_rate: float = 1
-    sla: float = None
+    sla: Optional[float] = None
 
 
 @dataclass
@@ -43,7 +44,7 @@ class Scenario:
     deployment: DeploymentSpec
     load: Load
     failures: list[Failure]
-    model: str = None
+    model: Optional[str] = None
 
 
 # Each Deployment Spec contains

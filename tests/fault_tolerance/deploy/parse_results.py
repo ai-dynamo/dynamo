@@ -18,7 +18,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from tabulate import tabulate
@@ -38,7 +38,7 @@ def parse_test_log(file_path):
                 start_time = datetime.fromisoformat(
                     line.split(" ")[1].replace("T", " ")
                 )
-                start_cmd = []
+                start_cmd: List[str] = []
             elif "Deployment fault-tolerance-test is ready" in line:
                 ready_time = datetime.fromisoformat(
                     line.split(" ")[1].replace("T", " ")
@@ -170,7 +170,7 @@ def parse_process_log(log_dir, process_name):
     }
     if not os.path.isdir(log_dir):
         return {}
-    ready_times = {}
+    ready_times: Dict[str, List[Tuple[datetime, str, float]]] = {}
 
     for entry in os.listdir(log_dir):
         if entry.endswith(".log") and "metrics" not in entry:
@@ -317,7 +317,7 @@ def process_test_directory(test_dir, sla):
     }
 
 
-def main(logs_dir, tablefmt, log_paths=[], sla=None):
+def main(logs_dir, tablefmt, log_paths=None, sla=None):
     results = []
     if log_paths:
         for log_path in log_paths:

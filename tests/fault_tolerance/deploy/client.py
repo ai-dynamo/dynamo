@@ -19,6 +19,7 @@ import os
 import random
 import time
 from datetime import datetime
+from typing import Any, Dict
 
 import requests
 
@@ -154,12 +155,13 @@ def client(
     logger = logging.getLogger(f"CLIENT: {index}")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    managed_deployment = ManagedDeployment(None, deployment_spec, namespace)
-    pod_ports = {}
+    managed_deployment = ManagedDeployment(log_dir, deployment_spec, namespace)
+    pod_ports: Dict[str, Any] = {}
 
     min_elapsed_time = 1 / max_request_rate
 
     try:
+        os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"client_{index}.log.txt")
         with open(log_path, "w") as log:
             for i in range(requests_per_client):
