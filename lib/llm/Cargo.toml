@@ -53,6 +53,7 @@ either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }
 futures-util = "0.3.31"
+hf-hub = { workspace = true }
 humantime = { workspace = true }                           # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
@@ -147,6 +148,7 @@ ahash = "0.8.12"
 approx = "0.5"
 assert_matches = "1.5"
 criterion = { version = "0.3", features = ["html_reports"] }
+hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 proptest = "1.5.0"
