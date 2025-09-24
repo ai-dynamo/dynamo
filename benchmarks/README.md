@@ -33,6 +33,9 @@ python3 -m benchmarks.utils.benchmark \
 
 # Generate plots
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
+
+# Or plot only specific benchmark experiments
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name my-benchmark
 ```
 
 ## Features

@@ -34,7 +34,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: trtllm-agg
@@ -50,7 +50,7 @@ spec:
           configMap:
             name: nvidia-config
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           # mount the configmap as a volume
           volumeMounts:

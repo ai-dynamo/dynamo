@@ -20,7 +20,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
+          image: my-registry/sglang-wideep-runtime:my-tag
     decode:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
@@ -43,7 +43,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
+          image: my-registry/sglang-wideep-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh
@@ -84,7 +84,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-sglang-wideep-runtime:hzhou-0917-01
+          image: my-registry/sglang-wideep-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh
