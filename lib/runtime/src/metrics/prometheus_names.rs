@@ -116,9 +116,6 @@ pub mod frontend_service {
     /// Request migration limit for a worker serving the model (MDC)
     pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
 
-    /// Number of worker instances currently serving a model
-    pub const MODEL_WORKERS_TOTAL: &str = "model_workers_total";
-
     /// Status label values
     pub mod status {
         /// Value for successful requests

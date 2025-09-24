@@ -207,10 +207,10 @@ impl HttpService {
         // Start background task to poll runtime config metrics with proper cancellation
         let poll_interval_secs = std::env::var("DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS")
             .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&secs| secs > 0) // Guard against zero or negative values
-            .unwrap_or(8);
-        let poll_interval = Duration::from_secs(poll_interval_secs);
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|&secs| secs > 0.0) // Guard against zero or negative values
+            .unwrap_or(8.0);
+        let poll_interval = Duration::from_secs_f64(poll_interval_secs);
 
         let _polling_task = super::metrics::Metrics::start_runtime_config_polling_task(
             self.state.metrics_clone(),

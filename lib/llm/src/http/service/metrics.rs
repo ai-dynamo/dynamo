@@ -22,8 +22,8 @@ use crate::discovery::ModelEntry;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::{ModelDeploymentCard, ROOT_PATH as MDC_ROOT_PATH};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
-use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 use dynamo_runtime::slug::Slug;
+use dynamo_runtime::storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 
 pub use prometheus::Registry;
 
@@ -49,7 +49,6 @@ pub struct Metrics {
     model_context_length: IntGaugeVec,
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
-    model_workers: IntGaugeVec,  // this is an actual gauge, not a counter
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -156,12 +155,11 @@ impl Metrics {
     /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
     /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
     /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
-    /// - `{prefix}_model_workers` - IntGaugeVec for number of worker instances serving each model
     ///
     /// ## Runtime Config Polling Configuration
     ///
     /// The polling behavior can be configured via environment variables:
-    /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds (must be > 0, defaults to 8)
+    /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds (must be > 0, supports fractional seconds, defaults to 8)
     ///
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
@@ -332,15 +330,6 @@ impl Metrics {
         )
         .unwrap();
 
-        let model_workers = IntGaugeVec::new(
-            Opts::new(
-                frontend_metric_name(frontend_service::MODEL_WORKERS),
-                "Number of worker instances currently serving the model",
-            ),
-            &["model"],
-        )
-        .unwrap();
-
         Metrics {
             request_counter,
             inflight_gauge,
@@ -357,7 +346,6 @@ impl Metrics {
             model_context_length,
             model_kv_cache_block_size,
             model_migration_limit,
-            model_workers,
         }
     }
 
@@ -454,7 +442,6 @@ impl Metrics {
         registry.register(Box::new(self.model_context_length.clone()))?;
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
-        registry.register(Box::new(self.model_workers.clone()))?;
 
         Ok(())
     }
@@ -507,7 +494,6 @@ impl Metrics {
             .set(migration_limit as i64);
     }
 
-
     /// Update metrics from a ModelEntry
     /// This is a convenience method that extracts runtime config from a ModelEntry
     /// and updates the appropriate metrics
@@ -534,7 +520,10 @@ impl Metrics {
         let store: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
         let card_store = Arc::new(KeyValueStoreManager::new(store));
 
-        match card_store.load::<ModelDeploymentCard>(MDC_ROOT_PATH, &model_slug).await {
+        match card_store
+            .load::<ModelDeploymentCard>(MDC_ROOT_PATH, &model_slug)
+            .await
+        {
             Ok(Some(mdc)) => {
                 self.update_mdc_metrics(
                     &model_entry.name,
@@ -566,11 +555,27 @@ impl Metrics {
     }
 
     /// Start a background task that periodically updates runtime config metrics
-    /// This polls the ModelManager for current models and updates metrics accordingly
-    /// Models are never removed - only marked as healthy/unhealthy to preserve historical data
     ///
-    /// Note: If multiple model instances have the same name, only the first instance's metrics are used.
-    /// Subsequent instances with duplicate names will be skipped.
+    /// ## Why Polling is Required
+    ///
+    /// Polling is necessary because new models may come online at any time through the distributed
+    /// discovery system. The ModelManager is continuously updated as workers register/deregister
+    /// with etcd, and we need to periodically check for these changes to expose their metrics.
+    ///
+    /// ## Behavior
+    ///
+    /// - Polls the ModelManager for current models and updates metrics accordingly
+    /// - Models are never removed from metrics to preserve historical data
+    /// - If multiple model instances have the same name, only the first instance's metrics are used
+    /// - Subsequent instances with duplicate names will be skipped
+    ///
+    /// ## MDC (Model Deployment Card) Behavior
+    ///
+    /// Currently, we don't overwrite an MDC. The first worker to start wins, and we assume
+    /// that all other workers claiming to serve that model really are using the same configuration.
+    /// Later, every worker will have its own MDC, and the frontend will validate that they
+    /// checksum the same. For right now, you can assume they have the same MDC, because
+    /// they aren't allowed to change it.
     ///
     /// The task will run until the provided cancellation token is cancelled.
     pub fn start_runtime_config_polling_task(
@@ -603,31 +608,12 @@ impl Metrics {
                 // Get current model entries from the manager
                 let current_entries = manager.get_model_entries();
                 let mut current_models = std::collections::HashSet::new();
-                let mut model_worker_counts = std::collections::HashMap::new();
-
-                // Count worker instances per model
-                for entry in &current_entries {
-                    *model_worker_counts.entry(entry.name.clone()).or_insert(0) += 1;
-                }
-
-                // Update worker count metrics for all models
-                for (model_name, count) in &model_worker_counts {
-                    metrics.model_workers
-                        .with_label_values(&[model_name])
-                        .set(*count);
-                }
-
-                // Reset worker count to 0 for models that no longer have any workers
-                let current_models_with_workers: std::collections::HashSet<String> =
-                    model_worker_counts.keys().cloned().collect();
-                for model_name in known_models.difference(&current_models_with_workers) {
-                    metrics.model_workers
-                        .with_label_values(&[model_name])
-                        .set(0);
-                }
 
                 // Note: If multiple model instances have the same name, only the first instance's config metrics are recorded.
                 // Subsequent instances with duplicate names will be skipped for config updates.
+                // This is based on the assumption that all workers serving the same model have identical
+                // configuration values (MDC content, runtime config, etc.). This assumption holds because
+                // workers are not allowed to change their configuration after registration.
 
                 // Update configuration metrics for current models
                 for entry in current_entries {
@@ -658,14 +644,6 @@ impl Metrics {
                             "Failed to update MDC metrics (this is normal if MDC is not available)"
                         );
                     }
-                }
-
-                // Log models that are no longer active (worker count reset to 0, other metrics preserved)
-                for model_name in known_models.difference(&current_models_with_workers) {
-                    tracing::debug!(
-                        model = %model_name,
-                        "Model no longer active (worker count reset to 0, other metrics preserved)"
-                    );
                 }
 
                 // Update our known models set
