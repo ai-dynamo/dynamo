@@ -17,4 +17,4 @@ limitations under the License.
 
 # Dynamo Kubernetes Platform CRDs Helm Chart
 
-This chart installs the [CRDs](../../../../docs/guides/dynamo_deploy/api_reference.md) for the Dynamo Kubernetes Platform.
+This chart installs the [CRDs](../../../../docs/kubernetes/api_reference.md) for the Dynamo Kubernetes Platform.

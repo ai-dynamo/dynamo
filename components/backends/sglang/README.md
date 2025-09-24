@@ -23,6 +23,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
+- [Dynamo SGLang Integration](#dynamo-sglang-integration)
 - [Quick Start](#quick-start)
 - [Single Node Examples](#run-single-node-examples)
 - [Multi-Node and Advanced Examples](#advanced-examples)
@@ -49,6 +50,31 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
 | **GB200 Support**   | ✅     |                                                              |
 
+
+## Dynamo SGLang Integration
+
+Dynamo SGLang integrates SGLang engines into Dynamo's distributed runtime, enabling advanced features like disaggregated serving, KV-aware routing, and request migration while maintaining full compatibility with SGLang's engine arguments.
+
+### Argument Handling
+
+Dynamo SGLang uses SGLang's native argument parser, so **most SGLang engine arguments work identically**. You can pass any SGLang argument (like `--model-path`, `--tp`, `--trust-remote-code`) directly to `dynamo.sglang`.
+
+#### Dynamo-Specific Arguments
+
+| Argument | Description | Default | SGLang Equivalent |
+|----------|-------------|---------|-------------------|
+| `--endpoint` | Dynamo endpoint in `dyn://namespace.component.endpoint` format | Auto-generated based on mode | N/A |
+| `--migration-limit` | Max times a request can migrate between workers | `0` (disabled) | N/A |
+| `--dyn-tool-call-parser` | Tool call parser for structured outputs (takes precedence over `--tool-call-parser`) | `None` | `--tool-call-parser` |
+| `--dyn-reasoning-parser` | Reasoning parser for CoT models (takes precedence over `--reasoning-parser`) | `None` | `--reasoning-parser` |
+| `--use-sglang-tokenizer` | Use SGLang's tokenizer instead of Dynamo's | `False` | N/A |
+
+#### Tokenizer Behavior
+
+- **Default (`--use-sglang-tokenizer` not set)**: Dynamo handles tokenization and passes `input_ids` to SGLang
+- **With `--use-sglang-tokenizer`**: SGLang handles tokenization, Dynamo passes raw prompts
+
+> **Note**: When using `--use-sglang-tokenizer`, only `v1/chat/completions` endpoints are available through Dynamo's frontend.
 
 ## SGLang Quick Start
 

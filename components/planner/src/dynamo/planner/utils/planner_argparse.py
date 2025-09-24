@@ -87,12 +87,6 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         help="Profile results directory",
     )
     parser.add_argument(
-        "--isl", type=int, default=SLAPlannerDefaults.isl, help="Input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=SLAPlannerDefaults.osl, help="Output sequence length"
-    )
-    parser.add_argument(
         "--ttft",
         type=float,
         default=SLAPlannerDefaults.ttft,
