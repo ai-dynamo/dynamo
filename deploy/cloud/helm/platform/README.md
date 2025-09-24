@@ -52,6 +52,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 If you need multiple operator instances (e.g., for multi-tenancy), use namespace-scoped deployment:
 
 ```yaml
+# values.yaml
 dynamo-operator:
   namespaceRestriction:
     enabled: true
