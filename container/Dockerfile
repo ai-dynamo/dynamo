@@ -297,11 +297,10 @@ RUN dnf update -y \
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
     PROTOC_VERSION=25.3; \
-    ARCH="$(uname -m)"; \
-    case "${ARCH}" in \
+    case "${ARCH_ALT}}" in \
       x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
       aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
-      *) echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+      *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
     esac; \
     wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
     rm -f /usr/local/bin/protoc /usr/bin/protoc; \
