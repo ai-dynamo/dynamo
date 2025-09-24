@@ -20,7 +20,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
     Planner:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
@@ -51,7 +51,7 @@ spec:
         mountPoint: /data
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           command:
             - /bin/sh
@@ -91,7 +91,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - /bin/sh
@@ -108,7 +108,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - python3
@@ -139,7 +139,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
+          image: my-registry/sglang-runtime:my-tag
           workingDir: /workspace/components/backends/sglang
           command:
             - python3
