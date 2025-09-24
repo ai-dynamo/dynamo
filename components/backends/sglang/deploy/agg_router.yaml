@@ -17,7 +17,7 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
-    SGLangDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-agg-router
       componentType: worker

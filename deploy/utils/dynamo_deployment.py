@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -114,9 +115,9 @@ class DynamoDeploymentClient:
             service_name: Service name for connecting to the service, defaults to {deployment_name}-frontend
         """
         self.namespace = namespace
-        self.deployment_name = deployment_name
+        self.deployment_name = f"{deployment_name}-{str(uuid.uuid4())[:4]}"
         self.model_name = model_name
-        self.service_name = service_name or f"{deployment_name}-frontend"
+        self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
         self.deployment_spec: Optional[
             Dict[str, Any]
@@ -246,13 +247,6 @@ class DynamoDeploymentClient:
         # Ensure name and namespace are set correctly
         self.deployment_spec["metadata"]["name"] = self.deployment_name
         self.deployment_spec["metadata"]["namespace"] = self.namespace
-
-        # Disable grove as it will cause the deployment to not report ready
-        if "annotations" not in self.deployment_spec["metadata"]:
-            self.deployment_spec["metadata"]["annotations"] = {}
-        self.deployment_spec["metadata"]["annotations"][
-            "nvidia.com/enable-grove"
-        ] = "false"
 
         try:
             await self.custom_api.create_namespaced_custom_object(

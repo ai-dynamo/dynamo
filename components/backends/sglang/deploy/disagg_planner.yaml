@@ -98,7 +98,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
-    SGLangDecodeWorker:
+    decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
@@ -129,7 +129,7 @@ spec:
             - decode
             - --disaggregation-transfer-backend
             - nixl
-    SGLangPrefillWorker:
+    prefill:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker

@@ -17,7 +17,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-    SGLangDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       dynamoNamespace: sglang-agg
       componentType: worker

@@ -6,6 +6,7 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
+from benchmarks.profiler.utils.defaults import DECODE_MAX_CONCURRENCY
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_decode
 from benchmarks.profiler.utils.plot import plot_decode_3d_surface
@@ -21,6 +22,21 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
+def get_num_request_range(attn_dp_size, engine_max_concurrency, granularity):
+    # for MoE models with attn-dp, we want the num_request to be a multiple of attn_dp_size
+    # so that we can make sure the request is sent to the same dp rank as the warmup request
+    # this is guaranteed because the dp scheduler is scheduling round-robin
+
+    max_concurrency = min(engine_max_concurrency, DECODE_MAX_CONCURRENCY)
+    conc_per_dp = max_concurrency // attn_dp_size
+    if conc_per_dp < granularity:
+        ans = list(range(attn_dp_size, conc_per_dp * attn_dp_size + 1, attn_dp_size))
+    else:
+        step = (conc_per_dp - 1) * attn_dp_size / (granularity - 1)
+        ans = [attn_dp_size + int(i * step) * attn_dp_size for i in range(granularity)]
+    return ans
+
+
 def _profile_decode_helper(
     work_dir,
     num_gpus,
@@ -30,6 +46,7 @@ def _profile_decode_helper(
     get_itl_and_thpt_per_gpu: Callable[
         [int, int, int], Tuple[Optional[float], Optional[float]]
     ],
+    attention_dp_size,
 ):
     """interpolate ITL - Active_KV_Cache - Decode_Context_Length"""
     x_kv_usage = []
@@ -51,18 +68,9 @@ def _profile_decode_helper(
                 f" isl {isl} + osl {osl}, skipping."
             )
             break
-        elif max_concurrency < interpolation_granularity:
-            logger.warning(
-                f"max_concurrency {max_concurrency} is too small for"
-                f" interpolation granularity {interpolation_granularity}."
-                f" max_kv_tokens {max_kv_tokens}, isl {isl}, osl {osl}"
-            )
-            sweep_num_request = range(1, max_concurrency + 1)
         else:
-            sweep_num_request = range(
-                1,
-                max_concurrency,
-                max_concurrency // interpolation_granularity,
+            sweep_num_request = get_num_request_range(
+                attention_dp_size, max_concurrency, interpolation_granularity
             )
         for num_request in sweep_num_request:
             itl, thpt_per_gpu = get_itl_and_thpt_per_gpu(isl, osl, num_request)
@@ -102,6 +110,7 @@ def profile_decode(
     max_kv_tokens,
     max_context_length,
     interpolation_granularity,
+    attention_dp_size,
 ):
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
         genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
@@ -127,6 +136,7 @@ def profile_decode(
         max_context_length,
         interpolation_granularity,
         get_itl_and_thpt_per_gpu,
+        attention_dp_size,
     )
 
 
@@ -137,6 +147,7 @@ def profile_decode_aiconfigurator(
     max_context_length,
     interpolation_granularity,
     ai_configurator_perf_estimator: AIConfiguratorPerfEstimator,
+    attention_dp_size,
     **model_config_kwargs,
 ):
     def get_itl_and_thpt_per_gpu(isl, osl, num_request):
@@ -156,4 +167,5 @@ def profile_decode_aiconfigurator(
         max_context_length,
         interpolation_granularity,
         get_itl_and_thpt_per_gpu,
+        attention_dp_size,
     )

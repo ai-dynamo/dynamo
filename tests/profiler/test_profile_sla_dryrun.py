@@ -28,27 +28,30 @@ class TestProfileSLADryRun:
         """Create arguments for vllm backend dry-run test."""
 
         class Args:
-            backend = "vllm"
-            config = "components/backends/vllm/deploy/disagg.yaml"
-            output_dir = "/tmp/test_profiling_results"
-            namespace = "test-namespace"
-            min_num_gpus_per_engine = 1
-            max_num_gpus_per_engine = 8
-            skip_existing_results = False
-            force_rerun = False
-            isl = 3000
-            osl = 500
-            ttft = 50
-            itl = 10
-            max_context_length = 16384
-            prefill_interpolation_granularity = 16
-            decode_interpolation_granularity = 6
-            service_name = ""
-            dry_run = True
-            use_ai_configurator = False
-            aic_system = None
-            aic_model_name = None
-            backend_version = None
+            def __init__(self):
+                self.backend = "vllm"
+                self.config = "components/backends/vllm/deploy/disagg.yaml"
+                self.output_dir = "/tmp/test_profiling_results"
+                self.namespace = "test-namespace"
+                self.min_num_gpus_per_engine = 1
+                self.max_num_gpus_per_engine = 8
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 500
+                self.ttft = 50
+                self.itl = 10
+                self.max_context_length = 16384
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.is_moe_model = False
+                self.dry_run = True
+                self.use_ai_configurator = False
+                self.aic_system = None
+                self.aic_model_name = None
+                self.backend_version = None
+                self.num_gpus_per_node = 8
 
         return Args()
 
@@ -57,27 +60,30 @@ class TestProfileSLADryRun:
         """Create arguments for sglang backend dry-run test."""
 
         class Args:
-            backend = "sglang"
-            config = "components/backends/sglang/deploy/disagg.yaml"
-            output_dir = "/tmp/test_profiling_results"
-            namespace = "test-namespace"
-            min_num_gpus_per_engine = 1
-            max_num_gpus_per_engine = 8
-            skip_existing_results = False
-            force_rerun = False
-            isl = 3000
-            osl = 500
-            ttft = 50
-            itl = 10
-            max_context_length = 16384
-            prefill_interpolation_granularity = 16
-            decode_interpolation_granularity = 6
-            service_name = ""
-            dry_run = True
-            use_ai_configurator = False
-            aic_system = None
-            aic_model_name = None
-            backend_version = None
+            def __init__(self):
+                self.backend = "sglang"
+                self.config = "components/backends/sglang/deploy/disagg.yaml"
+                self.output_dir = "/tmp/test_profiling_results"
+                self.namespace = "test-namespace"
+                self.min_num_gpus_per_engine = 1
+                self.max_num_gpus_per_engine = 8
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 500
+                self.ttft = 50
+                self.itl = 10
+                self.max_context_length = 16384
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.is_moe_model = False
+                self.dry_run = True
+                self.use_ai_configurator = False
+                self.aic_system = None
+                self.aic_model_name = None
+                self.backend_version = None
+                self.num_gpus_per_node = 8
 
         return Args()
 
@@ -100,27 +106,30 @@ class TestProfileSLADryRun:
         """Create arguments for trtllm backend dry-run test."""
 
         class Args:
-            backend = "trtllm"
-            config = "components/backends/trtllm/deploy/disagg.yaml"
-            output_dir = "/tmp/test_profiling_results"
-            namespace = "test-namespace"
-            min_num_gpus_per_engine = 1
-            max_num_gpus_per_engine = 8
-            skip_existing_results = False
-            force_rerun = False
-            isl = 3000
-            osl = 500
-            ttft = 50
-            itl = 10
-            max_context_length = 16384
-            prefill_interpolation_granularity = 16
-            decode_interpolation_granularity = 6
-            service_name = ""
-            dry_run = True
-            use_ai_configurator = False
-            aic_system = None
-            aic_model_name = None
-            backend_version = None
+            def __init__(self):
+                self.backend = "trtllm"
+                self.config = "components/backends/trtllm/deploy/disagg.yaml"
+                self.output_dir = "/tmp/test_profiling_results"
+                self.namespace = "test-namespace"
+                self.min_num_gpus_per_engine = 1
+                self.max_num_gpus_per_engine = 8
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 500
+                self.ttft = 50
+                self.itl = 10
+                self.max_context_length = 16384
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.is_moe_model = False
+                self.dry_run = True
+                self.use_ai_configurator = False
+                self.aic_system = None
+                self.aic_model_name = None
+                self.backend_version = None
+                self.num_gpus_per_node = 8
 
         return Args()
 
@@ -130,3 +139,44 @@ class TestProfileSLADryRun:
         """Test that profile_sla dry-run works for trtllm backend with disagg.yaml config."""
         # Run the profile in dry-run mode - should complete without errors
         await run_profile(trtllm_args)
+
+    @pytest.fixture
+    def sglang_moe_args(self):
+        """Create arguments for trtllm backend dry-run test."""
+
+        class Args:
+            def __init__(self):
+                self.backend = "sglang"
+                self.config = (
+                    "recipes/deepseek-r1/sglang-wideep/tep16p-dep16d-disagg.yaml"
+                )
+                self.output_dir = "/tmp/test_profiling_results"
+                self.namespace = "test-namespace"
+                self.min_num_gpus_per_engine = 8
+                self.max_num_gpus_per_engine = 32
+                self.skip_existing_results = False
+                self.force_rerun = False
+                self.isl = 3000
+                self.osl = 500
+                self.ttft = 50
+                self.itl = 10
+                self.max_context_length = 16384
+                self.prefill_interpolation_granularity = 16
+                self.decode_interpolation_granularity = 6
+                self.service_name = ""
+                self.is_moe_model = True
+                self.dry_run = True
+                self.use_ai_configurator = False
+                self.aic_system = None
+                self.aic_model_name = None
+                self.backend_version = None
+                self.num_gpus_per_node = 8
+
+        return Args()
+
+    @pytest.mark.pre_merge
+    @pytest.mark.asyncio
+    async def test_sglang_moe_dryrun(self, sglang_moe_args):
+        """Test that profile_sla dry-run works for sglang backend with MoE config."""
+        # Run the profile in dry-run mode - should complete without errors
+        await run_profile(sglang_moe_args)
