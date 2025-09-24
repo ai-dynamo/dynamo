@@ -13,7 +13,7 @@ Quick deployment guide for the disaggregated planner with automatic scaling.
 - **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
 - **Workers**: prefill and backend workers handle inference
 
-The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found [here](/components/planner/src/dynamo/planner/defaults.py#L31).
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found in this [file](/components/planner/src/dynamo/planner/defaults.py).
 
 ```mermaid
 flowchart LR
