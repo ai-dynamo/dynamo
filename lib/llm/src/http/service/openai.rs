@@ -66,33 +66,34 @@ fn get_body_limit() -> usize {
         .unwrap_or(45 * 1024 * 1024)
 }
 
-pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
+pub type ErrorResponse = Json<ErrorMessage>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
-    error: String,
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+    code: u16,
 }
 
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorMessage {
-                error: "Model not found".to_string(),
-            }),
-        )
+        Json(ErrorMessage {
+            message: "Model not found".to_string(),
+            error_type: "invalid_request_error".to_string(),
+            code: StatusCode::NOT_FOUND.as_u16(),
+        })
     }
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
     pub fn _service_unavailable() -> ErrorResponse {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorMessage {
-                error: "Service is not ready".to_string(),
-            }),
-        )
+        Json(ErrorMessage {
+            message: "Service is not ready".to_string(),
+            error_type: "server_error".to_string(),
+            code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        })
     }
 
     /// Internal Service Error
@@ -101,12 +102,11 @@ impl ErrorMessage {
     /// Internal Services errors are the result of misconfiguration or bugs in the service.
     pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorMessage {
-                error: msg.to_string(),
-            }),
-        )
+        Json(ErrorMessage {
+            message: msg.to_string(),
+            error_type: "server_error".to_string(),
+            code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+        })
     }
 
     /// Not Implemented Error
@@ -114,12 +114,11 @@ impl ErrorMessage {
     /// This should be used for features that are planned but not available.
     pub fn not_implemented_error(msg: &str) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(ErrorMessage {
-                error: msg.to_string(),
-            }),
-        )
+        Json(ErrorMessage {
+            message: msg.to_string(),
+            error_type: "invalid_request_error".to_string(),
+            code: StatusCode::NOT_IMPLEMENTED.as_u16(),
+        })
     }
 
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
@@ -135,12 +134,11 @@ impl ErrorMessage {
                 dynamo_runtime::pipeline::error::PipelineError::ServiceOverloaded(_)
             )
         {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorMessage {
-                    error: pipeline_err.to_string(),
-                }),
-            );
+            return Json(ErrorMessage {
+                message: pipeline_err.to_string(),
+                error_type: "server_error".to_string(),
+                code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            });
         }
 
         // Then check for HttpError
@@ -156,7 +154,11 @@ impl ErrorMessage {
             return ErrorMessage::internal_server_error(&err.message);
         }
         match StatusCode::from_u16(err.code) {
-            Ok(code) => (code, Json(ErrorMessage { error: err.message })),
+            Ok(_) => Json(ErrorMessage { 
+                message: err.message,
+                error_type: "invalid_request_error".to_string(),
+                code: err.code,
+            }),
             Err(_) => ErrorMessage::internal_server_error(&err.message),
         }
     }
@@ -164,9 +166,21 @@ impl ErrorMessage {
 
 impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
-        ErrorMessage { error: err.message }
+        ErrorMessage { 
+            message: err.message,
+            error_type: "invalid_request_error".to_string(),
+            code: err.code,
+        }
     }
 }
+
+impl IntoResponse for ErrorMessage {
+    fn into_response(self) -> Response {
+        let status_code = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status_code, Json(self)).into_response()
+    }
+}
+
 
 // Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
 // But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
@@ -180,12 +194,11 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
             .await
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorMessage {
-                error: error_message,
-            }),
-        )
+        Json(ErrorMessage {
+            message: error_message,
+            error_type: "invalid_request_error".to_string(),
+            code: StatusCode::BAD_REQUEST.as_u16(),
+        })
             .into_response()
     } else {
         // Pass through if it is not a 422
@@ -1221,36 +1234,36 @@ mod tests {
     #[test]
     fn test_http_error_response_from_anyhow() {
         let err = http_error_from_engine(400).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(response.message, "custom error message");
     }
 
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         let err = http_error_from_engine(399).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.code, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+        assert_eq!(response.message, "custom error message");
 
         let err = http_error_from_engine(500).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.code, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+        assert_eq!(response.message, "custom error message");
 
         let err = http_error_from_engine(501).unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(response.error, "custom error message");
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.code, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+        assert_eq!(response.message, "custom error message");
     }
 
     #[test]
     fn test_other_error_response_from_anyhow() {
         let err = other_error_from_engine().unwrap_err();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.code, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
         assert_eq!(
-            response.error,
+            response.message,
             format!(
                 "{}: {}",
                 BACKUP_ERROR_MESSAGE,
@@ -1267,10 +1280,10 @@ mod tests {
             "All workers are busy, please retry later".to_string(),
         )
         .into();
-        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
         assert_eq!(
-            response.error,
+            response.message,
             "Service temporarily unavailable: All workers are busy, please retry later"
         );
     }
@@ -1386,10 +1399,10 @@ mod tests {
         };
         let result = validate_chat_completion_required_fields(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "The 'messages' field cannot be empty. At least one message is required."
             );
         }
@@ -1450,10 +1463,10 @@ mod tests {
 
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Frequency penalty must be between -2 and 2, got -3"
             );
         }
@@ -1471,10 +1484,10 @@ mod tests {
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Presence penalty must be between -2 and 2, got -3"
             );
         }
@@ -1492,10 +1505,10 @@ mod tests {
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Temperature must be between 0 and 2, got -3"
             );
         }
@@ -1513,10 +1526,10 @@ mod tests {
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Top_p must be between 0 and 1, got -3"
             );
         }
@@ -1536,10 +1549,10 @@ mod tests {
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Repetition penalty must be between 0 and 2, got -3"
             );
         }
@@ -1557,10 +1570,10 @@ mod tests {
         };
         let result = validate_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Logprobs must be between 0 and 5, got 6"
             );
         }
@@ -1588,10 +1601,10 @@ mod tests {
 
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Frequency penalty must be between -2 and 2, got -3"
             );
         }
@@ -1615,10 +1628,10 @@ mod tests {
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Presence penalty must be between -2 and 2, got -3"
             );
         }
@@ -1642,10 +1655,10 @@ mod tests {
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Temperature must be between 0 and 2, got -3"
             );
         }
@@ -1669,10 +1682,10 @@ mod tests {
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Top_p must be between 0 and 1, got -3"
             );
         }
@@ -1698,10 +1711,10 @@ mod tests {
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Repetition penalty must be between 0 and 2, got -3"
             );
         }
@@ -1725,10 +1738,10 @@ mod tests {
         };
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
-        if let Err((status, error_response)) = result {
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+        if let Err(error_response) = result {
+            assert_eq!(error_response.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(
-                error_response.error,
+                error_response.message,
                 "Top_logprobs must be between 0 and 20, got 25"
             );
         }
