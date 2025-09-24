@@ -806,3 +806,204 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     }
     DynamoLlmResult::OK
 }
+
+////// TEMP TODO RM
+#[unsafe(no_mangle)]
+/// Create a worker-selection pipeline and immediately run a query on it.
+/// The pipeline is not stored globally; it is created and dropped within this call.
+///
+/// Inputs:
+/// - namespace/component/model + router knobs (same semantics as `dynamo_create_worker_selection_pipeline`)
+/// - request_json_c_str: OpenAI-compatible JSON for chat completions
+///
+/// Outputs:
+/// - worker_instance_id_out
+/// - token_ids_out (malloc'ed; free with `dynamo_free_worker_selection_result`)
+/// - token_count_out
+/// - annotated_request_json_out (malloc'ed C string; free with same free fn)
+pub unsafe extern "C" fn dynamo_one_shot_select_and_annotate(
+    namespace_c_str: *const c_char,
+    component_c_str: *const c_char,
+    model_name_c_str: *const c_char,
+    use_kv_routing: bool,
+    busy_threshold: f64,       // negative => None
+    overlap_score_weight: f64, // negative => default
+    router_temperature: f64,   // negative => default
+    use_kv_events: bool,
+    router_replica_sync: bool,
+    request_json_c_str: *const c_char,
+    // outs
+    worker_instance_id_out: *mut i64,
+    token_ids_out: *mut *mut u32,
+    token_count_out: *mut usize,
+    annotated_request_json_out: *mut *mut c_char,
+) -> DynamoLlmResult {
+    // Validate outs up-front
+    if worker_instance_id_out.is_null()
+        || token_ids_out.is_null()
+        || token_count_out.is_null()
+        || annotated_request_json_out.is_null()
+    {
+        eprintln!("one-shot: one or more output pointers are null");
+        return DynamoLlmResult::ERR;
+    }
+
+    // Ensure WK/DRT were already initialized by dynamo_llm_init
+    let wk = match WK.get() {
+        Some(wk) => wk,
+        None => {
+            eprintln!("one-shot: Worker not initialized. Call dynamo_llm_init first.");
+            return DynamoLlmResult::ERR;
+        }
+    };
+    if DRT.get().is_none() {
+        eprintln!("one-shot: DistributedRuntime not initialized. Call dynamo_llm_init first.");
+        return DynamoLlmResult::ERR;
+    }
+
+    // Parse inputs
+    let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("one-shot: bad namespace: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+    let component = match CStr::from_ptr(component_c_str).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("one-shot: bad component: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+    let model = match CStr::from_ptr(model_name_c_str).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            eprintln!("one-shot: bad model: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    let req_str = match CStr::from_ptr(request_json_c_str).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("one-shot: bad request json: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("one-shot: parse request failed: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    // Build pipeline on the same worker runtime (secondary handle)
+    let make_pipeline = || async {
+        // optional env override: DYNAMO_FORCE_RR=1
+        let force_rr = std::env::var("DYNAMO_FORCE_RR").ok().as_deref() == Some("1");
+        let router_mode = if force_rr {
+            RouterMode::RoundRobin
+        } else if use_kv_routing {
+            RouterMode::KV
+        } else {
+            RouterMode::RoundRobin
+        };
+
+        let kv_router_config = if use_kv_routing {
+            use dynamo_llm::kv_router::KvRouterConfig;
+            Some(KvRouterConfig::new(
+                (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
+                (router_temperature >= 0.0).then_some(router_temperature),
+                Some(use_kv_events),
+                Some(router_replica_sync),
+                None, // max_num_batched_tokens
+                None, // router_snapshot_threshold
+                None, // router_reset_states
+            ))
+        } else {
+            None
+        };
+
+        create_worker_selection_pipeline_chat(
+            &namespace,
+            &component,
+            &model,
+            router_mode,
+            (busy_threshold >= 0.0).then_some(busy_threshold),
+            kv_router_config,
+        )
+        .await
+    };
+
+    let pipeline = match wk.runtime().secondary().block_on(make_pipeline()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("one-shot: create_worker_selection_pipeline_chat failed: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    // Run the query on the just-created pipeline
+    let fut = async { query_worker_selection_and_annotate(&pipeline, request).await };
+    let (worker_id, tokens, annotated_req) = match wk.runtime().secondary().block_on(fut) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("one-shot: query_worker_selection_and_annotate failed: {e:?}");
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    // Marshal tokens to heap memory (caller frees with dynamo_free_worker_selection_result)
+    let tokens_ptr = if tokens.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        let len = tokens.len();
+        let layout = std::alloc::Layout::array::<u32>(len).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
+        if ptr.is_null() {
+            eprintln!("one-shot: alloc tokens failed");
+            return DynamoLlmResult::ERR;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len) };
+        ptr
+    };
+
+    // Serialize annotated request JSON
+    let annotated_json = match serde_json::to_string(&annotated_req) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("one-shot: serialize annotated req failed: {e:?}");
+            if !tokens_ptr.is_null() {
+                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
+            }
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    let cjson = match std::ffi::CString::new(annotated_json) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("one-shot: CString for annotated json failed: {e:?}");
+            if !tokens_ptr.is_null() {
+                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
+                unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
+            }
+            return DynamoLlmResult::ERR;
+        }
+    };
+
+    // Write outs
+    unsafe {
+        *worker_instance_id_out = worker_id;
+        *token_ids_out = tokens_ptr;
+        *token_count_out = tokens.len();
+        *annotated_request_json_out = cjson.into_raw();
+    }
+
+    // `pipeline` is dropped here (one-shot)
+    DynamoLlmResult::OK
+}
