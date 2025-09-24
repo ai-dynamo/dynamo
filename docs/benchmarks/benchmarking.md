@@ -342,8 +342,8 @@ kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 # Download results from PVC (recommended)
 python3 -m deploy.utils.download_pvc_results \
   --namespace $NAMESPACE \
-  --output-dir ./benchmarks/results/${INPUT_NAME} \
-  --folder /data/results/${INPUT_NAME} \
+  --output-dir ./benchmarks/results/<benchmark-name> \
+  --folder /data/results/<benchmark-name> \
   --no-config
 ```
 
