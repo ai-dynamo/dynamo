@@ -3,6 +3,10 @@
 
 name: NVIDIA Dynamo Backends Github Validation
 
+concurrency:
+  group: ${{ github.workflow }}-build-test-frameworks-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 on:
   push:
     branches:
@@ -11,34 +15,25 @@ on:
 
 jobs:
   build-test:
-    runs-on: gpu-l40-amd64
     strategy:
       fail-fast: false
       matrix:
-        framework: [vllm, sglang, trtllm]
-        include:
-          - framework: vllm
-            target: runtime
-            pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          - framework: sglang
-            target: runtime
-            pytest_marks: "e2e and sglang and gpu_1 and not slow"
-          - framework: trtllm
-            target: runtime
-            pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
+        framework:
+          - { name: vllm, target: runtime, pytest_marks: "e2e and vllm and gpu_1 and not slow" }
+          - { name: sglang, target: runtime, pytest_marks: "e2e and sglang and gpu_1 and not slow" }
+          - { name: trtllm, target: runtime, pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow" }
+        platform:
+          - { arch: "linux/amd64", runner: gpu-l40-amd64  }
+          - { arch: "linux/arm64", runner: cpu-arm-r8g-4xlarge }
 
-    # Do not cancel main branch runs
-    concurrency:
-      group: ${{ github.workflow }}-${{ matrix.framework }}-build-test-${{ github.ref_name || github.run_id }}
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
-    name: Build and Test - ${{ matrix.framework }}
+    name: build-test (${{matrix.framework.name }}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework.name }}
       PYTEST_XML_FILE: pytest_test_report.xml
-      FRAMEWORK: ${{ matrix.framework }}
-      TARGET: ${{ matrix.target }}
-      PYTEST_MARKS: ${{ matrix.pytest_marks }}
+      FRAMEWORK: ${{ matrix.framework.name }}
+      TARGET: ${{ matrix.framework.target }}
+      PYTEST_MARKS: ${{ matrix.framework.pytest_marks }}
 
     steps:
       - name: Checkout repository
@@ -55,24 +50,37 @@ jobs:
           docker system prune -af
       - name: Build image
         env:
+          ARCH: ${{ matrix.platform.arch }}
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
           SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          ./container/build.sh --tag ${{ matrix.framework }}:latest \
-            --target ${{ matrix.target }} \
-            --framework ${{ matrix.framework }} \
+          # Turns linux/arm64 into linux-arm64
+          export PLATFORM_TAG=${ARCH//\//-}
+          ./container/build.sh --tag ${{ matrix.framework.name }}:${PLATFORM_TAG} \
+            --platform ${{ matrix.platform.arch }} \
+            --target ${{ matrix.framework.target }} \
+            --framework ${{ matrix.framework.name }} \
             --use-sccache \
             --sccache-bucket "$SCCACHE_S3_BUCKET" \
             --sccache-region "$AWS_DEFAULT_REGION"
       - name: Run pytest
+        # No infra available for ARM + GPU in CI
+        if: ${{ matrix.platform.arch != 'linux/arm64' }}
         env:
+          ARCH: ${{ matrix.platform.arch }}
           HF_HOME: /runner/_work/_temp
         run: |
+          # Turns linux/arm64 into linux-arm64
+          export PLATFORM_TAG=${ARCH//\//-}
           docker run --runtime=nvidia --rm --gpus all -w /workspace \
             --network host \
             --name ${{ env.CONTAINER_ID }}_pytest \
-            ${{ matrix.framework }}:latest \
+            ${{ matrix.framework.name }}:${PLATFORM_TAG} \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+      - name: Docker Tag and Push
+        if: ${{ github.ref_name == 'main' }}
+        run: |
+          docker tag ${{ matrix.framework.name }}:${{ matrix.platform.arch }} ${{ matrix.framework.name }}:${{ github.sha }}-${{ matrix.platform.arch }}
