@@ -13,7 +13,7 @@ Quick deployment guide for the disaggregated planner with automatic scaling.
 - **Planner**: Queries Prometheus and adjusts worker scaling every adjustment interval
 - **Workers**: prefill and backend workers handle inference
 
-The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found [here](../components/planner/src/dynamo/planner/defaults.py#L31).
+The adjustment interval can be defined in the planner manifest as an argument. The default interval value can be found [here](/components/planner/src/dynamo/planner/defaults.py#L31).
 
 ```mermaid
 flowchart LR
@@ -126,7 +126,7 @@ curl http://localhost:8000/metrics | grep nv_llm_http_service
 **Unknown Field subComponentType:**
 
 If you encounter the following error when attempting to apply the deployment:
-```
+```bash
 Error from server (BadRequest): error when creating "components/backends/vllm/deploy/disagg.yaml": DynamoGraphDeployment in version "v1alpha1" cannot be handled as a DynamoGraphDeployment: strict decoding error: unknown field "spec.services.DecodeWorker.subComponentType", unknown field "spec.services.PrefillWorker.subComponentType"
 ```
 This is because the `subComponentType` field has only been added in newer versions of the DynamoGraphDeployment CRD (> 0.5.0). You can upgrade the CRD version by following the instructions [here](/docs/kubernetes/installation_guide.md).
