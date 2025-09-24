@@ -12,6 +12,15 @@ on:
 jobs:
   build-test:
     runs-on: gpu-l40-amd64
+    outputs:
+      build-duration-sec: ${{ steps.build-image.outputs.build-duration-sec }}
+      image-size-bytes: ${{ steps.build-image.outputs.image-size-bytes }}
+      image-size-mb: ${{ steps.build-image.outputs.image-size-mb }}
+      build-start-time: ${{ steps.build-image.outputs.build-start-time }}
+      build-end-time: ${{ steps.build-image.outputs.build-end-time }}
+      cache-hit-rate: ${{ steps.build-image.outputs.cache-hit-rate }}
+      framework: ${{ matrix.framework }}
+      target: ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,20 +62,283 @@ jobs:
         if: always()
         run: |
           docker system prune -af
-      - name: Build image
+      - name: Build image with Enhanced sccache S3 Debugging
+        id: build-image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-          SCCACHE_S3_BUCKET:  ${{ secrets.SCCACHE_S3_BUCKET }}
+          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
+          # Capture build start time
+          BUILD_START_TIME=$(date +%s)
+          echo "Build started at: $(date -u -d @$BUILD_START_TIME)"
+          
+          # === ENHANCED SCCACHE S3 DEBUGGING IN GITHUB ACTIONS ===
+          echo "🔧 === ENHANCED SCCACHE S3 DEBUGGING IN GITHUB ACTIONS ==="
+          echo "=========================================================="
+          echo ""
+          echo "This enhanced debugging integrates with the improved container/build.sh script"
+          echo "to provide comprehensive S3 cache testing and analysis."
+          echo ""
+          
+          # Pre-build environment check
+          echo "📋 Pre-Build Environment Check:"
+          echo "   Runner: ${{ runner.name }} (${{ runner.os }})"
+          echo "   Workflow: ${{ github.workflow }}"
+          echo "   Framework: ${{ matrix.framework }}"
+          echo "   Target: ${{ matrix.target }}"
+          echo ""
+          
+          # Check secrets availability
+          echo "🔐 Secrets Availability Check:"
+          if [ -n "${SCCACHE_S3_BUCKET:-}" ]; then
+            echo "   ✅ SCCACHE_S3_BUCKET: ${SCCACHE_S3_BUCKET}"
+          else
+            echo "   ❌ SCCACHE_S3_BUCKET: NOT SET"
+          fi
+          
+          if [ -n "${AWS_DEFAULT_REGION:-}" ]; then
+            echo "   ✅ AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}"
+          else
+            echo "   ❌ AWS_DEFAULT_REGION: NOT SET"
+          fi
+          
+          if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+            echo "   ✅ AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:0:8}... (truncated)"
+          else
+            echo "   ❌ AWS_ACCESS_KEY_ID: NOT SET"
+          fi
+          
+          if [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "   ✅ AWS_SECRET_ACCESS_KEY: [REDACTED]"
+          else
+            echo "   ❌ AWS_SECRET_ACCESS_KEY: NOT SET"
+          fi
+          echo ""
+          
+          # Pre-build S3 connectivity test using AWS CLI (if available)
+          echo "🔍 Pre-Build S3 Connectivity Test:"
+          if command -v aws >/dev/null 2>&1; then
+            echo "   AWS CLI available, testing S3 bucket access..."
+            
+            # Test S3 access
+            AWS_TEST_OUTPUT=$(aws s3 ls "s3://${SCCACHE_S3_BUCKET}/" --region "${AWS_DEFAULT_REGION}" 2>&1 || echo "AWS_TEST_FAILED")
+            if echo "$AWS_TEST_OUTPUT" | grep -q "AWS_TEST_FAILED"; then
+              echo "   ❌ S3 access test failed:"
+              echo "$AWS_TEST_OUTPUT" | head -5 | sed 's/^/      /'
+              echo "   ⚠️  Build will continue, but sccache S3 functionality may be limited"
+            else
+              echo "   ✅ S3 bucket is accessible"
+              echo "   📁 Bucket contents preview:"
+              echo "$AWS_TEST_OUTPUT" | head -3 | sed 's/^/      /'
+              
+              # Check for existing sccache data
+              SCCACHE_TEST_OUTPUT=$(aws s3 ls "s3://${SCCACHE_S3_BUCKET}/sccache-dynamo/" --region "${AWS_DEFAULT_REGION}" 2>&1 || echo "NO_SCCACHE_DATA")
+              if echo "$SCCACHE_TEST_OUTPUT" | grep -q "NO_SCCACHE_DATA"; then
+                echo "   ℹ️  No existing sccache data found (first-time use expected)"
+              else
+                echo "   🎯 Existing sccache data found - cache hits possible!"
+                echo "$SCCACHE_TEST_OUTPUT" | head -2 | sed 's/^/      /'
+              fi
+            fi
+          else
+            echo "   ⚠️  AWS CLI not available - skipping pre-build S3 test"
+            echo "   The enhanced build.sh script will handle S3 testing internally"
+          fi
+          echo ""
+          
+          # === RUN ENHANCED BUILD WITH COMPREHENSIVE S3 DEBUGGING ===
+          echo "🏗️  === RUNNING ENHANCED BUILD WITH S3 DEBUGGING ==="
+          echo "=================================================="
+          echo ""
+          echo "The enhanced build.sh script will now:"
+          echo "  1. Auto-install sccache if needed"
+          echo "  2. Test S3 connectivity and credentials"
+          echo "  3. Run live compilation tests to verify cache"
+          echo "  4. Provide detailed S3 upload/download analysis"
+          echo "  5. Report comprehensive cache effectiveness metrics"
+          echo ""
+          echo "Build command: ./container/build.sh --tag ${{ matrix.framework }}:latest --target ${{ matrix.target }} --framework ${{ matrix.framework }} --use-sccache --sccache-bucket \"$SCCACHE_S3_BUCKET\" --sccache-region \"$AWS_DEFAULT_REGION\""
+          echo ""
+          
+          # Run the enhanced build script
           ./container/build.sh --tag ${{ matrix.framework }}:latest \
             --target ${{ matrix.target }} \
             --framework ${{ matrix.framework }} \
             --use-sccache \
             --sccache-bucket "$SCCACHE_S3_BUCKET" \
             --sccache-region "$AWS_DEFAULT_REGION"
+          
+          BUILD_RESULT=$?
+          
+          # Capture build end time and calculate duration
+          BUILD_END_TIME=$(date +%s)
+          BUILD_DURATION=$((BUILD_END_TIME - BUILD_START_TIME))
+          echo ""
+          echo "🏁 Build completed at: $(date -u -d @$BUILD_END_TIME)"
+          echo "   Build duration: ${BUILD_DURATION} seconds"
+          echo "   Build exit code: $BUILD_RESULT"
+          
+          # === POST-BUILD S3 VERIFICATION ===
+          echo ""
+          echo "☁️  === POST-BUILD S3 VERIFICATION ==="
+          echo "===================================="
+          
+          # Extract cache hit rate from build output (enhanced build.sh provides this)
+          CACHE_HIT_RATE=0
+          
+          # Try to get final sccache stats if server is still running
+          if command -v sccache >/dev/null 2>&1; then
+            echo "🔍 Getting final sccache statistics from GitHub Actions runner..."
+            
+            FINAL_SCCACHE_STATS=$(sccache --show-stats 2>&1)
+            STATS_EXIT_CODE=$?
+            
+            if [ $STATS_EXIT_CODE -eq 0 ] && [ -n "$FINAL_SCCACHE_STATS" ]; then
+              echo "📊 Final sccache Statistics (GitHub Actions Runner):"
+              echo "---------------------------------------------------"
+              echo "$FINAL_SCCACHE_STATS"
+              echo "---------------------------------------------------"
+              echo ""
+              
+              # Parse final statistics
+              FINAL_HITS=$(echo "$FINAL_SCCACHE_STATS" | grep -E "Cache hits" | grep -oE '[0-9]+' | head -1 || echo "0")
+              FINAL_MISSES=$(echo "$FINAL_SCCACHE_STATS" | grep -E "Cache misses" | grep -oE '[0-9]+' | head -1 || echo "0")
+              FINAL_REQUESTS=$(echo "$FINAL_SCCACHE_STATS" | grep -E "Compile requests[^a-z]" | grep -oE '[0-9]+' | head -1 || echo "0")
+              
+              # Look for S3-specific metrics
+              S3_READS=$(echo "$FINAL_SCCACHE_STATS" | grep -E "(S3.*read|Remote.*read)" | grep -oE '[0-9]+' | head -1 || echo "0")
+              S3_WRITES=$(echo "$FINAL_SCCACHE_STATS" | grep -E "(S3.*write|Remote.*write)" | grep -oE '[0-9]+' | head -1 || echo "0")
+              
+              echo "🎯 GitHub Actions Final Analysis:"
+              echo "   Cache hits: $FINAL_HITS"
+              echo "   Cache misses: $FINAL_MISSES"
+              echo "   Total requests: $FINAL_REQUESTS"
+              echo "   S3 reads: $S3_READS"
+              echo "   S3 writes: $S3_WRITES"
+              
+              # Calculate final hit rate
+              TOTAL_CACHEABLE=$((FINAL_HITS + FINAL_MISSES))
+              if [ "$TOTAL_CACHEABLE" -gt 0 ]; then
+                CACHE_HIT_RATE=$((FINAL_HITS * 100 / TOTAL_CACHEABLE))
+                echo "   📈 Final hit rate: ${CACHE_HIT_RATE}% (${FINAL_HITS}/${TOTAL_CACHEABLE})"
+                
+                if [ "$CACHE_HIT_RATE" -gt 0 ]; then
+                  echo "   🎉 SUCCESS: sccache S3 integration is working!"
+                  if [ "$S3_READS" -gt 0 ] || [ "$S3_WRITES" -gt 0 ]; then
+                    echo "   ✅ S3 activity confirmed (reads: $S3_READS, writes: $S3_WRITES)"
+                    echo "   ✅ Cache persistence across builds is functioning"
+                  fi
+                else
+                  echo "   ⚠️  0% hit rate - this may be expected for first-time builds"
+                fi
+              else
+                echo "   ⚠️  No cacheable compilations in final stats"
+              fi
+            else
+              echo "⚠️  Could not get final stats from GitHub Actions runner"
+              echo "   This is normal - the enhanced build.sh script provides the main analysis"
+            fi
+          else
+            echo "ℹ️  sccache not available on GitHub Actions runner"
+            echo "   The enhanced build.sh script handles all sccache operations within Docker"
+          fi
+          
+          # Post-build S3 verification
+          if command -v aws >/dev/null 2>&1 && [ -n "${SCCACHE_S3_BUCKET}" ]; then
+            echo ""
+            echo "🔍 Post-Build S3 Cache Verification:"
+            
+            # Check if new sccache data was written
+            POST_BUILD_S3_OUTPUT=$(aws s3 ls "s3://${SCCACHE_S3_BUCKET}/sccache-dynamo/" --region "${AWS_DEFAULT_REGION}" 2>&1 || echo "S3_CHECK_FAILED")
+            if echo "$POST_BUILD_S3_OUTPUT" | grep -q "S3_CHECK_FAILED"; then
+              echo "   ⚠️  Could not verify S3 cache contents after build"
+            else
+              echo "   📁 S3 cache contents after build:"
+              echo "$POST_BUILD_S3_OUTPUT" | head -5 | sed 's/^/      /'
+              
+              # Count cache objects
+              CACHE_OBJECT_COUNT=$(echo "$POST_BUILD_S3_OUTPUT" | wc -l)
+              echo "   📊 Total cache objects in S3: $CACHE_OBJECT_COUNT"
+              
+              if [ "$CACHE_OBJECT_COUNT" -gt 0 ]; then
+                echo "   ✅ S3 cache data is present - future builds should benefit"
+              else
+                echo "   ⚠️  No cache objects found - check S3 permissions and connectivity"
+              fi
+            fi
+          fi
+          
+          # Get Docker image size
+          IMAGE_SIZE_BYTES=$(docker image inspect ${{ matrix.framework }}:latest --format='{{.Size}}')
+          IMAGE_SIZE_MB=$((IMAGE_SIZE_BYTES / 1024 / 1024))
+          echo ""
+          echo "📦 Docker image size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
+          
+          # Set outputs for other jobs to use
+          echo "build-duration-sec=${BUILD_DURATION}" >> $GITHUB_OUTPUT
+          echo "image-size-bytes=${IMAGE_SIZE_BYTES}" >> $GITHUB_OUTPUT
+          echo "image-size-mb=${IMAGE_SIZE_MB}" >> $GITHUB_OUTPUT
+          echo "build-start-time=${BUILD_START_TIME}" >> $GITHUB_OUTPUT
+          echo "build-end-time=${BUILD_END_TIME}" >> $GITHUB_OUTPUT
+          echo "cache-hit-rate=${CACHE_HIT_RATE}" >> $GITHUB_OUTPUT
+          
+          # Enhanced metrics file with S3 information
+          mkdir -p build-metrics
+          cat > build-metrics/metrics.json << EOF
+          {
+            "build_duration_sec": ${BUILD_DURATION},
+            "image_size_bytes": ${IMAGE_SIZE_BYTES},
+            "image_size_mb": ${IMAGE_SIZE_MB},
+            "build_start_time": ${BUILD_START_TIME},
+            "build_end_time": ${BUILD_END_TIME},
+            "cache_hit_rate": ${CACHE_HIT_RATE},
+            "framework": "${{ matrix.framework }}",
+            "target": "${{ matrix.target }}",
+            "sccache_enabled": true,
+            "s3_bucket": "${SCCACHE_S3_BUCKET}",
+            "aws_region": "${AWS_DEFAULT_REGION}",
+            "enhanced_debugging": true
+          }
+          EOF
+          
+          # === GITHUB ACTIONS SUMMARY ===
+          echo ""
+          echo "🏁 === ENHANCED SCCACHE S3 DEBUGGING COMPLETE ==="
+          echo "==============================================="
+          echo "📊 Build Summary:"
+          echo "  Framework: ${{ matrix.framework }}"
+          echo "  Target: ${{ matrix.target }}"
+          echo "  Duration: ${BUILD_DURATION}s"
+          echo "  Image Size: ${IMAGE_SIZE_MB} MB"
+          echo "  Cache Hit Rate: ${CACHE_HIT_RATE}%"
+          echo "  S3 Bucket: ${SCCACHE_S3_BUCKET}"
+          echo "  AWS Region: ${AWS_DEFAULT_REGION}"
+          echo ""
+          echo "🔍 Key Insights:"
+          if [ "$CACHE_HIT_RATE" -eq 0 ]; then
+            echo "  ⚠️  0% cache hit rate detected"
+            echo "     This may be expected for first-time builds or indicate configuration issues"
+            echo "     Check the detailed build.sh output above for specific diagnostics"
+          else
+            echo "  ✅ Cache hit rate: ${CACHE_HIT_RATE}%"
+            echo "     sccache S3 integration is working effectively!"
+          fi
+          echo ""
+          echo "📋 The enhanced build.sh script provided detailed analysis of:"
+          echo "  1. sccache installation and S3 connectivity"
+          echo "  2. AWS credentials and bucket accessibility"
+          echo "  3. Live compilation testing with cache verification"
+          echo "  4. S3 upload/download activity monitoring"
+          echo "  5. Comprehensive cache performance metrics"
+          echo ""
+          echo "🎯 Next builds should show improved cache hit rates as S3 cache accumulates"
+          echo "==============================================="
+          
+          # Exit with build result
+          exit $BUILD_RESULT
       - name: Run pytest
         env:
           HF_HOME: /runner/_work/_temp
@@ -76,3 +348,78 @@ jobs:
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ matrix.framework }}:latest \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+      
+      - name: Upload build metrics
+        uses: actions/upload-artifact@v4
+        if: always()  # Upload even if tests fail
+        with:
+          name: build-metrics-${{ matrix.framework }}
+          path: build-metrics/metrics.json
+          retention-days: 7
+
+  
+  # Upload metrics for this workflow and all its jobs
+  upload-workflow-metrics:
+    name: Upload Workflow Metrics
+    runs-on: gitlab
+    if: always()  # Always run, even if other jobs fail
+    needs: [build-test]  # Wait for the main job to complete
+    
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Download build metrics
+        uses: actions/download-artifact@v4
+        with:
+          name: build-metrics-vllm
+          path: build-metrics/
+        continue-on-error: true  # Don't fail if artifact doesn't exist
+
+      - name: Upload Complete Workflow Metrics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
+          JOB_INDEX: ${{ secrets.JOB_INDEX }}
+          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
+          # Pass build metrics as environment variables
+          BUILD_DURATION_SEC: ${{ needs.build-test.outputs.build-duration-sec }}
+          IMAGE_SIZE_BYTES: ${{ needs.build-test.outputs.image-size-bytes }}
+          IMAGE_SIZE_MB: ${{ needs.build-test.outputs.image-size-mb }}
+          BUILD_START_TIME: ${{ needs.build-test.outputs.build-start-time }}
+          BUILD_END_TIME: ${{ needs.build-test.outputs.build-end-time }}
+          CACHE_HIT_RATE: ${{ needs.build-test.outputs.cache-hit-rate }}
+          BUILD_FRAMEWORK: ${{ needs.build-test.outputs.framework }}
+          BUILD_TARGET: ${{ needs.build-test.outputs.target }}
+          # Build and container index configuration
+          BUILD_INDEX: ${{ secrets.BUILD_INDEX }}
+          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
+        run: |
+          # Show build metrics for debugging
+          echo "📊 Build Metrics Available:"
+          echo "  Duration: ${BUILD_DURATION_SEC} seconds"
+          echo "  Image Size: ${IMAGE_SIZE_MB} MB (${IMAGE_SIZE_BYTES} bytes)"
+          echo "  Cache Hit Rate: ${CACHE_HIT_RATE}%"
+          echo "  Framework: ${BUILD_FRAMEWORK}"
+          echo "  Target: ${BUILD_TARGET}"
+          
+          # Check if build metrics file exists
+          if [ -f "build-metrics/metrics.json" ]; then
+            echo "📁 Build metrics file found:"
+            cat build-metrics/metrics.json
+          else
+            echo "⚠️  Build metrics file not found, using job outputs only"
+          fi
+          
+          # Run the enhanced metrics upload script
+          python3 .github/workflows/upload_complete_workflow_metrics.py
