@@ -187,12 +187,14 @@ def set_multinode_config(worker_service, gpu_count: int, num_gpus_per_node: int)
                 worker_service.multinode.nodeCount = node_count
 
 
+# TODO: make is work for all frameworks
 def get_worker_service_from_config(config: dict):
     """Helper function to get the SGLang decode worker service from config."""
     cfg = Config.model_validate(config)
     return cfg.spec.services[WORKER_COMPONENT_NAMES["sglang"].decode_worker_k8s_name]
 
 
+# TODO: make is work for all frameworks
 def setup_worker_service_resources(
     worker_service, gpu_count: int, num_gpus_per_node: int = None
 ):
@@ -222,6 +224,7 @@ def setup_worker_service_resources(
         worker_service.resources.limits["gpu"] = str(gpu_value)
 
 
+# TODO: make is work for all frameworks
 def validate_and_get_worker_args(worker_service):
     """Helper function to validate worker service and get its arguments."""
     if not worker_service.extraPodSpec or not worker_service.extraPodSpec.mainContainer:
