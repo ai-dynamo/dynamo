@@ -20,9 +20,10 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
-    let endpoint =
-        env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR).unwrap_or("http://localhost:8001".to_string());
-    let config: MxClientConfig = MxClientConfig::default().with_endpoint(endpoint.clone());
+    let mut config: MxClientConfig = MxClientConfig::default();
+    if let Ok(endpoint) = env::var(MODEL_EXPRESS_ENDPOINT_ENV_VAR) {
+        config = config.with_endpoint(endpoint);
+    }
 
     let result = match MxClient::new(config).await {
         Ok(mut client) => {
