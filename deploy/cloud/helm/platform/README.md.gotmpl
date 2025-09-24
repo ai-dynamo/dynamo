@@ -38,6 +38,48 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
 
+## ⚠️ Important: Cluster-Wide vs Namespace-Scoped Deployment
+
+### Single Cluster-Wide Operator (Recommended)
+
+**By default, the Dynamo operator runs with cluster-wide permissions and should only be deployed ONCE per cluster.**
+
+- ✅ **Recommended**: Deploy one cluster-wide operator per cluster
+- ❌ **Not Recommended**: Multiple cluster-wide operators in the same cluster
+
+### Multiple Namespace-Scoped Operators (Advanced)
+
+If you need multiple operator instances (e.g., for multi-tenancy), use namespace-scoped deployment:
+
+```yaml
+# values.yaml
+dynamo-operator:
+  namespaceRestriction:
+    enabled: true
+    targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
+```
+
+### Validation and Safety
+
+The chart includes built-in validation to prevent all operator conflicts:
+
+- **Automatic Detection**: Scans for existing operators (both cluster-wide and namespace-restricted) during installation
+- **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
+- **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists
+- **Prevents Mixed Deployments (Type 2)**: Installation will fail if trying to install cluster-wide operator when namespace-restricted operators exist
+- **Safe Defaults**: Leader election uses shared ID for proper coordination
+
+#### 🚫 **Blocked Conflict Scenarios**
+
+| Existing Operator | New Operator | Status | Reason |
+|-------------------|--------------|---------|--------|
+| None | Cluster-wide | ✅ **Allowed** | No conflicts |
+| None | Namespace-restricted | ✅ **Allowed** | No conflicts |
+| Cluster-wide | Cluster-wide | ❌ **Blocked** | Multiple cluster managers |
+| Cluster-wide | Namespace-restricted | ❌ **Blocked** | Cluster-wide already manages target namespace |
+| Namespace-restricted | Cluster-wide | ❌ **Blocked** | Would conflict with existing namespace operators |
+| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes |
+
 ## 🔧 Configuration
 
 {{ template "chart.requirementsSection" . }}

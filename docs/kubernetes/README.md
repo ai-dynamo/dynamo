@@ -23,7 +23,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 
 ```bash
 # 1. Set environment
-export NAMESPACE=dynamo-kubernetes
+export NAMESPACE=dynamo-system
 export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
 
 # 2. Install CRDs
@@ -50,8 +50,8 @@ Each backend has deployment examples and configuration options:
 ## 3. Deploy Your First Model
 
 ```bash
-# Set same namespace from platform install
 export NAMESPACE=dynamo-cloud
+kubectl create namespace ${NAMESPACE}
 
 # Deploy any example (this uses vLLM with Qwen model using aggregated serving)
 kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}

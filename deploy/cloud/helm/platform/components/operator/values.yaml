@@ -27,6 +27,19 @@ namespaceRestriction:
   targetNamespace: ""
 controllerManager:
   tolerations: []
+
+  # Leader election configuration
+  leaderElection:
+    # Leader election ID for cluster-wide coordination
+    # WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain
+    # Different IDs would allow multiple leaders simultaneously
+    id: ""  # If empty, defaults to: dynamo.nvidia.com (shared across all cluster-wide operators)
+
+    # Namespace for leader election leases (only used in cluster-wide mode)
+    # If empty, defaults to kube-system for cluster-wide coordination
+    # All cluster-wide operators should use the SAME namespace for proper leader election
+    namespace: ""
+
   kubeRbacProxy:
     args:
     - --secure-listen-address=0.0.0.0:8443

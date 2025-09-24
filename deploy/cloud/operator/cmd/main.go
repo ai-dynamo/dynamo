@@ -124,6 +124,7 @@ func main() {
 	var enableHTTP2 bool
 	var restrictedNamespace string
 	var leaderElectionID string
+	var leaderElectionNamespace string
 	var natsAddr string
 	var etcdAddr string
 	var istioVirtualServiceGateway string
@@ -149,6 +150,9 @@ func main() {
 		"Enable resources filtering, only the resources belonging to the given namespace will be handled.")
 	flag.StringVar(&leaderElectionID, "leader-election-id", "", "Leader election id"+
 		"Id to use for the leader election.")
+	flag.StringVar(&leaderElectionNamespace,
+		"leader-election-namespace", "",
+		"Namespace where the leader election resource will be created (default: same as operator namespace)")
 	flag.StringVar(&natsAddr, "natsAddr", "", "address of the NATS server")
 	flag.StringVar(&etcdAddr, "etcdAddr", "", "address of the etcd server")
 	flag.StringVar(&istioVirtualServiceGateway, "istio-virtual-service-gateway", "",
@@ -253,10 +257,11 @@ func main() {
 			SecureServing: secureMetrics,
 			TLSOpts:       tlsOpts,
 		},
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       leaderElectionID,
+		WebhookServer:           webhookServer,
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: leaderElectionNamespace,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

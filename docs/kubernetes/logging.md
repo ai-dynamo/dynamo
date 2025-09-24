@@ -31,7 +31,7 @@ The following env variables are set:
 
 ```bash
 export MONITORING_NAMESPACE=monitoring
-export DYNAMO_NAMESPACE=dynamo-cloud
+export DYNAMO_NAMESPACE=dynamo-system
 ```
 
 ## Installation Steps

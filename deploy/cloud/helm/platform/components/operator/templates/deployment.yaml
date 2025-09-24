@@ -12,6 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+{{/* Validate installation to prevent conflicts */}}
+{{- include "dynamo-operator.validateClusterWideInstallation" . -}}
+{{- include "dynamo-operator.validateConfiguration" . -}}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -76,7 +81,8 @@ spec:
           - --leader-elect=false
         {{- else }}
           - --leader-elect
-          - --leader-election-id=dynamo.nvidia.com
+          - --leader-election-id={{ default "dynamo.nvidia.com" .Values.controllerManager.leaderElection.id }}
+          - --leader-election-namespace={{ default "kube-system" .Values.controllerManager.leaderElection.namespace }}
         {{- end }}
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}
