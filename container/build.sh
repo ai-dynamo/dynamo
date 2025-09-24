@@ -693,8 +693,8 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
-if [[ $FRAMEWORK == "VLLM" ]]; then
-    echo "Forcing enable_kvbm to true in vLLM image build"
+if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "TRTLLM" ]]; then
+    echo "Forcing enable_kvbm to true in ${FRAMEWORK} image build"
     ENABLE_KVBM=true
 fi
 
