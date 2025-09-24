@@ -297,7 +297,7 @@ RUN dnf update -y \
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
     PROTOC_VERSION=25.3; \
-    case "${ARCH_ALT}}" in \
+    case "${ARCH_ALT}" in \
       x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
       aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
       *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
