@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod bus;
-pub mod collector;
 pub mod config;
-pub mod event;
+pub mod handle;
+pub mod sink;
+pub mod stream;
