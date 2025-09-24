@@ -7,3 +7,7 @@ pub use super::{config, response};
 pub use harmony_parser::{
     detect_tool_call_start_harmony, parse_tool_calls_harmony, parse_tool_calls_harmony_complete,
 };
+
+pub fn find_tool_call_end_position_harmony(chunk: &str) -> usize {
+    chunk.len()
+}
