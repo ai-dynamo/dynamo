@@ -37,7 +37,16 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
             {
                 Ok(()) => {
                     tracing::info!("Server download succeeded for model: {model_name}");
-                    client.get_model_path(&model_name).await
+                    match client.get_model_path(&model_name).await {
+                        Ok(path) => Ok(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to resolve local model path after server download for '{model_name}': {e}. \
+                                Falling back to direct download."
+                            );
+                            mx_download_direct(&model_name, ignore_weights).await
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
