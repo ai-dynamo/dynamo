@@ -43,16 +43,13 @@ export DYN_KVBM_CPU_CACHE_GB=4
 # 8 means 8GB of disk would be used
 export DYN_KVBM_DISK_CACHE_GB=8
 
-# start dynamo frontend
+# [DYNAMO] start dynamo frontend
 python -m dynamo.frontend --http-port 8000 &
 
-# serve an LLM model using KVBM with dynamo
+# [DYNAMO] serve an LLM model using KVBM with dynamo
 python -m dynamo.vllm \
     --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
     --connector kvbm &
-
-# alternatively, can use "vllm serve" with KVBM
-vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 # make a call to LLM
 curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
@@ -66,6 +63,11 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "stream":false,
     "max_tokens": 30
   }'
+```
+
+Alternatively, can use "vllm serve" with KVBM by replacing the above two [DYNAMO] cmds with below:
+```bash
+vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}' deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
 ## Enable and View KVBM Metrics
