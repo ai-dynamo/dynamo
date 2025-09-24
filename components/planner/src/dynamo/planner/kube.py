@@ -58,7 +58,7 @@ class KubernetesAPI:
             name=graph_deployment_name,
         )
 
-    async def get_graph_deployment(self, graph_deployment_name: str) -> dict:
+    def get_graph_deployment(self, graph_deployment_name: str) -> dict:
         """
         Get the parent DynamoGraphDeployment
 
@@ -113,7 +113,7 @@ class KubernetesAPI:
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
-            graph_deployment = await self.get_graph_deployment(graph_deployment_name)
+            graph_deployment = self.get_graph_deployment(graph_deployment_name)
 
             conditions = graph_deployment.get("status", {}).get("conditions", [])
             ready_condition = next(

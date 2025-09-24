@@ -441,7 +441,6 @@ class Planner:
                 return
 
         if not self.args.no_operation:
-            # Ensure change for virtual connector does not break things
             target_replicas = [
                 TargetReplica(
                     sub_component_type=SubComponentType.PREFILL,
@@ -459,18 +458,19 @@ class Planner:
     async def run(self):
         """Main loop for the planner"""
 
-        # Fail fast if the deployment does not contain prefill and decode components
-        logger.info("Verifying prefill and decode components exist...")
+        if not self.args.no_operation:
+            # Fail fast if the deployment does not contain prefill and decode components
+            logger.info("Verifying prefill and decode components exist...")
 
-        # TODO: still supporting framework component names for backwards compatibility
-        # Should be deprecated in favor of service subComponentType
-        await self.connector.verify_prefill_and_decode_components_exist(
-            prefill_component_name=self.prefill_component_name,
-            decode_component_name=self.decode_component_name,
-        )
-        logger.info("Successfully verified prefill and decode components exist")
+            # TODO: still supporting framework component names for backwards compatibility
+            # Should be deprecated in favor of service subComponentType
+            await self.connector.verify_prefill_and_decode_components_exist(
+                prefill_component_name=self.prefill_component_name,
+                decode_component_name=self.decode_component_name,
+            )
+            logger.info("Successfully verified prefill and decode components exist")
 
-        await self.connector.wait_for_deployment_ready()
+            await self.connector.wait_for_deployment_ready()
 
         self.last_adjustment_time = time.time()
 

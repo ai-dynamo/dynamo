@@ -72,9 +72,7 @@ class KubernetesConnector(PlannerConnector):
     ):
         """Add a component by increasing its replica count by 1"""
 
-        deployment = await self.kube_api.get_graph_deployment(
-            self.graph_deployment_name
-        )
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = self.get_service_from_sub_component_type_or_name(
             deployment, sub_component_type
@@ -94,9 +92,7 @@ class KubernetesConnector(PlannerConnector):
     ):
         """Remove a component by decreasing its replica count by 1"""
 
-        deployment = await self.kube_api.get_graph_deployment(
-            self.graph_deployment_name
-        )
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         service = self.get_service_from_sub_component_type_or_name(
             deployment, sub_component_type
@@ -124,9 +120,7 @@ class KubernetesConnector(PlannerConnector):
         Raises:
             DeploymentValidationError: If the deployment does not contain services with subComponentType prefill and decode
         """
-        deployment = await self.kube_api.get_graph_deployment(
-            self.graph_deployment_name
-        )
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         errors = []
 
@@ -171,9 +165,7 @@ class KubernetesConnector(PlannerConnector):
         if not target_replicas:
             raise EmptyTargetReplicasError()
 
-        deployment = await self.kube_api.get_graph_deployment(
-            self.graph_deployment_name
-        )
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         if not self.kube_api.is_deployment_ready(deployment):
             logger.warning(
