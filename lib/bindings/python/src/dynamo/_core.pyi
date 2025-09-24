@@ -1359,3 +1359,40 @@ class EntrypointArgs:
     """
 
     ...
+
+class Scaler:
+    """Internal planner virtual connector component"""
+
+    def __init__(runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+        ...
+
+    async def async_init(self) -> None:
+        """Call this before using PlannerConnector"""
+        ...
+
+    async def update_scaling_decision(self, num_prefill: int, num_decode: int) -> None:
+        ...
+
+    async def wait_for_scaling_completion(self) -> None:
+        ...
+
+class ScalerDecision:
+    """A request from planner to client to perform a scaling action.
+    Fields: num_prefill_workers, num_decode_workers, decision_id.
+    Call ScalerClient.complete(event) when action is completed.
+    """
+    ...
+
+class ScalerClient:
+    """How a client discovers planner requests and marks them complete"""
+
+    def __init__(runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+        ...
+
+    async def get(self) -> ScalerEvent:
+        ...
+
+    async def complete(self, ScalerState) -> None:
+        ...
+
+

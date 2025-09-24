@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#
+# This test requires etcd and nats to be running, and the bindings to be installed
+#
+
+import asyncio
+import logging
+import subprocess
+import time
+import threading
+
+import pytest
+
+from dynamo._core import DistributedRuntime, ScalerClient
+from dynamo.planner import VirtualConnector
+
+pytestmark = pytest.mark.pre_merge
+logger = logging.getLogger(__name__)
+
+NAMESPACE = "test_virtual_connector"
+
+@pytest.fixture(scope="module")
+async def distributed_runtime():
+    loop = asyncio.get_running_loop()
+    return DistributedRuntime(loop, False)
+
+
+async def next_scaling_decision(c):
+    """Move the second decision in to a separate task so we can `.wait` for it."""
+    replicas = {"prefill": 5, "decode": 8}
+    await c.set_component_replicas(replicas, blocking=False)
+
+
+async def test_main(distributed_runtime):
+    """
+    Connect a VirtualConnector (Dynamo Planner) and a ScalerClient (customer), and scale.
+    """
+
+    # This is Dynamo Planner
+    c = VirtualConnector(distributed_runtime, NAMESPACE, "sglang")
+    await c._async_init()
+    replicas = {"prefill": 1, "decode": 2}
+    await c.set_component_replicas(replicas, blocking=False)
+
+    # This is the client
+    client = ScalerClient(distributed_runtime, NAMESPACE)
+    event = await client.get()
+    # Here the client would do the scaling
+    assert event.num_prefill_workers == 1
+    assert event.num_decode_workers == 2
+    assert event.decision_id == 0
+    await client.complete(event)
+
+    await c._wait_for_scaling_completion()
+
+    # Second decision with wait
+
+    task = asyncio.create_task(next_scaling_decision(c))
+    await client.wait()
+    await task
+
+    event = await client.get()
+    assert event.num_prefill_workers == 5
+    assert event.num_decode_workers == 8
+    assert event.decision_id == 1
+    await client.complete(event)
+
+    await c._wait_for_scaling_completion()
+
