@@ -23,7 +23,7 @@ async def register_llm_with_runtime_config(
     Returns:
         bool: True if registration succeeded, False if it failed
     """
-    runtime_config = await _get_runtime_config(engine, dynamo_args)
+    runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
     input_type = ModelInput.Tokens
     output_type = ModelType.Chat | ModelType.Completions
     if not server_args.skip_tokenizer_init:
@@ -51,13 +51,25 @@ async def register_llm_with_runtime_config(
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, dynamo_args: DynamoArgs
+    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoArgs
 ) -> Optional[ModelRuntimeConfig]:
     """Get runtime config from SGLang engine"""
     runtime_config = ModelRuntimeConfig()
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+
+    # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
+    # Note: If --max-running-requests is not specified, SGLang uses an internal default
+    # undocumented value. The value here will be None if not explicitly set by user.
+    max_running_requests = getattr(server_args, "max_running_requests", None)
+    if max_running_requests:
+        runtime_config.max_num_seqs = max_running_requests
+
+    max_prefill_tokens = getattr(server_args, "max_prefill_tokens", None)
+    if max_prefill_tokens:
+        runtime_config.max_num_batched_tokens = max_prefill_tokens
+
     try:
         # Try to check if the engine has a scheduler attribute with the computed values
         if hasattr(engine, "scheduler_info") and engine.scheduler_info is not None:
@@ -77,7 +89,10 @@ async def _get_runtime_config(
                             f"(max_total_tokens={max_total_tokens}, page_size={page_size})"
                         )
 
-            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info
+            # Note: max_running_requests and max_prefill_tokens are NOT available in scheduler_info.
+            # SGLang separates configuration (server_args) from runtime stats (scheduler_info).
+            # In contrast, vLLM exposes both config and runtime values through engine config.
+            # These are config parameters, so they must be retrieved from server_args only.
 
             return runtime_config
 
