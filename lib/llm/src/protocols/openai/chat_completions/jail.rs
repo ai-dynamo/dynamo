@@ -72,6 +72,23 @@ struct ChoiceJailState {
     partial_match_buffer: String,
 }
 
+fn create_choice_stream(choice: &ChatChoiceStream, content: &str) -> ChatChoiceStream {
+    #[allow(deprecated)]
+    ChatChoiceStream {
+        index: choice.index,
+        delta: ChatCompletionStreamResponseDelta {
+            role: choice.delta.role,
+            content: Some(content.to_string()),
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason: choice.finish_reason,
+        logprobs: choice.logprobs.clone(),
+    }
+}
+
 impl ChoiceJailState {
     /// Create a new jail state for a choice
     fn new(index: u32) -> Self {
@@ -120,19 +137,7 @@ impl ChoiceJailState {
                     // Emit prefix if any
                     if !prefix.is_empty() {
                         #[allow(deprecated)]
-                        let prefix_choice = ChatChoiceStream {
-                            index: choice.index,
-                            delta: ChatCompletionStreamResponseDelta {
-                                role: choice.delta.role,
-                                content: Some(prefix),
-                                tool_calls: None,
-                                function_call: None,
-                                refusal: None,
-                                reasoning_content: None,
-                            },
-                            finish_reason: None,
-                            logprobs: choice.logprobs.clone(),
-                        };
+                        let prefix_choice = create_choice_stream(choice, &prefix);
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
                     }
 
@@ -165,19 +170,7 @@ impl ChoiceJailState {
                         // Handle trailing content if any
                         if !trailing_part.is_empty() {
                             #[allow(deprecated)]
-                            let trailing_choice = ChatChoiceStream {
-                                index: choice.index,
-                                delta: ChatCompletionStreamResponseDelta {
-                                    role: choice.delta.role,
-                                    content: Some(trailing_part.to_string()),
-                                    tool_calls: None,
-                                    function_call: None,
-                                    refusal: None,
-                                    reasoning_content: None,
-                                },
-                                finish_reason: None,
-                                logprobs: choice.logprobs.clone(),
-                            };
+                            let trailing_choice = create_choice_stream(choice, trailing_part);
                             emissions.push(ChoiceEmission::Trailing(trailing_choice));
                         }
                     } else {
@@ -202,19 +195,7 @@ impl ChoiceJailState {
                     // Emit the safe prefix
                     if !prefix.is_empty() {
                         #[allow(deprecated)]
-                        let prefix_choice = ChatChoiceStream {
-                            index: choice.index,
-                            delta: ChatCompletionStreamResponseDelta {
-                                role: choice.delta.role,
-                                content: Some(prefix),
-                                tool_calls: None,
-                                function_call: None,
-                                refusal: None,
-                                reasoning_content: None,
-                            },
-                            finish_reason: None,
-                            logprobs: choice.logprobs.clone(),
-                        };
+                        let prefix_choice = create_choice_stream(choice, &prefix);
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
                     }
 
@@ -250,19 +231,7 @@ impl ChoiceJailState {
                         // No markers - emit everything
                         if !content.is_empty() {
                             #[allow(deprecated)]
-                            let pass_through_choice = ChatChoiceStream {
-                                index: choice.index,
-                                delta: ChatCompletionStreamResponseDelta {
-                                    role: choice.delta.role,
-                                    content: Some(content),
-                                    tool_calls: None,
-                                    function_call: None,
-                                    refusal: None,
-                                    reasoning_content: None,
-                                },
-                                finish_reason: None,
-                                logprobs: choice.logprobs.clone(),
-                            };
+                            let pass_through_choice = create_choice_stream(choice, &content);
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
                         }
                         self.partial_match_buffer.clear();
@@ -300,19 +269,7 @@ impl ChoiceJailState {
                 // Handle trailing content if any
                 if !trailing_part.is_empty() {
                     #[allow(deprecated)]
-                    let trailing_choice = ChatChoiceStream {
-                        index: choice.index,
-                        delta: ChatCompletionStreamResponseDelta {
-                            role: choice.delta.role,
-                            content: Some(trailing_part.to_string()),
-                            tool_calls: None,
-                            function_call: None,
-                            refusal: None,
-                            reasoning_content: None,
-                        },
-                        finish_reason: None,
-                        logprobs: choice.logprobs.clone(),
-                    };
+                    let trailing_choice = create_choice_stream(choice, trailing_part);
                     emissions.push(ChoiceEmission::Trailing(trailing_choice));
                 }
 
