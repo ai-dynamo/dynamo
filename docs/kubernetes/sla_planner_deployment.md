@@ -53,7 +53,6 @@ Expected pods (all should be `1/1 Running`):
 ```
 # For vLLM:
 vllm-disagg-planner-frontend-*            1/1 Running
-vllm-disagg-planner-prometheus-*          1/1 Running
 vllm-disagg-planner-planner-*             1/1 Running
 vllm-disagg-planner-backend-*             1/1 Running
 vllm-disagg-planner-prefill-*             1/1 Running

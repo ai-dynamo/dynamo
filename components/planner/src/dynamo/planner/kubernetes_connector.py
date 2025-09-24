@@ -259,13 +259,21 @@ if __name__ == "__main__":
     parser.add_argument("--dynamo_namespace", type=str, default="dynamo")
     parser.add_argument("--k8s_namespace", type=str, default="default")
     parser.add_argument("--action", type=str, choices=["add", "remove"])
-    parser.add_argument("--component", type=str, default="planner")
+    parser.add_argument(
+        "--component",
+        type=str,
+        choices=[t.value for t in SubComponentType],
+        default=SubComponentType.PREFILL.value,
+        help="Target sub-component to scale",
+    )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
     connector = KubernetesConnector(args.dynamo_namespace, args.k8s_namespace)
 
     if args.action == "add":
-        task = connector.add_component(args.component, args.blocking)
+        task = connector.add_component(SubComponentType(args.component), args.blocking)
     elif args.action == "remove":
-        task = connector.remove_component(args.component, args.blocking)
+        task = connector.remove_component(
+            SubComponentType(args.component), args.blocking
+        )
     asyncio.run(task)
