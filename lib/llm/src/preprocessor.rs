@@ -822,7 +822,9 @@ impl
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
-        let (request, context) = request.into_parts();
+        let (mut request, context) = request.into_parts();
+
+        request.inner.stream = Some(true);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
