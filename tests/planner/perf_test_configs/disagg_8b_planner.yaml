@@ -106,7 +106,7 @@ spec:
       replicas: 1
       envs:
         - name: PYTHONPATH
-          value: "/workspace/components/planner/src"
+          value: "/workspace/components/src"
         - name: PROMETHEUS_PORT
           value: "8000"
       livenessProbe:

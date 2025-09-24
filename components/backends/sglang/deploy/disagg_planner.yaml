@@ -69,7 +69,7 @@ spec:
       replicas: 1
       envs:
         - name: PYTHONPATH
-          value: "/workspace/components/planner/src"
+          value: "/workspace/components/src"
       livenessProbe:
         exec:
           command:

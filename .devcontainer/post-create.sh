@@ -111,7 +111,7 @@ else
         fi
     else
         # Back-up version. Make sure to sync this with the README.md's PYTHONPATH. This is the version from 2025-08-19
-        show_and_run export PYTHONPATH=$DYNAMO_HOME/components/frontend/src:$DYNAMO_HOME/components/planner/src:$DYNAMO_HOME/components/backends/vllm/src:$DYNAMO_HOME/components/backends/sglang/src:$DYNAMO_HOME/components/backends/trtllm/src:$DYNAMO_HOME/components/backends/llama_cpp/src:$DYNAMO_HOME/components/backends/mocker/src
+        show_and_run export PYTHONPATH=$DYNAMO_HOME/components/src
     fi
 fi
 
