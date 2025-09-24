@@ -12,6 +12,9 @@ use crate::protocols::openai::chat_completions::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
+use dynamo_async_openai::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta, Role};
+use futures::StreamExt;
+
 /// Forwards transformed chunks unchanged; collects them for aggregation.
 pub struct PassThroughWithAgg<S> {
     inner: S,
@@ -72,15 +75,15 @@ where
 pub fn scan_aggregate_with_future<S>(
     stream: S,
 ) -> (
-    PassThroughWithAgg<S>,
-    impl std::future::Future<Output = NvCreateChatCompletionResponse> + Send + 'static,
+    Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+    Pin<Box<dyn std::future::Future<Output = NvCreateChatCompletionResponse> + Send>>,
 )
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Unpin + Send + 'static,
 {
     let (tx, rx) = oneshot::channel::<NvCreateChatCompletionResponse>();
     let passthrough = PassThroughWithAgg::new(stream, tx);
-    (passthrough, async move {
+    (Box::pin(passthrough), Box::pin(async move {
         rx.await.unwrap_or_else(|_| {
             tracing::warn!("audit: aggregation future canceled/failed");
             // Return minimal response if aggregation failed
@@ -95,7 +98,130 @@ where
                 service_tier: None,
             }
         })
-    })
+    }))
+}
+
+/// Collect all chunks, aggregate them, then emit a single final chunk (for non-streaming)
+pub fn fold_aggregate_with_future<S>(
+    stream: S,
+) -> (
+    Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+    Pin<Box<dyn std::future::Future<Output = NvCreateChatCompletionResponse> + Send>>,
+)
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
+    let (tx, rx) = oneshot::channel::<NvCreateChatCompletionResponse>();
+
+    let single_chunk_stream = async move {
+        let chunks: Vec<_> = stream.collect().await;
+        let chunks_stream = futures::stream::iter(chunks);
+        let parsing_options = ParsingOptions::default();
+
+        match DeltaAggregator::apply(chunks_stream, parsing_options).await {
+            Ok(final_resp) => {
+                let _ = tx.send(final_resp.clone());
+                final_response_to_one_chunk_stream(final_resp)
+            }
+            Err(e) => {
+                tracing::warn!("fold aggregation failed: {e}");
+                let fallback = NvCreateChatCompletionResponse {
+                    id: String::new(),
+                    created: 0,
+                    usage: None,
+                    model: String::new(),
+                    object: "chat.completion".to_string(),
+                    system_fingerprint: None,
+                    choices: vec![],
+                    service_tier: None,
+                };
+                let _ = tx.send(fallback.clone());
+                final_response_to_one_chunk_stream(fallback)
+            }
+        }
+    };
+
+    let future = Box::pin(async move {
+        rx.await.unwrap_or_else(|_| {
+            tracing::warn!("fold aggregation future canceled");
+            NvCreateChatCompletionResponse {
+                id: String::new(),
+                created: 0,
+                usage: None,
+                model: String::new(),
+                object: "chat.completion".to_string(),
+                system_fingerprint: None,
+                choices: vec![],
+                service_tier: None,
+            }
+        })
+    });
+
+    (Box::pin(futures::stream::once(single_chunk_stream).flatten()), future)
+}
+
+/// Convert a final (non-streaming) response into a single "final chunk" stream.
+/// Put the entire final text/tool-calls into `delta` so downstream aggregate is a no-op.
+pub fn final_response_to_one_chunk_stream(
+    resp: NvCreateChatCompletionResponse,
+) -> std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
+    let mut choices: Vec<ChatChoiceStream> = Vec::with_capacity(resp.choices.len());
+    for (idx, ch) in resp.choices.iter().enumerate() {
+        // Convert FunctionCall to FunctionCallStream if present
+        let function_call = ch.message.function_call.as_ref().map(|fc| {
+            dynamo_async_openai::types::FunctionCallStream {
+                name: Some(fc.name.clone()),
+                arguments: Some(fc.arguments.clone()),
+            }
+        });
+
+        // Convert tool calls
+        let tool_calls = ch.message.tool_calls.as_ref().map(|calls| {
+            calls.iter().enumerate().map(|(i, call)| {
+                dynamo_async_openai::types::ChatCompletionMessageToolCallChunk {
+                    index: i as u32,
+                    id: Some(call.id.clone()),
+                    r#type: Some(call.r#type.clone()),
+                    function: Some(dynamo_async_openai::types::FunctionCallStream {
+                        name: Some(call.function.name.clone()),
+                        arguments: Some(call.function.arguments.clone()),
+                    }),
+                }
+            }).collect()
+        });
+
+        #[allow(deprecated)]
+        let delta = ChatCompletionStreamResponseDelta {
+            role: Some(ch.message.role.clone()),
+            content: ch.message.content.clone(),
+            tool_calls,
+            function_call,
+            refusal: ch.message.refusal.clone(),
+            reasoning_content: ch.message.reasoning_content.clone(),
+        };
+
+        let choice = ChatChoiceStream {
+            index: idx as u32,
+            delta,
+            finish_reason: ch.finish_reason.clone(),
+            logprobs: ch.logprobs.clone(),
+        };
+        choices.push(choice);
+    }
+
+    let chunk = NvCreateChatCompletionStreamResponse {
+        id: resp.id.clone(),
+        object: "chat.completion.chunk".to_string(),
+        created: resp.created,
+        model: resp.model.clone(),
+        system_fingerprint: resp.system_fingerprint.clone(),
+        service_tier: resp.service_tier.clone(),
+        choices,
+        usage: resp.usage.clone(),
+    };
+
+    let annotated = Annotated { data: Some(chunk), id: None, event: None, comment: None };
+    Box::pin(futures::stream::once(async move { annotated }))
 }
 
 #[cfg(test)]
