@@ -134,6 +134,9 @@ python3 -m benchmarks.utils.benchmark \
 ```bash
 # Generate plots and summary using Python plotting script
 python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
+
+# Or plot only specific benchmark experiments
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name experiment-a --benchmark-name experiment-b
 ```
 
 ## Use Cases
@@ -190,6 +193,28 @@ The Python benchmarking module:
 The Python plotting module:
 1. **Generates** comparison plots using your custom labels in `<OUTPUT_DIR>/plots/`
 2. **Creates** summary statistics and visualizations
+
+### Plotting Options
+
+The plotting script supports several options for customizing which experiments to visualize:
+
+```bash
+# Plot all benchmark experiments in the data directory
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
+
+# Plot only specific benchmark experiments
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --benchmark-name experiment-a --benchmark-name experiment-b
+
+# Specify custom output directory for plots
+python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results --output-dir ./custom-plots
+```
+
+**Available Options:**
+- `--data-dir`: Directory containing benchmark results (required)
+- `--benchmark-name`: Specific benchmark experiment name to plot (can be specified multiple times). Names must match subdirectory names under the data dir.
+- `--output-dir`: Custom output directory for plots (defaults to data-dir/plots)
+
+**Note**: If `--benchmark-name` is not specified, the script will plot all subdirectories found in the data directory.
 
 ### Using Your Own Models and Configuration
 
