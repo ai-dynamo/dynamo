@@ -56,7 +56,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     match result {
         Ok(path) => {
             tracing::info!("ModelExpress download completed successfully for model: {model_name}");
-            return Ok(path);
+            Ok(path)
         }
         Err(e) => {
             tracing::warn!("ModelExpress download failed for model '{model_name}': {e}");
