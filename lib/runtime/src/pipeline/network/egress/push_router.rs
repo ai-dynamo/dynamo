@@ -136,21 +136,41 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        println!("!![ROUTER] round_robin: Starting round-robin worker selection");
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+        println!("!![ROUTER] round_robin: Counter value: {}", counter);
 
         let instance_id = {
             let instance_ids = self.client.instance_ids_avail();
             let count = instance_ids.len();
+            println!(
+                "!![ROUTER] round_robin: Available instance IDs: {:?} (count: {})",
+                instance_ids, count
+            );
             if count == 0 {
+                println!(
+                    "!![ROUTER] round_robin: ERROR - No instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
+                );
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
                     self.client.endpoint.etcd_root()
                 ));
             }
-            instance_ids[counter % count]
+            let selected_index = counter % count;
+            let selected_id = instance_ids[selected_index];
+            println!(
+                "!![ROUTER] round_robin: Selected index {} -> worker ID {}",
+                selected_index, selected_id
+            );
+            selected_id
         };
         tracing::trace!("round robin router selected {instance_id}");
 
+        println!(
+            "!![ROUTER] round_robin: Calling generate_with_fault_detection for worker {}",
+            instance_id
+        );
         self.generate_with_fault_detection(instance_id, request)
             .await
     }
@@ -207,13 +227,21 @@ where
         instance_id: i64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
+        println!(
+            "!![ROUTER] generate_with_fault_detection: Starting request to worker {}",
+            instance_id
+        );
+
         // Check if all workers are busy (only if busy threshold is set)
         if self.busy_threshold.is_some() {
             let free_instances = self.client.instance_ids_free();
+            println!("!![ROUTER] Free worker instances: {:?}", free_instances);
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
                 let all_instances = self.client.instance_ids();
+                println!("!![ROUTER] All worker instances: {:?}", all_instances);
                 if !all_instances.is_empty() {
+                    println!("!![ROUTER] ERROR: All workers are busy");
                     return Err(PipelineError::ServiceOverloaded(
                         "All workers are busy, please retry later".to_string(),
                     )
@@ -223,17 +251,43 @@ where
         }
 
         let subject = self.client.endpoint.subject_to(instance_id);
-        let request = request.map(|req| AddressedRequest::new(req, subject));
+        println!(
+            "!![ROUTER] Created subject for worker {}: {}",
+            instance_id, subject
+        );
 
+        let request = request.map(|req| AddressedRequest::new(req, subject));
+        println!("!![ROUTER] Created AddressedRequest, calling addressed.generate()");
+
+        let start_time = std::time::Instant::now();
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
+        let elapsed = start_time.elapsed();
+        println!(
+            "!![ROUTER] addressed.generate() took {:?}, success: {}",
+            elapsed,
+            stream.is_ok()
+        );
+
         match stream {
             Ok(stream) => {
+                println!(
+                    "!![ROUTER] Successfully got stream from worker {}",
+                    instance_id
+                );
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
                     if let Some(err) = res.err() {
+                        println!(
+                            "!![ROUTER] Error in stream from worker {}: {:?}",
+                            instance_id, err
+                        );
                         const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
                         if format!("{:?}", err) == STREAM_ERR_MSG {
+                            println!(
+                                "!![ROUTER] Reporting worker {} as down due to stream end",
+                                instance_id
+                            );
                             client.report_instance_down(instance_id);
                         }
                     }
@@ -242,9 +296,14 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
+                println!("!![ROUTER] ERROR from worker {}: {:?}", instance_id, err);
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>()
                     && matches!(req_err.kind(), NatsNoResponders)
                 {
+                    println!(
+                        "!![ROUTER] No NATS responders for worker {}, reporting down",
+                        instance_id
+                    );
                     self.client.report_instance_down(instance_id);
                 }
                 Err(err)
