@@ -34,9 +34,100 @@ The main KV-aware routing arguments:
 >
 > When `--kv-overlap-score-weight` is set to 0 or `--no-kv-events` is set, no KvIndexer will be launched to drain and process KV events. It's recommended to disable your backend workers from relaying events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
 
-## Architecture
+## Overview
 
-Colloquially, we refer to a Dynamo component that serves an endpoint for LLM inference as a **worker**.
+The KV-aware router operates on two key principles to optimize request routing:
+
+### Global KV Cache State via JetStream
+
+First, KV events from engines are sent to a persistent NATS JetStream. Each KV router/indexer replica acts as a durable consumer, pulling messages from this shared stream to maintain a global view of cached blocks across all engines. This architecture ensures consistency across router replicas and persistence across restarts.
+
+```mermaid
+graph TD
+    subgraph Engines
+        E1[Engine 1<br/>KVPublisher]
+        E2[Engine 2<br/>KVPublisher]
+        E3[Engine 3<br/>KVPublisher]
+    end
+
+    subgraph "NATS JetStream"
+        JS[(Persistent KV Events Stream<br/>- Block created<br/>- Block removed)]
+    end
+
+    subgraph "NATS Object Store"
+        OS[(Radix Tree<br/>State Snapshot)]
+    end
+
+    subgraph "Router Replicas"
+        R1[Router 1<br/>KVIndexer]
+        R2[Router 2<br/>KVIndexer]
+    end
+
+    E1 -->|Publish Events| JS
+    E2 -->|Publish Events| JS
+    E3 -->|Publish Events| JS
+
+    JS -->|Consume as Durable Consumer| R1
+    JS -->|Consume as Durable Consumer| R2
+    JS -->|Periodic Snapshot| OS
+
+    style JS fill:#e1f5fe
+    style OS fill:#e8f5e9
+    style E1 fill:#fff3e0
+    style E2 fill:#fff3e0
+    style E3 fill:#fff3e0
+    style R1 fill:#f3e5f5
+    style R2 fill:#f3e5f5
+```
+
+### Local Active Block Management with Replica Sync
+
+Second, in addition to cached blocks, each router replica needs to track active blocks (blocks being used for ongoing generation) as load metrics. Since this information is highly time-sensitive, it must be predicted immediately when:
+- The router receives and routes a request
+- The first token is generated (prefill complete)
+- The response ends (request freed)
+
+This is managed locally in each router via a "slot manager". To maintain consistency across the system, router replicas synchronize these local predictions with each other through NATS core messaging.
+
+```mermaid
+sequenceDiagram
+    participant C1 as Client 1
+    participant R1 as Router 1<br/>(Slot Manager)
+    participant R2 as Router 2<br/>(Slot Manager)
+    participant C2 as Client 2
+
+    Note over R1,R2: Router Replica Sync Enabled
+
+    C1->>R1: Request A
+    activate R1
+    R1->>R1: Predict blocks & route to worker
+    R1-->>R2: Sync: AddRequest(A)
+
+    C2->>R2: Request B
+    activate R2
+    R2->>R2: Predict blocks & route to worker
+    R2-->>R1: Sync: AddRequest(B)
+
+    R1->>R1: First token received<br/>(prefill complete)
+    R1-->>R2: Sync: MarkPrefillCompleted(A)
+    R1->>C1: Stream response
+
+    R2->>R2: First token received<br/>(prefill complete)
+    R2-->>R1: Sync: MarkPrefillCompleted(B)
+    R2->>C2: Stream response
+
+    R1->>R1: Response complete<br/>(free blocks)
+    R1-->>R2: Sync: Free(A)
+    deactivate R1
+
+    R2->>R2: Response complete<br/>(free blocks)
+    R2-->>R1: Sync: Free(B)
+    deactivate R2
+
+    Note over R1,R2: Both routers have consistent<br/>view of active blocks
+```
+
+This dual-layer approach—persistent global KV cache state via JetStream and ephemeral active block synchronization via router replicas—enables the system to make optimal routing decisions that balance cache reuse with load distribution.
 
 ## Basic Routing
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
@@ -181,20 +272,6 @@ Example calculation with `overlap_score_weight = 1.0`:
 - Worker 3: cost = 1.0 * 2 + 9 = 11
 
 ## Events
-
-Dynamo supports KV Cache Routing across multiple backend implementations through a flexible event system. The KVPublisher component integrates with any framework to emit KV events, while the KVIndexer component maintains a global prefix tree of cached blocks by processing these events from all workers.
-
-```text
-+----------------+                         +-----------------+
-|                |                         | KV Aware Router |
-|     Worker     |                         |                 |
-|                | create_kv_block()       | +-------------+ |
-| +------------+ | remove_kv_block()       | |  KVIndexer  | |
-| |KVPublisher | |------------------------>| +-------------+ |
-| +------------+ |                         |                 |
-|                |                         |                 |
-+----------------+                         +-----------------+
-```
 
 ### KVPublisher
 The KVPublisher can be initialized and then called in the inference framework where blocks are allocated and removed.
