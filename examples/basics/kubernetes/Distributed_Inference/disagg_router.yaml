@@ -34,10 +34,6 @@ spec:
           hostPath:
             path: /YOUR/LOCAL/CACHE/FOLDER
             type: DirectoryOrCreate
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 16Gi 
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
           workingDir: /workspace/components/backends/vllm

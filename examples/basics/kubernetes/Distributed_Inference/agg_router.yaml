@@ -21,7 +21,7 @@ spec:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-agg-router
       componentType: worker
-      replicas: 1
+      replicas: 4
       resources:
         limits:
           gpu: "1"
