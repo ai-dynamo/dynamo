@@ -7,9 +7,6 @@
 
 import asyncio
 import logging
-import subprocess
-import time
-import threading
 
 import pytest
 
@@ -20,6 +17,7 @@ pytestmark = pytest.mark.pre_merge
 logger = logging.getLogger(__name__)
 
 NAMESPACE = "test_virtual_connector"
+
 
 @pytest.fixture(scope="module")
 async def distributed_runtime():
@@ -68,4 +66,3 @@ async def test_main(distributed_runtime):
     await client.complete(event)
 
     await c._wait_for_scaling_completion()
-

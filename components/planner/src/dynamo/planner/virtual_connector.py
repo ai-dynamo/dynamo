@@ -37,9 +37,7 @@ class VirtualConnector(PlannerConnector):
         self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None
     ):
         """Update scaling decision"""
-        await self.connector.update_scaling_decision(
-            num_prefill or 0, num_decode or 0
-        )
+        await self.connector.update_scaling_decision(num_prefill or 0, num_decode or 0)
 
     async def _wait_for_scaling_completion(self):
         """Wait for the deployment environment to report that scaling is complete"""

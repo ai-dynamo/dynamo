@@ -1389,7 +1389,7 @@ class ScalerClient:
     def __init__(runtime: DistributedRuntime, dynamo_namespace: str) -> None:
         ...
 
-    async def get(self) -> ScalerEvent:
+    async def get(self) -> ScalerDecision:
         ...
 
     async def complete(self, ScalerState) -> None:
