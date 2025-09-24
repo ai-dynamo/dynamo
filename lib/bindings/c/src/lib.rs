@@ -352,7 +352,6 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 //         assert_eq!(shutdown_result as u32, DynamoLlmResult::OK as u32);
 //     }
 // }
-
 /* ------------------------------------------------------------------------
  * Worker selection pipeline
  * ------------------------------------------------------------------------ */
@@ -363,48 +362,16 @@ use dynamo_llm::entrypoint::input::worker_selection_pipeline::{
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::types::{Annotated, openai::chat_completions::NvCreateChatCompletionRequest};
 use dynamo_runtime::pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn};
-use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, OnceLock};
 
-// Opaque handle exposed to C
+// Opaque handle exposed to C — contains the engine directly.
+// You will pass around a *mut WorkerSelectionPipeline allocated via Box.
 pub struct WorkerSelectionPipeline {
-    id: u64,
+    engine:
+        ServiceEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
 }
-
-// Global registry for created pipelines (lives entirely in-process)
-static PIPELINES: OnceLock<
-    Mutex<
-        HashMap<
-            u64,
-            Arc<
-                ServiceEngine<
-                    SingleIn<NvCreateChatCompletionRequest>,
-                    ManyOut<Annotated<LLMEngineOutput>>,
-                >,
-            >,
-        >,
-    >,
-> = OnceLock::new();
-
-fn pipelines() -> &'static Mutex<
-    HashMap<
-        u64,
-        Arc<
-            ServiceEngine<
-                SingleIn<NvCreateChatCompletionRequest>,
-                ManyOut<Annotated<LLMEngineOutput>>,
-            >,
-        >,
-    >,
-> {
-    PIPELINES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[unsafe(no_mangle)]
-/// Create a worker-selection pipeline ("generate" endpoint) and return an opaque handle.
+/// Create a worker-selection pipeline ("generate" endpoint) and return an opaque Box handle.
 ///
 /// # Safety
 /// - All `*_c_str` must be valid, nul-terminated C strings.
@@ -464,12 +431,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
 
     // Build on the same worker runtime (secondary handle)
     let make_pipeline = || async {
-        // let router_mode = if use_kv_routing {
-        //     RouterMode::KV
-        // } else {
-        //     RouterMode::RoundRobin
-        // };
-        // TODO rm later
+        // Optional env override: DYNAMO_FORCE_RR=1
         let force_rr = std::env::var("DYNAMO_FORCE_RR").ok().as_deref() == Some("1");
         let router_mode = if force_rr {
             RouterMode::RoundRobin
@@ -479,17 +441,17 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
             RouterMode::RoundRobin
         };
         eprintln!("!!! router_mode={:?} (force_rr={})", router_mode, force_rr);
+
         let kv_router_config = if use_kv_routing {
             use dynamo_llm::kv_router::KvRouterConfig;
             Some(KvRouterConfig::new(
-                // None => default, Some(x) => override
                 (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
                 Some(router_replica_sync),
-                None, // max_num_batched_tokens (use default)
-                None, // router_snapshot_threshold (use default)
-                None, // router_reset_states (use default)
+                None, // max_num_batched_tokens (default)
+                None, // router_snapshot_threshold (default)
+                None, // router_reset_states (default)
             ))
         } else {
             None
@@ -506,125 +468,30 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         .await
     };
 
-    let pipeline = match wk.runtime().secondary().block_on(make_pipeline()) {
+    let engine = match wk.runtime().secondary().block_on(make_pipeline()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("create_worker_selection_pipeline_chat failed: {e:?}");
             return DynamoLlmResult::ERR;
         }
     };
-    // TODO rm
-    // ---- preflight sanity check: run a tiny query to verify the graph is wired ----
-    // Store and hand out an ID-backed handle *before* preflight so we can reuse the FFI
-    // use std::sync::atomic::AtomicU64; // <-- do NOT import Ordering again here
 
-    // let id = NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed);
-    // {
-    //     let mut map = pipelines().lock().unwrap();
-    //     map.insert(id, pipeline);
-    // }
+    // Box the engine inside our opaque handle and return it
+    let handle = Box::new(WorkerSelectionPipeline { engine });
+    eprintln!(
+        "!!! pipeline created; engine at {:p}",
+        &handle.engine as *const _
+    );
 
-    // // Create the handle we’ll return to the caller
-    // let handle = Box::new(WorkerSelectionPipeline { id });
-
-    // // ---- preflight sanity using the same exported FFI you call from Go ----
-    // let sanity_json = format!(
-    //     r#"{{
-    //         "model":"{}",
-    //         "messages":[{{"role":"user","content":"ping"}}],
-    //         "stream":true,
-    //         "max_tokens":1,
-    //         "temperature":0.0,
-    //         "nvext":{{"annotations":["query_instance_id"]}}
-    //     }}"#,
-    //     model
-    // );
-
-    // // Prepare C args/outs
-    // let c_req = match std::ffi::CString::new(sanity_json) {
-    //     Ok(s) => s,
-    //     Err(e) => {
-    //         eprintln!("preflight: CString failed: {:?}", e);
-    //         // continue; this is diagnostic only
-    //         unsafe { *pipeline_out = Box::into_raw(handle) };
-    //         return DynamoLlmResult::OK;
-    //     }
-    // };
-
-    // let mut wid_out: i64 = 0;
-    // let mut toks_ptr: *mut u32 = std::ptr::null_mut();
-    // let mut toks_len: usize = 0;
-    // let mut ann_json_ptr: *mut c_char = std::ptr::null_mut();
-
-    // let rc = unsafe {
-    //     // SAFETY: `handle` points to a valid WorkerSelectionPipeline we just created.
-    //     dynamo_query_worker_selection_and_annotate(
-    //         Box::into_raw(handle),          // temporarily transfer ownership for the call
-    //         c_req.as_ptr(),
-    //         &mut wid_out as *mut i64,
-    //         &mut toks_ptr as *mut *mut u32,
-    //         &mut toks_len as *mut usize,
-    //         &mut ann_json_ptr as *mut *mut c_char,
-    //     )
-    // };
-
-    // // Re-acquire ownership of the handle (the FFI doesn’t keep it)
-    // let handle = unsafe { Box::from_raw(*pipeline_out) };
-    // // ^ Wait—we haven’t assigned pipeline_out yet. Instead, do this:
-    // let mut handle = handle; // keep ownership locally
-
-    // if rc != DynamoLlmResult::OK {
-    //     eprintln!("preflight FAILED (FFI): dynamo_query_worker_selection_and_annotate returned ERR");
-    // } else {
-    //     eprintln!("preflight OK: worker_id={}, tokens_len={}", wid_out, toks_len);
-    // }
-
-    // // Free preflight outputs if any
-    // let _ = unsafe {
-    //     dynamo_free_worker_selection_result(toks_ptr, toks_len, ann_json_ptr)
-    // };
-
-    // // Finally return the handle to the caller
-    // unsafe { *pipeline_out = Box::into_raw(handle) };
-    // DynamoLlmResult::OK
-
-    // match wk
-    //     .runtime()
-    //     .secondary()
-    //     .block_on(async { query_worker_selection_and_annotate(&pipeline, sanity_req).await })
-    // {
-    //     Ok((wid, toks, _ann)) => {
-    //         eprintln!("preflight OK: worker_id={wid}, tokens_len={}", toks.len());
-    //     }
-    //     Err(e) => {
-    //         eprintln!("preflight FAILED (graph likely unwired): {e:?}");
-    //         // keep going; this is diagnostic but tells you queries will fail later too
-    //     }
-    // }
-    // End of TODO
-
-    // Store and hand out an ID-backed handle
-    let id = NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed);
-    {
-        let mut map = pipelines().lock().unwrap();
-        map.insert(id, Arc::new(pipeline));
-        eprintln!(
-            "!!! pipeline[{}] created at {:p}",
-            id,
-            &*map.get(&id).unwrap()
-        );
-    }
-
-    let handle = Box::new(WorkerSelectionPipeline { id });
     unsafe { *pipeline_out = Box::into_raw(handle) };
     DynamoLlmResult::OK
 }
 
 #[unsafe(no_mangle)]
-/// Destroy a previously created pipeline.
+/// Destroy a previously created pipeline (drops the Box).
 ///
 /// # Safety
-/// - `pipeline` must be a valid pointer returned by `dynamo_create_worker_selection_pipeline`.
+/// - `pipeline` must be a pointer previously returned by `dynamo_create_worker_selection_pipeline`.
 pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
     pipeline: *mut WorkerSelectionPipeline,
 ) -> DynamoLlmResult {
@@ -633,12 +500,13 @@ pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
         return DynamoLlmResult::ERR;
     }
 
-    // Take ownership and remove from registry
-    let id = unsafe { &*pipeline }.id;
-    let _boxed: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
-
-    let mut map = pipelines().lock().unwrap();
-    map.remove(&id);
+    // Re-box to drop
+    let boxed: Box<WorkerSelectionPipeline> = unsafe { Box::from_raw(pipeline) };
+    eprintln!(
+        "!!! pipeline destroy; engine at {:p}",
+        &boxed.engine as *const _
+    );
+    drop(boxed);
     DynamoLlmResult::OK
 }
 
@@ -650,7 +518,7 @@ pub unsafe extern "C" fn dynamo_destroy_worker_selection_pipeline(
 /// - annotated_request_json_out (CString*, caller frees via same free fn)
 ///
 /// # Safety
-/// - `pipeline` must be a valid pointer returned by `dynamo_create_worker_selection_pipeline`.
+/// - `pipeline` must be a pointer previously returned by `dynamo_create_worker_selection_pipeline`.
 /// - `request_json_c_str` must be a valid, nul-terminated C string containing valid JSON.
 pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
     pipeline: *mut WorkerSelectionPipeline,
@@ -664,7 +532,6 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         eprintln!("Pipeline pointer is null");
         return DynamoLlmResult::ERR;
     }
-
     if worker_instance_id_out.is_null()
         || token_ids_out.is_null()
         || token_count_out.is_null()
@@ -687,6 +554,7 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         return DynamoLlmResult::ERR;
     }
 
+    // Parse request JSON
     let req_str = match CStr::from_ptr(request_json_c_str).to_str() {
         Ok(s) => s,
         Err(e) => {
@@ -694,7 +562,6 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
             return DynamoLlmResult::ERR;
         }
     };
-
     let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
         Ok(r) => r,
         Err(e) => {
@@ -703,29 +570,13 @@ pub unsafe extern "C" fn dynamo_query_worker_selection_and_annotate(
         }
     };
 
-    let id = unsafe { &*pipeline }.id;
-
-    // Look up the pipeline
-    let pipeline_arc = {
-        let map = pipelines().lock().unwrap();
-        match map.get(&id) {
-            Some(p) => Arc::clone(p), // <-- clone the Arc
-            None => {
-                eprintln!("invalid pipeline id");
-                return DynamoLlmResult::ERR;
-            }
-        }
-    };
-    eprintln!(
-        "!!! pipeline[{}] query using instance {:p}",
-        id, &*pipeline_arc
-    );
+    // Borrow the engine from the boxed handle
+    let handle = unsafe { &*pipeline };
+    let engine_ref = &handle.engine;
+    eprintln!("!!! pipeline query; engine at {:p}", engine_ref as *const _);
 
     // Execute on the same worker runtime (secondary)
-    let fut = async move {
-        // pass &*pipeline_arc (reference to the SAME instance)
-        query_worker_selection_and_annotate(&*pipeline_arc, request).await
-    };
+    let fut = async { query_worker_selection_and_annotate(engine_ref, request).await };
 
     let (worker_id, tokens, annotated_req) = match wk.runtime().secondary().block_on(fut) {
         Ok(v) => v,
@@ -794,216 +645,13 @@ pub unsafe extern "C" fn dynamo_free_worker_selection_result(
     token_count: usize,
     annotated_request_json: *mut c_char,
 ) -> DynamoLlmResult {
-    // Free tokens array if present
     if !token_ids.is_null() && token_count > 0 {
         if let Ok(layout) = std::alloc::Layout::array::<u32>(token_count) {
             unsafe { std::alloc::dealloc(token_ids as *mut u8, layout) };
         }
     }
-    // Free annotated JSON CString if present
     if !annotated_request_json.is_null() {
         let _ = unsafe { std::ffi::CString::from_raw(annotated_request_json) };
     }
-    DynamoLlmResult::OK
-}
-
-////// TEMP TODO RM
-#[unsafe(no_mangle)]
-/// Create a worker-selection pipeline and immediately run a query on it.
-/// The pipeline is not stored globally; it is created and dropped within this call.
-///
-/// Inputs:
-/// - namespace/component/model + router knobs (same semantics as `dynamo_create_worker_selection_pipeline`)
-/// - request_json_c_str: OpenAI-compatible JSON for chat completions
-///
-/// Outputs:
-/// - worker_instance_id_out
-/// - token_ids_out (malloc'ed; free with `dynamo_free_worker_selection_result`)
-/// - token_count_out
-/// - annotated_request_json_out (malloc'ed C string; free with same free fn)
-pub unsafe extern "C" fn dynamo_one_shot_select_and_annotate(
-    namespace_c_str: *const c_char,
-    component_c_str: *const c_char,
-    model_name_c_str: *const c_char,
-    use_kv_routing: bool,
-    busy_threshold: f64,       // negative => None
-    overlap_score_weight: f64, // negative => default
-    router_temperature: f64,   // negative => default
-    use_kv_events: bool,
-    router_replica_sync: bool,
-    request_json_c_str: *const c_char,
-    // outs
-    worker_instance_id_out: *mut i64,
-    token_ids_out: *mut *mut u32,
-    token_count_out: *mut usize,
-    annotated_request_json_out: *mut *mut c_char,
-) -> DynamoLlmResult {
-    // Validate outs up-front
-    if worker_instance_id_out.is_null()
-        || token_ids_out.is_null()
-        || token_count_out.is_null()
-        || annotated_request_json_out.is_null()
-    {
-        eprintln!("one-shot: one or more output pointers are null");
-        return DynamoLlmResult::ERR;
-    }
-
-    // Ensure WK/DRT were already initialized by dynamo_llm_init
-    let wk = match WK.get() {
-        Some(wk) => wk,
-        None => {
-            eprintln!("one-shot: Worker not initialized. Call dynamo_llm_init first.");
-            return DynamoLlmResult::ERR;
-        }
-    };
-    if DRT.get().is_none() {
-        eprintln!("one-shot: DistributedRuntime not initialized. Call dynamo_llm_init first.");
-        return DynamoLlmResult::ERR;
-    }
-
-    // Parse inputs
-    let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            eprintln!("one-shot: bad namespace: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-    let component = match CStr::from_ptr(component_c_str).to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            eprintln!("one-shot: bad component: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-    let model = match CStr::from_ptr(model_name_c_str).to_str() {
-        Ok(s) => s.to_owned(),
-        Err(e) => {
-            eprintln!("one-shot: bad model: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let req_str = match CStr::from_ptr(request_json_c_str).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("one-shot: bad request json: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let request: NvCreateChatCompletionRequest = match serde_json::from_str(req_str) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("one-shot: parse request failed: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    // Build pipeline on the same worker runtime (secondary handle)
-    let make_pipeline = || async {
-        // optional env override: DYNAMO_FORCE_RR=1
-        let force_rr = std::env::var("DYNAMO_FORCE_RR").ok().as_deref() == Some("1");
-        let router_mode = if force_rr {
-            RouterMode::RoundRobin
-        } else if use_kv_routing {
-            RouterMode::KV
-        } else {
-            RouterMode::RoundRobin
-        };
-
-        let kv_router_config = if use_kv_routing {
-            use dynamo_llm::kv_router::KvRouterConfig;
-            Some(KvRouterConfig::new(
-                (overlap_score_weight >= 0.0).then_some(overlap_score_weight),
-                (router_temperature >= 0.0).then_some(router_temperature),
-                Some(use_kv_events),
-                Some(router_replica_sync),
-                None, // max_num_batched_tokens
-                None, // router_snapshot_threshold
-                None, // router_reset_states
-            ))
-        } else {
-            None
-        };
-
-        create_worker_selection_pipeline_chat(
-            &namespace,
-            &component,
-            &model,
-            router_mode,
-            (busy_threshold >= 0.0).then_some(busy_threshold),
-            kv_router_config,
-        )
-        .await
-    };
-
-    let pipeline = match wk.runtime().secondary().block_on(make_pipeline()) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("one-shot: create_worker_selection_pipeline_chat failed: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    // Run the query on the just-created pipeline
-    let fut = async { query_worker_selection_and_annotate(&pipeline, request).await };
-    let (worker_id, tokens, annotated_req) = match wk.runtime().secondary().block_on(fut) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("one-shot: query_worker_selection_and_annotate failed: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    // Marshal tokens to heap memory (caller frees with dynamo_free_worker_selection_result)
-    let tokens_ptr = if tokens.is_empty() {
-        std::ptr::null_mut()
-    } else {
-        let len = tokens.len();
-        let layout = std::alloc::Layout::array::<u32>(len).unwrap();
-        let ptr = unsafe { std::alloc::alloc(layout) as *mut u32 };
-        if ptr.is_null() {
-            eprintln!("one-shot: alloc tokens failed");
-            return DynamoLlmResult::ERR;
-        }
-        unsafe { std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, len) };
-        ptr
-    };
-
-    // Serialize annotated request JSON
-    let annotated_json = match serde_json::to_string(&annotated_req) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("one-shot: serialize annotated req failed: {e:?}");
-            if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-                unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
-            }
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    let cjson = match std::ffi::CString::new(annotated_json) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("one-shot: CString for annotated json failed: {e:?}");
-            if !tokens_ptr.is_null() {
-                let layout = std::alloc::Layout::array::<u32>(tokens.len()).unwrap();
-                unsafe { std::alloc::dealloc(tokens_ptr as *mut u8, layout) };
-            }
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    // Write outs
-    unsafe {
-        *worker_instance_id_out = worker_id;
-        *token_ids_out = tokens_ptr;
-        *token_count_out = tokens.len();
-        *annotated_request_json_out = cjson.into_raw();
-    }
-
-    // `pipeline` is dropped here (one-shot)
     DynamoLlmResult::OK
 }

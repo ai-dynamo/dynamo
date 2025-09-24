@@ -37,7 +37,6 @@ include = [
     "dynamo_destroy_worker_selection_pipeline",
     "dynamo_query_worker_selection_and_annotate",
     "dynamo_free_worker_selection_result",
-    "dynamo_one_shot_select_and_annotate"
 ]
 
 
