@@ -142,7 +142,7 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
                 };
                 find_tool_call_end_position_json(chunk, effective_parser, &config.json)
             }
-            ToolCallParserType::Harmony => find_tool_call_end_position_harmony(chunk),
+            ToolCallParserType::Harmony => find_tool_call_end_position_harmony(chunk, &config.json),
             ToolCallParserType::Pythonic => find_tool_call_end_position_pythonic(chunk),
             ToolCallParserType::Typescript => {
                 // Typescript parser not implemented
