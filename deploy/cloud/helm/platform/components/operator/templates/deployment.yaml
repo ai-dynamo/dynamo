@@ -45,6 +45,10 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.controllerManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - args: {{- toYaml .Values.controllerManager.kubeRbacProxy.args | nindent
           8 }}
@@ -109,6 +113,10 @@ spec:
         {{- end }}
         {{- if .Values.dynamo.metrics.prometheusEndpoint }}
           - --prometheus-endpoint={{ .Values.dynamo.metrics.prometheusEndpoint }}
+        {{- end }}
+        {{- if .Values.dynamo.mpiRun.secretName }}
+          - --mpi-run-ssh-secret-name={{ .Values.dynamo.mpiRun.secretName }}
+          - --mpi-run-ssh-secret-namespace={{ .Release.Namespace }}
         {{- end }}
         command:
         - /manager

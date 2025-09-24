@@ -32,13 +32,13 @@ logger.addHandler(console_handler)
 
 
 def plot_prefill_performance(
-    prefill_tp_size, prefill_ttft, prefill_thpt_per_gpu, target_ttft, output_dir
+    prefill_num_gpu, prefill_ttft, prefill_thpt_per_gpu, target_ttft, output_dir
 ):
     """
-    Plot prefill performance as a 2D scatter plot with TP size annotations.
+    Plot prefill performance as a 2D scatter plot with GPU count annotations.
 
     Args:
-        prefill_tp_size: list of TP sizes
+        prefill_num_gpu: list of GPU counts
         prefill_ttft: list of time to first token values
         prefill_thpt_per_gpu: list of throughput per GPU values
         target_ttft: target TTFT value for the vertical line
@@ -46,9 +46,9 @@ def plot_prefill_performance(
     """
     plt.figure(figsize=(10, 6))
     plt.scatter(prefill_ttft, prefill_thpt_per_gpu, s=100)
-    for i, tp in enumerate(prefill_tp_size):
+    for i, num_gpu in enumerate(prefill_num_gpu):
         plt.annotate(
-            f"TP{tp}",
+            f"{num_gpu} GPU(s)",
             (prefill_ttft[i], prefill_thpt_per_gpu[i]),
             xytext=(10, 0),
             textcoords="offset points",
@@ -73,17 +73,17 @@ def plot_prefill_performance(
 
 def plot_decode_performance(decode_results, target_itl, output_dir):
     """
-    Plot decode performance with multiple TP size lines.
+    Plot decode performance with multiple GPU count lines.
 
     Args:
-        decode_results: list of tuples (tp_size, itl_list, thpt_per_gpu_list)
+        decode_results: list of tuples (num_gpu, itl_list, thpt_per_gpu_list)
         target_itl: target ITL value for the vertical line
         output_dir: directory to save the plot
     """
     plt.figure(figsize=(10, 6))
 
-    for tp_size, itl_list, thpt_per_gpu_list in decode_results:
-        plt.plot(itl_list, thpt_per_gpu_list, label=f"TP{tp_size}")
+    for num_gpu, itl_list, thpt_per_gpu_list in decode_results:
+        plt.plot(itl_list, thpt_per_gpu_list, label=f"{num_gpu} GPU(s)")
 
     plt.axvline(
         x=target_itl, color="r", linestyle="--", label=f"Target ITL: {target_itl} ms"
