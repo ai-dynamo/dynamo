@@ -70,12 +70,15 @@ jobs:
         # No infra available for ARM + GPU in CI
         if: ${{ matrix.platform.arch != 'linux/arm64' }}
         env:
+          ARCH: ${{ matrix.platform.arch }}
           HF_HOME: /runner/_work/_temp
         run: |
+          # Turns linux/arm64 into linux-arm64
+          export PLATFORM_TAG=${ARCH//\//-}
           docker run --runtime=nvidia --rm --gpus all -w /workspace \
             --network host \
             --name ${{ env.CONTAINER_ID }}_pytest \
-            ${{ matrix.framework.name }}:latest \
+            ${{ matrix.framework.name }}:${PLATFORM_TAG} \
             bash -c "pytest -xsv --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
       - name: Docker Tag and Push
         if: ${{ github.ref_name == 'main' }}
