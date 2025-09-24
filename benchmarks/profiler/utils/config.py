@@ -795,8 +795,9 @@ class TrtllmConfigModifier:
                 ]
                 del cfg.spec.services["TRTLLMPrefillWorker"]
 
-            # Remove decode worker
-            del cfg.spec.services["TRTLLMDecodeWorker"]
+            # Remove decode worker if it exists
+            if "TRTLLMDecodeWorker" in cfg.spec.services:
+                del cfg.spec.services["TRTLLMDecodeWorker"]
 
             worker_service = cfg.spec.services["TRTLLMWorker"]
             if (
@@ -839,7 +840,7 @@ class TrtllmConfigModifier:
 
         elif target == "decode":
             # Convert to decode-only aggregated setup
-            # Use decode worker as the main worker
+            # Use decode worker as the main worker if it exists
             if "TRTLLMDecodeWorker" in cfg.spec.services:
                 # Rename decode worker to generic worker
                 cfg.spec.services["TRTLLMWorker"] = cfg.spec.services[
