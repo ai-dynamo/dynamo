@@ -28,8 +28,8 @@ kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev
 
 # Run benchmark
 python3 -m benchmarks.utils.benchmark \
-    --benchmark_name my-benchmark \
-    --endpoint_url http://localhost:8000 \
+    --benchmark-name my-benchmark \
+    --endpoint-url http://localhost:8000 \
     --model "<your-model>"
 
 # Generate plots
@@ -41,8 +41,8 @@ python3 -m benchmarks.utils.plot --data-dir ./benchmarks/results
 Benchmark any HTTP endpoints! The benchmarking framework supports:
 
 **Flexible Configuration:**
-- User-defined benchmark names using `--benchmark_name` flag
-- Support for single endpoint benchmarking with `--endpoint_url` flag
+- User-defined benchmark names using `--benchmark-name` flag
+- Support for single endpoint benchmarking with `--endpoint-url` flag
 - Customizable concurrency levels (configurable via CONCURRENCIES env var), sequence lengths, and models
 - Automated performance plot generation with custom benchmark names
 

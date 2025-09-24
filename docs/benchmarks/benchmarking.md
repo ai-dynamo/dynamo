@@ -110,8 +110,8 @@ kubectl port-forward -n <namespace> svc/<frontend-service-name> 8000:8000 > /dev
 
 # Benchmark deployment A using Python scripts
 python3 -m benchmarks.utils.benchmark \
-   --benchmark_name deployment-a \
-   --endpoint_url http://localhost:8000 \
+   --benchmark-name deployment-a \
+   --endpoint-url http://localhost:8000 \
    --model "your-model-name" \
    --output-dir ./benchmarks/results
 ```
@@ -126,8 +126,8 @@ kubectl port-forward -n <namespace> svc/<frontend-service-name> 8001:8000 > /dev
 
 # Benchmark deployment B using Python scripts
 python3 -m benchmarks.utils.benchmark \
-   --benchmark_name deployment-b \
-   --endpoint_url http://localhost:8001 \
+   --benchmark-name deployment-b \
+   --endpoint-url http://localhost:8001 \
    --model "your-model-name" \
    --output-dir ./benchmarks/results
 ```
@@ -154,11 +154,11 @@ The benchmarking framework supports various comparative analysis scenarios:
 ### Command Line Options
 
 ```bash
-python3 -m benchmarks.utils.benchmark --benchmark_name <name> --endpoint_url <endpoint_url> [OPTIONS]
+python3 -m benchmarks.utils.benchmark --benchmark-name <name> --endpoint-url <endpoint_url> [OPTIONS]
 
 REQUIRED:
-  --benchmark_name NAME           Name/label for this benchmark (used in plots and results)
-  --endpoint_url URL              HTTP endpoint URL to benchmark (e.g., http://localhost:8000)
+  --benchmark-name NAME           Name/label for this benchmark (used in plots and results)
+  --endpoint-url URL              HTTP endpoint URL to benchmark (e.g., http://localhost:8000)
 
 OPTIONS:
   -h, --help                    Show help message and examples
@@ -208,14 +208,14 @@ You can customize the concurrency levels using the CONCURRENCIES environment var
 ```bash
 # Custom concurrency levels
 CONCURRENCIES="1,5,20,50" python3 -m benchmarks.utils.benchmark \
-    --benchmark_name my-test \
-    --endpoint_url http://localhost:8000
+    --benchmark-name my-test \
+    --endpoint-url http://localhost:8000
 
 # Or set permanently
 export CONCURRENCIES="1,2,5,10,25,50,100"
 python3 -m benchmarks.utils.benchmark \
-    --benchmark_name test \
-    --endpoint_url http://localhost:8000
+    --benchmark-name test \
+    --endpoint-url http://localhost:8000
 ```
 
 ## Understanding Your Results
@@ -224,9 +224,9 @@ After benchmarking completes, check `./benchmarks/results/` (or your custom outp
 
 ### Plot Labels and Organization
 
-The plotting script uses the `--benchmark_name` as the experiment name in all generated plots. For example:
-- `--benchmark_name aggregated` → plots will show "aggregated" as the label
-- `--benchmark_name vllm-disagg` → plots will show "vllm-disagg" as the label
+The plotting script uses the `--benchmark-name` as the experiment name in all generated plots. For example:
+- `--benchmark-name aggregated` → plots will show "aggregated" as the label
+- `--benchmark-name vllm-disagg` → plots will show "vllm-disagg" as the label
 
 This allows you to easily identify and compare different configurations in the visualization plots.
 
@@ -271,9 +271,9 @@ results/                          # Client-side: ./benchmarks/results/ or custom
 ```text
 results/
 ├── plots/
-├── experiment-a/                  # --benchmark_name experiment-a
-├── experiment-b/                  # --benchmark_name experiment-b
-└── experiment-c/                  # --benchmark_name experiment-c
+├── experiment-a/                  # --benchmark-name experiment-a
+├── experiment-b/                  # --benchmark-name experiment-b
+└── experiment-c/                  # --benchmark-name experiment-c
 ```
 
 Each concurrency directory contains:
@@ -382,8 +382,8 @@ The benchmark job is configured directly in the YAML file.
 To customize the benchmark, edit `benchmarks/incluster/benchmark_job.yaml`:
 
 1. **Change the model**: Update the `--model` argument
-2. **Change the benchmark name**: Update the `--benchmark_name` argument
-3. **Change the service URL**: Update the `--endpoint_url` argument (use `<svc_name>.<namespace>.svc.cluster.local:port` for cross-namespace access)
+2. **Change the benchmark name**: Update the `--benchmark-name` argument
+3. **Change the service URL**: Update the `--endpoint-url` argument (use `<svc_name>.<namespace>.svc.cluster.local:port` for cross-namespace access)
 4. **Change Docker image**: Update the image field if needed
 
 ### Example: Multi-Namespace Benchmarking
@@ -395,9 +395,9 @@ To benchmark services across multiple namespaces, you would need to run separate
 args:
   - --model
   - "Qwen/Qwen3-0.6B"
-  - --benchmark_name
+  - --benchmark-name
   - "prod-vllm"
-  - --endpoint_url
+  - --endpoint-url
   - "vllm-agg-frontend.production.svc.cluster.local:8000"
   - --output-dir
   - /data/results
@@ -406,9 +406,9 @@ args:
 args:
   - --model
   - "Qwen/Qwen3-0.6B"
-  - --benchmark_name
+  - --benchmark-name
   - "staging-vllm"
-  - --endpoint_url
+  - --endpoint-url
   - "vllm-agg-frontend.staging.svc.cluster.local:8000"
   - --output-dir
   - /data/results

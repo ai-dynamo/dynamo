@@ -50,9 +50,9 @@ spec:
           - "256"
           - --output-dir
           - /data/results
-          - --benchmark_name
+          - --benchmark-name
           - "qwen3-0p6b-vllm-agg"
-          - --endpoint_url
+          - --endpoint-url
           - "vllm-agg-frontend:8000"
         volumeMounts:
           - name: data-volume

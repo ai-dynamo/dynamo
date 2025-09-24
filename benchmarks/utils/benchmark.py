@@ -51,12 +51,12 @@ def validate_benchmark_name(name: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark Orchestrator")
     parser.add_argument(
-        "--benchmark_name",
+        "--benchmark-name",
         required=True,
         help="Name/label for this benchmark (used in plots and results)",
     )
     parser.add_argument(
-        "--endpoint_url",
+        "--endpoint-url",
         required=True,
         help="Endpoint to benchmark: HTTP(S) URL (e.g., http://localhost:8000) or in-cluster service URL host[:port]",
     )
