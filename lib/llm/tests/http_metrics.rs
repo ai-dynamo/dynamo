@@ -436,8 +436,8 @@ mod integration_tests {
         // Consume the response stream to complete the request
         let _response_body = response.bytes().await.unwrap();
 
-        // Wait for the fast polling interval (600ms) for MDC metrics
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        // Wait for the fast polling interval (50ms) for MDC metrics
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Fetch and verify metrics
         let metrics_response = client
