@@ -25,85 +25,89 @@ from typing import List, Optional
 
 class PlannerError(Exception):
     """Base exception for all planner-related errors.
-    
+
     This serves as the root exception class for all custom exceptions
     in the planner module, allowing for broad exception catching when needed.
     """
+
     pass
 
 
 class DynamoGraphDeploymentNotFoundError(PlannerError):
     """Raised when Parent DynamoGraphDeployment cannot be found.
-    
+
     This typically occurs when:
     - The DYN_PARENT_DGD_K8S_NAME environment variable is not set
     - The referenced DynamoGraphDeployment doesn't exist in the namespace
     """
-    
-    def __init__(self, deployment_name: Optional[str] = None, namespace: Optional[str] = None):
+
+    def __init__(
+        self, deployment_name: Optional[str] = None, namespace: Optional[str] = None
+    ):
         self.deployment_name = deployment_name
         self.namespace = namespace
-        
+
         message = "Parent DynamoGraphDeployment not found"
         if deployment_name:
             message += f" (name: '{deployment_name}')"
         if namespace:
             message += f" in namespace '{namespace}'"
-            
+
         super().__init__(message)
 
 
 class ComponentError(PlannerError):
     """Base class for subComponent configuration issues.
-    
+
     This serves as a parent class for all exceptions related to
     subComponentType configuration problems in DynamoGraphDeployments.
     """
+
     pass
 
 
 class SubComponentNotFoundError(ComponentError):
     """Raised when a required subComponentType is not found in the deployment.
-    
+
     This occurs when the DynamoGraphDeployment doesn't contain any service
     with the requested subComponentType (e.g., 'prefill', 'decode').
     """
-    
+
     def __init__(self, sub_component_type: str):
         self.sub_component_type = sub_component_type
-        
+
         message = f"DynamoGraphDeployment must contain a service with subComponentType '{sub_component_type}'"
-            
+
         super().__init__(message)
 
 
 class DuplicateSubComponentError(ComponentError):
     """Raised when multiple services have the same subComponentType.
-    
+
     This occurs when the DynamoGraphDeployment contains more than one service
     with the same subComponentType, which violates the expected uniqueness constraint.
     """
-    
+
     def __init__(self, sub_component_type: str, service_names: List[str]):
         self.sub_component_type = sub_component_type
         self.service_names = service_names
-        
+
         message = (
             f"DynamoGraphDeployment must contain only one service with "
             f"subComponentType '{sub_component_type}', but found multiple: "
             f"{', '.join(sorted(service_names))}"
         )
-        
+
         super().__init__(message)
 
 
 class DeploymentValidationError(PlannerError):
     """Raised when deployment validation fails for multiple components.
-    
+
     This is used to aggregate multiple validation errors into a single exception,
     providing a comprehensive view of all validation issues.
     """
-    
+
     def __init__(self, errors: List[str]):
         self.errors = errors
         message = f"Service verification failed: {'; '.join(errors)}"
@@ -112,11 +116,13 @@ class DeploymentValidationError(PlannerError):
 
 class EmptyTargetReplicasError(PlannerError):
     """Raised when target_replicas is empty or invalid.
-    
+
     This occurs when attempting to set component replicas with an empty
     or invalid target_replicas dictionary.
     """
-    
-    def __init__(self, ):
+
+    def __init__(
+        self,
+    ):
         message = "target_replicas cannot be empty"
         super().__init__(message)

@@ -48,9 +48,7 @@ class KubernetesAPI:
         self.custom_api = client.CustomObjectsApi()
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
-    def _get_graph_deployment_from_name(
-        self, graph_deployment_name: str
-    ) -> Optional[dict]:
+    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
         """Get the graph deployment from the dynamo graph deployment name"""
         return self.custom_api.get_namespaced_custom_object(
             group="nvidia.com",
@@ -66,7 +64,7 @@ class KubernetesAPI:
 
         Returns:
             The DynamoGraphDeployment object
-        
+
         Raises:
             DynamoGraphDeploymentNotFoundError: If the parent graph deployment is not found
         """
@@ -74,7 +72,10 @@ class KubernetesAPI:
             return self._get_graph_deployment_from_name(graph_deployment_name)
         except client.ApiException as e:
             if e.status == 404:
-                raise DynamoGraphDeploymentNotFoundError(deployment_name=graph_deployment_name, namespace=self.current_namespace)
+                raise DynamoGraphDeploymentNotFoundError(
+                    deployment_name=graph_deployment_name,
+                    namespace=self.current_namespace,
+                )
             raise
 
     def update_graph_replicas(
@@ -112,9 +113,7 @@ class KubernetesAPI:
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
-            graph_deployment = await self.get_graph_deployment(
-                graph_deployment_name
-            )
+            graph_deployment = await self.get_graph_deployment(graph_deployment_name)
 
             conditions = graph_deployment.get("status", {}).get("conditions", [])
             ready_condition = next(

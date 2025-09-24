@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -76,6 +75,7 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
         name="test-deployment",
     )
 
+
 def test_update_graph_replicas(k8s_api, mock_custom_api):
     mock_custom_api.patch_namespaced_custom_object.return_value = None
 
@@ -89,6 +89,7 @@ def test_update_graph_replicas(k8s_api, mock_custom_api):
         name="test-deployment",
         body={"spec": {"services": {"test-component": {"replicas": 1}}}},
     )
+
 
 @pytest.mark.asyncio
 async def test_is_deployment_ready_true(k8s_api, mock_custom_api):
@@ -137,9 +138,7 @@ async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api)
     }
 
     # Mock the method on the instance
-    with patch.object(
-        k8s_api, "get_graph_deployment", return_value=mock_deployment
-    ):
+    with patch.object(k8s_api, "get_graph_deployment", return_value=mock_deployment):
         # Test with minimal attempts and delay for faster testing
         await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment", max_attempts=2, delay_seconds=0.1
@@ -163,9 +162,7 @@ async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api)
     }
 
     # Mock the method on the instance
-    with patch.object(
-        k8s_api, "get_graph_deployment", return_value=mock_deployment
-    ):
+    with patch.object(k8s_api, "get_graph_deployment", return_value=mock_deployment):
         # Test with minimal attempts and delay for faster testing
         with pytest.raises(TimeoutError) as exc_info:
             await k8s_api.wait_for_graph_deployment_ready(
@@ -179,18 +176,21 @@ async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api)
 async def test_wait_for_graph_deployment_not_found(k8s_api, mock_custom_api):
     """Test wait_for_graph_deployment_ready when deployment is not found"""
 
-    mock_custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+    mock_custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
+        status=404
+    )
 
     # Test with minimal attempts and delay for faster testing
     with pytest.raises(DynamoGraphDeploymentNotFoundError) as exc_info:
         await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment", max_attempts=2, delay_seconds=0.1
         )
-    
+
     # Validate the exception fields
     exception = exc_info.value
     assert exception.deployment_name == "test-deployment"
     assert exception.namespace == "default"
+
 
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_no_conditions(k8s_api, mock_custom_api):
@@ -198,9 +198,7 @@ async def test_wait_for_graph_deployment_no_conditions(k8s_api, mock_custom_api)
     # Mock the _get_graph_deployment_from_name response with no conditions
     mock_deployment: Dict[str, Any] = {"status": {}}
 
-    with patch.object(
-        k8s_api, "get_graph_deployment", return_value=mock_deployment
-    ):
+    with patch.object(k8s_api, "get_graph_deployment", return_value=mock_deployment):
         # Test with minimal attempts and delay for faster testing
         with pytest.raises(TimeoutError) as exc_info:
             await k8s_api.wait_for_graph_deployment_ready(
@@ -263,10 +261,12 @@ async def test_get_graph_deployment(k8s_api, mock_custom_api):
 @pytest.mark.asyncio
 async def test_get_graph_deployment_not_found(k8s_api, mock_custom_api):
     """Test get_graph_deployment when deployment is not found"""
-    k8s_api.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+    k8s_api.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
+        status=404
+    )
     with pytest.raises(DynamoGraphDeploymentNotFoundError) as exc_info:
         await k8s_api.get_graph_deployment("parent-dgd")
-    
+
     exception = exc_info.value
     assert exception.deployment_name == "parent-dgd"
     assert exception.namespace == "default"

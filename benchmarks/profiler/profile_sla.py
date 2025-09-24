@@ -22,7 +22,7 @@ import os
 import numpy as np
 import yaml
 
-from benchmarks.profiler.utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
+from benchmarks.profiler.utils.config import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.estimate_perf import AIConfiguratorPerfEstimator
 from benchmarks.profiler.utils.genai_perf import benchmark_decode, benchmark_prefill
 from benchmarks.profiler.utils.plot import (
@@ -188,7 +188,7 @@ async def run_profile(args):
 
             if args.is_moe_model:
                 prefill_config = config_modifier.set_config_tep_size(
-                    prefill_config, num_gpus, args.num_gpus_per_node
+                    prefill_config, num_gpus, args.num_gpus_per_node, "prefill"
                 )
             else:
                 prefill_config = config_modifier.set_config_tp_size(
@@ -325,7 +325,7 @@ async def run_profile(args):
 
             if args.is_moe_model:
                 decode_config = config_modifier.set_config_dep_size(
-                    decode_config, num_gpus, args.num_gpus_per_node
+                    decode_config, num_gpus, args.num_gpus_per_node, "decode"
                 )
             else:
                 decode_config = config_modifier.set_config_tp_size(
@@ -377,7 +377,11 @@ async def run_profile(args):
                 # For MoE models, attention_dp_size = DEP size (num_gpus), for dense models = 1
                 attention_dp_size = num_gpus if args.is_moe_model else 1
                 max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                    decode_config, work_dir, client.deployment_name, "decode", attention_dp_size
+                    decode_config,
+                    work_dir,
+                    client.deployment_name,
+                    "decode",
+                    attention_dp_size,
                 )
                 max_concurrency = max_kv_tokens // (args.isl + args.osl)
 
@@ -547,7 +551,7 @@ async def run_profile(args):
         )
         if args.is_moe_model:
             prefill_config = config_modifier.set_config_tep_size(
-                prefill_config, best_prefill_gpus, args.num_gpus_per_node
+                prefill_config, best_prefill_gpus, args.num_gpus_per_node, "prefill"
             )
         else:
             prefill_config = config_modifier.set_config_tp_size(
@@ -624,7 +628,7 @@ async def run_profile(args):
         logger.info(f"Profiling decode with {best_decode_gpus} GPUs...")
         if args.is_moe_model:
             decode_config = config_modifier.set_config_dep_size(
-                decode_config, best_decode_gpus, args.num_gpus_per_node
+                decode_config, best_decode_gpus, args.num_gpus_per_node, "decode"
             )
         else:
             decode_config = config_modifier.set_config_tp_size(
@@ -681,7 +685,11 @@ async def run_profile(args):
             # For MoE models, attention_dp_size = DEP size (best_decode_gpus), for dense models = 1
             attention_dp_size = best_decode_gpus if args.is_moe_model else 1
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                decode_config, work_dir, client.deployment_name, "decode", attention_dp_size
+                decode_config,
+                work_dir,
+                client.deployment_name,
+                "decode",
+                attention_dp_size,
             )
 
             base_url = client.get_service_url()
