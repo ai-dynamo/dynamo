@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This job is used to generate an SSH key pair and create a Kubernetes secret with the key pair.
+# The secret is used when mpi is in use by dynamo workers.
+{{- if .Values.dynamo.mpiRun.sshKeygen.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      initContainers:
+      - name: keygen
+        image: bitnamisecure/git:latest
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+        env:
+        - name: SECRET_NAME
+          value: "{{ .Values.dynamo.mpiRun.secretName }}"
+        - name: NAMESPACE
+          value: "{{ .Release.Namespace }}"
+        command:
+        - /bin/bash
+        - -e
+        - -c
+        - |
+          echo "Generating SSH key pair with ssh-keygen..."
+          ssh-keygen -t rsa -b 2048 -f /shared/private.key -N ""
+          echo "SSH keys generated and saved to shared volume"
+      containers:
+      - name: kubectl-create-secret
+        image: bitnamisecure/kubectl:latest
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+        env:
+        - name: SECRET_NAME
+          value: "{{ .Values.dynamo.mpiRun.secretName }}"
+        - name: NAMESPACE
+          value: "{{ .Release.Namespace }}"
+        command:
+        - /bin/bash
+        - -e
+        - -c
+        - |
+          # Check if secret already exists
+          if kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" &>/dev/null; then
+            echo "Secret $SECRET_NAME already exists, skipping creation"
+            exit 0
+          fi
+          echo "Creating Kubernetes secret..."
+          kubectl create secret generic "$SECRET_NAME" \
+            --from-file=private.key=/shared/private.key \
+            --from-file=private.key.pub=/shared/private.key.pub \
+            -n "$NAMESPACE"
+          echo "SSH key secret created successfully"
+      volumes:
+      - name: shared
+        emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+subjects:
+- kind: ServiceAccount
+  name: {{ include "dynamo-operator.fullname" . }}-ssh-keygen
+  namespace: {{ .Release.Namespace }}
+---
+{{- end }}

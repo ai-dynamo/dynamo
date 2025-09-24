@@ -13,7 +13,7 @@ Support matrix:
 | vLLM | Dense | ✅ |
 | vLLM | MoE | 🚧 |
 | SGLang | Dense | ✅ |
-| SGLang | MoE | 🚧 |
+| SGLang | MoE | ✅ |
 | TensorRT-LLM | Dense | ✅ |
 | TensorRT-LLM | MoE | 🚧 |
 
@@ -63,8 +63,14 @@ After finding the best TP size for prefill and decode, the script will then inte
 
 In prefill engine, prefills are usually done with batch size=1 and only the ISL (excluding prefix cache hit) affects the iteration time. The script profiles the selected prefill TP configuration across different ISLs and record the TTFT and prefill throughput per GPU under those ISLs.
 
+For dense models, the script profiles different TP sizes.
+For MoE models, the script only profiles different TEP sizes, since DEP is generally not the optimal prefill configuration.
+
 ### Decode Interpolation Data
 In decode engine, decode requests are added inflight and iteration time (or ITL) depends on both the context length and the real-time load of the engine. We capture the real-time load of the engine with active kv usage and average context length. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
+
+For dense models, the script profiles different TP sizes.
+For MoE models, the script profiles different DEP sizes. TEP decode engines for low latency will be supported in the future.
 
 ![images](../../docs/images/itl_interpolation.png)
 
@@ -96,7 +102,7 @@ Set up your Kubernetes namespace for profiling (one-time per namespace). First e
 pip install -r deploy/utils/requirements.txt
 ```
 
-### Step 1: Inject your DGD configuration
+**Step 1: Inject your DGD configuration**
 
 Use the injector utility to place your DGD manifest into the PVC. The profiling job will read the path you specify.
 
@@ -113,11 +119,14 @@ Use the injector utility to place your DGD manifest into the PVC. The profiling 
 
    > **Note**: All paths must start with `/data/` for security reasons. If you forget this prefix, the script will show a helpful error message with the correct path.
 
-> **Important**: For profiling, disagg configs should be run with Grove disabled by adding the annotation `nvidia.com/enable-grove: "false"` to avoid alpha Grove status issues.
-
 **Step 2: Set SLA target**
 
-Edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to `vllm` or `sglang`. The backend type must match the dynamo deployment in the `DGD_CONFIG_FILE`.
+For dense models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_job.yaml` to set the target ISL, OSL, TTFT, and ITL. Also, set the backend type to match the dynamo deployment in the `DGD_CONFIG_FILE`.
+
+For MoE models, edit `$DYNAMO_HOME/benchmarks/profiler/deploy/profile_sla_moe_job.yaml` to set the target TEP, DEP, TTFT, and ITL.
+
+> [!NOTE]
+> If the model is too large to be downloaded every time, you can create a multi-attach PVC to cache the model. Refer to [recipes](../../recipes/README.md) for more details.
 
 ```yaml
 spec:
@@ -145,7 +154,7 @@ spec:
    export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1 # or any existing image tag (TODO: update to 0.5.0 upon release as profiling with 0.4.1 is broken)
    ```
 
-3. **Set the config path for the profiling job:**
+2. **Set the config path for the profiling job:**
    ```bash
    export DGD_CONFIG_FILE=/data/configs/disagg.yaml # should be the same path you set for --dest in Step 1
    ```
@@ -153,7 +162,11 @@ spec:
 **Step 4: Run profiling (required)**
 
 ```bash
+# for dense models
 envsubst < benchmarks/profiler/deploy/profile_sla_job.yaml | kubectl apply -f -
+
+# for MoE models
+envsubst < benchmarks/profiler/deploy/profile_sla_moe_job.yaml | kubectl apply -f -
 ```
 
 **Step 5: Wait for profiling to complete**

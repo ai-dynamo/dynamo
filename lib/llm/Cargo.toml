@@ -52,6 +52,7 @@ required-features = ["block-manager", "testing-cuda"]
 dynamo-runtime = { workspace = true }
 
 # workspace
+aho-corasick = "1.1"
 anyhow = { workspace = true }
 dynamo-async-openai = { workspace = true }
 dynamo-parsers = { workspace = true}
