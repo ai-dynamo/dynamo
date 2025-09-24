@@ -379,14 +379,15 @@ pub struct WorkerSelectionPipeline {
 /// # Safety
 /// - All `*_c_str` must be valid, nul-terminated C strings.
 /// - `pipeline_out` must be a valid non-null pointer to receive the handle.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
     model_name_c_str: *const c_char,
     use_kv_routing: bool,
-    busy_threshold: f64,       // negative => None
-    overlap_score_weight: f64, // negative => default
-    router_temperature: f64,   // negative => default
+    busy_threshold: f64,
+    overlap_score_weight: f64,
+    router_temperature: f64,
     use_kv_events: bool,
     router_replica_sync: bool,
     pipeline_out: *mut *mut WorkerSelectionPipeline,
@@ -395,6 +396,15 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         eprintln!("pipeline_out pointer is null");
         return DynamoLlmResult::ERR;
     }
+
+    // ⬇️ Reuse the globally initialized Worker from dynamo_llm_init()
+    let wk = match WK.get() {
+        Some(w) => w.clone(),
+        None => {
+            eprintln!("Worker not initialized. Call dynamo_llm_init first.");
+            return DynamoLlmResult::ERR;
+        }
+    };
 
     let namespace = match CStr::from_ptr(namespace_c_str).to_str() {
         Ok(s) => s.to_owned(),
@@ -418,17 +428,6 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    // Build a fresh Worker from settings; keep it inside the handle so the runtime
-    // stays alive exactly as long as the pipeline exists.
-    let wk = match Worker::from_settings() {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("Worker::from_settings failed: {e:?}");
-            return DynamoLlmResult::ERR;
-        }
-    };
-
-    // Build the engine on the worker's async runtime.
     let make_engine = || async {
         let force_rr = std::env::var("DYNAMO_FORCE_RR").ok().as_deref() == Some("1");
         let router_mode = if force_rr {
@@ -446,9 +445,9 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 (router_temperature >= 0.0).then_some(router_temperature),
                 Some(use_kv_events),
                 Some(router_replica_sync),
-                None, // max_num_batched_tokens (default)
-                None, // router_snapshot_threshold (default)
-                None, // router_reset_states (default)
+                None,
+                None,
+                None,
             ))
         } else {
             None
@@ -473,9 +472,8 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
         }
     };
 
-    // Box the handle (owns both runtime and engine) and hand the raw pointer to C.
     let handle = Box::new(WorkerSelectionPipeline { wk, engine });
-    unsafe { *pipeline_out = Box::into_raw(handle) };
+    *pipeline_out = Box::into_raw(handle);
     DynamoLlmResult::OK
 }
 
