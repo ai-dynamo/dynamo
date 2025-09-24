@@ -134,7 +134,13 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
     match parser_map.get(parser_key) {
         Some(config) => match config.format {
             ToolCallParserType::Json => {
-                find_tool_call_end_position_json(chunk, parser_key, &config.json)
+                // For "default", use "nemotron_deci" as the effective parser; otherwise, use the provided parser_key
+                let effective_parser = if parser_key == "default" {
+                    "nemotron_deci"
+                } else {
+                    parser_key
+                };
+                find_tool_call_end_position_json(chunk, effective_parser, &config.json)
             }
             ToolCallParserType::Harmony => find_tool_call_end_position_harmony(chunk),
             ToolCallParserType::Pythonic => find_tool_call_end_position_pythonic(chunk),
