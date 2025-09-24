@@ -233,14 +233,13 @@ This allows you to easily identify and compare different configurations in the v
 ### Summary and Plots
 
 ```text
-benchmarks/results/
-├── SUMMARY.txt          # Quick overview of all results
-└── plots/               # Visual comparisons (these are what you want!)
-    ├── p50_inter_token_latency_vs_concurrency.png      # Token generation speed
-    ├── avg_time_to_first_token_vs_concurrency.png      # Response time
-    ├── request_throughput_vs_concurrency.png           # Requests per second
-    ├── efficiency_tok_s_gpu_vs_user.png                # GPU efficiency
-    └── avg_inter_token_latency_vs_concurrency.png      # Average latency
+benchmarks/results/plots
+├── SUMMARY.txt                                     # Quick overview of all results
+├── p50_inter_token_latency_vs_concurrency.png      # Token generation speed
+├── avg_time_to_first_token_vs_concurrency.png      # Response time
+├── request_throughput_vs_concurrency.png           # Requests per second
+├── efficiency_tok_s_gpu_vs_user.png                # GPU efficiency
+└── avg_inter_token_latency_vs_concurrency.png      # Average latency
 ```
 
 ### Data Files
@@ -249,8 +248,8 @@ Raw data is organized by deployment/benchmark type and concurrency level:
 
 **For Any Benchmarking (uses your custom benchmark name):**
 ```text
-results/                          # Client-side: ./benchmarks/results/ or custom dir
-├── plots/                        # Server-side: /data/results/
+results/                         # Client-side: ./benchmarks/results/ or custom dir
+├── plots/                       # Server-side: /data/results/
 │   ├── SUMMARY.txt              # Performance visualization plots
 │   ├── p50_inter_token_latency_vs_concurrency.png
 │   ├── avg_inter_token_latency_vs_concurrency.png
@@ -278,6 +277,7 @@ results/
 
 Each concurrency directory contains:
 - **`profile_export_genai_perf.json`** - Structured metrics from GenAI-Perf
+- **`profile_export_genai_perf.csv`** - CSV format metrics from GenAI-Perf
 - **`profile_export.json`** - Raw GenAI-Perf results
 - **`inputs.json`** - Generated test inputs
 
@@ -345,6 +345,15 @@ python3 -m deploy.utils.download_pvc_results \
   --folder /data/results/${INPUT_NAME} \
   --no-config
 ```
+
+### Step 4: Generate Plots
+```bash
+# Generate performance plots from the downloaded results
+python3 -m benchmarks.utils.plot \
+  --data-dir ./benchmarks/results
+```
+
+This will create visualization plots. For more details on interpreting these plots, see the [Summary and Plots](#summary-and-plots) section above.
 
 ## Cross-Namespace Service Access
 
@@ -420,13 +429,6 @@ Results are stored in `/data/results` and follow the same structure as client-si
 
 ```text
 /data/results/
-├── plots/                           # Performance visualization plots
-│   ├── SUMMARY.txt                  # Human-readable benchmark summary
-│   ├── p50_inter_token_latency_vs_concurrency.png
-│   ├── avg_inter_token_latency_vs_concurrency.png
-│   ├── request_throughput_vs_concurrency.png
-│   ├── efficiency_tok_s_gpu_vs_user.png
-│   └── avg_time_to_first_token_vs_concurrency.png
 └── <benchmark-name>/                # Results for your benchmark name
     ├── c1/                          # Concurrency level 1
     │   └── profile_export_genai_perf.json
