@@ -17,7 +17,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: benchmark-runner
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

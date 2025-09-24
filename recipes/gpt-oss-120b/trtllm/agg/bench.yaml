@@ -16,7 +16,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: perf
-        image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:aiperf-0637181
+        image: my-registry/vllm-runtime:my-tag
         workingDir: /workspace/components/backends/vllm
         env:
           - name: TARGET_MODEL

@@ -116,7 +116,7 @@ Edit the template to match your environment:
 
 ```yaml
 # Update image registry and tag
-image: your-registry/vllm-runtime:your-tag
+image: my-registry/vllm-runtime:my-tag
 
 # Configure your model
 args:

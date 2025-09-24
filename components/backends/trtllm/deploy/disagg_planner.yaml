@@ -18,7 +18,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3
@@ -69,7 +69,7 @@ spec:
         mountPoint: /data
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/planner/src/dynamo/planner
           ports:
             - name: metrics
@@ -114,7 +114,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3
@@ -152,7 +152,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3
@@ -186,7 +186,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/dynamo-dev/dynamo-trtllm-runtime:hzhou-0909-03
+          image: my-registry/trtllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
           command:
             - python3

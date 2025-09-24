@@ -56,7 +56,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:gpt-oss-dynamo-nvl72-debug-trtllm-tot
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace/components/backends/trtllm
       replicas: 1
       resources:

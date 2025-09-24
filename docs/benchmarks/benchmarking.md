@@ -398,7 +398,7 @@ The benchmark job is configured directly in the YAML file.
 
 - **Model**: `Qwen/Qwen3-0.6B`
 - **Service**: `qwen-vllm-agg=vllm-agg-frontend:8000`
-- **Docker Image**: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.0`
+- **Docker Image**: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag`
 
 ### Customizing the Job
 

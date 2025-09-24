@@ -73,7 +73,7 @@ eppAware:
     # Container name for the sidecar
     name: frontend-router
     # Sidecar image
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     # Image pull policy for the sidecar
     imagePullPolicy: IfNotPresent
     # Command and args for running the frontend in router mode.
