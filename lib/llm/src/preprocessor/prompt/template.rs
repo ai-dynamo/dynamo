@@ -18,52 +18,106 @@ use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+        println!(
+            "!![DEBUG] PromptFormatter::from_mdc: Starting PromptFormatter creation from ModelDeploymentCard"
+        );
+        println!(
+            "!![DEBUG] PromptFormatter::from_mdc: Model: '{}'",
+            mdc.display_name
+        );
+
+        println!("!![DEBUG] PromptFormatter::from_mdc: Checking for prompt_formatter in MDC");
         match mdc
             .prompt_formatter
             .as_ref()
             .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
         {
             PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) => {
+                println!(
+                    "!![DEBUG] PromptFormatter::from_mdc: Using HfTokenizerConfigJson prompt formatter"
+                );
                 let Some(file) = checked_file.path() else {
+                    println!(
+                        "!![DEBUG] PromptFormatter::from_mdc: ERROR: HfTokenizerConfigJson for {} is a URL, cannot load",
+                        mdc.display_name
+                    );
                     anyhow::bail!(
                         "HfTokenizerConfigJson for {} is a URL, cannot load",
                         mdc.display_name
                     );
                 };
+                println!(
+                    "!![DEBUG] PromptFormatter::from_mdc: Reading tokenizer config file: {}",
+                    file.display()
+                );
                 let contents = std::fs::read_to_string(file)
                     .with_context(|| format!("fs:read_to_string '{}'", file.display()))?;
+                println!("!![DEBUG] PromptFormatter::from_mdc: Successfully read file, parsing JSON");
                 let mut config: ChatTemplate =
                     serde_json::from_str(&contents).inspect_err(|err| {
+                        println!(
+                            "!![DEBUG] PromptFormatter::from_mdc: ERROR parsing JSON: {}",
+                            err
+                        );
                         crate::log_json_err(&file.display().to_string(), &contents, err)
                     })?;
+                println!(
+                    "!![DEBUG] PromptFormatter::from_mdc: Successfully parsed ChatTemplate from JSON"
+                );
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
+                println!(
+                    "!![DEBUG] PromptFormatter::from_mdc: Checking for separate chat_template_file"
+                );
                 if let Some(PromptFormatterArtifact::HfChatTemplate(checked_file)) =
                     mdc.chat_template_file.as_ref()
                 {
+                    println!(
+                        "!![DEBUG] PromptFormatter::from_mdc: Found separate chat_template_file"
+                    );
                     let Some(chat_template_file) = checked_file.path() else {
+                        println!(
+                            "!![DEBUG] PromptFormatter::from_mdc: ERROR: HfChatTemplate for {} is a URL, cannot load",
+                            mdc.display_name
+                        );
                         anyhow::bail!(
                             "HfChatTemplate for {} is a URL, cannot load",
                             mdc.display_name
                         );
                     };
+                    println!(
+                        "!![DEBUG] PromptFormatter::from_mdc: Reading chat template file: {}",
+                        chat_template_file.display()
+                    );
                     let chat_template =
                         std::fs::read_to_string(chat_template_file).with_context(|| {
                             format!("fs:read_to_string '{}'", chat_template_file.display())
                         })?;
                     // clean up the string to remove newlines
                     let chat_template = chat_template.replace('\n', "");
+                    println!(
+                        "!![DEBUG] PromptFormatter::from_mdc: Successfully read and cleaned chat template"
+                    );
                     config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                } else {
+                    println!(
+                        "!![DEBUG] PromptFormatter::from_mdc: No separate chat_template_file found"
+                    );
                 }
-                Self::from_parts(
-                    config,
-                    mdc.prompt_context
-                        .clone()
-                        .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
-                )
+
+                println!(
+                    "!![DEBUG] PromptFormatter::from_mdc: Creating ContextMixins from prompt_context"
+                );
+                let context_mixins = mdc
+                    .prompt_context
+                    .clone()
+                    .map_or(ContextMixins::default(), |x| ContextMixins::new(&x));
+                println!("!![DEBUG] PromptFormatter::from_mdc: Created ContextMixins");
+
+                Self::from_parts(config, context_mixins)
             }
             PromptFormatterArtifact::HfChatTemplate(_) => Err(anyhow::anyhow!(
                 "prompt_formatter should not have type HfChatTemplate"

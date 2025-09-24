@@ -29,14 +29,29 @@ pub struct Migration {
 
 impl Migration {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
+        println!(
+            "!![DEBUG] Migration::from_mdc: Starting migration creation from ModelDeploymentCard"
+        );
+        println!(
+            "!![DEBUG] Migration::from_mdc: Model: '{}', migration_limit: {}",
+            mdc.display_name, mdc.migration_limit
+        );
+
         tracing::debug!(
             "model {} migration limit {}",
             mdc.display_name,
             mdc.migration_limit
         );
-        Arc::new(Self {
+
+        let migration = Arc::new(Self {
             migration_limit: mdc.migration_limit,
-        })
+        });
+        println!(
+            "!![DEBUG] Migration::from_mdc: Successfully created Migration with limit: {}",
+            mdc.migration_limit
+        );
+
+        migration
     }
 }
 

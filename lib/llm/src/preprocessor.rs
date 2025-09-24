@@ -162,23 +162,69 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         hf_tokenizer: tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Starting OpenAI preprocessor creation"
+        );
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Model: '{}'",
+            mdc.display_name
+        );
+
+        println!("!![DEBUG] OpenAIPreprocessor::new_with_parts: Getting MDC checksum");
         let mdcsum = mdc.mdcsum();
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: MDC checksum: {}",
+            mdcsum
+        );
+
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Creating HuggingFaceTokenizer wrapper"
+        );
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Successfully created tokenizer wrapper"
+        );
+
+        println!("!![DEBUG] OpenAIPreprocessor::new_with_parts: Checking model_info from MDC");
         let Some(model_info) = mdc.model_info else {
+            println!(
+                "!![DEBUG] OpenAIPreprocessor::new_with_parts: ERROR: No model_info in ModelDeploymentCard"
+            );
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
-        let model_info = model_info.get_model_info()?;
-        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Found model_info, getting model_info details"
+        );
 
-        Ok(Arc::new(Self {
+        let model_info = model_info.get_model_info()?;
+        println!("!![DEBUG] OpenAIPreprocessor::new_with_parts: Successfully extracted model_info");
+
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Getting tool_call_parser from runtime_config"
+        );
+        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Tool call parser: {:?}",
+            tool_call_parser
+        );
+
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Creating OpenAIPreprocessor struct"
+        );
+        let preprocessor = Arc::new(Self {
             formatter,
             tokenizer,
             model_info,
             mdcsum,
             tool_call_parser,
-        }))
+        });
+        println!(
+            "!![DEBUG] OpenAIPreprocessor::new_with_parts: Successfully created OpenAIPreprocessor"
+        );
+
+        Ok(preprocessor)
     }
     /// Encode a string to it's tokens
     pub fn tokenize(&self, s: &str) -> anyhow::Result<Encoding> {
