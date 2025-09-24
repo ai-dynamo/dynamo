@@ -156,26 +156,16 @@ def verify_request_cancelled(
     if request_id is None:
         pytest.fail("Could not find 'New Request ID: <id>' pattern in worker log")
 
-    # Check if the same request ID was cancelled at worker
-    #
-    # Engine loop abort is only printed on one worker because workers never run their
-    # engine at the same time for a given request since responses are sequential for a
-    # given request
-    #
-    # This check is performed either at the worker or remote worker and not both
-    if not assert_cancel_at_remote_worker:
-        has_worker_cancellation = False
-        cancellation_pattern = f"Aborted Request ID: {request_id}"
-        for line in new_worker_content.split("\n"):
-            # Strip ANSI codes and whitespace for pattern matching
-            clean_line = strip_ansi_codes(line).strip()
-            if clean_line.endswith(cancellation_pattern):
-                has_worker_cancellation = True
-                break
-        if not has_worker_cancellation:
-            pytest.fail(
-                f"Could not find '{cancellation_pattern}' pattern in worker log"
-            )
+    has_worker_cancellation = False
+    cancellation_pattern = f"Aborted {'Remote ' if assert_cancel_at_remote_worker else ''}Request ID: {request_id}"
+    for line in new_worker_content.split("\n"):
+        # Strip ANSI codes and whitespace for pattern matching
+        clean_line = strip_ansi_codes(line).strip()
+        if clean_line.endswith(cancellation_pattern):
+            has_worker_cancellation = True
+            break
+    if not has_worker_cancellation:
+        pytest.fail(f"Could not find '{cancellation_pattern}' pattern in worker log")
 
     # Check remote worker log if provided
     if remote_worker_process is not None:
@@ -258,6 +248,9 @@ def test_request_cancellation_trtllm_aggregated(
         with worker:
             logger.info(f"Aggregated Worker PID: {worker.get_pid()}")
 
+            # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+            time.sleep(2)
+
             # Step 3: Test request cancellation
             frontend_log_offset, worker_log_offset = 0, 0
 
@@ -325,6 +318,9 @@ def test_request_cancellation_trtllm_decode_first_decode_cancel(
             with decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
+                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+                time.sleep(2)
+
                 # Step 4: Test request cancellation for completion scenario only
                 logger.info(
                     "Testing completion request cancellation in decode worker (decode phase)..."
@@ -380,6 +376,9 @@ def test_request_cancellation_trtllm_decode_first_remote_prefill_cancel(
 
             with decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
+
+                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+                time.sleep(2)
 
                 # Step 4: Test request cancellation during remote prefill phase
                 logger.info(
@@ -437,6 +436,9 @@ def test_request_cancellation_trtllm_prefill_first_prefill_cancel(
             with prefill_worker:
                 logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
+                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+                time.sleep(2)
+
                 # Step 4: Test request cancellation during prefill phase
                 logger.info(
                     "Testing completion request cancellation during prefill phase..."
@@ -492,6 +494,9 @@ def test_request_cancellation_trtllm_prefill_first_remote_decode_cancel(
 
             with prefill_worker:
                 logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+
+                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+                time.sleep(2)
 
                 # Step 4: Test request cancellation during remote decode phase
                 logger.info(

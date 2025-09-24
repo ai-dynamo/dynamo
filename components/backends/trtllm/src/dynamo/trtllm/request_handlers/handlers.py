@@ -157,6 +157,10 @@ class PrefillHandler(HandlerBase):
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
 
+        if context.is_stopped() or context.is_killed():
+            # Local generate abort monitor will print debug log, so only returning here.
+            return
+
         if (
             self.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
             and not self.check_error(prefill_response)
@@ -169,6 +173,10 @@ class PrefillHandler(HandlerBase):
                 ]
             async for res in self.remote_decode(request, context):
                 yield res
+
+            if context.is_stopped() or context.is_killed():
+                logging.debug(f"Aborted Remote Request ID: {context.id()}")
+                return
         else:
             # Return response to the decode handler.
             yield prefill_response
@@ -200,6 +208,10 @@ class DecodeHandler(HandlerBase):
                 response_count += 1
                 if response_count > 1:
                     raise ValueError("Prefill response should be generated only once.")
+
+            if context.is_stopped() or context.is_killed():
+                logging.debug(f"Aborted Remote Request ID: {context.id()}")
+                return
 
             response_data = (
                 prefill_response.data() if prefill_response is not None else None
