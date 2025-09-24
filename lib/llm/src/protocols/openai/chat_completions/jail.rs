@@ -75,9 +75,10 @@ struct ChoiceJailState {
 }
 
 fn create_choice_stream(
-    content: &str,
-    role: Option<Role>,
     index: u32,
+    role: Option<Role>,
+    content: &str,
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
@@ -87,7 +88,7 @@ fn create_choice_stream(
         delta: ChatCompletionStreamResponseDelta {
             role,
             content: Some(content.to_string()),
-            tool_calls: None,
+            tool_calls,
             function_call: None,
             refusal: None,
             reasoning_content: None,
@@ -146,10 +147,11 @@ impl ChoiceJailState {
                     if !prefix.is_empty() {
                         #[allow(deprecated)]
                         let prefix_choice = create_choice_stream(
-                            &prefix,
-                            choice.delta.role,
                             choice.index,
-                            choice.finish_reason,
+                            choice.delta.role,
+                            &prefix,
+                            None,
+                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -185,10 +187,11 @@ impl ChoiceJailState {
                         if !trailing_part.is_empty() {
                             #[allow(deprecated)]
                             let trailing_choice = create_choice_stream(
-                                trailing_part,
-                                choice.delta.role,
                                 choice.index,
-                                choice.finish_reason,
+                                choice.delta.role,
+                                trailing_part,
+                                None,
+                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -216,10 +219,11 @@ impl ChoiceJailState {
                     if !prefix.is_empty() {
                         #[allow(deprecated)]
                         let prefix_choice = create_choice_stream(
-                            &prefix,
-                            choice.delta.role,
                             choice.index,
-                            choice.finish_reason,
+                            choice.delta.role,
+                            &prefix,
+                            None,
+                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -258,10 +262,11 @@ impl ChoiceJailState {
                         if !content.is_empty() {
                             #[allow(deprecated)]
                             let pass_through_choice = create_choice_stream(
-                                &content,
-                                choice.delta.role,
                                 choice.index,
-                                choice.finish_reason,
+                                choice.delta.role,
+                                &content,
+                                None,
+                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -302,10 +307,11 @@ impl ChoiceJailState {
                 if !trailing_part.is_empty() {
                     #[allow(deprecated)]
                     let trailing_choice = create_choice_stream(
-                        trailing_part,
-                        choice.delta.role,
                         choice.index,
-                        choice.finish_reason,
+                        choice.delta.role,
+                        trailing_part,
+                        None,
+                        None,
                         choice.logprobs.clone(),
                     );
                     emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -331,9 +337,10 @@ impl ChoiceJailState {
             // Create a dummy choice for the method call
             #[allow(deprecated)]
             let dummy_choice = create_choice_stream(
-                &self.accumulated_content,
-                Some(Role::Assistant),
                 self.index,
+                Some(Role::Assistant),
+                &self.accumulated_content,
+                None,
                 None,
                 None,
             );
@@ -693,37 +700,25 @@ impl JailedStream {
                 .collect();
 
             // Create choice with tool calls
-            #[allow(deprecated)]
-            return ChatChoiceStream {
-                index: choice_index,
-                delta: ChatCompletionStreamResponseDelta {
-                    role: Some(Role::Assistant),
-                    content: normal_text.filter(|t| !t.is_empty()),
-                    tool_calls: Some(tool_call_chunks),
-                    function_call: None,
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: Some(FinishReason::ToolCalls),
-                logprobs: None,
-            };
+            return create_choice_stream(
+                choice_index,
+                Some(Role::Assistant),
+                normal_text.as_deref().unwrap_or(""),
+                Some(tool_call_chunks),
+                Some(FinishReason::ToolCalls),
+                None,
+            );
         }
 
         // No tool calls found or parsing failed, return content choice
-        #[allow(deprecated)]
-        ChatChoiceStream {
-            index: choice_index,
-            delta: ChatCompletionStreamResponseDelta {
-                role: Some(Role::Assistant),
-                content: Some(accumulated_content.to_string()),
-                tool_calls: None,
-                function_call: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason: None,
-            logprobs: base_choice.logprobs.clone(),
-        }
+        create_choice_stream(
+            choice_index,
+            Some(Role::Assistant),
+            accumulated_content,
+            None,
+            None,
+            base_choice.logprobs.clone(),
+        )
     }
 
     /// Check if accumulated content contains complete tool calls that can be parsed
