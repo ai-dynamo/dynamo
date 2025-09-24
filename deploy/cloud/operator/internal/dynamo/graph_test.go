@@ -1804,7 +1804,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1828,7 +1828,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-														Value: `["generate"]`,
+														Value: "[\"generate\"]",
 													},
 													{
 														Name:  "WORKER_ENV_1",
@@ -1955,7 +1955,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1979,7 +1979,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-														Value: `["generate"]`,
+														Value: "[\"generate\"]",
 													},
 													{
 														Name:  "WORKER_ENV_1",
@@ -2624,7 +2624,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-														Value: `["generate"]`,
+														Value: "[\"generate\"]",
 													},
 													{
 														Name:  "WORKER_ENV_1",
@@ -2739,7 +2739,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block",
+													"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2763,7 +2763,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-														Value: `["generate"]`,
+														Value: "[\"generate\"]",
 													},
 													{
 														Name:  "WORKER_ENV_1",
@@ -3141,6 +3141,20 @@ func (m *mockSecretsRetriever) GetSecrets(namespace, registry string) ([]string,
 	return []string{}, nil
 }
 
+// Mock SecretsRetriever that returns secrets for testing docker secrets functionality
+type mockSecretsRetrieverWithSecrets struct{}
+
+func (m *mockSecretsRetrieverWithSecrets) RetrieveImagePullSecrets(ctx context.Context, deployment *v1alpha1.DynamoGraphDeployment) ([]corev1.LocalObjectReference, error) {
+	return []corev1.LocalObjectReference{
+		{Name: "test-docker-secret"},
+	}, nil
+}
+
+func (m *mockSecretsRetrieverWithSecrets) GetSecrets(namespace, registry string) ([]string, error) {
+	// Return some mock secrets when called
+	return []string{"test-docker-secret"}, nil
+}
+
 func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
@@ -3168,7 +3182,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3", "-m", "dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang.worker"},
 						},
 					},
 				},
@@ -3187,7 +3201,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3", "-m", "dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang.worker"},
 						},
 					},
 				},
@@ -3205,7 +3219,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ExtraPodSpec: &common.ExtraPodSpec{
 						MainContainer: &corev1.Container{
-							Args: []string{"python3", "-m", "dynamo.sglang.worker"},
+							Args: []string{"python3 -m dynamo.sglang.worker"},
 						},
 					},
 				},
@@ -3363,7 +3377,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleWorker,
 			numberOfNodes:     3,
 			expectError:       false,
-			expectContains:    []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectContains:    []string{"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-worker-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block"},
 			expectNotContains: []string{"python3 -m dynamo.vllm"},
 		},
 		{
@@ -3501,55 +3515,6 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				if err != nil {
 					t.Errorf("GeneratePodSpecForComponent() unexpected error: %v", err)
 				}
-			}
-		})
-	}
-}
-
-func TestMergeContainerCommand(t *testing.T) {
-	tests := []struct {
-		name       string
-		defaultCmd []string
-		userCmd    []string
-		expected   []string
-	}{
-		{
-			name:       "user command overrides default",
-			defaultCmd: []string{"python", "default.py"},
-			userCmd:    []string{"python", "custom.py"},
-			expected:   []string{"python", "custom.py"},
-		},
-		{
-			name:       "empty user command returns default",
-			defaultCmd: []string{"python", "default.py"},
-			userCmd:    []string{},
-			expected:   []string{"python", "default.py"},
-		},
-		{
-			name:       "nil user command returns default",
-			defaultCmd: []string{"python", "default.py"},
-			userCmd:    nil,
-			expected:   []string{"python", "default.py"},
-		},
-		{
-			name:       "both empty returns empty",
-			defaultCmd: []string{},
-			userCmd:    []string{},
-			expected:   []string{},
-		},
-		{
-			name:       "default empty user provided",
-			defaultCmd: []string{},
-			userCmd:    []string{"python", "user.py"},
-			expected:   []string{"python", "user.py"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := mergeContainerCommand(tt.defaultCmd, tt.userCmd)
-			if !reflect.DeepEqual(result, tt.expected) {
-				t.Errorf("mergeContainerCommand() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
@@ -4479,6 +4444,138 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 			if podSpec.ServiceAccountName != tt.expectedServiceAcc {
 				t.Errorf("GenerateBasePodSpec() serviceAccountName = %v, want %v",
 					podSpec.ServiceAccountName, tt.expectedServiceAcc)
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
+	tests := []struct {
+		name                     string
+		component                *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		secretsRetriever         SecretsRetriever
+		expectedImagePullSecrets []corev1.LocalObjectReference
+	}{
+		{
+			name: "disable docker secrets annotation set to true",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueTrue,
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever:         &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: nil, // Should be nil when disabled
+		},
+		{
+			name: "disable docker secrets annotation set to false",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueFalse,
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "test-docker-secret"},
+			}, // Should be present when enabled
+		},
+		{
+			name: "disable docker secrets annotation not set (default behavior)",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "test-docker-secret"},
+			}, // Should be present by default
+		},
+		{
+			name: "disable docker secrets annotation set to invalid value",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: "invalid",
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever: &mockSecretsRetrieverWithSecrets{},
+			expectedImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "test-docker-secret"},
+			}, // Should be present when annotation is not "true"
+		},
+		{
+			name: "disable docker secrets but no secrets retriever",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDisableImagePullSecretDiscovery: commonconsts.KubeLabelValueFalse,
+					},
+					ExtraPodSpec: &common.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Image: "test-registry/test-image:latest",
+						},
+					},
+				},
+			},
+			secretsRetriever:         nil,
+			expectedImagePullSecrets: nil, // Should be nil when no retriever
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controllerConfig := controller_common.Config{}
+
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				BackendFrameworkNoop,
+				tt.secretsRetriever,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if err != nil {
+				t.Errorf("GenerateBasePodSpec() error = %v", err)
+				return
+			}
+
+			if !reflect.DeepEqual(podSpec.ImagePullSecrets, tt.expectedImagePullSecrets) {
+				t.Errorf("GenerateBasePodSpec() ImagePullSecrets = %v, want %v",
+					podSpec.ImagePullSecrets, tt.expectedImagePullSecrets)
 			}
 		})
 	}

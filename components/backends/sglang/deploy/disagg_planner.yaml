@@ -48,7 +48,7 @@ spec:
       pvc:
         create: false
         name: dynamo-pvc # Must be pre-created before deployment and SLA profiler must have been run
-        mountPoint: /data/profiling_results
+        mountPoint: /data
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/sglang-runtime:hzhou-0811-1
@@ -98,7 +98,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
-    SGLangDecodeWorker:
+    decode:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
@@ -129,7 +129,7 @@ spec:
             - decode
             - --disaggregation-transfer-backend
             - nixl
-    SGLangPrefillWorker:
+    prefill:
       dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker

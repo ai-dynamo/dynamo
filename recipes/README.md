@@ -6,7 +6,7 @@
 | llama-3-70b   | vllm    | disagg-multi-node   |     ✓      |     ✓     |
 | llama-3-70b   | vllm    | disagg-single-node  |     ✓      |     ✓     |
 | oss-gpt       | trtllm  | aggregated          |     ✓      |     ✓     |
-| DeepSeek-R1   | sglang  | disaggregated       |     🚧     |    🚧     |
+| DeepSeek-R1   | sglang  | disaggregated       |     ✓      |    🚧     |
 
 
 ## Prerequisites
@@ -19,7 +19,7 @@ export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
 ```
 
-2. **Dynamo Cloud Platform installed** - Follow [Quickstart Guide](../docs/guides/dynamo_deploy/README.md)
+2. **Dynamo Cloud Platform installed** - Follow [Quickstart Guide](../docs/kubernetes/README.md)
 
 3. **Kubernetes cluster with GPU support**
 

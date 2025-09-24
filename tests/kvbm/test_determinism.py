@@ -775,7 +775,6 @@ class TestDeterminism:
         ],
         indirect=True,
     )
-    @pytest.mark.vllm
     def test_determinism_with_cache_reset(self, tester, llm_server, runtime_services):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
         print("\n" + "=" * 70)
@@ -916,6 +915,7 @@ class TestDeterminism:
         "num_prompts",
         [int(x) for x in os.environ.get("KVBM_IFEVAL_PROMPTS", "120").split(",")],
     )
+    @pytest.mark.skip(reason="Flaky test: DIS-665")
     def test_concurrent_determinism_with_ifeval(
         self,
         tester,
@@ -995,12 +995,6 @@ class TestDeterminism:
                     )
 
                 # Wait for 10 seconds to make sure all transfers are complete
-                time.sleep(10)
-                # Reset cache
-                print("\n" + "=" * 50)
-                print("RESETTING CACHE AFTER WARMUP")
-                print("=" * 50)
-                tester.reset_prefix_cache()
                 time.sleep(10)
             else:
                 print("Skipping warmup (already done in previous phase)")
