@@ -541,7 +541,7 @@ async def run_profile(args):
         # interpolate ISL - TTFT with best prefill GPU count
         best_prefill_gpus = prefill_num_gpus[selected_prefill_idx]
         logger.info(
-            f"Profiling prefill under best {best_prefill_gpus}GPUs with different ISL..."
+            f"Profiling prefill under best {best_prefill_gpus} GPU(s) with different ISL..."
         )
         prefill_config = config_modifier.convert_config(
             config, "prefill", is_moe_model=args.is_moe_model

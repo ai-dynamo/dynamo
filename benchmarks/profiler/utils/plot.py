@@ -83,7 +83,7 @@ def plot_decode_performance(decode_results, target_itl, output_dir):
     plt.figure(figsize=(10, 6))
 
     for num_gpu, itl_list, thpt_per_gpu_list in decode_results:
-        plt.plot(itl_list, thpt_per_gpu_list, label=f"{num_gpu}GPU")
+        plt.plot(itl_list, thpt_per_gpu_list, label=f"{num_gpu} GPU(s)")
 
     plt.axvline(
         x=target_itl, color="r", linestyle="--", label=f"Target ITL: {target_itl} ms"
