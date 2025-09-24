@@ -133,6 +133,9 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+
+    // Metrics polling configuration
+    etcd_client: Option<dynamo_runtime::transports::etcd::Client>,
 }
 
 #[derive(Clone, Builder)]
@@ -200,6 +203,22 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
+
+        // Start background task to poll runtime config metrics with proper cancellation
+        let poll_interval_secs = std::env::var("DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|&secs| secs > 0.0) // Guard against zero or negative values
+            .unwrap_or(8.0);
+        let poll_interval = Duration::from_secs_f64(poll_interval_secs);
+
+        let _polling_task = super::metrics::Metrics::start_runtime_config_polling_task(
+            self.state.metrics_clone(),
+            self.state.manager_clone(),
+            self.etcd_client.clone(),
+            poll_interval,
+            cancel_token.child_token(),
+        );
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -294,6 +313,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
+        let etcd_client = config.etcd_client.clone();
         let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
 
         state
@@ -312,6 +332,8 @@ impl HttpServiceConfigBuilder {
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
+
+        // Note: Metrics polling task will be started in run() method to have access to cancellation token
 
         let mut router = axum::Router::new();
 
@@ -344,6 +366,7 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            etcd_client,
         })
     }
 
