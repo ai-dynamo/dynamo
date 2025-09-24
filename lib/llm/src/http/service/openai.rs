@@ -291,7 +291,6 @@ async fn completions(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
 
-
     // todo - error handling should be more robust
     let engine = state
         .manager()
@@ -540,7 +539,6 @@ async fn chat_completions(
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
-
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
