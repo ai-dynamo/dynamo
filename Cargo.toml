@@ -30,7 +30,10 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-runtime = { path = "lib/runtime", version = "0.5.0" }
 dynamo-llm = { path = "lib/llm", version = "0.5.0" }
 dynamo-tokens = { path = "lib/tokens", version = "0.5.0" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.5.0", features = ["byot", "rustls"]}
+dynamo-async-openai = { path = "lib/async-openai", version = "0.5.0", features = [
+    "byot",
+    "rustls",
+] }
 dynamo-parsers = { path = "lib/parsers", version = "0.5.0" }
 
 # External dependencies
@@ -41,19 +44,38 @@ async-trait = { version = "0.1" }
 async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
 bytes = { version = "1" }
-chrono = { version = "0.4", default-features = false, features = ["alloc", "std", "clock", "now", "serde"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "alloc",
+    "std",
+    "clock",
+    "now",
+    "serde",
+] }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.16", features = ["tls"] }
 futures = { version = "0.3" }
-hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
+hf-hub = { version = "0.4.2", default-features = false, features = [
+    "tokio",
+    "rustls-tls",
+    "ureq",
+] }
+
+# ModelExpress for model downloading
+modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-client" }
+modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "a232220bf268a475d293914d407f4ae186f443e3", package = "modelexpress-common" }
+
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
-reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12.22", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 strum = { version = "0.27", features = ["derive"] }
@@ -62,13 +84,17 @@ thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net", "rt"] }
-tower-http = {version = "0.6", features=["trace"]}
-axum = { version = "0.8" , features = ["macros"]}
+tower-http = { version = "0.6", features = ["trace"] }
+axum = { version = "0.8", features = ["macros"] }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "local-time",
+    "json",
+] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
-url = {version = "2.5", features = ["serde"]}
+url = { version = "2.5", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 
 [profile.dev.package]
