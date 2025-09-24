@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field
+from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 TokenIdType = int
 
@@ -35,7 +36,6 @@ class SamplingOptions(BaseModel):
 
 class PreprocessedRequest(BaseModel):
     token_ids: List[TokenIdType]
-    batch_token_ids: Optional[List[List[TokenIdType]]] = None
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
@@ -44,6 +44,6 @@ class PreprocessedRequest(BaseModel):
 
 
 class DisaggPreprocessedRequest(BaseModel):
-    request: PreprocessedRequest
+    request: Union[PreprocessedRequest, ChatCompletionRequest]
     sampling_params: dict
     data_parallel_rank: Optional[int] = None
