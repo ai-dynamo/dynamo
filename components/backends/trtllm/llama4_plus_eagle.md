@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Llama 4 Maverick Instruct with Eagle Speculative Decoding on SLURM
+# Llama 4 Maverick Instruct with Eagle Speculative Decoding
 
 This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Speculative Decoding on GB200x4 nodes. We will be following the [multi-node deployment instructions](./multinode/multinode-examples.md) to set up the environment for the following scenarios:
 
