@@ -553,6 +553,8 @@ class ManagedDeployment:
         return processes
 
     def get_service(self, service_name=None):
+        if not service_name:
+            service_name = ""
         full_service_name = f"{self._deployment_name}-{service_name.lower()}"
 
         return kr8s_Service.get(full_service_name, namespace=self.namespace)

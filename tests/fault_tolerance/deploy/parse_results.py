@@ -18,7 +18,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from tabulate import tabulate
@@ -28,7 +28,7 @@ def parse_test_log(file_path):
     start_time = None
     ready_time = None
     fault_time = None
-    start_cmd = None
+    start_cmd: Optional[List[str]] = None
     if not os.path.isfile(file_path):
         return None, None, None
     with open(file_path, "r") as f:
@@ -38,7 +38,7 @@ def parse_test_log(file_path):
                 start_time = datetime.fromisoformat(
                     line.split(" ")[1].replace("T", " ")
                 )
-                start_cmd: List[str] = []
+                start_cmd = []
             elif "Deployment fault-tolerance-test is ready" in line:
                 ready_time = datetime.fromisoformat(
                     line.split(" ")[1].replace("T", " ")

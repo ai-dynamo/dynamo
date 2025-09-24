@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import time
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict
 
@@ -72,10 +73,11 @@ def _single_request(
     retry_delay=1,
 ):
     prompt = _get_random_prompt(input_token_length)
-    payload["messages"][0]["content"] = prompt
-    payload["max_tokens"] = output_token_length
-    payload["min_tokens"] = output_token_length
-    payload["model"] = model
+    payload_copy = deepcopy(payload)
+    payload_copy["messages"][0]["content"] = prompt
+    payload_copy["max_tokens"] = output_token_length
+    payload_copy["min_tokens"] = output_token_length
+    payload_copy["model"] = model
     response = None
     end_time = None
     start_time = time.time()
@@ -87,7 +89,7 @@ def _single_request(
         try:
             response = requests.post(
                 url,
-                json=payload,
+                json=payload_copy,
                 timeout=timeout,
             )
             end_time = time.time()
@@ -158,7 +160,7 @@ def client(
     managed_deployment = ManagedDeployment(log_dir, deployment_spec, namespace)
     pod_ports: Dict[str, Any] = {}
 
-    min_elapsed_time = 1 / max_request_rate
+    min_elapsed_time = (1 / max_request_rate) if max_request_rate > 0 else 0.0
 
     try:
         os.makedirs(log_dir, exist_ok=True)
@@ -207,7 +209,7 @@ def client(
                     retry_delay=retry_delay,
                 )
                 logger.info(
-                    f"Request: {i} Pod {pod.name} Local Port {port} Status: {result['results'][-1]['status']} Latency: {result['results'][-1]['request_elapsed_time']}"
+                    f"Request: {i} Pod {pod_name} Local Port {port} Status: {result['results'][-1]['status']} Latency: {result['results'][-1]['request_elapsed_time']}"
                 )
 
                 log.write(json.dumps(result) + "\n")
