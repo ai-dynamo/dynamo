@@ -12,7 +12,7 @@
 //!
 //! Usage:
 //! ```rust,ignore
-//! let engine = build_worker_selection_pipeline(...).await?;
+//! let engine = build_worker_selection_pipeline_chat(...).await?;
 //! let request = create_request_with_annotation("query_instance_id");
 //! let response_stream = engine.generate(request).await?;
 //!
@@ -40,9 +40,7 @@ use serde_json;
 const GENERATE_ENDPOINT: &str = "generate";
 
 use crate::{
-    backend::Backend,
     kv_router::{KvPushRouter, KvRouter, KvRouterConfig},
-    migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::{
@@ -56,73 +54,10 @@ use dynamo_runtime::{
     component::Client,
     engine::AsyncEngineStream,
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
-        ServiceEngine, SingleIn, Source,
+        ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend, ServiceEngine,
+        SingleIn, Source,
     },
 };
-
-/// Build a worker selection pipeline that gets routing decisions from the router
-///
-/// This pipeline: frontend -> preprocessor -> backend -> migration -> router
-/// The router handles query_instance_id annotations and returns worker_instance_id and token_data annotations.
-pub async fn build_worker_selection_pipeline<Req>(
-    card: &ModelDeploymentCard,
-    client: &Client,
-    router_mode: RouterMode,
-    busy_threshold: Option<f64>,
-    chooser: Option<Arc<KvRouter>>,
-    hf_tokenizer: tokenizers::Tokenizer,
-) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>>
-where
-    Req: dynamo_runtime::engine::Data,
-    OpenAIPreprocessor: Operator<
-            Context<Req>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
-            Context<PreprocessedRequest>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
-        >,
-{
-    use crate::preprocessor::prompt::PromptFormatter;
-
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
-    let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
-
-    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>::new();
-    let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card).into_operator();
-
-    let router =
-        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-            client.clone(),
-            router_mode,
-            busy_threshold,
-        )
-        .await?;
-
-    let service_backend = match router_mode {
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-            ServiceBackend::from_engine(Arc::new(router))
-        }
-        RouterMode::KV => {
-            let Some(chooser) = chooser else {
-                anyhow::bail!("RouterMode::KV requires KvRouter to not be null");
-            };
-            let kv_push_router = KvPushRouter::new(router, chooser);
-            ServiceBackend::from_engine(Arc::new(kv_push_router))
-        }
-    };
-
-    // Build pipeline - forward path only (router handles query_instance_id and returns annotations)
-    frontend
-        .link(preprocessor_op.forward_edge())?
-        .link(backend.forward_edge())?
-        .link(migration.forward_edge())?
-        .link(service_backend)?;
-
-    Ok(frontend)
-}
 
 /// Helper function to extract worker selection information from the annotation stream
 /// This demonstrates how to process the annotations returned by the router
@@ -464,127 +399,6 @@ pub async fn create_worker_selection_pipeline_chat(
 
     // Build and return the worker selection pipeline
     build_worker_selection_pipeline_chat(
-        &card,
-        &client,
-        router_mode,
-        busy_threshold,
-        chooser,
-        hf_tokenizer,
-    )
-    .await
-}
-
-/// Generic helper function to create worker selection pipeline from string parameters
-///
-/// This function creates all the necessary parameters for `build_worker_selection_pipeline`
-/// when you have namespace, component, and model information as strings.
-/// Uses the "generate" endpoint by default.
-///
-/// # Parameters
-/// - `namespace`: namespace name
-/// - `component_name`: component name
-/// - `model_name`: Name/slug of the model to load
-/// - `router_mode`: How to route requests (KV, RoundRobin, etc.)
-/// - `busy_threshold`: Optional threshold for busy worker detection
-/// - `kv_router_config`: Optional KV router configuration (only used when router_mode is KV)
-///
-/// # Returns
-/// A configured worker selection pipeline ready to use
-///
-/// # Example Usage:
-/// ```rust,ignore
-/// let kv_config = KvRouterConfig::new(
-///     Some(1.5),        // overlap_score_weight
-///     Some(0.2),        // temperature
-///     None,             // use_kv_events (default)
-///     None,             // replica_sync (default)
-///     None,             // max_num_batched_tokens (default)
-///     None,             // router_snapshot_threshold (default)
-///     None,             // router_reset_states (default)
-/// );
-/// let pipeline = create_worker_selection_pipeline(
-///     "my-namespace",
-///     "backend",
-///     "llama3-8b-instruct",
-///     RouterMode::KV,
-///     Some(0.8),
-///     Some(kv_config),
-/// ).await?;
-///
-/// // Use pipeline to get worker selection
-/// let request = create_request_with_annotation("query_instance_id");
-/// let response_stream = pipeline.generate(request).await?;
-/// let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
-/// ```
-pub async fn create_worker_selection_pipeline<Req>(
-    namespace: &str,
-    component_name: &str,
-    model_name: &str,
-    router_mode: RouterMode,
-    busy_threshold: Option<f64>,
-    kv_router_config: Option<KvRouterConfig>,
-) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<LLMEngineOutput>>>>
-where
-    Req: dynamo_runtime::engine::Data,
-    OpenAIPreprocessor: Operator<
-            Context<Req>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
-            Context<PreprocessedRequest>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
-        >,
-{
-    use crate::{discovery::ModelManager, model_card::ModelDeploymentCard};
-    use anyhow::Context;
-    use dynamo_runtime::{
-        DistributedRuntime, Runtime, distributed::DistributedConfig, slug::Slug,
-        traits::DistributedRuntimeProvider,
-    };
-
-    // Create DistributedRuntime
-    let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings(false);
-    let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
-
-    // Create Component and Client
-    let ns = distributed_runtime.namespace(namespace)?;
-    let component = ns.component(component_name)?;
-    let endpoint = component.endpoint(GENERATE_ENDPOINT);
-    let client = endpoint.client().await?;
-
-    // Load ModelDeploymentCard
-    let model_slug = Slug::from_string(model_name);
-    let card = match ModelDeploymentCard::load_from_store(&model_slug, component.drt()).await {
-        Ok(Some(card)) => card,
-        Ok(None) => anyhow::bail!("ModelDeploymentCard not found for model: {}", model_name),
-        Err(err) => anyhow::bail!(
-            "Error fetching ModelDeploymentCard from storage under key {model_slug}. {err}"
-        ),
-    };
-
-    // Get tokenizer from the model card
-    let hf_tokenizer = card
-        .tokenizer_hf()
-        .with_context(|| format!("Failed to load tokenizer for model: {}", model_name))?;
-
-    // Create KV chooser if using KV routing mode
-    let chooser = if router_mode == RouterMode::KV {
-        let model_manager = std::sync::Arc::new(ModelManager::new());
-        Some(
-            model_manager
-                .kv_chooser_for(
-                    &card.display_name,
-                    &component,
-                    card.kv_cache_block_size,
-                    kv_router_config,
-                )
-                .await?,
-        )
-    } else {
-        None
-    };
-
-    // Build and return the worker selection pipeline
-    build_worker_selection_pipeline(
         &card,
         &client,
         router_mode,
