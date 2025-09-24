@@ -14,6 +14,7 @@ ARG CMAKE_VERSION="3.31.8"
 ARG RUST_VERSION="1.90.0"
 ARG CARGO_BUILD_JOBS="16"
 
+RUN rm -f /usr/local/bin/protoc /usr/bin/protoc
 RUN apt-get update -y && \
     apt-get install -y \
       cmake meson ninja-build pybind11-dev patchelf net-tools \

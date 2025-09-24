@@ -272,6 +272,7 @@ FROM runtime AS dev
 ARG WORKSPACE_DIR=/workspace
 
 # Install utilities as root
+RUN rm -f /usr/local/bin/protoc /usr/bin/protoc
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends  \
     # Install utilities

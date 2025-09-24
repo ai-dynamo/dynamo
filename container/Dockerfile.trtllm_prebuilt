@@ -28,6 +28,7 @@ RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases
 RUN pip install -r ./container/deps/requirements.txt
 
 # Rust build/dev dependencies
+RUN rm -f /usr/local/bin/protoc /usr/bin/protoc
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
     gdb \

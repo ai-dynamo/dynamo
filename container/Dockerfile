@@ -110,6 +110,7 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 ##################################
 
 # Install system packages
+RUN rm -f /usr/local/bin/protoc /usr/bin/protoc
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # NIXL build dependencies
