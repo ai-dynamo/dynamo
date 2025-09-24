@@ -96,6 +96,7 @@ ARG ARCH_ALT
 WORKDIR /workspace
 # Install SGLang and related dependencies
 ARG SGLANG_VERSION
+ARG SGL_KERNEL_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd /opt && \
     git clone https://github.com/sgl-project/sglang.git && \
