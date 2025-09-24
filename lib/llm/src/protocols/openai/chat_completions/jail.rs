@@ -3,12 +3,14 @@
 
 use async_stream::stream;
 use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-    FinishReason, FunctionCallStream, Role,
+    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
 };
 
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
-use dynamo_parsers::tool_calling::{detect_tool_call_start, try_tool_call_parse_aggregate};
+use dynamo_parsers::tool_calling::{
+    detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
@@ -74,7 +76,7 @@ struct ChoiceJailState {
 
 fn create_choice_stream(
     content: &str,
-    role: Role,
+    role: Option<Role>,
     index: u32,
     finish_reason: Option<FinishReason>,
     logprobs: Option<ChatChoiceLogprobs>,
@@ -83,7 +85,7 @@ fn create_choice_stream(
     ChatChoiceStream {
         index,
         delta: ChatCompletionStreamResponseDelta {
-            role: Some(role),
+            role,
             content: Some(content.to_string()),
             tool_calls: None,
             function_call: None,
@@ -330,7 +332,7 @@ impl ChoiceJailState {
             #[allow(deprecated)]
             let dummy_choice = create_choice_stream(
                 &self.accumulated_content,
-                Role::Assistant,
+                Some(Role::Assistant),
                 self.index,
                 None,
                 None,
@@ -650,7 +652,7 @@ impl JailedStream {
                 if let Ok((_, _)) =
                     try_tool_call_parse_aggregate(accumulated_content, Some(parser)).await
                 {
-                    let split_pos = self.find_tool_call_end_position(accumulated_content, parser);
+                    let split_pos = find_tool_call_end_position(accumulated_content, Some(parser));
                     (true, split_pos)
                 } else {
                     (false, accumulated_content.len())
@@ -736,63 +738,6 @@ impl JailedStream {
             }
         }
         false
-    }
-
-    /// Find the exact position where the tool call ends for splitting content
-    /// This handles the early exit case where we have trailing content after the tool call
-    fn find_tool_call_end_position(&self, content: &str, parser: &str) -> usize {
-        match parser {
-            "hermes" => {
-                // For Hermes, look for </tool_call> marker
-                if let Some(pos) = content.find("</tool_call>") {
-                    pos + "</tool_call>".len()
-                } else {
-                    content.len()
-                }
-            }
-            "nemotron_deci" => {
-                // For Nemotron, look for </TOOLCALL> marker
-                if let Some(pos) = content.find("</TOOLCALL>") {
-                    pos + "</TOOLCALL>".len()
-                } else {
-                    content.len()
-                }
-            }
-            "mistral" => {
-                // For Mistral, look for [/TOOL_CALLS] marker or end of JSON array
-                if let Some(pos) = content.find("[/TOOL_CALLS]") {
-                    pos + "[/TOOL_CALLS]".len()
-                } else if let Some(pos) = content.rfind(']') {
-                    // Find the last ] which should be the end of the tool calls array
-                    pos + 1
-                } else {
-                    content.len()
-                }
-            }
-            "phi4" => {
-                // For Phi4, look for <|tool_call|> end marker
-                if let Some(pos) = content.rfind("<|tool_call|>") {
-                    // Look for the next occurrence after this position
-                    if let Some(end_pos) = content[pos..].find(">") {
-                        pos + end_pos + 1
-                    } else {
-                        content.len()
-                    }
-                } else {
-                    content.len()
-                }
-            }
-            "llama3_json" => {
-                // For Llama3 JSON, there's no explicit end marker
-                // The end is determined by complete JSON parsing
-                // Return full content length to avoid early splitting
-                content.len()
-            }
-            _ => {
-                // Unknown parser, default to full content
-                content.len()
-            }
-        }
     }
 }
 
