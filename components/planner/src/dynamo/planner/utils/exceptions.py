@@ -20,7 +20,7 @@ error handling than generic ValueError exceptions. Each exception includes
 contextual information to help with debugging and error handling.
 """
 
-from typing import List, Optional
+from typing import List
 
 
 class PlannerError(Exception):
@@ -41,17 +41,11 @@ class DynamoGraphDeploymentNotFoundError(PlannerError):
     - The referenced DynamoGraphDeployment doesn't exist in the namespace
     """
 
-    def __init__(
-        self, deployment_name: Optional[str] = None, namespace: Optional[str] = None
-    ):
+    def __init__(self, deployment_name: str, namespace: str):
         self.deployment_name = deployment_name
         self.namespace = namespace
 
-        message = "Parent DynamoGraphDeployment not found"
-        if deployment_name:
-            message += f" (name: '{deployment_name}')"
-        if namespace:
-            message += f" in namespace '{namespace}'"
+        message = f"Parent DynamoGraphDeployment not found (name: '{deployment_name}' in namespace '{namespace}')"
 
         super().__init__(message)
 
