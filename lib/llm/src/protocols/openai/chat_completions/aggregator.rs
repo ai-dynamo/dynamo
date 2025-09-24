@@ -249,14 +249,6 @@ impl DeltaAggregator {
             service_tier: aggregator.service_tier,
         };
 
-        // Emit audit response event (no serialization on hot path)
-        if crate::audit::config::policy().enabled {
-            crate::audit::bus::publish(crate::audit::event::AuditEvent::Response {
-                id: response.id.clone(),
-                resp: std::sync::Arc::new(response.clone()),
-            });
-        }
-
         Ok(response)
     }
 }
