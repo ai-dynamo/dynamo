@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from typing import Optional
 
-from dynamo._core import Scaler
+from dynamo._core import VirtualConnectorCoordinator
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 from dynamo.planner.planner_connector import PlannerConnector
 from dynamo.runtime import DistributedRuntime
@@ -13,18 +14,33 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Constants for scaling readiness check and waiting
+SCALING_CHECK_INTERVAL = int(
+    os.environ.get("SCALING_CHECK_INTERVAL", 10)
+)  # Check every 10 seconds
+SCALING_MAX_WAIT_TIME = int(
+    os.environ.get("SCALING_MAX_WAIT_TIME", 1800)
+)  # Maximum wait time: 30 minutes (1800 seconds)
+SCALING_MAX_RETRIES = SCALING_MAX_WAIT_TIME // SCALING_CHECK_INTERVAL  # 180 retries
+
 
 class VirtualConnector(PlannerConnector):
     """
     This is a virtual connector for planner to output scaling decisions to non-native environments
-    This virtual connector does not actually scale the deployment, instead, it communicates with the non-native environment through dynamo-runtime's Scaler.
-    The deployment environment needs to use ScalerClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
+    This virtual connector does not actually scale the deployment, instead, it communicates with the non-native environment through dynamo-runtime's VirtualConnectorCoordinator.
+    The deployment environment needs to use VirtualConnectorClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
     """
 
     def __init__(
         self, runtime: DistributedRuntime, dynamo_namespace: str, backend: str
     ):
-        self.connector = Scaler(runtime, dynamo_namespace)
+        self.connector = VirtualConnectorCoordinator(
+            runtime,
+            dynamo_namespace,
+            SCALING_CHECK_INTERVAL,
+            SCALING_MAX_WAIT_TIME,
+            SCALING_MAX_RETRIES,
+        )
 
         self.backend = backend
         self.worker_component_names = WORKER_COMPONENT_NAMES[backend]
@@ -37,7 +53,7 @@ class VirtualConnector(PlannerConnector):
         self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None
     ):
         """Update scaling decision"""
-        await self.connector.update_scaling_decision(num_prefill or 0, num_decode or 0)
+        await self.connector.update_scaling_decision(num_prefill, num_decode)
 
     async def _wait_for_scaling_completion(self):
         """Wait for the deployment environment to report that scaling is complete"""

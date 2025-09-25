@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-from dynamo._core import DistributedRuntime, ScalerClient
+from dynamo._core import DistributedRuntime, VirtualConnectorClient
 from dynamo.planner import VirtualConnector
 
 pytestmark = pytest.mark.pre_merge
@@ -33,7 +33,7 @@ async def next_scaling_decision(c):
 
 async def test_main(distributed_runtime):
     """
-    Connect a VirtualConnector (Dynamo Planner) and a ScalerClient (customer), and scale.
+    Connect a VirtualConnector (Dynamo Planner) and a VirtualConnectorClient (customer), and scale.
     """
 
     # This is Dynamo Planner
@@ -43,7 +43,7 @@ async def test_main(distributed_runtime):
     await c.set_component_replicas(replicas, blocking=False)
 
     # This is the client
-    client = ScalerClient(distributed_runtime, NAMESPACE)
+    client = VirtualConnectorClient(distributed_runtime, NAMESPACE)
     event = await client.get()
     # Here the client would do the scaling
     assert event.num_prefill_workers == 1
@@ -66,3 +66,11 @@ async def test_main(distributed_runtime):
     await client.complete(event)
 
     await c._wait_for_scaling_completion()
+
+    # Now scale to zero
+    replicas = {"prefill": 0, "decode": 0}
+    await c.set_component_replicas(replicas, blocking=False)
+    event = await client.get()
+    assert event.num_prefill_workers == 0
+    assert event.num_decode_workers == 0
+    await client.complete(event)

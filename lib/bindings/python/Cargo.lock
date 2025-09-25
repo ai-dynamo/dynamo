@@ -1579,6 +1579,7 @@ dependencies = [
  "futures",
  "local-ip-address",
  "once_cell",
+ "parking_lot",
  "prometheus",
  "pyo3",
  "pyo3-async-runtimes",

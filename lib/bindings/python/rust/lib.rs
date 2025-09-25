@@ -121,9 +121,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
-    m.add_class::<planner::Scaler>()?;
-    m.add_class::<planner::ScalerClient>()?;
-    m.add_class::<planner::ScalerDecision>()?;
+    m.add_class::<planner::VirtualConnectorCoordinator>()?;
+    m.add_class::<planner::VirtualConnectorClient>()?;
+    m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;

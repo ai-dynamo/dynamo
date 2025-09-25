@@ -1360,39 +1360,47 @@ class EntrypointArgs:
 
     ...
 
-class Scaler:
+class PlannerDecision:
+    """A request from planner to client to perform a scaling action.
+    Fields: num_prefill_workers, num_decode_workers, decision_id.
+            -1 in any of those fields mean not set, usually because planner hasn't decided anything yet.
+    Call VirtualConnectorClient.complete(event) when action is completed.
+    """
+    ...
+
+class VirtualConnectorCoordinator:
     """Internal planner virtual connector component"""
 
-    def __init__(runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+    def __init__(runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
         ...
 
     async def async_init(self) -> None:
-        """Call this before using PlannerConnector"""
+        """Call this before using the object"""
         ...
 
-    async def update_scaling_decision(self, num_prefill: int, num_decode: int) -> None:
+    async def read_state(self) -> PlannerDecision:
+        """Get the current values. Most for test / debug."""
+        ...
+
+    async def update_scaling_decision(self, num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None:
         ...
 
     async def wait_for_scaling_completion(self) -> None:
         ...
 
-class ScalerDecision:
-    """A request from planner to client to perform a scaling action.
-    Fields: num_prefill_workers, num_decode_workers, decision_id.
-    Call ScalerClient.complete(event) when action is completed.
-    """
-    ...
-
-class ScalerClient:
+class VirtualConnectorClient:
     """How a client discovers planner requests and marks them complete"""
 
     def __init__(runtime: DistributedRuntime, dynamo_namespace: str) -> None:
         ...
 
-    async def get(self) -> ScalerDecision:
+    async def get(self) -> PlannerDecision:
         ...
 
-    async def complete(self, ScalerState) -> None:
+    async def complete(self, decision: PlannerDecision) -> None:
         ...
 
+    async def wait(self) -> None:
+        """Blocks until there is a new decision to fetch using 'get'"""
+        ...
 

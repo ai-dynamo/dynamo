@@ -6,28 +6,29 @@
 //! - We can probably replace wrap the whole InnerConnector in a Mutex, it should be uncontended.
 
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
-use dynamo_runtime::CancellationToken;
+use parking_lot::Mutex;
 use pyo3::{exceptions::PyException, prelude::*};
 
 use super::to_pyerr;
+use dynamo_runtime::CancellationToken;
 use dynamo_runtime::transports::etcd::{Client, KvCache};
-use tokio::sync::Mutex;
 
 // All three AI's I asked agreed, this is the way
 const NONE_SENTINEL: usize = usize::MAX;
 
 struct InnerConnector {
-    scaling_check_interval: Duration,
-    scaling_max_wait_time: Duration,
-    scaling_max_retries: usize,
+    check_interval: Duration,
+    max_wait_time: Duration,
+    max_retries: usize,
     namespace: String,
     etcd_client: Client,
-    kv_cache: Mutex<Option<KvCache>>,
+    // We need a mutex because we are `async`, but it should never be contended, planner should
+    // be calling it from max one thread at once.
+    kv_cache: Mutex<Option<Arc<KvCache>>>,
 
     // On x86 AtomicUsize at Relaxed compiles to usize, it's free
     num_prefill_workers: AtomicUsize,
@@ -38,34 +39,34 @@ struct InnerConnector {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct Scaler(Arc<InnerConnector>);
+pub struct VirtualConnectorCoordinator(Arc<InnerConnector>);
 
 #[pymethods]
-impl Scaler {
+impl VirtualConnectorCoordinator {
     #[new]
-    pub fn new(runtime: super::DistributedRuntime, dynamo_namespace: &str) -> Self {
-        // Check every 10 seconds
-        let scaling_check_interval_secs = get_env_usize("SCALING_CHECK_INTERVAL", 10);
-        let scaling_check_interval = Duration::from_secs(scaling_check_interval_secs as u64);
-        // Maximum wait time: 30 minutes (1800 seconds)
-        let scaling_max_wait_time_secs = get_env_usize("SCALING_MAX_WAIT_TIME", 1800);
-        let scaling_max_wait_time = Duration::from_secs(scaling_max_wait_time_secs as u64);
-        // 180 retries
-        let scaling_max_retries = scaling_max_wait_time_secs / scaling_check_interval_secs;
+    pub fn new(
+        runtime: super::DistributedRuntime,
+        dynamo_namespace: &str,
+        check_interval_secs: usize,
+        max_wait_time_secs: usize,
+        max_retries: usize,
+    ) -> Self {
+        let check_interval = Duration::from_secs(check_interval_secs as u64);
+        let max_wait_time = Duration::from_secs(max_wait_time_secs as u64);
 
         let c = InnerConnector {
-            scaling_check_interval,
-            scaling_max_wait_time,
-            scaling_max_retries,
+            check_interval,
+            max_wait_time,
+            max_retries,
             namespace: dynamo_namespace.to_string(),
             etcd_client: runtime
-                .inner
+                .inner()
                 .etcd_client()
                 .expect("Planner cannot run without etcd / in static mode"),
 
             kv_cache: Mutex::new(None),
-            num_prefill_workers: AtomicUsize::new(0),
-            num_decode_workers: AtomicUsize::new(0),
+            num_prefill_workers: AtomicUsize::new(NONE_SENTINEL),
+            num_decode_workers: AtomicUsize::new(NONE_SENTINEL),
             decision_id: AtomicUsize::new(NONE_SENTINEL),
             first_skip_timestamp: AtomicUsize::new(NONE_SENTINEL),
         };
@@ -73,29 +74,38 @@ impl Scaler {
     }
 
     #[pyo3(signature = ())]
-    pub fn read_state(&self) -> ScalerDecision {
-        ScalerDecision {
-            num_prefill_workers: load(&self.0.num_prefill_workers) as isize,
-            num_decode_workers: load(&self.0.num_decode_workers) as isize,
-            decision_id: load(&self.0.decision_id) as isize,
+    pub fn read_state(&self) -> PlannerDecision {
+        let current_prefill = load(&self.0.num_prefill_workers);
+        let current_decode = load(&self.0.num_decode_workers);
+        let current_decision_id = load(&self.0.decision_id);
+        PlannerDecision {
+            num_prefill_workers: if current_prefill != NONE_SENTINEL {
+                current_prefill as isize
+            } else {
+                -1
+            },
+            num_decode_workers: if current_decode != NONE_SENTINEL {
+                current_decode as isize
+            } else {
+                -1
+            },
+            decision_id: if current_decision_id != NONE_SENTINEL {
+                current_decision_id as isize
+            } else {
+                -1
+            },
         }
     }
 
     #[pyo3(signature = ())]
     pub fn async_init<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let prefix = root_key(&self.0.namespace);
-        let initial_values = HashMap::from([
-            ("num_prefill_workers".to_string(), "0".as_bytes().to_vec()),
-            ("num_decode_workers".to_string(), "0".as_bytes().to_vec()),
-            ("decision_id".to_string(), "0".as_bytes().to_vec()),
-        ]);
-
         let inner = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let kv_cache = KvCache::new(inner.etcd_client.clone(), prefix, initial_values)
+            let kv_cache = KvCache::new(inner.etcd_client.clone(), prefix, HashMap::new())
                 .await
                 .map_err(to_pyerr)?;
-            *inner.kv_cache.lock().await = Some(kv_cache);
+            *inner.kv_cache.lock() = Some(Arc::new(kv_cache));
             inner.load_current_state().await.map_err(to_pyerr)
         })
     }
@@ -104,20 +114,21 @@ impl Scaler {
     pub fn update_scaling_decision<'p>(
         &self,
         py: Python<'p>,
-        num_prefill: usize,
-        num_decode: usize,
+        num_prefill: Option<usize>,
+        num_decode: Option<usize>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let has_prefill_changed =
-                num_prefill > 0 && num_prefill != load(&inner.num_prefill_workers);
-            let has_decode_changed =
-                num_decode > 0 && num_decode != load(&inner.num_decode_workers);
+            let current_prefill = load(&inner.num_prefill_workers);
+            let has_prefill_changed = num_prefill.is_some_and(|n| n != current_prefill);
+
+            let current_decode = load(&inner.num_decode_workers);
+            let has_decode_changed = num_decode.is_some_and(|n| n != current_decode);
 
             if !(has_prefill_changed || has_decode_changed) {
                 tracing::info!(
-                    num_prefill_workers = load(&inner.num_prefill_workers),
-                    num_decode_workers = load(&inner.num_decode_workers),
+                    current_prefill,
+                    current_decode,
                     "No scaling needed, skipping update"
                 );
                 return Ok(());
@@ -145,7 +156,7 @@ impl Scaler {
 
                 // Check if we've been waiting too long
                 let time_waited = current_time - load(&inner.first_skip_timestamp);
-                if time_waited < inner.scaling_max_wait_time.as_secs() as usize {
+                if time_waited < inner.max_wait_time.as_secs() as usize {
                     tracing::warn!(
                         decision_id = load(&inner.decision_id),
                         time_waited,
@@ -155,7 +166,7 @@ impl Scaler {
                 } else {
                     tracing::warn!(
                         decision_id = load(&inner.decision_id),
-                        scaling_max_wait_time = inner.scaling_max_wait_time.as_secs(),
+                        scaling_max_wait_time = inner.max_wait_time.as_secs(),
                         "Previous scaling decision not ready, proceeding with new decision anyway"
                     )
                 }
@@ -166,64 +177,60 @@ impl Scaler {
                 .first_skip_timestamp
                 .store(NONE_SENTINEL, Ordering::Relaxed);
 
-            // Update internal state
-            if num_prefill > 0 {
-                inner
-                    .num_prefill_workers
-                    .store(num_prefill, Ordering::Relaxed);
-            }
-            if num_decode > 0 {
-                inner
-                    .num_decode_workers
-                    .store(num_decode, Ordering::Relaxed);
-            }
-
-            match load(&inner.decision_id) {
-                NONE_SENTINEL => {
-                    inner.decision_id.store(0, Ordering::Relaxed);
-                }
-                _ => {
-                    inner.decision_id.fetch_add(1, Ordering::Relaxed);
-                }
-            };
-
-            let kv_cache_lock = inner.kv_cache.lock().await;
-            let Some(kv_cache) = kv_cache_lock.as_ref() else {
+            let Some(kv_cache) = inner.kv_cache.lock().as_ref().cloned() else {
                 return Err(PyErr::new::<PyException, _>(
                     "Call async_init before using this object",
                 ));
             };
-            kv_cache
-                .put(
-                    "num_prefill_workers",
-                    load(&inner.num_prefill_workers).to_string().into_bytes(),
-                    None,
-                )
-                .await
-                .map_err(to_pyerr)?;
-            kv_cache
-                .put(
-                    "num_decode_workers",
-                    load(&inner.num_decode_workers).to_string().into_bytes(),
-                    None,
-                )
-                .await
-                .map_err(to_pyerr)?;
-            if load(&inner.decision_id) != NONE_SENTINEL {
+            if let Some(new_prefill) = num_prefill {
+                inner
+                    .num_prefill_workers
+                    .store(new_prefill, Ordering::Relaxed);
                 kv_cache
                     .put(
-                        "decision_id",
-                        load(&inner.decision_id).to_string().into_bytes(),
+                        "num_prefill_workers",
+                        new_prefill.to_string().into_bytes(),
                         None,
                     )
                     .await
                     .map_err(to_pyerr)?;
             }
+            if let Some(new_decode) = num_decode {
+                inner
+                    .num_decode_workers
+                    .store(new_decode, Ordering::Relaxed);
+                kv_cache
+                    .put(
+                        "num_decode_workers",
+                        new_decode.to_string().into_bytes(),
+                        None,
+                    )
+                    .await
+                    .map_err(to_pyerr)?;
+            }
+            let new_decision_id = match load(&inner.decision_id) {
+                NONE_SENTINEL => {
+                    inner.decision_id.store(0, Ordering::Relaxed);
+                    0
+                }
+                _ => {
+                    inner.decision_id.fetch_add(1, Ordering::Relaxed);
+                    load(&inner.decision_id)
+                }
+            };
+            kv_cache
+                .put(
+                    "decision_id",
+                    new_decision_id.to_string().into_bytes(),
+                    None,
+                )
+                .await
+                .map_err(to_pyerr)?;
 
             tracing::info!(
-                decision_id = load(&inner.decision_id),
-                num_prefill_workers = load(&inner.num_prefill_workers),
-                num_decode_workers = load(&inner.num_decode_workers),
+                decision_id = new_decision_id,
+                ?num_prefill,
+                ?num_decode,
                 "Updated scaling decision"
             );
             Ok(())
@@ -234,17 +241,15 @@ impl Scaler {
     pub fn wait_for_scaling_completion<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            for _ in 0..inner.scaling_max_retries {
-                let kv_cache_lock = inner.kv_cache.lock().await;
-                let Some(kv_cache) = kv_cache_lock.as_ref() else {
-                    return Err(PyErr::new::<PyException, _>(
-                        "Call async_init before using this object",
-                    ));
-                };
+            let Some(kv_cache) = inner.kv_cache.lock().as_ref().cloned() else {
+                return Err(PyErr::new::<PyException, _>(
+                    "Call async_init before using this object",
+                ));
+            };
+            for _ in 0..inner.max_retries {
                 match kv_cache.get("scaled_decision_id").await {
                     None => {
-                        drop(kv_cache_lock);
-                        tokio::time::sleep(inner.scaling_check_interval).await;
+                        tokio::time::sleep(inner.check_interval).await;
                     }
                     Some(scaled_decision_id_bytes) => {
                         match String::from_utf8_lossy(&scaled_decision_id_bytes).parse::<usize>() {
@@ -267,7 +272,7 @@ impl Scaler {
             }
             tracing::warn!(
                 decision_id = load(&inner.decision_id),
-                scaling_max_wait_time = inner.scaling_max_wait_time.as_secs(),
+                scaling_max_wait_time = inner.max_wait_time.as_secs(),
                 "Timeout waiting for scaling decision to complete"
             );
             Ok(())
@@ -277,16 +282,12 @@ impl Scaler {
 
 impl InnerConnector {
     async fn load_current_state(&self) -> PyResult<()> {
-        let kv_cache_lock = self.kv_cache.lock().await;
-        let all_values = match &kv_cache_lock.as_ref() {
-            Some(k) => k.get_all().await,
-            None => {
-                return Err(PyErr::new::<PyException, _>(
-                    "Call async_init before using this object",
-                ));
-            }
+        let Some(kv_cache) = self.kv_cache.lock().as_ref().cloned() else {
+            return Err(PyErr::new::<PyException, _>(
+                "Call async_init before using this object",
+            ));
         };
-        drop(kv_cache_lock);
+        let all_values = kv_cache.get_all().await;
 
         if let Some(v) = all_values.get("num_prefill_workers") {
             match String::from_utf8_lossy(v).parse() {
@@ -334,8 +335,7 @@ impl InnerConnector {
         if current == NONE_SENTINEL {
             return true;
         }
-        let kv_cache_lock = self.kv_cache.lock().await;
-        let Some(kv_cache) = kv_cache_lock.as_ref() else {
+        let Some(kv_cache) = self.kv_cache.lock().as_ref().cloned() else {
             tracing::warn!("Call async_init before using this object");
             return false;
         };
@@ -360,10 +360,10 @@ impl InnerConnector {
 
 #[pyclass]
 #[derive(Clone)]
-pub struct ScalerClient(Arc<InnerClient>);
+pub struct VirtualConnectorClient(Arc<InnerClient>);
 
 #[pymethods]
-impl ScalerClient {
+impl VirtualConnectorClient {
     #[new]
     pub fn new(runtime: super::DistributedRuntime, dynamo_namespace: &str) -> Self {
         let c = InnerClient {
@@ -377,7 +377,7 @@ impl ScalerClient {
         Self(Arc::new(c))
     }
 
-    /// Get the current values as a ScalerDecision
+    /// Get the current values as a PlannerDecision
     #[pyo3(signature = ())]
     pub fn get<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
@@ -391,7 +391,7 @@ impl ScalerClient {
     pub fn complete<'p>(
         &self,
         py: Python<'p>,
-        event: ScalerDecision,
+        event: PlannerDecision,
     ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -399,7 +399,7 @@ impl ScalerClient {
         })
     }
 
-    /// Wait until a new ScalerDecision appears. Will block until there is one to fetch.
+    /// Wait until a new PlannerDecision appears. Will block until there is one to fetch.
     /// Use `get` to fetch the decision.
     #[pyo3(signature = ())]
     pub fn wait<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
@@ -413,8 +413,8 @@ impl ScalerClient {
 #[pyclass]
 #[derive(Clone, Copy)]
 /// The decision Planner made. The client should make necessary changes to the environment to make
-/// this true, and then call `complete` on the ScalerClient.
-pub struct ScalerDecision {
+/// this true, and then call `complete` on the VirtualConnectorClient.
+pub struct PlannerDecision {
     #[pyo3(get)]
     pub num_prefill_workers: isize,
     #[pyo3(get)]
@@ -431,7 +431,7 @@ struct InnerClient {
 
 impl InnerClient {
     /// Fetch the latest scaling decision
-    async fn get(&self) -> anyhow::Result<ScalerDecision> {
+    async fn get(&self) -> anyhow::Result<PlannerDecision> {
         let mut num_prefill_workers = -1;
         let mut num_decode_workers = -1;
         let mut decision_id = -1;
@@ -446,6 +446,9 @@ impl InnerClient {
                 x if x.ends_with("/decision_id") => {
                     decision_id = kv.value_str()?.parse()?;
                 }
+                x if x.ends_with("/scaled_decision_id") => {
+                    // This is the client's response, it doesn't go in PlannerDecision
+                }
                 x => {
                     tracing::warn!(
                         unexpected_key = x,
@@ -455,7 +458,7 @@ impl InnerClient {
                 }
             }
         }
-        Ok(ScalerDecision {
+        Ok(PlannerDecision {
             num_prefill_workers,
             num_decode_workers,
             decision_id,
@@ -463,7 +466,7 @@ impl InnerClient {
     }
 
     /// Mark this decision as having been handled.
-    async fn complete(&self, event: ScalerDecision) -> anyhow::Result<()> {
+    async fn complete(&self, event: PlannerDecision) -> anyhow::Result<()> {
         self.etcd_client
             .kv_put(
                 format!("{}scaled_decision_id", self.key),
@@ -482,7 +485,7 @@ impl InnerClient {
                 Ok(())
             }
             _ = self.cancellation_token.cancelled() => {
-                anyhow::bail!("ScalerClient.wait: Runtime shutdown");
+                anyhow::bail!("VirtualConnectorClient.wait: Runtime shutdown");
             },
         }
     }
@@ -491,14 +494,6 @@ impl InnerClient {
 // This compiles to a `mov`, it's basically free
 fn load(a: &AtomicUsize) -> usize {
     a.load(Ordering::Relaxed)
-}
-
-/// The value of an environment variable as a usize, or the default
-fn get_env_usize(name: &str, default: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
 }
 
 fn root_key(namespace: &str) -> String {

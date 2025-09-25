@@ -146,12 +146,12 @@ backend: "vllm"  # or "sglang"
 
 #### Deployment Environment Requirements
 
-The external deployment environment must use `ScalerClient`:
+The external deployment environment must use `VirtualConnectorClient`:
 
 ```
-from dynamo._core import DistributedRuntime, ScalerClient
+from dynamo._core import DistributedRuntime, VirtualConnectorClient
 
-client = ScalerClient(distributed_runtime, namespace)
+client = VirtualConnectorClient(distributed_runtime, namespace)
 ```
 
 1. **Monitor Planner**: Continuously watch for scaling decisions: `await client.wait()`. This blocks until there is a change.
