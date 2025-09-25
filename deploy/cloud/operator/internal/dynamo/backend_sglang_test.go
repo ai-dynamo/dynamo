@@ -19,7 +19,7 @@ func (m *MockSimpleDeployer) GetHostNames(serviceName string, numberOfNodes int3
 	hostnames := make([]string, numberOfNodes)
 	hostnames[0] = m.GetLeaderHostname(serviceName)
 	for i := int32(1); i < numberOfNodes; i++ {
-		hostnames[i] = "worker" + string(rune('0'+i)) + ".example.com"
+		hostnames[i] = "worker" + string('0'+i) + ".example.com"
 	}
 	return hostnames
 }
@@ -39,7 +39,7 @@ func (m *MockShellDeployer) GetHostNames(serviceName string, numberOfNodes int32
 	hostnames := make([]string, numberOfNodes)
 	hostnames[0] = m.GetLeaderHostname(serviceName)
 	for i := int32(1); i < numberOfNodes; i++ {
-		hostnames[i] = "$(WORKER_" + string(rune('0'+i)) + "_HOST)"
+		hostnames[i] = "$(WORKER_" + string('0'+i) + "_HOST)"
 	}
 	return hostnames
 }

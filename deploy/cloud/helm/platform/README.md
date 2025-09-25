@@ -38,6 +38,48 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
 
+## ⚠️ Important: Cluster-Wide vs Namespace-Scoped Deployment
+
+### Single Cluster-Wide Operator (Recommended)
+
+**By default, the Dynamo operator runs with cluster-wide permissions and should only be deployed ONCE per cluster.**
+
+- ✅ **Recommended**: Deploy one cluster-wide operator per cluster
+- ❌ **Not Recommended**: Multiple cluster-wide operators in the same cluster
+
+### Multiple Namespace-Scoped Operators (Advanced)
+
+If you need multiple operator instances (e.g., for multi-tenancy), use namespace-scoped deployment:
+
+```yaml
+# values.yaml
+dynamo-operator:
+  namespaceRestriction:
+    enabled: true
+    targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
+```
+
+### Validation and Safety
+
+The chart includes built-in validation to prevent all operator conflicts:
+
+- **Automatic Detection**: Scans for existing operators (both cluster-wide and namespace-restricted) during installation
+- **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
+- **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists
+- **Prevents Mixed Deployments (Type 2)**: Installation will fail if trying to install cluster-wide operator when namespace-restricted operators exist
+- **Safe Defaults**: Leader election uses shared ID for proper coordination
+
+#### 🚫 **Blocked Conflict Scenarios**
+
+| Existing Operator | New Operator | Status | Reason |
+|-------------------|--------------|---------|--------|
+| None | Cluster-wide | ✅ **Allowed** | No conflicts |
+| None | Namespace-restricted | ✅ **Allowed** | No conflicts |
+| Cluster-wide | Cluster-wide | ❌ **Blocked** | Multiple cluster managers |
+| Cluster-wide | Namespace-restricted | ❌ **Blocked** | Cluster-wide already manages target namespace |
+| Namespace-restricted | Cluster-wide | ❌ **Blocked** | Would conflict with existing namespace operators |
+| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes |
+
 ## 🔧 Configuration
 
 ## Requirements
@@ -58,11 +100,13 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Cloud infrastructure 
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.namespaceRestriction | object | `{"enabled":true,"targetNamespace":null}` | Namespace access controls for the operator |
-| dynamo-operator.namespaceRestriction.enabled | bool | `true` | Whether to restrict operator to specific namespaces |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"targetNamespace":null}` | Namespace access controls for the operator |
+| dynamo-operator.namespaceRestriction.enabled | bool | `false` | Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace). |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | Target namespace for operator deployment (leave empty for current namespace) |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
 | dynamo-operator.controllerManager.affinity | list | `[]` | Affinity for controller manager pods |
+| dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
+| dynamo-operator.controllerManager.leaderElection.namespace | string | `""` | Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election. |
 | dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
 | dynamo-operator.controllerManager.manager.image.tag | string | `""` | Image tag (leave empty to use chart default) |
 | dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
