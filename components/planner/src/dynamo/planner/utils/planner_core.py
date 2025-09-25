@@ -18,6 +18,7 @@ from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
     PrefillInterpolator,
 )
+from dynamo.planner.utils.pre_swept_results_utils import PreSweptResultsHelper
 from dynamo.planner.utils.prometheus import PrometheusAPIClient
 from dynamo.planner.utils.trace_data_extractor import extract_metrics_from_mooncake
 from dynamo.runtime import DistributedRuntime
@@ -90,8 +91,35 @@ class Planner:
             window_size=args.load_prediction_window_size,
         )
 
-        self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
-        self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
+        if "use-pre-swept-results" in args.profile_results_dir:
+            config_list = args.profile_results_dir.split(":")
+            configs = {
+                "gpu_type": config_list[1],
+                "model": config_list[2],
+                "framework": config_list[3],
+                "framework_version": config_list[4],
+                "tp": int(config_list[5]),
+                "dp": int(config_list[6]),
+                "pp": int(config_list[7]),
+                "block_size": int(config_list[8]),
+                "max_batch_size": int(config_list[9]),
+                "gpu_count": int(config_list[10]),
+            }
+            if self.dryrun:
+                pre_swept_results_helper = PreSweptResultsHelper(
+                    configs["gpu_type"], configs["framework"], configs["model"]
+                )
+                raw_data = pre_swept_results_helper.select_data("prefill", configs)
+                self.prefill_interpolator = PrefillInterpolator(raw_data=raw_data)
+                raw_data = pre_swept_results_helper.select_data("decode", configs)
+                self.decode_interpolator = DecodeInterpolator(raw_data=raw_data)
+            else:
+                raise ValueError(
+                    "Cannot set profile_results_dir to 'use-pre-swept-results' in non-dryrun mode"
+                )
+        else:
+            self.prefill_interpolator = PrefillInterpolator(args.profile_results_dir)
+            self.decode_interpolator = DecodeInterpolator(args.profile_results_dir)
 
         if not self.dryrun:
             self.prefill_client = None

@@ -14,6 +14,8 @@
 # limitations under the License.
 
 
+from typing import Optional
+
 import numpy as np
 import scipy
 
@@ -24,15 +26,25 @@ class PrefillInterpolator:
     throughput/gpu and TTFT for a given ISL.
     """
 
-    def __init__(self, profile_results_dir: str):
-        prefill_npz_fn = (
-            f"{profile_results_dir}/selected_prefill_interpolation/raw_data.npz"
-        )
-
-        with np.load(prefill_npz_fn) as raw_data:
+    def __init__(
+        self,
+        profile_results_dir: Optional[str] = None,
+        raw_data: Optional[dict] = None,
+    ):
+        if profile_results_dir:
+            prefill_npz_fn = (
+                f"{profile_results_dir}/selected_prefill_interpolation/raw_data.npz"
+            )
+            with np.load(prefill_npz_fn) as raw_data:
+                self.prefill_isl = raw_data["prefill_isl"]
+                self.prefill_ttft = raw_data["prefill_ttft"] / 1000  # convert ms to s
+                self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
+        elif raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
             self.prefill_ttft = raw_data["prefill_ttft"] / 1000  # convert ms to s
             self.prefill_thpt_per_gpu = raw_data["prefill_thpt_per_gpu"]
+        else:
+            raise ValueError("Either profile_results_dir or raw_data must be provided")
 
         self.min_isl = min(self.prefill_isl)
         self.max_isl = max(self.prefill_isl)
@@ -60,17 +72,30 @@ class DecodeInterpolator:
     throughput/gpu and ITL for a given decode context length.
     """
 
-    def __init__(self, profile_results_dir: str, resolution: int = 100):
-        decode_npz_fn = (
-            f"{profile_results_dir}/selected_decode_interpolation/raw_data.npz"
-        )
-
-        with np.load(decode_npz_fn) as raw_data:
+    def __init__(
+        self,
+        profile_results_dir: Optional[str] = None,
+        resolution: int = 100,
+        raw_data: Optional[dict] = None,
+    ):
+        if profile_results_dir:
+            decode_npz_fn = (
+                f"{profile_results_dir}/selected_decode_interpolation/raw_data.npz"
+            )
+            with np.load(decode_npz_fn) as raw_data:
+                self.x_kv_usage = raw_data["x_kv_usage"]
+                self.y_context_length = raw_data["y_context_length"]
+                self.z_itl = raw_data["z_itl"]
+                self.z_thpt_per_gpu = raw_data["z_thpt_per_gpu"]
+                self.max_kv_tokens = raw_data["max_kv_tokens"][0]
+        elif raw_data:
             self.x_kv_usage = raw_data["x_kv_usage"]
             self.y_context_length = raw_data["y_context_length"]
             self.z_itl = raw_data["z_itl"]
             self.z_thpt_per_gpu = raw_data["z_thpt_per_gpu"]
             self.max_kv_tokens = raw_data["max_kv_tokens"][0]
+        else:
+            raise ValueError("Either profile_results_dir or raw_data must be provided")
 
         # pre-compute the interpolation grid for fast lookup
         self.resolution = resolution
