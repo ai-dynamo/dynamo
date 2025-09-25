@@ -102,7 +102,7 @@ async fn run_throughput_test(
     pool: Option<Arc<ComputePool>>,
     mode: &str,
 ) -> (Duration, Vec<Duration>) {
-    println!("\n🚀 Running: {} (n={}, tasks={})", name, n, num_tasks);
+    println!("\n Running: {} (n={}, tasks={})", name, n, num_tasks);
 
     let completed = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
@@ -167,7 +167,7 @@ fn print_results(_name: &str, total: Duration, latencies: &mut [Duration]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("🔬 Async Throughput Demonstration");
+    println!("Async Throughput Demonstration");
     println!("==================================\n");
     println!("This demo shows how compute-intensive work affects async task throughput.\n");
 
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
         print_results("spawn_blocking", total3, &mut latencies3);
 
         // Analysis
-        println!("\n📊 Impact Analysis:");
+        println!("\n Impact Analysis:");
         let speedup_rayon = total1.as_secs_f64() / total2.as_secs_f64();
         let speedup_spawn = total1.as_secs_f64() / total3.as_secs_f64();
 
@@ -259,7 +259,7 @@ async fn main() -> Result<()> {
         if compute_time.as_millis() > 1 {
             let blocking_factor = compute_time.as_secs_f64() / io_delay.as_secs_f64();
             println!(
-                "\n  ⚠️  Compute time ({:.1}ms) is {:.1}x the I/O time",
+                "\n  Compute time ({:.1}ms) is {:.1}x the I/O time",
                 compute_time.as_secs_f64() * 1000.0,
                 blocking_factor
             );
@@ -268,11 +268,11 @@ async fn main() -> Result<()> {
     }
 
     // Show pool metrics
-    println!("\n📈 Compute Pool Metrics:");
+    println!("\n Compute Pool Metrics:");
     println!("========================");
     println!("{}", pool.metrics());
 
-    println!("\n✅ Conclusion:");
+    println!("\n Conclusion:");
     println!("==============");
     println!("• Small compute (n=10): Overhead may not justify offloading");
     println!("• Medium compute (n=1000): Offloading preserves async throughput");

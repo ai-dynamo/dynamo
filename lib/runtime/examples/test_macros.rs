@@ -46,6 +46,6 @@ async fn main() -> Result<()> {
     });
     println!("  Result: {}", result);
 
-    println!("\n✅ All macros working!");
+    println!("\n All macros working!");
     Ok(())
 }

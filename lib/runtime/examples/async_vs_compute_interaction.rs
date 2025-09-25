@@ -192,7 +192,7 @@ fn tune_compute_n(target_us: f64, initial_n: u64, name: &str) -> u64 {
 
 /// Calibrate compute functions to measure actual execution times
 fn calibrate_compute_functions() {
-    println!("\n📏 Dynamically calibrating compute functions for this machine...");
+    println!("\n Dynamically calibrating compute functions for this machine...");
     println!("{:-<60}", "");
 
     // Tune each function
@@ -203,7 +203,7 @@ fn calibrate_compute_functions() {
     }
 
     println!();
-    println!("  💡 For future runs on this machine, you can use:");
+    println!("For future runs on this machine, you can use:");
     println!("     SMALL_N  = {}", unsafe { SMALL_N });
     println!("     MEDIUM_N = {}", unsafe { MEDIUM_N });
     println!("     LARGE_N  = {}", unsafe { LARGE_N });
@@ -414,7 +414,7 @@ async fn run_all_tests(pool: Option<Arc<ComputePool>>) -> Result<()> {
     let runtime = Arc::new(Runtime::from_current()?);
 
     for (name, workload) in &workload_types {
-        println!("\n📊 Workload: {}", name);
+        println!("\n Workload: {}", name);
         println!("{:-<50}", "");
 
         let results = run_interference_test(runtime.clone(), *workload, pool.clone()).await;
@@ -449,7 +449,7 @@ async fn run_all_tests(pool: Option<Arc<ComputePool>>) -> Result<()> {
             if results.baseline_overhead.mean > 0.0 {
                 let interference_factor = compute_overhead.mean / results.baseline_overhead.mean;
                 println!(
-                    "\n  ⚠️  Interference factor: {:.1}x slower",
+                    "\n   Interference factor: {:.1}x slower",
                     interference_factor
                 );
 
@@ -482,7 +482,7 @@ async fn run_all_tests(pool: Option<Arc<ComputePool>>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    println!("🔬 Async vs Compute Interaction Benchmark");
+    println!(" Async vs Compute Interaction Benchmark");
     println!("==========================================");
     println!();
     println!("This benchmark measures how compute workloads interfere with async I/O latency.");
@@ -500,7 +500,7 @@ fn main() -> Result<()> {
     println!("\n{:=<70}", "");
     println!("Configuration 1: All-Async (4 Tokio threads, no Rayon)");
     println!("{:=<70}", "");
-    println!("⚠️  Compute tasks run INLINE on Tokio threads, blocking async work!");
+    println!("  Compute tasks run INLINE on Tokio threads, blocking async work!");
 
     let all_async_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -518,7 +518,7 @@ fn main() -> Result<()> {
     println!("\n{:=<70}", "");
     println!("Configuration 2: Hybrid (2 Tokio + 2 Rayon threads)");
     println!("{:=<70}", "");
-    println!("✅ Compute tasks offloaded to Rayon, keeping async threads free!");
+    println!(" Compute tasks offloaded to Rayon, keeping async threads free!");
 
     let hybrid_rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -538,7 +538,7 @@ fn main() -> Result<()> {
 
     // Summary
     println!("\n{:=<70}", "");
-    println!("📈 Key Takeaway");
+    println!(" Key Takeaway");
     println!("{:=<70}", "");
     println!();
     println!("The benchmark demonstrates that offloading compute work to dedicated");
@@ -625,10 +625,10 @@ fn main() -> Result<()> {
         }
 
         // Test if macros work
-        println!("\n🧪 Testing thread-local macros:");
+        println!("\n Testing thread-local macros:");
 
         if dynamo_runtime::compute::thread_local::has_compute_context() {
-            println!("  ✅ Thread-local context is available!");
+            println!("  Thread-local context is available!");
 
             // Test compute_small! macro
             println!("\n  Testing compute_small! (inline):");
@@ -648,16 +648,16 @@ fn main() -> Result<()> {
             let result = compute_large!(large_compute());
             println!("    Result: {}, Time: {:?}", result, start.elapsed());
 
-            println!("\n  🎉 All macros work with thread-local context!");
+            println!("\n  All macros work with thread-local context!");
         } else {
-            println!("  ❌ Thread-local context NOT available - macros would fail");
+            println!("  Thread-local context NOT available - macros would fail");
         }
 
         Ok::<_, anyhow::Error>(())
     })?;
 
     println!();
-    println!("✅ Benchmark complete!");
+    println!(" Benchmark complete!");
 
     Ok(())
 }

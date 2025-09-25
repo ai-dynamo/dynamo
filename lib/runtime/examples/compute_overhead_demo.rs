@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
     println!("{:=<120}", "");
 
     // Analysis
-    println!("\n📊 Analysis:");
+    println!("\n Analysis:");
     println!("============\n");
 
     if found_crossover {
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
     }
 
     // Print pool metrics
-    println!("\n📈 Compute Pool Metrics:");
+    println!("\n Compute Pool Metrics:");
     println!("========================");
     println!("{}", pool.metrics());
 
