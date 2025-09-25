@@ -3,7 +3,7 @@
 ## Pre-requisites
 
 ### Install gcloud CLI
-https://cloud.google.com/sdk/docs/install 
+https://cloud.google.com/sdk/docs/install
 
 ### Create GKE cluster
 
@@ -56,7 +56,7 @@ sudo apt-get install -y helm
 
 ###  Clone Dynamo GitHub repository
 
-**Note:** Please make sure GitHub branch/commit version matches with Dynamo platform and VLLM container. 
+**Note:** Please make sure GitHub branch/commit version matches with Dynamo platform and VLLM container.
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
@@ -131,11 +131,11 @@ dynamo-platform-nats-0                                            2/2     Runnin
 dynamo-platform-nats-box-5dbf45c748-ql2nk                         1/1     Running            0          4m27s
 ```
 
-Other ways to install Dynamo platform could be found here https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/dynamo_cloud.md 
+Other ways to install Dynamo platform could be found here https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/dynamo_cloud.md
 
 ## Deploy Inference Graph
 
-We will deploy a LLM model to the Dynamo platform. Here we use `google/gemma-3-1b-it` model with VLLM and disaggregated deployment as an example. 
+We will deploy a LLM model to the Dynamo platform. Here we use `google/gemma-3-1b-it` model with VLLM and disaggregated deployment as an example.
 
 In the deployment yaml file, some adjustments have to/ could be made:
 
