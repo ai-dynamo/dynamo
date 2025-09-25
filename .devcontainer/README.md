@@ -19,6 +19,28 @@ limitations under the License.
 
 > Warning: Dev Containers (aka `devcontainers`) is an evolving feature and we are not testing in CI. Please submit any problem/feedback using the issues on GitHub.
 
+## Framework-Specific Devcontainers
+
+This directory contains framework-specific devcontainer configurations generated from a Jinja2 template:
+
+- **`vllm/`** - Development environment for vLLM framework
+- **`sglang/`** - Development environment for SGLang framework
+- **`trtllm/`** - Development environment for TensorRT-LLM framework
+
+### Template System
+
+The devcontainer configurations are generated from:
+- **`devcontainer.json.j2`** - Jinja2 template with framework variables
+- **`gen_devcontainer_json.py`** - Python script to generate configs
+
+To regenerate the framework-specific configurations after making changes:
+```bash
+cd .devcontainer
+python3 gen_devcontainer_json.py
+```
+
+**Important**: Do not edit the generated `devcontainer.json` files directly. They contain auto-generated warnings and will be overwritten. Instead, edit the `devcontainer.json.j2` template and regenerate.
+
 ```mermaid
 graph TB
     subgraph "Developer Laptop"
@@ -41,7 +63,7 @@ graph TB
             TOOLS["rust-analyzer<br/>cargo<br/>etc."]
         end
 
-        IMAGE["Docker Image<br/>dynamo:latest-vllm-local-dev"]
+        IMAGE["Docker Image<br/>dynamo:latest-{framework}-local-dev<br/>(vllm/sglang/trtllm)"]
 
         IMAGE -->|"docker run<br/>as ubuntu user"| CONTAINER
     end
@@ -89,20 +111,29 @@ You must have the following path on your host.
 
 Follow these steps to get your NVIDIA Dynamo development environment up and running:
 
+### Step 0: Choose Your Framework
+
+Select the appropriate devcontainer based on your framework:
+- Use `vllm/devcontainer.json` for vLLM development
+- Use `sglang/devcontainer.json` for SGLang development
+- Use `trtllm/devcontainer.json` for TensorRT-LLM development
+
+When opening the devcontainer in VS Code/Cursor, navigate to the specific framework directory (e.g., `.devcontainer/vllm/`) and open that devcontainer.json.
+
 ### Step 1: Build the Development Container Image
 
-Build `dynamo:latest-vllm-local-dev` from scratch from the source:
+Build the appropriate framework image (e.g., `dynamo:latest-vllm-local-dev`) from scratch from the source:
 
 ```bash
-# Single command approach (recommended)
-./container/build.sh --framework VLLM --target local-dev
-# Creates both dynamo:latest-vllm and dynamo:latest-vllm-local-dev
+# Single command approach (recommended) - replace FRAMEWORK with VLLM/SGLANG/TRTLLM
+./container/build.sh --framework FRAMEWORK --target local-dev
+# Creates both dynamo:latest-framework and dynamo:latest-framework-local-dev
 
-# Alternatively, you can build a development container then local-dev
-./container/build.sh --framework VLLM
-# Now you have a development image dynamo:latest-vllm
-./container/build.sh --dev-image dynamo:latest-vllm --framework VLLM
-# Now you have a local-dev image dynamo:latest-vllm-local-dev
+# Alternatively, you can build a development container, then build local-dev
+./container/build.sh --framework FRAMEWORK
+# Now you have a development image dynamo:latest-framework
+./container/build.sh --dev-image dynamo:latest-FRAMEWORK
+# Now you have a local-dev image dynamo:latest-FRAMEWORK-local-dev
 ```
 
 The local-dev image will give you local user permissions matching your host user and includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
@@ -362,9 +393,9 @@ If you see errors like "container is not running" or "An error occurred setting 
    docker images | grep dynamo
 
    # If missing, build the dev image first, then build local-dev
-   ./container/build.sh --framework vllm
-   ./container/build.sh --dev-image dynamo:latest-vllm --framework vllm
-   # Output: dynamo:latest-vllm-local-dev
+   ./container/build.sh --framework FRAMEWORK  # Replace with vllm/sglang/trtllm
+   ./container/build.sh --dev-image dynamo:latest-FRAMEWORK --framework FRAMEWORK
+   # Output: dynamo:latest-FRAMEWORK-local-dev
    ```
 
 2. **Container startup failure:**
