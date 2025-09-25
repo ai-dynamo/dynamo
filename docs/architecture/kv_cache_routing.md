@@ -318,7 +318,7 @@ Instead of launching the KV Router via command line, you can create a `KvPushRou
 
 First, launch your backend engines:
 ```bash
-python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf --endpoint dyn://inference.vllm.generate
+python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf
 ```
 
 ### Example Script
