@@ -947,7 +947,7 @@ mod test_event_processing {
 
         let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0);
 
-        assert_eq!(stored.block_hash.0, blk_hash as u64);
+        assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash = compute_block_hash_for_seq(&token_ids, 4)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
     }
@@ -1007,8 +1007,8 @@ mod test_event_processing {
     fn test_convert_event_block_stored() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockStored {
-            block_hashes: vec![10, 11],
-            parent_block_hash: Some(99),
+            block_hashes: vec![BlockHashValue::Unsigned(10), BlockHashValue::Unsigned(11)],
+            parent_block_hash: Some(BlockHashValue::Unsigned(99)),
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             block_size: 4,
             lora_id: Some(0),
@@ -1169,7 +1169,7 @@ mod tests_startup_helpers {
         let seq: u64 = 77;
 
         let events = vec![RawKvEvent::BlockStored {
-            block_hashes: vec![42],
+            block_hashes: vec![BlockHashValue::Unsigned(42)],
             parent_block_hash: None,
             token_ids: vec![0, 1, 2, 3],
             block_size: 4,

@@ -294,7 +294,7 @@ impl KvEventPublisher {
     fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
         let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
             .into_iter()
-            .map(|h| ExternalSequenceBlockHash::from(h))
+            .map(ExternalSequenceBlockHash::from)
             .collect();
         let event = KvCacheEvent {
             event_id,
