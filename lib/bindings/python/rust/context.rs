@@ -20,16 +20,7 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(inner: Arc<dyn AsyncEngineContext>) -> Self {
-        Self {
-            inner,
-            trace_context: None,
-        }
-    }
-
-    // Create context with trace information
-    #[must_use]
-    pub fn with_trace_context(
+    pub fn new(
         inner: Arc<dyn AsyncEngineContext>,
         trace_context: Option<DistributedTraceContext>,
     ) -> Self {
