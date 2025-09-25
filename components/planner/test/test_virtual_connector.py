@@ -19,11 +19,6 @@ logger = logging.getLogger(__name__)
 NAMESPACE = "test_virtual_connector"
 
 
-@pytest.fixture(scope="module")
-def distributed_runtime():
-    return get_runtime()
-
-
 def get_runtime():
     """Get or create a DistributedRuntime instance.
 
@@ -41,17 +36,20 @@ def get_runtime():
     return _runtime_instance
 
 
+def test_main():
+    """
+    Connect a VirtualConnector (Dynamo Planner) and a VirtualConnectorClient (customer), and scale.
+    """
+    asyncio.run(async_internal(get_runtime()))
+
+
 async def next_scaling_decision(c):
     """Move the second decision in to a separate task so we can `.wait` for it."""
     replicas = {"prefill": 5, "decode": 8}
     await c.set_component_replicas(replicas, blocking=False)
 
 
-async def test_main(distributed_runtime):
-    """
-    Connect a VirtualConnector (Dynamo Planner) and a VirtualConnectorClient (customer), and scale.
-    """
-
+async def async_internal(distributed_runtime):
     # This is Dynamo Planner
     c = VirtualConnector(distributed_runtime, NAMESPACE, "sglang")
     await c._async_init()
