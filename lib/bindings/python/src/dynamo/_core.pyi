@@ -1371,7 +1371,7 @@ class PlannerDecision:
 class VirtualConnectorCoordinator:
     """Internal planner virtual connector component"""
 
-    def __init__(runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str, check_interval_secs: int, max_wait_time_secs: int, max_retries: int) -> None:
         ...
 
     async def async_init(self) -> None:
@@ -1391,7 +1391,7 @@ class VirtualConnectorCoordinator:
 class VirtualConnectorClient:
     """How a client discovers planner requests and marks them complete"""
 
-    def __init__(runtime: DistributedRuntime, dynamo_namespace: str) -> None:
+    def __init__(self, runtime: DistributedRuntime, dynamo_namespace: str) -> None:
         ...
 
     async def get(self) -> PlannerDecision:

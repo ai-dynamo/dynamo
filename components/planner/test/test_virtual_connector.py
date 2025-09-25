@@ -21,8 +21,23 @@ NAMESPACE = "test_virtual_connector"
 
 @pytest.fixture(scope="module")
 async def distributed_runtime():
-    loop = asyncio.get_running_loop()
-    return DistributedRuntime(loop, False)
+    return get_runtime()
+
+def get_runtime():
+    """Get or create a DistributedRuntime instance.
+
+    This handles the case where a worker is already initialized (common in CI)
+    by using the detached() method to reuse the existing runtime.
+    """
+    try:
+        # Try to use existing runtime (common in CI where tests run in same process)
+        _runtime_instance = DistributedRuntime.detached()
+    except Exception as e:
+        # If no existing runtime, create a new one
+        loop = asyncio.get_running_loop()
+        _runtime_instance = DistributedRuntime(loop, False)
+
+    return _runtime_instance
 
 
 async def next_scaling_decision(c):
