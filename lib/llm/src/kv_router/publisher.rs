@@ -522,7 +522,6 @@ enum RawKvEvent {
 ///
 /// This keeps us compatible with older payloads while safely
 /// accepting newer ones that include extra metadata.
-
 impl<'de> Deserialize<'de> for RawKvEvent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1023,7 +1022,7 @@ mod test_event_processing {
     fn test_convert_event_block_removed() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockRemoved {
-            block_hashes: vec![123, 456],
+            block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
         };
         let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
