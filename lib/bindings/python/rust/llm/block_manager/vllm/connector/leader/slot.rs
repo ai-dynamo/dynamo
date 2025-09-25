@@ -499,6 +499,11 @@ impl Slot for VllmConnectorSlot {
         }
 
         // we should have enough device blocks to cover the newly scheduled tokens
+        tracing::debug!(
+            "ziqif current_position: {}; num_scheduled_tokens: {}",
+            self.current_position,
+            num_scheduled_tokens
+        );
         let next_position = self.current_position + num_scheduled_tokens;
         assert!(
             next_position <= self.device_blocks.len() * self.block_size,
