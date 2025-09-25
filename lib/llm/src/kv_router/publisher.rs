@@ -28,6 +28,8 @@ use tokio_util::sync::CancellationToken;
 use rmp_serde as rmps;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use zeromq::{Socket, SocketRecv, SubSocket};
@@ -363,6 +365,7 @@ fn convert_event(
             token_ids,
             block_size,
             lora_id,
+            ..
         } => {
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
             let block_hashes_u64: Vec<u64> = block_hashes
@@ -386,7 +389,7 @@ fn convert_event(
                 }),
             }
         }
-        RawKvEvent::BlockRemoved { block_hashes } => {
+        RawKvEvent::BlockRemoved { block_hashes, .. } => {
             let hashes = block_hashes
                 .into_iter()
                 .map(BlockHashValue::into_u64)
@@ -413,6 +416,13 @@ pub fn create_stored_block_from_parts(
     _lora_id: u64,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size)[0];
+    tracing::debug!(
+        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}",
+        block_hash,
+        tokens_hash.0,
+        token_ids,
+        kv_block_size
+    );
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash::from(block_hash),
         tokens_hash,
@@ -483,7 +493,7 @@ impl BlockHashValue {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type")] // msgspec encodes variant tag as a string when `tag=True`
 enum RawKvEvent {
     BlockStored {
@@ -494,11 +504,178 @@ enum RawKvEvent {
         token_ids: Vec<u32>,
         block_size: usize,
         lora_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<String>,
     },
     AllBlocksCleared,
+}
+
+/// Our producers use msgspec with `tag=True` and `array_like=True`, which
+/// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
+/// additional fields that may be appended in the future, we implement a custom
+/// deserializer that ignores unknown keys and any extra positional elements.
+///
+/// This keeps us compatible with older payloads while safely
+/// accepting newer ones that include extra metadata.
+
+impl<'de> Deserialize<'de> for RawKvEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(RawKvEventVisitor)
+    }
+}
+
+struct RawKvEventVisitor;
+
+impl<'de> Visitor<'de> for RawKvEventVisitor {
+    type Value = RawKvEvent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a kv event encoded as a tagged map or sequence")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut event_type: Option<String> = None;
+        let mut block_hashes: Option<Vec<BlockHashValue>> = None;
+        let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
+        let mut token_ids: Option<Vec<u32>> = None;
+        let mut block_size: Option<usize> = None;
+        let mut lora_id: Option<Option<u64>> = None;
+        let mut medium: Option<Option<String>> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => {
+                    event_type = Some(map.next_value()?);
+                }
+                "block_hashes" => {
+                    block_hashes = Some(map.next_value()?);
+                }
+                "parent_block_hash" => {
+                    parent_block_hash = Some(map.next_value()?);
+                }
+                "token_ids" => {
+                    token_ids = Some(map.next_value()?);
+                }
+                "block_size" => {
+                    block_size = Some(map.next_value()?);
+                }
+                "lora_id" => {
+                    lora_id = Some(map.next_value()?);
+                }
+                "medium" => {
+                    medium = Some(map.next_value()?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        match event_type.as_deref() {
+            Some("BlockStored") => {
+                let block_hashes = block_hashes
+                    .ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                let token_ids = token_ids
+                    .ok_or_else(|| de::Error::missing_field("token_ids"))?;
+                let block_size = block_size
+                    .ok_or_else(|| de::Error::missing_field("block_size"))?;
+                Ok(RawKvEvent::BlockStored {
+                    block_hashes,
+                    parent_block_hash: parent_block_hash.unwrap_or(None),
+                    token_ids,
+                    block_size,
+                    lora_id: lora_id.unwrap_or(None),
+                    medium: medium.unwrap_or(None),
+                })
+            }
+            Some("BlockRemoved") => {
+                let block_hashes = block_hashes
+                    .ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                Ok(RawKvEvent::BlockRemoved {
+                    block_hashes,
+                    medium: medium.unwrap_or(None),
+                })
+            }
+            Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
+            Some(other) => Err(de::Error::unknown_variant(other, &[
+                "BlockStored",
+                "BlockRemoved",
+                "AllBlocksCleared",
+            ])),
+            None => Err(de::Error::missing_field("type")),
+        }
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let tag: Option<String> = seq.next_element()?;
+        let Some(tag) = tag else {
+            return Err(de::Error::invalid_length(0, &"sequence must start with event tag"));
+        };
+
+        match tag.as_str() {
+            "BlockStored" => {
+                let block_hashes: Vec<BlockHashValue> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
+                let parent_block_hash: Option<BlockHashValue> = seq.next_element()?.unwrap_or(None);
+                let token_ids: Vec<u32> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(3, &"missing token_ids"))?;
+                let block_size: usize = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
+                let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
+                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(RawKvEvent::BlockStored {
+                    block_hashes,
+                    parent_block_hash,
+                    token_ids,
+                    block_size,
+                    lora_id,
+                    medium,
+                })
+            }
+            "BlockRemoved" => {
+                let block_hashes: Vec<BlockHashValue> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &"missing block_hashes"))?;
+                let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(RawKvEvent::BlockRemoved {
+                    block_hashes,
+                    medium,
+                })
+            }
+            "AllBlocksCleared" => {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(RawKvEvent::AllBlocksCleared)
+            }
+            other => Err(de::Error::unknown_variant(other, &[
+                "BlockStored",
+                "BlockRemoved",
+                "AllBlocksCleared",
+            ])),
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -835,6 +1012,7 @@ mod test_event_processing {
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             block_size: 4,
             lora_id: Some(0),
+            medium: None,
         };
 
         let out = convert_event(raw_evt, 42, kv_block_size, &Arc::new(AtomicU32::new(0)));
@@ -846,6 +1024,7 @@ mod test_event_processing {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![123, 456],
+            medium: None,
         };
         let out = convert_event(raw_evt, 7, kv_block_size, &Arc::new(AtomicU32::new(0)));
 
@@ -995,6 +1174,7 @@ mod tests_startup_helpers {
             token_ids: vec![0, 1, 2, 3],
             block_size: 4,
             lora_id: None,
+            medium: None,
         }];
 
         let batch = KvEventBatch {
