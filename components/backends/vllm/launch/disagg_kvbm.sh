@@ -9,7 +9,7 @@ python -m dynamo.frontend --router-mode kv --http-port=8000 &
 
 # run decode worker on GPU 0, without enabling KVBM
 # NOTE: remove --enforce-eager for production use
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model qwen/qwen3-0.6b --enforce-eager &
 
 # wait for decode worker to initialize
 sleep 20
@@ -19,7 +19,7 @@ sleep 20
 DYN_KVBM_CPU_CACHE_GB=4 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-0.6B \
+    --model qwen/qwen3-0.6b \
     --is-prefill-worker \
     --connector kvbm nixl \
     --enforce-eager

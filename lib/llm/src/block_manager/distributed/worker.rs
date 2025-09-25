@@ -55,6 +55,7 @@ pub fn load_and_validate_tensors(
         // Check the stride, and ensure our tensor is contiguous.
         // TODO: We eventually need to be able to handle this.
         let stride = tensor.stride();
+        tracing::info!("ziqif stride: {:?}", stride);
         for i in 1..stride.len() {
             if stride[i] > stride[i - 1] {
                 return Err(anyhow::anyhow!(

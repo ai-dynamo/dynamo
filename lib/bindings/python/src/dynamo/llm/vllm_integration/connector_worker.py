@@ -114,6 +114,7 @@ class KvConnectorWorker:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Register with connector using ordered data
+        print("ziqif register kv caches")
         self._connector.register_kv_caches(
             num_device_blocks,
             page_size,
