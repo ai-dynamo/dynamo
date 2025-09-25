@@ -71,33 +71,130 @@ pub async fn extract_worker_selection_from_stream(
 ) -> anyhow::Result<(i64, Vec<u32>)> {
     use futures::StreamExt;
 
+    println!("!![DEBUG] extract_worker_selection_from_stream: Starting stream processing");
     let mut worker_id = 0i64;
     let mut tokens = Vec::<u32>::new();
+    let mut response_count = 0;
 
     while let Some(response) = stream.next().await {
+        response_count += 1;
+        println!(
+            "!![DEBUG] extract_worker_selection_from_stream: Processing response #{}",
+            response_count
+        );
+        println!(
+            "!![DEBUG] extract_worker_selection_from_stream: Response event: {:?}",
+            response.event
+        );
+        println!(
+            "!![DEBUG] extract_worker_selection_from_stream: Response comment: {:?}",
+            response.comment
+        );
+        println!(
+            "!![DEBUG] extract_worker_selection_from_stream: Response data: {:?}",
+            response.data.is_some()
+        );
+
         if let Some(event) = &response.event {
             match event.as_str() {
                 "worker_instance_id" => {
-                    worker_id = response
-                        .comment
-                        .as_ref()
-                        .and_then(|comments| comments.first())
-                        .and_then(|v| v.parse::<i64>().ok())
-                        .unwrap_or(0);
+                    println!(
+                        "!![DEBUG] extract_worker_selection_from_stream: Found worker_instance_id event"
+                    );
+                    if let Some(comments) = &response.comment {
+                        println!(
+                            "!![DEBUG] extract_worker_selection_from_stream: Comments array: {:?}",
+                            comments
+                        );
+                        if let Some(first_comment) = comments.first() {
+                            println!(
+                                "!![DEBUG] extract_worker_selection_from_stream: First comment: '{}'",
+                                first_comment
+                            );
+                            if let Ok(parsed_id) = first_comment.parse::<i64>() {
+                                worker_id = parsed_id;
+                                println!(
+                                    "!![DEBUG] extract_worker_selection_from_stream: Successfully parsed worker_id: {}",
+                                    worker_id
+                                );
+                            } else {
+                                println!(
+                                    "!![DEBUG] extract_worker_selection_from_stream: Failed to parse worker_id from: '{}'",
+                                    first_comment
+                                );
+                            }
+                        } else {
+                            println!(
+                                "!![DEBUG] extract_worker_selection_from_stream: Comments array is empty"
+                            );
+                        }
+                    } else {
+                        println!(
+                            "!![DEBUG] extract_worker_selection_from_stream: No comments field in response"
+                        );
+                    }
                 }
                 "token_data" => {
-                    tokens = response
-                        .comment
-                        .as_ref()
-                        .and_then(|comments| comments.first())
-                        .and_then(|v| serde_json::from_str::<Vec<u32>>(v).ok())
-                        .unwrap_or_default();
+                    println!(
+                        "!![DEBUG] extract_worker_selection_from_stream: Found token_data event"
+                    );
+                    if let Some(comments) = &response.comment {
+                        println!(
+                            "!![DEBUG] extract_worker_selection_from_stream: Token comments array: {:?}",
+                            comments
+                        );
+                        if let Some(first_comment) = comments.first() {
+                            println!(
+                                "!![DEBUG] extract_worker_selection_from_stream: Token comment: '{}'",
+                                first_comment
+                            );
+                            match serde_json::from_str::<Vec<u32>>(first_comment) {
+                                Ok(parsed_tokens) => {
+                                    tokens = parsed_tokens;
+                                    println!(
+                                        "!![DEBUG] extract_worker_selection_from_stream: Successfully parsed {} tokens",
+                                        tokens.len()
+                                    );
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "!![DEBUG] extract_worker_selection_from_stream: Failed to parse tokens from '{}': {}",
+                                        first_comment, e
+                                    );
+                                }
+                            }
+                        } else {
+                            println!(
+                                "!![DEBUG] extract_worker_selection_from_stream: Token comments array is empty"
+                            );
+                        }
+                    } else {
+                        println!(
+                            "!![DEBUG] extract_worker_selection_from_stream: No comments field in token_data response"
+                        );
+                    }
                 }
-                _ => {}
+                _ => {
+                    println!(
+                        "!![DEBUG] extract_worker_selection_from_stream: Unknown event type: '{}'",
+                        event
+                    );
+                }
             }
+        } else {
+            println!("!![DEBUG] extract_worker_selection_from_stream: Response has no event field");
         }
     }
 
+    println!(
+        "!![DEBUG] extract_worker_selection_from_stream: Finished processing {} responses",
+        response_count
+    );
+    println!(
+        "!![DEBUG] extract_worker_selection_from_stream: Final worker_id={}, tokens.len()={}",
+        worker_id,
+        tokens.len()
+    );
     Ok((worker_id, tokens))
 }
 
@@ -250,7 +347,15 @@ pub async fn query_worker_selection_and_annotate(
     let response_stream = engine.generate(single_in).await?;
 
     // Extract worker selection from stream
+    println!(
+        "!![DEBUG] query_worker_selection_and_annotate: About to extract worker selection from stream"
+    );
     let (worker_id, tokens) = extract_worker_selection_from_stream(response_stream).await?;
+    println!(
+        "!![DEBUG] query_worker_selection_and_annotate: Extracted worker_id={}, tokens.len()={}",
+        worker_id,
+        tokens.len()
+    );
 
     // Add worker_instance_id and tokens to original request's nvext
     add_worker_instance_id_annotation(&mut original_request, worker_id);
