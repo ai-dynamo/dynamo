@@ -584,12 +584,11 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
         match event_type.as_deref() {
             Some("BlockStored") => {
-                let block_hashes = block_hashes
-                    .ok_or_else(|| de::Error::missing_field("block_hashes"))?;
-                let token_ids = token_ids
-                    .ok_or_else(|| de::Error::missing_field("token_ids"))?;
-                let block_size = block_size
-                    .ok_or_else(|| de::Error::missing_field("block_size"))?;
+                let block_hashes =
+                    block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
+                let block_size =
+                    block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
@@ -600,19 +599,18 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 })
             }
             Some("BlockRemoved") => {
-                let block_hashes = block_hashes
-                    .ok_or_else(|| de::Error::missing_field("block_hashes"))?;
+                let block_hashes =
+                    block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
                 Ok(RawKvEvent::BlockRemoved {
                     block_hashes,
                     medium: medium.unwrap_or(None),
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
-            Some(other) => Err(de::Error::unknown_variant(other, &[
-                "BlockStored",
-                "BlockRemoved",
-                "AllBlocksCleared",
-            ])),
+            Some(other) => Err(de::Error::unknown_variant(
+                other,
+                &["BlockStored", "BlockRemoved", "AllBlocksCleared"],
+            )),
             None => Err(de::Error::missing_field("type")),
         }
     }
@@ -623,7 +621,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
     {
         let tag: Option<String> = seq.next_element()?;
         let Some(tag) = tag else {
-            return Err(de::Error::invalid_length(0, &"sequence must start with event tag"));
+            return Err(de::Error::invalid_length(
+                0,
+                &"sequence must start with event tag",
+            ));
         };
 
         match tag.as_str() {
@@ -669,11 +670,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
                 Ok(RawKvEvent::AllBlocksCleared)
             }
-            other => Err(de::Error::unknown_variant(other, &[
-                "BlockStored",
-                "BlockRemoved",
-                "AllBlocksCleared",
-            ])),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["BlockStored", "BlockRemoved", "AllBlocksCleared"],
+            )),
         }
     }
 }
