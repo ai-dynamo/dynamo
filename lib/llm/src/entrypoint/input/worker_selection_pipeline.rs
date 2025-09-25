@@ -111,17 +111,30 @@ pub async fn extract_worker_selection_from_stream(
                                 "!![DEBUG] extract_worker_selection_from_stream: First comment: '{}'",
                                 first_comment
                             );
-                            if let Ok(parsed_id) = first_comment.parse::<i64>() {
-                                worker_id = parsed_id;
-                                println!(
-                                    "!![DEBUG] extract_worker_selection_from_stream: Successfully parsed worker_id: {}",
-                                    worker_id
-                                );
-                            } else {
-                                println!(
-                                    "!![DEBUG] extract_worker_selection_from_stream: Failed to parse worker_id from: '{}'",
-                                    first_comment
-                                );
+                            // Try JSON deserialization first (handles quoted strings like "1732646935200805498")
+                            match serde_json::from_str::<i64>(first_comment) {
+                                Ok(parsed_id) => {
+                                    worker_id = parsed_id;
+                                    println!(
+                                        "!![DEBUG] extract_worker_selection_from_stream: Successfully JSON-parsed worker_id: {}",
+                                        worker_id
+                                    );
+                                }
+                                Err(_) => {
+                                    // Fallback to direct parsing (handles unquoted numbers)
+                                    if let Ok(parsed_id) = first_comment.parse::<i64>() {
+                                        worker_id = parsed_id;
+                                        println!(
+                                            "!![DEBUG] extract_worker_selection_from_stream: Successfully direct-parsed worker_id: {}",
+                                            worker_id
+                                        );
+                                    } else {
+                                        println!(
+                                            "!![DEBUG] extract_worker_selection_from_stream: Failed to parse worker_id from: '{}'",
+                                            first_comment
+                                        );
+                                    }
+                                }
                             }
                         } else {
                             println!(
