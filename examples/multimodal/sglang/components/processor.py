@@ -87,12 +87,6 @@ class SglangProcessor:
         request_id = str(uuid.uuid4().hex)
         logger.debug(f"Got raw request: {raw_request}")
 
-        # Safely extract user text
-        # try:
-        #     user_text = raw_request.messages[0].content[0].text
-        # except (IndexError, AttributeError) as e:
-        #     raise ValueError(f"Invalid message structure: {e}")
-
         # Create SGLang conversation prompt
         sglang_request = multimodal_request_to_sglang(
             raw_request, self.tokenizer, self.chat_template
