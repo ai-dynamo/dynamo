@@ -23,6 +23,7 @@ NAMESPACE = "test_virtual_connector"
 async def distributed_runtime():
     return get_runtime()
 
+
 def get_runtime():
     """Get or create a DistributedRuntime instance.
 
@@ -32,7 +33,7 @@ def get_runtime():
     try:
         # Try to use existing runtime (common in CI where tests run in same process)
         _runtime_instance = DistributedRuntime.detached()
-    except Exception as e:
+    except Exception:
         # If no existing runtime, create a new one
         loop = asyncio.get_running_loop()
         _runtime_instance = DistributedRuntime(loop, False)
