@@ -982,11 +982,6 @@ pub fn validate_response_unsupported_fields(
             "`max_tool_calls` is not supported.",
         ));
     }
-    if inner.metadata.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            "`metadata` is not supported.",
-        ));
-    }
     if inner.parallel_tool_calls == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             "`parallel_tool_calls: true` is not supported.",
@@ -1198,7 +1193,6 @@ pub fn responses_router(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use super::*;
     use crate::discovery::ModelManagerError;
@@ -1358,7 +1352,6 @@ mod tests {
                 Box::new(|r| r.instructions = Some("System prompt".into())),
             ),
             ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
-            ("metadata", Box::new(|r| r.metadata = Some(HashMap::new()))),
             (
                 "parallel_tool_calls",
                 Box::new(|r| r.parallel_tool_calls = Some(true)),
