@@ -1378,7 +1378,7 @@ class VirtualConnectorCoordinator:
         """Call this before using the object"""
         ...
 
-    async def read_state(self) -> PlannerDecision:
+    def read_state(self) -> PlannerDecision:
         """Get the current values. Most for test / debug."""
         ...
 

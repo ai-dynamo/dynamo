@@ -159,10 +159,10 @@ client = VirtualConnectorClient(distributed_runtime, namespace)
 3. **Execute Scaling**: Apply the scaling decisions to the actual deployment infrastructure
 4. **Acknowledge Completion**: Mark the decision completed when scaling is finished: `await client.complete(decision)`
 
-A scaling decision (returned by `client.get()`) contains the following fields:
-- `num_prefill_workers`: Integer (stored as string) specifying the target number of prefill workers
-- `num_decode_workers`: Integer (stored as string) specifying the target number of decode workers
-- `decision_id`: Integer (stored as string) with incremental ID for each scaling decision (-1 if no decisions made)
+A scaling decision (returned by `client.get()`) contains the following fields, which are -1 if not set yet:
+- `num_prefill_workers`: Integer specifying the target number of prefill workers
+- `num_decode_workers`: Integer specifying the target number of decode workers
+- `decision_id`: Integer with incremental ID for each scaling decision
 
 See `components/planner/test/test_virtual_connector.py` for a full example.
 

@@ -20,7 +20,7 @@ NAMESPACE = "test_virtual_connector"
 
 
 @pytest.fixture(scope="module")
-async def distributed_runtime():
+def distributed_runtime():
     return get_runtime()
 
 

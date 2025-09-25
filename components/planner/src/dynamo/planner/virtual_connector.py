@@ -127,6 +127,9 @@ class VirtualConnector(PlannerConnector):
             elif worker_type == "decode":
                 num_decode = replicas
 
+        if num_prefill is None and num_decode is None:
+            return
+
         # Update scaling decision if there are any changes
         await self._update_scaling_decision(
             num_prefill=num_prefill, num_decode=num_decode
